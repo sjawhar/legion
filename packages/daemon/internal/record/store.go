@@ -370,6 +370,13 @@ func (s *Postgres) TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree s
 	return treelifecycle.Read(ctx, tx, project, tree)
 }
 
+// TreeLifecycles reads the lifecycle of each of trees in one query, opening nothing; a tree with
+// no row has no entry. project is the claim project token the tree_lifecycles table is keyed by,
+// the value OpenTreeLifecycle takes, not the Dispatch project key.
+func (s *Postgres) TreeLifecycles(ctx context.Context, tx pgx.Tx, project string, trees []string) (map[string]treelifecycle.Lifecycle, error) {
+	return treelifecycle.ReadMany(ctx, tx, project, trees)
+}
+
 func scanIssue(row scanner) (*Issue, error) {
 	var issue Issue
 	var phaseValue string
@@ -1174,7 +1181,7 @@ func scannedMark(seq *int64, at *time.Time) EventMark {
 	return mark
 }
 
-const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at`
+const gateColumns = `issue, artifact_id, latest_version, approved_version, approved_seq, approved_at, told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, ever_opened`
 
 // scanGate reads a gate row in the shape PutGate writes: an approval's mark only with the approval,
 // a told changes request's reason and mark only with its version. An older daemon, which knows none
@@ -1185,7 +1192,7 @@ func scanGate(row scanner) (DesignGate, error) {
 	var approvedSeq, toldSeq *int64
 	var approvedAt, toldAt *time.Time
 	if err := row.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &approvedSeq, &approvedAt,
-		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt); err != nil {
+		&gate.ToldChangesVersion, &gate.ToldChangesReason, &toldSeq, &toldAt, &gate.EverOpened); err != nil {
 		return DesignGate{}, err
 	}
 	if gate.ApprovedVersion != nil {
@@ -1256,7 +1263,8 @@ func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID s
 }
 
 // PutGate writes the gate, keeping its shape itself: an approval's mark is written only with the
-// approval, and a told changes request's reason and mark only with its version (scanGate).
+// approval, and a told changes request's reason and mark only with its version (scanGate). It is
+// the single writer of every gate change, so it is also the only place ever_opened can rise.
 func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error {
 	approvedSeq, approvedAt := markValues(gate.ApprovedMark)
 	if gate.ApprovedVersion == nil {
@@ -1267,16 +1275,23 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 	if gate.ToldChangesVersion == nil {
 		toldSeq, toldAt, toldReason = nil, nil, ""
 	}
+	// ever_opened only ever rises: the write ORs what the row holds with what this gate opens with,
+	// because a changes request's write carries a gate whose approval it has just cleared and would
+	// otherwise put out a mark a past approval lit. The inserted value is classify.DesignGateOpen's
+	// rule written out rather than called: internal/classify reads this package, so this package
+	// may not read it back.
 	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
-		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, ever_opened)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
 		latest_version = excluded.latest_version, approved_version = excluded.approved_version,
 		approved_seq = excluded.approved_seq, approved_at = excluded.approved_at,
 		told_changes_version = excluded.told_changes_version, told_changes_reason = excluded.told_changes_reason,
-		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at`,
+		told_changes_seq = excluded.told_changes_seq, told_changes_at = excluded.told_changes_at,
+		ever_opened = design_gates.ever_opened or excluded.ever_opened`,
 		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, approvedSeq, approvedAt,
-		gate.ToldChangesVersion, toldReason, toldSeq, toldAt)
+		gate.ToldChangesVersion, toldReason, toldSeq, toldAt,
+		gate.EverOpened || gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion)
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}

@@ -21,14 +21,32 @@ func (s *Postgres) PutDispatchIssue(ctx context.Context, tx pgx.Tx, row Dispatch
 	if blockers == nil {
 		blockers = []string{}
 	}
-	_, err := tx.Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq)
-		values ($1, $2, $3, $4, $5)
+	var parent *string
+	if row.Parent != "" {
+		parent = &row.Parent
+	}
+	_, err := tx.Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq, parent)
+		values ($1, $2, $3, $4, $5, $6)
 		on conflict (key) do update set project = excluded.project, status = excluded.status,
-			blockers = excluded.blockers, dispatch_seq = excluded.dispatch_seq
+			blockers = excluded.blockers, dispatch_seq = excluded.dispatch_seq,
+			parent = coalesce(excluded.parent, dispatch_issues.parent)
 		where dispatch_issues.dispatch_seq < excluded.dispatch_seq`,
-		row.Key, row.Project, row.Status, blockers, row.Seq)
+		row.Key, row.Project, row.Status, blockers, row.Seq, parent)
 	if err != nil {
 		return fmt.Errorf("put the Dispatch mirror of %s: %w", row.Key, err)
+	}
+	// The parent stands outside the sequence fence. Only Dispatch's own listing of the project
+	// carries one — the boot listing and the controller tick's re-read — and an issue whose live
+	// events are newer than that listing would keep no parent at all if the fence refused this
+	// observation. The write above has already set it when the fence let the row through, so this
+	// one is for the row the fence refused, and it touches the parent alone: the status, the
+	// blockers and the sequence of the fresher observation the row holds stay as they are. An
+	// observation carrying no parent writes none, rather than clearing the one Dispatch gave.
+	if parent != nil {
+		if _, err := tx.Exec(ctx, `update dispatch_issues set parent = $2
+			where key = $1 and parent is distinct from $2`, row.Key, row.Parent); err != nil {
+			return fmt.Errorf("put the Dispatch parent of %s: %w", row.Key, err)
+		}
 	}
 	return s.PutDispatchClaim(ctx, tx, row.Key, row.ClaimedBy, row.ClaimSeq)
 }
@@ -73,7 +91,7 @@ func (s *Postgres) DispatchClaim(ctx context.Context, tx pgx.Tx, key string) (st
 }
 
 func (s *Postgres) DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error) {
-	mirrored, err := queryDispatchIssues(ctx, tx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0)
+	mirrored, err := queryDispatchIssues(ctx, tx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0), coalesce(i.parent, '')
 		from dispatch_issues i left join dispatch_claims c on c.key = i.key
 		where i.project = $1 order by i.key`, project)
 	if err != nil {
@@ -89,7 +107,7 @@ func (s *Postgres) DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project stri
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	mirrored, err := queryDispatchIssues(ctx, tx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0)
+	mirrored, err := queryDispatchIssues(ctx, tx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0), coalesce(i.parent, '')
 		from dispatch_issues i left join dispatch_claims c on c.key = i.key
 		where i.project = $1 and i.key = any(array(
 			select unnest($2::text[])
@@ -99,6 +117,27 @@ func (s *Postgres) DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project stri
 		return nil, fmt.Errorf("read the Dispatch mirror of %v in %s: %w", keys, project, err)
 	}
 	return mirrored, nil
+}
+
+// DispatchChildren groups the mirror's children of each of parents under the parent they name. A
+// later step reads it to decide whether a parent's own first phase waits for a child of its own
+// that is still open, which is a question about every child Dispatch knows of, recorded here or
+// not, so it is the mirror that answers it rather than the daemon's records.
+func (s *Postgres) DispatchChildren(ctx context.Context, tx pgx.Tx, project string, parents []string) (map[string][]DispatchIssueRow, error) {
+	children := make(map[string][]DispatchIssueRow, len(parents))
+	if len(parents) == 0 {
+		return children, nil
+	}
+	mirrored, err := queryDispatchIssues(ctx, tx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0), coalesce(i.parent, '')
+		from dispatch_issues i left join dispatch_claims c on c.key = i.key
+		where i.project = $1 and i.parent = any($2) order by i.key`, project, parents)
+	if err != nil {
+		return nil, fmt.Errorf("read the Dispatch children of %v in %s: %w", parents, project, err)
+	}
+	for _, row := range mirrored {
+		children[row.Parent] = append(children[row.Parent], row)
+	}
+	return children, nil
 }
 
 // queryDispatchIssues is every mirrored row query selects with args, in its order.
@@ -111,7 +150,7 @@ func queryDispatchIssues(ctx context.Context, tx pgx.Tx, query string, args ...a
 	var mirrored []DispatchIssueRow
 	for rows.Next() {
 		var row DispatchIssueRow
-		if err := rows.Scan(&row.Key, &row.Project, &row.Status, &row.Blockers, &row.Seq, &row.ClaimedBy, &row.ClaimSeq); err != nil {
+		if err := rows.Scan(&row.Key, &row.Project, &row.Status, &row.Blockers, &row.Seq, &row.ClaimedBy, &row.ClaimSeq, &row.Parent); err != nil {
 			return nil, err
 		}
 		mirrored = append(mirrored, row)

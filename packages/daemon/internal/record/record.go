@@ -807,6 +807,17 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+	// EverOpened records that a human approved the gate's document version at some point in this
+	// generation of the issue, whether or not the gate stands open now. Nothing else remembers it:
+	// classify.DesignGateOpen is point-in-time, reading the approval against LatestVersion as both
+	// stand, and a changes request clears ApprovedVersion, so a gate that opened and was sent back
+	// reads exactly like one that never opened. Under the children-first rule a root stays at
+	// admitted while its children run, which is the state the later rule must tell from a root
+	// still waiting for its first approval. It lives on the gate row rather than on the issue
+	// because ClearTreeGeneration deletes the gate when a root is re-admitted, and a re-admitted
+	// root's architect writes its spec again: the mark belongs to the generation whose approval it
+	// records.
+	EverOpened bool
 }
 
 // RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, written from the ask's
@@ -946,7 +957,10 @@ type HandedOverRoot struct {
 // observation that showed it, 0 when none has. The claim is kept apart from the row, with a fence
 // of its own, since a claim event says nothing of the status or the blockers and may arrive before
 // the issue's first mirrored observation (PutDispatchClaim). A row written with ClaimSeq 0 leaves
-// the stored claim as it stands.
+// the stored claim as it stands. Parent is the key of the issue's Dispatch parent, "" for none; it
+// is written outside the sequence fence, since Dispatch's listing is the only thing that carries
+// one and an issue whose live events are older than that listing must still get its parent, and a
+// row carrying none never clears a stored one (PutDispatchIssue).
 type DispatchIssueRow struct {
 	Key       string
 	Project   string
@@ -955,6 +969,7 @@ type DispatchIssueRow struct {
 	Seq       int64
 	ClaimedBy string
 	ClaimSeq  int64
+	Parent    string
 }
 
 // Store contains only transactional operations. The caller owns each transaction so intake can
@@ -1012,8 +1027,12 @@ type Store interface {
 	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
 	// slower observation never overwrites a faster one. The claim is fenced apart, on ClaimSeq: a
 	// row carrying a claim (ClaimSeq above zero) writes it only over an older claim, and one
-	// carrying none leaves the stored claim as it stands. A row whose Seq is zero — a fact the
-	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	// carrying none leaves the stored claim as it stands. The parent is written outside the fence,
+	// and only when the row carries one: an observation at or below the stored sequence writes the
+	// parent alone, leaving the status, the blockers and the sequence as they stand, so an issue
+	// whose live events are older than the listing that carried its parent still gets it. A row
+	// whose Seq is zero — a fact the daemon minted from its own record, which Dispatch never said —
+	// writes nothing at all.
 	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
 	// PutDispatchClaim writes holder (`<kind>:<id>`, "" for nobody) as key's claim at seq, over an
 	// older claim only, and touches nothing of the status or the blockers. It is kept whether or not
@@ -1030,6 +1049,11 @@ type Store interface {
 	// (blockers.Load), whatever the number of rows the project's mirror holds. No keys read
 	// nothing.
 	DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]DispatchIssueRow, error)
+	// DispatchChildren is every mirrored issue of the Dispatch project key project whose parent is
+	// one of parents, grouped by parent and in key order within each group; a parent with no
+	// children has no entry, and no parents reads nothing. A later step reads it to decide whether
+	// a parent's own first phase waits for a child of its own that is still open.
+	DispatchChildren(ctx context.Context, tx pgx.Tx, project string, parents []string) (map[string][]DispatchIssueRow, error)
 	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
 	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
 	// or without a mirrored row of the issue: a claim event applied before the issue's first row is
@@ -1181,6 +1205,12 @@ type Store interface {
 	// TreeLifecycle is the tree's lifecycle under the project token, and whether it has one, read
 	// without opening anything (treelifecycle.Read).
 	TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string) (treelifecycle.Lifecycle, bool, error)
+	// TreeLifecycles is the lifecycle of each of trees, by tree, in one read, opening nothing: the
+	// lifecycles a single look over many trees needs, rather than a read per tree under the fact
+	// lock. A tree with no row has no entry, and no trees reads nothing. project is the claim
+	// project token the tree_lifecycles table is keyed by, the value OpenTreeLifecycle takes, not
+	// the Dispatch project key.
+	TreeLifecycles(ctx context.Context, tx pgx.Tx, project string, trees []string) (map[string]treelifecycle.Lifecycle, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.
