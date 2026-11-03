@@ -120,6 +120,7 @@ func TestIdentityPlace(t *testing.T) {
 		"azure:example.services.ai.azure.com/embed-v-4-0":        {"azure", "embed-v-4-0"},
 		"azure:example.services.ai.azure.com/models/embed-v-4-0": {"azure", "embed-v-4-0"},
 		"us.cohere.embed-v4:0":                                   {"bedrock", "us.cohere.embed-v4:0"},
+		"dev:hashed-words-v1":                                    {"dev", "hashed-words-v1"},
 	} {
 		if place, model := IdentityPlace(identity); place != want[0] || model != want[1] {
 			t.Errorf("IdentityPlace(%q) = %q, %q, want %q, %q", identity, place, model, want[0], want[1])

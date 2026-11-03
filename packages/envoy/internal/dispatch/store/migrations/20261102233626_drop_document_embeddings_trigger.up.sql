@@ -1,0 +1,21 @@
+-- 20261102233626_drop_document_embeddings_trigger.up.sql
+-- A document is embedded in windows of its blocks (20261102233625_block_embedding_windows),
+-- which refs.IndexBlocks writes in the transaction that writes the version's block rows. The
+-- trigger 0074 added, which enqueued the whole markdown of each new version as one text, has
+-- nothing left to do: the whole-text row it wrote holds only the first embed.MaxInputRunes
+-- runes of the document, which is the gap the windows close.
+--
+-- Its own migration, so the transaction holds artifact_versions' ACCESS EXCLUSIVE lock alone,
+-- for milliseconds, and never while waiting for another table's, exactly as 0074 held it alone
+-- to add the trigger.
+--
+-- The other embedding trigger on artifact_versions stays: artifact_versions_issue_embeddings_enqueue
+-- (0140) keeps the issue's own row, whose text is the issue's title and the markdown of its
+-- primary document. An issue is one row of title and spec, not a collection of blocks, so it
+-- is the one kind that is still embedded whole.
+--
+-- The rows the dropped trigger wrote stay as they are. The release before this one reads them
+-- while it serves, and a later release deletes each one whose owner holds a window whose
+-- vector is current.
+drop trigger artifact_versions_embeddings_enqueue on artifact_versions;
+drop function embeddings_enqueue_document();

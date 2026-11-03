@@ -26,6 +26,8 @@ func TestTouchedTablesFindsEveryStatementFormTheMigrationsUse(t *testing.T) {
 		"drop table if exists old_a, old_b;":                                                                                      {"old_a", "old_b"},
 		"truncate table only t1, t2;":                                                                                             {"t1", "t2"},
 		"create trigger trg before insert on comments for each row execute function f();":                                         {"comments"},
+		"drop trigger comments_embeddings_enqueue on comments;":                                                                   {"comments"},
+		"DROP TRIGGER IF EXISTS asks_embeddings_enqueue ON \"asks\";":                                                             {"asks"},
 		"update events set payload = '{}' where type = 'x';":                                                                      {"events"},
 		"delete from refs where kind is null;":                                                                                    {"refs"},
 		"insert into user_agent_read (login) select login from users;":                                                            {"user_agent_read"},

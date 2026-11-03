@@ -97,13 +97,16 @@ else
   port_env=()
 fi
 
-# This process's own web dist and sign-in, read before the sweep below: web/dist and dev sign-in
-# with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave it others
-# (above).
+# This process's own web dist, sign-in and embedder, read before the sweep below: web/dist and
+# dev sign-in with a cookie key of its own unless two-process mode or DISPATCH_E2E_SIGNIN gave
+# it others (above). The dev embedder goes with dev sign-in, which is the only shape the server
+# reads it in: it hashes a text's words into a vector in the process, so meaning search answers
+# with no AWS or Azure account, and under DISPATCH_E2E_SIGNIN=oidc, which mounts no dev sign-in,
+# nothing embeds and search answers by keyword alone.
 web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
 case "${DISPATCH_E2E_SIGNIN:-}" in
   "")
-    signin_env=(DISPATCH_DEV_SIGNIN=1)
+    signin_env=(DISPATCH_DEV_SIGNIN=1 DISPATCH_DEV_EMBEDDER=1)
     if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
       signin_env+=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
     fi

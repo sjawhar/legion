@@ -25,9 +25,10 @@ const (
 )
 
 // embedderConfig is where meaning search embeds text, as resolveEmbedder checked it. Place is
-// embed.PlaceBedrock (DISPATCH_EMBEDDER unset or bedrock) or embed.PlaceAzure; the rest is Azure's
-// alone, empty under Bedrock. Under Azure exactly one credential is set: AzureKey, or the keyless
-// trio AzureTenantID, AzureClientID and AzureTokenFile, all three.
+// embed.PlaceBedrock (DISPATCH_EMBEDDER unset or bedrock), embed.PlaceAzure, or embed.PlaceDev
+// (DISPATCH_DEV_EMBEDDER=1, a local harness); the rest is Azure's alone, empty under the other
+// two. Under Azure exactly one credential is set: AzureKey, or the keyless trio AzureTenantID,
+// AzureClientID and AzureTokenFile, all three.
 type embedderConfig struct {
 	Place                string
 	AzureEndpoint        string
@@ -39,14 +40,33 @@ type embedderConfig struct {
 	AzureTokenFile       string
 }
 
-// resolveEmbedder reads DISPATCH_EMBEDDER and the DISPATCH_AZURE_* settings, and refuses, naming
-// the setting, every shape newEmbedder could not build or would silently ignore: a place other
-// than bedrock or azure; any DISPATCH_AZURE_* setting under Bedrock, DISPATCH_EMBEDDER's default;
-// and under Azure, an endpoint that is missing or not an absolute https URL with a host and no
-// query or fragment, a quota that is missing or not a positive integer, a key file that is
-// unreadable or blank, both credential forms, neither, or part of the keyless one. It calls
-// nothing, so a model service or a sign-in that is down never refuses boot.
+// resolveEmbedder reads DISPATCH_DEV_EMBEDDER, DISPATCH_EMBEDDER and the DISPATCH_AZURE_*
+// settings, and refuses, naming the setting, every shape newEmbedder could not build or would
+// silently ignore: a DISPATCH_DEV_EMBEDDER that is neither 1 nor unset, and any other embedder
+// setting beside it; a place other than bedrock or azure; any DISPATCH_AZURE_* setting under
+// Bedrock, DISPATCH_EMBEDDER's default; and under Azure, an endpoint that is missing or not an
+// absolute https URL with a host and no query or fragment, a quota that is missing or not a
+// positive integer, a key file that is unreadable or blank, both credential forms, neither, or
+// part of the keyless one. It calls nothing, so a model service or a sign-in that is down never
+// refuses boot.
+//
+// The dev embedder is a local harness's, so resolveBootConfig refuses it without dev sign-in,
+// where it reads every setting that is only ever a local harness's.
 func resolveEmbedder(env settingValues) (embedderConfig, error) {
+	switch flag := strings.TrimSpace(env.get("DISPATCH_DEV_EMBEDDER")); flag {
+	case "":
+	case "1":
+		set := azureSettingsSet(env)
+		if place := strings.TrimSpace(env.get("DISPATCH_EMBEDDER")); place != "" {
+			set = append([]string{"DISPATCH_EMBEDDER"}, set...)
+		}
+		if len(set) > 0 {
+			return embedderConfig{}, fmt.Errorf("%s set, but DISPATCH_DEV_EMBEDDER=1: the dev embedder calls no model service and reads no setting of one", strings.Join(set, ", "))
+		}
+		return embedderConfig{Place: embed.PlaceDev}, nil
+	default:
+		return embedderConfig{}, fmt.Errorf("DISPATCH_DEV_EMBEDDER=%q (expected 1 or unset)", flag)
+	}
 	switch place := strings.TrimSpace(env.get("DISPATCH_EMBEDDER")); place {
 	case "", embed.PlaceBedrock:
 		if set := azureSettingsSet(env); len(set) > 0 {
@@ -138,13 +158,21 @@ func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
 	return cfg, nil
 }
 
-// newEmbedder builds the embedder cfg names, or nil when meaning search is off. Bedrock is built
-// as it always was: with no AWS region reaching the process (a CI job, a devbox with no
-// AWS_REGION) embed.NewBedrock fails, which is a warning and keyword-only search, never a refusal
-// to boot. Azure is built from settings resolveEmbedder has already checked, so an error here is
-// a shape that check missed; it calls nothing, so Azure or Entra being down fails an embedding
-// later, never the boot. The Azure line it logs names the place and the identity, never the key.
+// newEmbedder builds the embedder cfg names, or nil when meaning search is off. The dev
+// embedder is built first and calls nothing, since it is nothing but a hash of the text's
+// words. Bedrock is built as it always was: with no AWS region reaching the process (a CI job,
+// a devbox with no AWS_REGION) embed.NewBedrock fails, which is a warning and keyword-only
+// search, never a refusal to boot. Azure is built from settings resolveEmbedder has already
+// checked, so an error here is a shape that check missed; it calls nothing, so Azure or Entra
+// being down fails an embedding later, never the boot. The Azure line it logs names the place
+// and the identity, never the key.
 func newEmbedder(ctx context.Context, cfg embedderConfig) (embed.Embedder, error) {
+	if cfg.Place == embed.PlaceDev {
+		client := embed.NewDev()
+		slog.Warn("dispatch: meaning search embeds with the dev embedder, which hashes words and calls no model service; its vectors rank nothing a model embedded",
+			"place", embed.PlaceDev, "identity", client.Identity())
+		return client, nil
+	}
 	if cfg.Place != embed.PlaceAzure {
 		client, err := embed.NewBedrock(ctx)
 		if err != nil {

@@ -1408,7 +1408,7 @@ Postgres reads `pg_stat_activity` once per transaction and serves that copy unti
 Those tables are:
 
 - the ones its statements name (`pgmigrate.TouchedTables`:
-  the targets of `alter table`, `create index … on`, `drop table`, `truncate`, `create trigger … on`, `update` with or without an alias, `delete from`, `insert into`, `lock table`, and a foreign key's `references`), read as Postgres's lexer reads the migration:
+  the targets of `alter table`, `create index … on`, `drop table`, `truncate`, `create trigger … on`, `drop trigger … on`, `update` with or without an alias, `delete from`, `insert into`, `lock table`, and a foreign key's `references`), read as Postgres's lexer reads the migration:
   not in its comments, its string literals or the body of a function it defines, and in a `DO` block's body, which it runs;
 
 - the table behind each index it drops or alters;
