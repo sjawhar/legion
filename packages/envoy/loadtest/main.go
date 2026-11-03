@@ -23,6 +23,7 @@ commands:
   refs-shape       check the references answers of the LGA issues against production's shape
   refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
+  loop-seed-plan   plan the Verified Linux spec loop's own seed, without a stack; writes loopseed.plan.json
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
@@ -73,6 +74,8 @@ func main() {
 		err = runRefsFetch(os.Args[2:])
 	case "run":
 		err = runLoad(os.Args[2:])
+	case "loop-seed-plan":
+		err = runLoopSeedPlan(os.Args[2:])
 	case "plan-docs":
 		err = runPlanDocs(os.Args[2:])
 	case "tables":
