@@ -493,6 +493,19 @@ function optionalNumber(args: Record<string, unknown>, name: string): number | u
   return typeof value === "number" ? value : undefined;
 }
 
+/** One field of a call's input, or no field at all when the argument was absent. An input whose
+ *  optional properties are exact (`exactOptionalPropertyTypes`, which claude-envoy compiles this
+ *  file under) takes an omitted key, never one whose value is `undefined`. */
+function defined<K extends string, V>(name: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [name]: value }) as { [P in K]?: V };
+}
+
+/** A list of strings an argument carries, or nothing when it carries none. */
+function optionalStringArray(args: Record<string, unknown>, name: string): string[] | undefined {
+  const value = args[name];
+  return Array.isArray(value) ? (value as string[]) : undefined;
+}
+
 /** `priority` as the server's tri-state: absent leaves it, null clears it, 0–3 set it. */
 function optionalPriority(
   args: Record<string, unknown>,
@@ -4806,20 +4819,26 @@ export async function executeDispatchTool(
     }
     case "dispatch_result": {
       const issue = stringArg(args, "issue");
+      // Each optional field is omitted rather than passed as `undefined`: the input's optional
+      // properties are exact (`exactOptionalPropertyTypes`, which claude-envoy compiles this
+      // file under), so `{ surface: undefined }` is not the same shape as `{}`.
+      const optional = {
+        ...defined("surface", optionalString(args, "surface")),
+        ...defined("run", optionalString(args, "run")),
+        ...defined("observed", optionalString(args, "observed")),
+        ...defined("negative_control", optionalString(args, "negative_control")),
+        ...defined("failed", optionalNumber(args, "failed")),
+        ...defined("skipped", optionalNumber(args, "skipped")),
+        ...defined("excluded", optionalNumber(args, "excluded")),
+        ...defined("screenshots", optionalStringArray(args, "screenshots")),
+      };
       const recorded = await client.recordResult(issue, {
         actor,
         check: stringArg(args, "check"),
         role: stringArg(args, "role"),
         verdict: stringArg(args, "verdict") as "pass" | "fail",
         commit: stringArg(args, "commit"),
-        surface: optionalString(args, "surface"),
-        run: optionalString(args, "run"),
-        observed: optionalString(args, "observed"),
-        negative_control: optionalString(args, "negative_control"),
-        failed: optionalNumber(args, "failed"),
-        skipped: optionalNumber(args, "skipped"),
-        excluded: optionalNumber(args, "excluded"),
-        screenshots: Array.isArray(args.screenshots) ? (args.screenshots as string[]) : undefined,
+        ...optional,
       });
       return {
         text: `Recorded ${recorded.result.verdict} for check ${recorded.result.check_block_id} of ${recorded.result.check_issue_key} at ${recorded.result.commit_sha.slice(0, 12)}, as ${recorded.result.role}.\n\nPull request body line:\n${recorded.line}`,
