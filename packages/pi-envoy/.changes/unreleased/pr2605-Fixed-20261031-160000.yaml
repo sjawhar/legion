@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+  A session keeps the `dispatch` command when its plugins root is a symlink that a new version re-points and whose old target is removed. The manifest declares `omp.bin`, so an Oh My Pi that supports the field puts `bin/` on `PATH` under the plugin's installed path, which follows the link; the extension adds `bin/` itself only when no `PATH` entry already resolves to it. It used to add the realpath it gets from `import.meta.url`, an entry that died with the old version's directory.
+time: 2026-10-31T16:00:00.000000000Z
+custom:
+    Issue: pr2605

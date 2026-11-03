@@ -57,11 +57,13 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DecisionKeep,
   DeliveryRunDetail,
   DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
   DispatchUser,
+  DocumentRead,
   DocumentReferenceSummary,
   EditCommentInput,
   Event,
@@ -72,6 +74,7 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
   IssueReferences,
@@ -487,6 +490,16 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
     body: { read_through: readThrough },
     method: "PUT",
     path: `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+  };
+}
+
+/** `PUT /api/v1/me/documents/{id}/read`: the person's last read version of a document
+ *  (`putDocumentRead`). */
+export function documentReadRequest(id: string, version: number): WriteRequest<DocumentRead> {
+  return {
+    body: { version },
+    method: "PUT",
+    path: `/api/v1/me/documents/${pathSegment(id)}/read`,
   };
 }
 
@@ -1308,6 +1321,39 @@ export class DispatchApiClient {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
 
+  /** An issue's decision records: its decisions.md, the open questions its spec holds, and each
+   *  decision with the spec blocks it shaped. */
+  getIssueDecisions(key: string): Promise<IssueDecisions> {
+    return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions`);
+  }
+
+  /** Record that the caller agrees with the decision that heading block opens, as the text they
+   *  read: `textSha256` is the decision's own `text_sha256`, and a decision that changed since
+   *  is `409 DECISION_CHANGED`. */
+  keepDecision(
+    id: string,
+    blockId: string,
+    textSha256: string,
+    bounds: WriteBounds
+  ): Promise<DecisionKeep> {
+    return this.post<DecisionKeep>(
+      `/api/v1/artifacts/${pathSegment(id)}/blocks/${pathSegment(blockId)}/keep`,
+      { text_sha256: textSha256 },
+      bounds
+    );
+  }
+
+  /** The caller's last read version of a document; its version is null when they have read none. */
+  getDocumentRead(id: string): Promise<DocumentRead> {
+    return this.json<DocumentRead>(`/api/v1/me/documents/${pathSegment(id)}/read`);
+  }
+
+  /** Record the caller's last read version of a document: the Spec tab marks each block that
+   *  changed since it. */
+  putDocumentRead(id: string, version: number, bounds: WriteBounds): Promise<DocumentRead> {
+    return this.send(documentReadRequest(id, version), bounds);
+  }
+
   /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
    *  this GET carries none. */
   async getArtifactVersion(id: string, version: number): Promise<ArtifactVersionContent> {
@@ -1383,8 +1429,12 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
-  getReferences(reference: string): Promise<GraphReferences> {
-    return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
+   *  which a document's read otherwise leaves out. */
+  getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
+    return this.json<GraphReferences>(
+      pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */

@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 )
 
 // Querier is the slice of a database pool the backfill runs on: what *store.Pool offers, named
@@ -33,7 +36,8 @@ var ErrAnotherPassRunning = errors.New("another backfill-files pass holds the lo
 
 // acquire takes backfillLock on a connection of pool it holds for the pass, or answers
 // ErrAnotherPassRunning. The lock is the session's, so it lives on that one connection, which the
-// returned release unlocks and gives back.
+// returned release unlocks and gives back (duty.FreeSessionLock). The pass's own statements run
+// through pool, not that connection, so the unlock is bounded by that call alone.
 func acquire(ctx context.Context, pool Querier) (func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -49,8 +53,9 @@ func acquire(ctx context.Context, pool Querier) (func(), error) {
 		return nil, ErrAnotherPassRunning
 	}
 	return func() {
-		_, _ = conn.Exec(context.Background(), `select pg_advisory_unlock($1)`, backfillLock)
-		conn.Release()
+		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock($1)`, backfillLock); err != nil {
+			slog.Warn("dispatch: free the backfill lock", "error", err)
+		}
 	}, nil
 }
 

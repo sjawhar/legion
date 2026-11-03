@@ -101,6 +101,8 @@ review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
+repository_renames:
+  - {from: acme/widgets-legacy, to: acme/widgets}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"

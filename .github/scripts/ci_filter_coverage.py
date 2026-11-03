@@ -469,10 +469,12 @@ def reduce_line(line: str) -> tuple:
 # never which version: the module files this check already reads decide that, and go.sum holds
 # each module's hash whichever source serves it. This check's own go commands run with
 # GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
-# them either.
+# them either. CI_OK_SELECTED_BY and CI_OK_PULL_REQUEST_ONLY are ci.yaml's ci-ok map, which only
+# ci-ok-report.sh and ci-ok.sh read.
 ENV_ALLOWED = frozenset({
-    "BROKER_TEST_DATABASE_URL", "DATABASE_URL", "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
-    "DISPATCH_PREVIOUS_BUILD", "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE",
+    "BROKER_TEST_DATABASE_URL", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY", "DATABASE_URL",
+    "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT", "DISPATCH_PREVIOUS_BUILD",
+    "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE",
     "ENVOY_SMOKE_IMAGE", "GOPROXY", "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN",
     "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN", "PREVIOUS_COMMIT",
     "TESTCONTAINERS_RYUK_DISABLED",
@@ -723,98 +725,122 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                             f"{job_id}, which {path} does not have")
     return unreduced
 
-# The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
+# The jobs ci-ok.sh holds to success on every run, so CI_OK_SELECTED_BY maps neither.
 ALWAYS_RUN = ("changes", "lint")
-# ci-ok.sh's lists of SELECTED_BY jobs whose if: admits only some events: per list, the if: term
-# that puts a job on it, what that term admits, and the events where ci-ok.sh accepts its skip.
+# ci-ok.sh's lists of CI_OK_SELECTED_BY jobs whose if: admits only some events, as ci.yaml's env
+# names them: per list, the if: term that puts a job on it, what that term admits, and the events
+# where ci-ok.sh accepts its skip.
 EVENT_LISTS = {
-    "PULL_REQUEST_ONLY": (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
-                          "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
+    "CI_OK_PULL_REQUEST_ONLY": (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
+                                "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
 }
+# The step every job but `changes` ends with (.github/actions/ci-ok-report): it records the job's
+# result, and the last job of a run to finish posts ci-ok from it, so its inputs are fixed.
+REPORT_ACTION = "./.github/actions/ci-ok-report"
+REPORT_CHANGES = "${{ toJSON(needs.changes) }}"
+REPORT_STATUS = "${{ job.status }}"
+# The checks main's ruleset requires. A job of ci.yaml named for one would post it itself, and a
+# skipped job posts a passing check.
+REQUIRED_CHECKS = ("ci-ok", "pr-title")
 
 
 def check_ci_ok(document: dict, problems: list) -> None:
-    """ci-ok.sh fails a job its SELECTED_BY says `changes` selected unless the job succeeded, so
-    SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but the
-    ALWAYS_RUN ones, and each EVENT_LISTS list exactly the jobs whose if: holds its term. The
-    jobs come from ci.yaml itself, every job whose if: tests an output of changes, so a job that
-    neither ci-ok's needs nor its SELECTED_BY names fails here too."""
+    """ci-ok.sh fails a job CI_OK_SELECTED_BY says `changes` selected unless the job succeeded, and
+    ci-ok-report.sh waits for every selected job's report, so CI_OK_SELECTED_BY must be exactly
+    {job: the output its if: tests} for every job whose if: tests an output of changes, and each
+    EVENT_LISTS list exactly the jobs whose if: holds its term. Every job but `changes` must end
+    with the report step, or a run whose last job lacks it never gets ci-ok, and a job that calls
+    a workflow must hand that workflow `ci-ok-changes` for its job's report step. No job may be
+    named for a required check."""
     jobs = document.get("jobs") or {}
-    ci_ok = jobs.get("ci-ok")
-    if ci_ok is None:
-        problems.append(f"::error file={WORKFLOW}::no ci-ok job, whose SELECTED_BY this check holds to the jobs' if:s")
-        return
-    envs = [s["env"] for s in ci_ok.get("steps") or [] if "SELECTED_BY" in (s.get("env") or {})]
-    if len(envs) != 1:
-        problems.append(f"::error file={WORKFLOW}::ci-ok has {len(envs)} steps that set SELECTED_BY; ci-ok.sh reads "
-                        f"it from exactly one")
-        return
+    env = document.get("env") or {}
     try:
-        selected_by = json.loads(str(envs[0]["SELECTED_BY"]))
-        listed = {name: json.loads(str(envs[0].get(name, ""))) for name in EVENT_LISTS}
+        selected_by = json.loads(str(env.get("CI_OK_SELECTED_BY", "")))
+        listed = {name: json.loads(str(env.get(name, ""))) for name in EVENT_LISTS}
     except json.JSONDecodeError as error:
-        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY, {' or '.join(EVENT_LISTS)} is missing or not "
-                        f"JSON: {error}")
+        problems.append(f"::error file={WORKFLOW}::the env's CI_OK_SELECTED_BY or {' or '.join(EVENT_LISTS)} is "
+                        f"missing or not JSON: {error}")
         return
     if not (isinstance(selected_by, dict) and all(isinstance(v, str) for v in selected_by.values())):
-        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY is not a JSON object of job to output name")
+        problems.append(f"::error file={WORKFLOW}::the env's CI_OK_SELECTED_BY is not a JSON object of job to "
+                        f"output name")
         return
     for name, jobs_listed in listed.items():
         if not (isinstance(jobs_listed, list) and all(isinstance(j, str) for j in jobs_listed)):
-            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} is not a JSON array of job names")
+            problems.append(f"::error file={WORKFLOW}::the env's {name} is not a JSON array of job names")
             return
-    needs = ci_ok.get("needs") or []
-    needed = [j for j in ([needs] if isinstance(needs, str) else needs) if j not in ALWAYS_RUN]
-    # The jobs ci-ok must hold, read from ci.yaml's own jobs, not from ci-ok's needs. A job that
-    # `changes` gates and that neither needs nor SELECTED_BY names raises nothing in the two
-    # loops below, because both of them start from those two lists. ci-ok is the required check,
-    # so such a job is advisory: it goes red and tells nobody.
+    for job_id, job in jobs.items():
+        named = str((job or {}).get("name", job_id))
+        if job_id in REQUIRED_CHECKS or named in REQUIRED_CHECKS:
+            problems.append(f"::error file={WORKFLOW}::job {job_id} is named {named}, a check main's ruleset "
+                            f"requires: a job posts its own check, and a skipped one posts a pass; ci-ok comes "
+                            f"from the ci-ok-report step and pr-title from lint's post")
     gated = sorted(job_id for job_id, job in jobs.items()
-                   if job_id not in ALWAYS_RUN and job_id != "ci-ok"
-                   and GATE_REF.search(str((job or {}).get("if", ""))))
-    for job_id in gated:
-        if job_id in needed:
-            continue
-        absent = ["needs"] if job_id in selected_by else ["needs", "SELECTED_BY"]
-        names = " and ".join(absent)
-        problems.append(f"::error file={WORKFLOW}::job {job_id} tests an output of changes in its if:, and ci-ok's "
-                        f"{names} {'do' if len(absent) > 1 else 'does'} not name it, so ci-ok passes while {job_id} "
-                        f"fails. Add {job_id} to ci-ok's {names}.")
+                   if job_id not in ALWAYS_RUN and GATE_REF.search(str((job or {}).get("if", ""))))
     expected, list_expected = {}, {name: set() for name in EVENT_LISTS}
-    for job_id in needed:
+    for job_id in gated:
         condition = str((jobs.get(job_id) or {}).get("if", ""))
         outputs = sorted(set(GATE_REF.findall(condition)))
         if len(outputs) != 1:
-            problems.append(f"::error file={WORKFLOW}::ci-ok needs {job_id}, whose if: tests "
-                            f"{len(outputs)} outputs of changes ({', '.join(outputs) or 'none'}), so ci-ok's "
-                            f"SELECTED_BY cannot say what selects it")
+            problems.append(f"::error file={WORKFLOW}::job {job_id}'s if: tests {len(outputs)} outputs of changes "
+                            f"({', '.join(outputs)}), so CI_OK_SELECTED_BY cannot say what selects it")
             continue
         expected[job_id] = outputs[0]
         for name, (term, _, _, _) in EVENT_LISTS.items():
             if term.search(condition):
                 list_expected[name].add(job_id)
-    for job_id in sorted(set(needed) | set(selected_by)):
+    for job_id in sorted(set(gated) | set(selected_by)):
         want, have = expected.get(job_id), selected_by.get(job_id)
-        if job_id in gated and job_id not in needed:
-            continue  # the loop above already names it, and says to add it to ci-ok's needs
-        if job_id not in needed:
-            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id}, which is not a job ci-ok "
-                            f"needs other than {' and '.join(ALWAYS_RUN)}; drop it")
+        if job_id not in gated:
+            problems.append(f"::error file={WORKFLOW}::CI_OK_SELECTED_BY maps {job_id}, which is no job whose if: "
+                            f"tests an output of changes; drop it")
         elif want is None or want == have:
             continue
         elif have is None:
-            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY does not map {job_id}, which ci-ok needs, "
-                            f"so ci-ok.sh fails it; add \"{job_id}\": \"{want}\", the output its if: tests")
+            problems.append(f"::error file={WORKFLOW}::CI_OK_SELECTED_BY does not map {job_id}, whose if: tests "
+                            f"needs.changes.outputs.{want}, so ci-ok-report.sh never waits for its report and "
+                            f"ci-ok.sh fails any it finds; add \"{job_id}\": \"{want}\"")
         else:
-            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id} to {have}, but its if: tests "
+            problems.append(f"::error file={WORKFLOW}::CI_OK_SELECTED_BY maps {job_id} to {have}, but its if: tests "
                             f"needs.changes.outputs.{want}")
     for name, (_, admits, text, where) in EVENT_LISTS.items():
         for job_id in sorted(list_expected[name] - set(listed[name])):
-            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} lacks {job_id}, whose if: {admits}, so ci-ok.sh "
+            problems.append(f"::error file={WORKFLOW}::{name} lacks {job_id}, whose if: {admits}, so ci-ok.sh "
                             f"fails its skip on {where}")
         for job_id in sorted(set(listed[name]) - list_expected[name]):
-            problems.append(f"::error file={WORKFLOW}::ci-ok's {name} lists {job_id}, whose if: has no {text} term, so "
+            problems.append(f"::error file={WORKFLOW}::{name} lists {job_id}, whose if: has no {text} term, so "
                             f"ci-ok.sh accepts its skip on {where} even when changes selected it")
+    for job_id, job in jobs.items():
+        job = job or {}
+        if job_id == "changes":
+            continue
+        if "uses" in job:
+            if str((job.get("with") or {}).get("ci-ok-changes", "")) != REPORT_CHANGES:
+                problems.append(f"::error file={WORKFLOW}::job {job_id} calls {job['uses']} without "
+                                f"`ci-ok-changes: {REPORT_CHANGES}`, so the called job cannot report to ci-ok")
+            called = REPO / str(job["uses"]).removeprefix("./")
+            called_jobs = ((yaml.safe_load(called.read_text()) or {}).get("jobs") or {}) if called.is_file() else {}
+            # The job that reports is the called workflow's job whose last step is the report:
+            # always() first, so it runs after a failed step too, and ended only by the call's own
+            # condition (docs-site.yaml's input, worker-image.yaml's event).
+            reports = [((j or {}).get("steps") or [])[-1] for j in called_jobs.values() if (j or {}).get("steps")]
+            if not any(s.get("uses") == REPORT_ACTION and str(s.get("if", "")).startswith("always()")
+                       and str((s.get("with") or {}).get("job", "")) == job_id
+                       and str((s.get("with") or {}).get("changes", "")) == "${{ inputs.ci-ok-changes }}"
+                       and str((s.get("with") or {}).get("job-status", "")) == REPORT_STATUS for s in reports):
+                problems.append(f"::error file={WORKFLOW}::{job['uses']}, which job {job_id} calls, has no job "
+                                f"whose last step is `uses: {REPORT_ACTION}` with an `if:` that starts with "
+                                f"`always()`, `job: {job_id}`, `changes: ${{{{ inputs.ci-ok-changes }}}}` and "
+                                f"`job-status: {REPORT_STATUS}`, so a run that {job_id} ends never gets ci-ok")
+            continue
+        steps = job.get("steps") or []
+        last = steps[-1] if steps else {}
+        given = last.get("with") or {}
+        if (last.get("uses") != REPORT_ACTION or str(last.get("if", "")) != "always()"
+                or str(given.get("changes", "")) != REPORT_CHANGES or str(given.get("job-status", "")) != REPORT_STATUS):
+            problems.append(f"::error file={WORKFLOW}::job {job_id}'s last step is not `uses: {REPORT_ACTION}` with "
+                            f"`if: always()`, `changes: {REPORT_CHANGES}` and `job-status: {REPORT_STATUS}`, so a run "
+                            f"that {job_id} ends never gets ci-ok")
 
 
 def check_push_workflows(data, filters: dict, problems: list) -> list:

@@ -100,9 +100,9 @@ type Deps struct {
 // "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
 // holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
 // answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
-// for a holder with a serving port (roleForward.send) - and "failed" for every other failure
-// (sendChains). Every increment goes through here: a Deps built without a counter - the package's
-// own tests - then counts nothing instead of dereferencing nil.
+// for a holder whose entry records a port (roleForward.send) - and "failed" for every other
+// failure (sendChains). Every increment goes through here: a Deps built without a counter - the
+// package's own tests - then counts nothing instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return

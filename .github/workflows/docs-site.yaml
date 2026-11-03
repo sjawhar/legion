@@ -6,8 +6,9 @@ name: Docs site
 # held the two copies equal: a step changed in one copy alone made main build what no pull request
 # built.
 #
-# Two boolean inputs carry the only difference between the callers. Each adds one trailing step
-# that only docs-pages.yaml needs. Every other step is the same for both.
+# Three inputs carry the only difference between the callers. Two booleans each add one trailing
+# step that only docs-pages.yaml needs, and ci.yaml's `ci-ok-changes` adds the ci-ok report its own
+# jobs end with. Every other step is the same for both.
 #
 # A reusable workflow, not a composite action, for two reasons. A composite action's step keys do
 # not include timeout-minutes, which the screenshots step sets. `services:` is a job-level key,
@@ -18,8 +19,9 @@ name: Docs site
 # workflow's jobs run in the caller's run, so the artifact the build job uploads here is the one
 # the deploy job finds.
 #
-# No permissions: block either, so each caller's permissions stand. Both callers give this job
-# `contents: read` today.
+# No permissions: block either, so each caller's permissions stand. docs-pages.yaml gives this job
+# `contents: read`; ci.yaml also gives it the `actions: read` and `checks: write` its ci-ok report
+# needs.
 #
 # .github/scripts/ci_job_reads.py's docs gate cites the steps below by name, and
 # .github/scripts/check-ci-filters.sh fails when a cited step is gone. The docs filter of ci.yaml
@@ -35,6 +37,13 @@ on:
         description: Save the go-docs cache entry, on a push to main whose restore missed the exact key.
         type: boolean
         default: false
+      ci-ok-changes:
+        description: >-
+          ci.yaml's `toJSON(needs.changes)`: end the job with ci-ok's report
+          (.github/actions/ci-ok-report), as every job of ci.yaml ends, for its docs job. Empty for
+          docs-pages.yaml, which reports nothing.
+        type: string
+        default: ""
 
 env:
   # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
@@ -154,3 +163,11 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+      # ci.yaml's call only: this job's result, and ci-ok itself when this job is that run's last.
+      - name: Report ci-ok when this is the run's last job
+        if: always() && inputs.ci-ok-changes != ''
+        uses: ./.github/actions/ci-ok-report
+        with:
+          job: docs
+          changes: ${{ inputs.ci-ok-changes }}
+          job-status: ${{ job.status }}
