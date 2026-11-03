@@ -262,7 +262,7 @@ mint_app_tokens() {
 app_token_refresh_seconds=900
 app_token_refresher=
 start_app_token_refresher() {
-  local dir=$1
+  local dir=$1 driver=$$
   (
     sleeper=
     trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; exit 0' TERM
@@ -271,6 +271,9 @@ start_app_token_refresher() {
       sleeper=$!
       wait "$sleeper" || true
       sleeper=
+      # A driver killed without its TERM trap leaves this loop behind: stop once the driver or
+      # its token directory is gone, so no orphan keeps minting tokens.
+      kill -0 "$driver" 2>/dev/null && [ -d "$dir" ] || exit 0
       app_token_mint "$dir" "${github_apps_read[@]}" ||
         printf '   [refresher] could not refresh: %s; the last releases stay\n' "$app_token_mint_failed" >&2
     done
