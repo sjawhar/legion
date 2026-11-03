@@ -5,8 +5,8 @@ import { PinButton } from "../../components/PinButton";
 import { borderDefault, textMutedOnSurface } from "../../theme/classes";
 import { EventBody, isAskEvent } from "../activity/EventBody";
 import { AgentName } from "../refs/AgentName";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { Timestamp } from "../refs/Timestamp";
 import type { PinnedConversationCard } from "./useMarginItems";
 
 interface PinnedTabProps {
@@ -15,6 +15,8 @@ interface PinnedTabProps {
   /** Events pinned from the Activity tab, and conversations pinned before a card carried its
    *  own id, which stay their event's line here until the reader pins the card again. */
   events: Event[];
+  /** The issue whose margin this is, which each pinned conversation's address names. */
+  issueKey: string;
   onUnpin(eventId: number): void;
   onUnpinConversation(id: string): void;
   pinnedIds: string[];
@@ -23,6 +25,7 @@ interface PinnedTabProps {
 export function PinnedTab({
   conversations,
   events,
+  issueKey,
   onUnpin,
   onUnpinConversation,
   pinnedIds,
@@ -36,7 +39,14 @@ export function PinnedTab({
               <MarkdownBody markdown={conversation.body} />
               <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
                 <AgentName actor={conversation.author} inline /> ·{" "}
-                <Timestamp at={conversation.at} />
+                <ItemTimestamp
+                  at={conversation.at}
+                  route={{
+                    id: conversation.id.slice(conversation.kind.length + 1),
+                    key: issueKey,
+                    kind: conversation.kind,
+                  }}
+                />
               </p>
             </div>
             <PinButton

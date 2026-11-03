@@ -36,6 +36,7 @@ test("PinnedTab renders pinned event bodies as Markdown", async () => {
       <PinnedTab
         conversations={[]}
         events={[messageEvent]}
+        issueKey="CORE-1"
         onUnpin={() => {}}
         onUnpinConversation={() => {}}
         pinnedIds={["1"]}
@@ -88,6 +89,7 @@ test("a pinned lifecycle event remains removable", async () => {
       <PinnedTab
         conversations={[]}
         events={[lifecycleEvent]}
+        issueKey="CORE-1"
         onUnpin={(eventId) => removed.push(eventId)}
         onUnpinConversation={() => {}}
         pinnedIds={["2"]}
@@ -129,6 +131,7 @@ test("a pinned card's agent byline links to its live conversation", () => {
             },
           ]}
           events={[{ ...messageEvent, actor: agent }]}
+          issueKey="CORE-1"
           onUnpin={() => {}}
           onUnpinConversation={() => {}}
           pinnedIds={["ask:ask-1", "1"]}

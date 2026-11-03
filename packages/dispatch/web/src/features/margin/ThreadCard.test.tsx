@@ -317,28 +317,30 @@ test("the author can edit a comment and an edited comment carries its marker", a
     );
 
     view.rerender(
-      <QueryClientProvider client={new QueryClient()}>
-        <EditableCard
-          actionFailure={undefined}
-          artifactSlug="spec"
-          expanded
-          hovered={false}
-          isClosed={false}
-          onAction={() => {}}
-          onEdit={async () => undefined}
-          onRetryAction={() => {}}
-          onToggle={() => {}}
-          owner={{ key: "CORE-1", kind: "issue" }}
-          pendingAction={false}
-          thread={thread({
-            root: {
-              comment: { ...root, body: "Updated root", edited_at: "2026-09-10T00:02:00Z" },
-              kind: "comment",
-            },
-          })}
-          viewerLogin="alice"
-        />
-      </QueryClientProvider>
+      <MemoryRouter>
+        <QueryClientProvider client={new QueryClient()}>
+          <EditableCard
+            actionFailure={undefined}
+            artifactSlug="spec"
+            expanded
+            hovered={false}
+            isClosed={false}
+            onAction={() => {}}
+            onEdit={async () => undefined}
+            onRetryAction={() => {}}
+            onToggle={() => {}}
+            owner={{ key: "CORE-1", kind: "issue" }}
+            pendingAction={false}
+            thread={thread({
+              root: {
+                comment: { ...root, body: "Updated root", edited_at: "2026-09-10T00:02:00Z" },
+                kind: "comment",
+              },
+            })}
+            viewerLogin="alice"
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
     );
     expect(await screen.findByText("Updated root")).not.toBeNull();
     expect(screen.getByTestId(`margin-comment-${root.id}`).textContent).toContain("edited");

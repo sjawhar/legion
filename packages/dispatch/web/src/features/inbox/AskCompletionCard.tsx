@@ -18,8 +18,9 @@ import {
 } from "../../theme/classes";
 import { AgentName, AskResolutionLine } from "../refs/AgentName";
 import { askResolutionBadge, askResolutionReason } from "../refs/actor";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, type DispatchReferenceRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
 import { AskAnchorHeader } from "./AskAnchorLink";
@@ -136,6 +137,7 @@ function AnsweredAsk({
   frame,
   markRef,
   onChangeAnswer,
+  reference,
 }: {
   answers: AskAnswer[];
   artifactSlug: string | undefined;
@@ -145,6 +147,7 @@ function AnsweredAsk({
   frame: AskFrame;
   markRef?: DwellRef;
   onChangeAnswer?: () => void;
+  reference: DispatchReferenceRoute | undefined;
 }): ReactNode {
   const { answer } = ask;
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
@@ -190,12 +193,13 @@ function AnsweredAsk({
       )}
       {answer === null ? (
         <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
-          Asked <Timestamp at={ask.created_at} />
+          Asked <ItemTimestamp at={ask.created_at} route={reference} />
         </p>
       ) : (
         <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
-          Asked <Timestamp at={ask.created_at} /> · Answered by{" "}
-          <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
+          Asked <ItemTimestamp at={ask.created_at} route={reference} /> · Answered by{" "}
+          <span className="font-semibold">{answer.user}</span>{" "}
+          <ItemTimestamp at={answer.at} route={reference} />
         </p>
       )}
       <AskAnswerHistory answers={answers} />
@@ -217,11 +221,13 @@ function ResolvedAsk({
   documentLink,
   edits,
   frame,
+  reference,
 }: {
   ask: Ask & { resolution: AskResolution };
   documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
+  reference: DispatchReferenceRoute | undefined;
 }): ReactNode {
   const { resolution } = ask;
   const reason = askResolutionReason(resolution);
@@ -253,7 +259,8 @@ function ResolvedAsk({
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        Asked <Timestamp at={ask.created_at} /> · <AskResolutionLine resolution={resolution} />
+        Asked <ItemTimestamp at={ask.created_at} route={reference} /> ·{" "}
+        <AskResolutionLine resolution={resolution} />
         {reason === undefined ? null : (
           <>
             {" "}
@@ -283,6 +290,9 @@ interface AskCompletionCardProps {
   markRef?: DwellRef;
   /** Shown only to the person who gave the current, non-approval answer. */
   onChangeAnswer?: () => void;
+  /** The ask's own route (`itemRoute`), which its asked and answered times link to; none for an
+   *  ask with no address. */
+  reference?: DispatchReferenceRoute;
 }
 
 export function AskCompletionCard({
@@ -294,6 +304,7 @@ export function AskCompletionCard({
   frame = "card",
   markRef,
   onChangeAnswer,
+  reference,
 }: AskCompletionCardProps): ReactNode {
   if (ask.state === "resolved") {
     if (ask.resolution === undefined) {
@@ -305,6 +316,7 @@ export function AskCompletionCard({
         documentLink={documentLink}
         edits={edits}
         frame={frame}
+        reference={reference}
       />
     );
   }
@@ -318,6 +330,7 @@ export function AskCompletionCard({
       frame={frame}
       markRef={markRef}
       onChangeAnswer={onChangeAnswer}
+      reference={reference}
     />
   );
 }

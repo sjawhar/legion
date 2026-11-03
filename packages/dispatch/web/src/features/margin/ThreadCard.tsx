@@ -35,6 +35,7 @@ import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
 import type { SaveCommentEdit } from "../conversation/send-request";
 import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
@@ -207,7 +208,8 @@ function CommentBody({
       {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
-          <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
+          <AgentName actor={comment.author} inline /> ·{" "}
+          <ItemTimestamp at={comment.created_at} route={reference} />
           {comment.edited_at === null ? null : " · edited"}
         </span>
         {showReference && reference !== undefined ? <CopyRefButton route={reference} /> : null}

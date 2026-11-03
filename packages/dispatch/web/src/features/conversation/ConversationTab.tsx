@@ -50,9 +50,9 @@ import {
   useAgentText,
 } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
@@ -219,6 +219,7 @@ function ConversationReply({
       author={reply.author}
       body={<MarkdownBody markdown={reply.body} />}
       current={reply.id === currentReplyId}
+      route={{ id: reply.id, key: issueKey, kind: "message" }}
       markRef={markRef}
       delivery={
         lastAttempt === undefined
@@ -343,7 +344,10 @@ function MessageTurn({
         <div className="min-w-0 flex-1">
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
             <AgentName actor={author} className="font-semibold" inline />
-            <Timestamp at={item.root.created_at} />
+            <ItemTimestamp
+              at={item.root.created_at}
+              route={{ id: item.root.id, key: issueKey, kind: "message" }}
+            />
             {item.unread ? <UnreadMark /> : null}
           </p>
           <MarkdownBody markdown={item.root.body} />
@@ -835,7 +839,10 @@ function TargetedMessageTurn({
         <>
           <p className={`flex flex-wrap items-center gap-x-2 text-sm ${textSecondaryOnSurface}`}>
             <AgentName actor={asker} className="font-semibold" inline />
-            <Timestamp at={item.root.created_at} />
+            <ItemTimestamp
+              at={item.root.created_at}
+              route={{ id: item.root.id, key: issueKey, kind: "message" }}
+            />
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>

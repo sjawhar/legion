@@ -4,7 +4,8 @@ import type { ReactNode } from "react";
 import type { Actor } from "../../api/types";
 import { secondaryButtonBorder, textSecondaryOnSurface } from "../../theme/classes";
 import { AgentName, type AgentPart } from "../refs/AgentName";
-import { Timestamp } from "../refs/Timestamp";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
+import type { DispatchReferenceRoute } from "../refs/routes";
 import type { DwellRef } from "../shell/useDwell";
 import { Avatar } from "./Avatar";
 import { ReplyButton } from "./ReplyButton";
@@ -67,6 +68,7 @@ export function ReplyTurn({
   onReply,
   quote,
   replyDisabled = false,
+  route,
   turnID,
 }: {
   actions?: ReactNode;
@@ -88,6 +90,8 @@ export function ReplyTurn({
   };
   /** Holds the Reply button while the composer it would address is busy with a send. */
   replyDisabled?: boolean;
+  /** The reply's own route, which its time links to; none for a reply with no address. */
+  route?: DispatchReferenceRoute;
   turnID: string;
 }): ReactNode {
   // The retry row a delivered reply keeps until the session answers it or took it as its turn.
@@ -109,7 +113,7 @@ export function ReplyTurn({
       <div className="min-w-0 flex-1">
         <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
           <AgentName actor={author} className="font-semibold" inline />
-          <Timestamp at={at} />
+          <ItemTimestamp at={at} route={route} />
         </p>
         {quote === undefined ? null : (
           <ReplyQuote

@@ -69,6 +69,7 @@ import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/Targ
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -316,6 +317,11 @@ function AgentExchangeReply({
             }
       }
       replyDisabled={replyDisabled}
+      route={
+        reply.issue_key === null
+          ? undefined
+          : { id: reply.id, key: reply.issue_key, kind: "message" }
+      }
       turnID={`message:${reply.id}`}
     />
   );
@@ -354,7 +360,14 @@ function AgentTargetedMessage({
         <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnCanvas}`}>
             <AgentName actor={read.message.author} className="font-semibold" inline />
-            <Timestamp at={read.message.created_at} />
+            <ItemTimestamp
+              at={read.message.created_at}
+              route={
+                read.message.issue_key === null
+                  ? undefined
+                  : { id: read.message.id, key: read.message.issue_key, kind: "message" }
+              }
+            />
           </p>
           <div className={textPrimaryOnCanvas}>
             <MarkdownBody markdown={read.message.body} />

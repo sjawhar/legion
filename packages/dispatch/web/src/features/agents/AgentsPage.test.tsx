@@ -3744,3 +3744,52 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     page.restore();
   }
 });
+
+test("an agent's exchange links the time of a message on an issue, and a direct message's time is plain", async () => {
+  const onIssue = message("Filed on the issue", {
+    created_at: "2026-09-14T00:01:00Z",
+    id: "issue-message",
+    issue_key: "CORE-1",
+  });
+  const issueReply = message("A reply on the issue", {
+    created_at: "2026-09-14T00:02:00Z",
+    id: "issue-reply",
+    in_reply_to: onIssue.id,
+    issue_key: "CORE-1",
+  });
+  const direct = message("Straight to the agent", {
+    created_at: "2026-09-14T00:03:00Z",
+    id: "direct-message",
+  });
+  const directReply = message("A direct reply", {
+    created_at: "2026-09-14T00:04:00Z",
+    id: "direct-reply",
+    in_reply_to: direct.id,
+  });
+  const page = renderAgents({
+    messages: [
+      { message: direct, replies: [directReply] },
+      { message: onIssue, replies: [issueReply] },
+    ],
+  });
+  const linkOfTime = (at: string) =>
+    document.querySelector(`time[datetime="${at}"]`)?.closest("a")?.getAttribute("href") ?? null;
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    // The newest exchange shows; the older one is folded until asked for.
+    await within(planner).findByText("A direct reply");
+    fireEvent.click(within(planner).getByRole("button", { name: /older/ }));
+    await within(planner).findByText("A reply on the issue");
+    expect(linkOfTime(onIssue.created_at)).toBe("/issues/CORE-1/messages/issue-message");
+    expect(linkOfTime(issueReply.created_at)).toBe("/issues/CORE-1/messages/issue-reply");
+    // A message straight to an agent belongs to no issue, and Dispatch has no address for it.
+    expect(document.querySelector(`time[datetime="${direct.created_at}"]`)).not.toBeNull();
+    expect(linkOfTime(direct.created_at)).toBeNull();
+    expect(linkOfTime(directReply.created_at)).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});

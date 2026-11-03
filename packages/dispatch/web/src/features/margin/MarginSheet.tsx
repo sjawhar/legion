@@ -312,6 +312,7 @@ export function MarginSheet({
                 <PinnedTab
                   conversations={pinnedConversations}
                   events={pinned}
+                  issueKey={owner.key}
                   onUnpin={actions.onUnpin}
                   onUnpinConversation={actions.onUnpinConversation}
                   pinnedIds={pinnedIds}

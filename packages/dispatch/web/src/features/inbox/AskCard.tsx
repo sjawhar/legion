@@ -41,10 +41,10 @@ import {
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
-import { Timestamp } from "../refs/Timestamp";
 import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
@@ -57,7 +57,7 @@ import {
 } from "./AskCompletionCard";
 import { AskChoiceRow } from "./AskOptionRow";
 import { AskRecipients } from "./AskRecipients";
-import { AskThread } from "./AskThread";
+import { AskDocument, AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
@@ -357,7 +357,7 @@ export function AskCard({
         ) : null}
       </div>
     );
-  const threadNode =
+  const threadBody =
     thread === "collapsed" ? (
       <AskThreadDisclosure
         ask={currentAsk}
@@ -379,6 +379,7 @@ export function AskCard({
         uploadOwner={uploadOwner}
       />
     );
+  const threadNode = <AskDocument value={displayedAsk.document ?? owner}>{threadBody}</AskDocument>;
 
   const answerField = (
     <>
@@ -498,6 +499,7 @@ export function AskCard({
           frame={frame}
           markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
+          reference={reference}
         />
         {unsentAnswer === "" ? null : (
           <div
@@ -642,7 +644,7 @@ export function AskCard({
               <span className="shrink-0" aria-hidden="true">
                 ·
               </span>
-              <Timestamp at={displayedAsk.created_at} />
+              <ItemTimestamp at={displayedAsk.created_at} route={reference} />
             </span>
           </span>
           {reference === undefined ? null : <CopyRefButton route={reference} />}

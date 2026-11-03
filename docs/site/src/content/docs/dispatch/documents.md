@@ -141,6 +141,27 @@ document's key and name and the block's id, `<KEY>/<name>#<id>`, come to at most
 bound every reference is held to (References, below); a longer one names no block, and opening it
 opens the document.
 
+## Links to a comment, message, or ask
+
+The time shown on a comment, a reply, a message, an ask, and an answer, such as **5 minutes ago**,
+is a link to that item, as a comment's time is on GitHub. It is a link wherever the item is shown:
+an issue's Conversation tab, the Inbox, a document's margin and its Pinned tab, a decision block,
+and the Agents page.
+
+- Choose the time to go to the item. Dispatch scrolls to it, highlights it, and puts its address in
+  the address bar. A comment or question beside a document, or a decision block, opens on that
+  document, so choosing its time there keeps you on the page. A message or reply opens on the
+  issue's Conversation tab, in its thread.
+- Right-click the time and choose **Copy link** to copy the item's address, or open it in a new tab
+  with `Ctrl` (`⌘` on a Mac) as you choose it.
+- Rest the pointer on the time to see the full date and time.
+
+The address is the item's own, such as `/issues/CORE-12/comments/<id>`, and it opens the item
+wherever it lives. The copy button beside an item copies its `dispatch://` reference instead, the
+form a document or a message uses to link to it. A message sent straight to an agent on the Agents
+page belongs to no issue and has no address, so its time is plain text. So is a time that is not
+about one item, such as when a claim was taken or a document was last edited.
+
 ## References
 
 Anything in Dispatch can be linked with a `dispatch://` reference: `dispatch://CORE-12` for an

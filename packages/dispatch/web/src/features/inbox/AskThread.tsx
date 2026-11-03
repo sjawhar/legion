@@ -1,6 +1,6 @@
 import type { UseQueryResult } from "@tanstack/react-query";
 import { useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { createContext, type FormEvent, type ReactNode, useContext, useId, useState } from "react";
 
 import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -22,8 +22,9 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { AgentName } from "../refs/AgentName";
+import { ItemTimestamp } from "../refs/ItemTimestamp";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { Timestamp } from "../refs/Timestamp";
+import { itemRoute } from "../refs/routes";
 import type { DwellRef } from "../shell/useDwell";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
@@ -37,6 +38,11 @@ export type CreateReply = (
 const createReply: CreateReply = (issueKey, input, bounds) =>
   api.createComment(issueKey, input, bounds);
 
+/** The project document an ask with no issue belongs to, which a reply's address names. The
+ *  card that shows the thread knows it (`AskCard`: the ask's `document`, else its `owner`) and
+ *  provides it here, past `AskThreadDisclosure` and the thread's reply lists. */
+export const AskDocument = createContext<{ project: string; slug: string } | undefined>(undefined);
+
 function AskReply({
   comment,
   current = false,
@@ -46,6 +52,7 @@ function AskReply({
   current?: boolean;
   markRef?: DwellRef;
 }): ReactNode {
+  const askDocument = useContext(AskDocument);
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -57,7 +64,8 @@ function AskReply({
         <MarkdownBody markdown={comment.body} />
       </div>
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
-        <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
+        <AgentName actor={comment.author} inline /> ·{" "}
+        <ItemTimestamp at={comment.created_at} route={itemRoute("comment", comment, askDocument)} />
       </p>
     </li>
   );
