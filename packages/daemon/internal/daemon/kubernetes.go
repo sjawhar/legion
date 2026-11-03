@@ -174,17 +174,30 @@ func logPlugins(log *slog.Logger, plugins *runtime.PluginInstall, source string)
 // prepareSandbox is the runtime over readSandbox's client and Options, and the part of boot its
 // worker pod can refuse (sandboxBootOf). The worker stream listens on tcp://<bind>:<worker_stream_port>;
 // openSupervision hands the factory the address every pod dials (shimAddress).
-func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
+func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, reads bootReads, p *plan) error {
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
+		// A test handed the daemon its runtime: a rebuild builds the same one again.
+		p.runtimeFor = func(config.Config) (runtimeFactory, error) { return o.runtime, nil }
 		return nil
 	}
-	boot, err := sandboxBootOf(cfg, reads)
+	boot, err := sandboxBootOf(cfg, reads.sandbox)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
+	p.newRuntime = sandboxRuntime(reads.sandbox.client, reads.sandbox.opts, p.repositories.Owners, cfg.RepositoryRenames)
+	// A `runtime.kubernetes.*` change rebuilds the runtime (config.HolderRuntime): the cluster
+	// client and every pod option are read again from the configuration the rebuild is given,
+	// through the same boot read, so a changed kubeconfig is read again too.
+	lookup := environLookup(o.environment())
+	p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
+		next, err := readSandbox(c, p.project, reads.dispatchToken, reads.paneNatsUser, lookup, log)
+		if err != nil {
+			return nil, err
+		}
+		return sandboxRuntime(next.client, next.opts, p.repositories.Owners, c.RepositoryRenames), nil
+	}
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -197,7 +210,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		return nil
 	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
-		sandboxed, ok := rt.(*sandbox.Runtime)
+		sandboxed, ok := sandboxOf(rt)
 		if !ok {
 			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}

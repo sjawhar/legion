@@ -297,7 +297,7 @@ func (rig *checkWakeRig) boot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, rig.cfg, Build{Revision: checkWakeDaemonBuild, Repository: "sjawhar/legion"}, slog.New(slog.NewJSONHandler(rig.logs, nil)), overrides{
+		done <- run(ctx, config.Settled(rig.cfg), Build{Revision: checkWakeDaemonBuild, Repository: "sjawhar/legion"}, slog.New(slog.NewJSONHandler(rig.logs, nil)), overrides{
 			listen: heldListen, runtime: fakeRuntime(rig.rt, rig.built).runtime, clock: stillClock{},
 			workflowTokens: &workflowTokenRecorder{}, githubAPI: rig.github.url,
 		})

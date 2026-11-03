@@ -132,7 +132,7 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 
 // ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.
 func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
-	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.DesignGate, root)
+	return ParkedDecisionTask(ctx, tx, e.store, e.settings().DesignGate, root)
 }
 
 // EnqueueNaming enqueues payload for issue, due at, a root-architect start or a catch-up notice
@@ -244,7 +244,7 @@ func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root rec
 
 // DesignGateOff says whether the engine runs with gates.design off, which asks no person to
 // approve a spec.
-func (e *Engine) DesignGateOff() bool { return e.cfg.DesignGate == config.DesignGateOff }
+func (e *Engine) DesignGateOff() bool { return e.settings().DesignGate == config.DesignGateOff }
 
 // specRef is the Dispatch reference of an issue's spec, the document its gate reviews.
 func specRef(key string) string { return "dispatch://" + key + "/spec" }

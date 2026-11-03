@@ -49,7 +49,7 @@ func Unresumable(ctx context.Context, store record.Store, tx pgx.Tx, issue recor
 }
 
 // armed says whether the design gate is armed: with it off, no approval is asked for.
-func (e *Engine) armed() bool { return e.cfg.DesignGate != config.DesignGateOff }
+func (e *Engine) armed() bool { return e.settings().DesignGate != config.DesignGateOff }
 
 // declare records a hand-back of root's architect to the person at mark (its sequence and
 // Dispatch's time of it, where the wait it starts begins), fresh for its ask: one at or below the

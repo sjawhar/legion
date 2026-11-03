@@ -357,11 +357,31 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		// is a harmless second close after.
 		defer inherited.Close()
 	}
-	cfg, err := config.Load(configPath, nil)
+	// The daemon's one settings holder: it resolves legion.yaml here and nothing resolves it
+	// again. Its normalizer is this command's own fix of what the file says — the plugin pair
+	// this binary links when the file names none, and the state directory as an absolute path —
+	// so a file read again under the running daemon settles exactly as this read did.
+	live, err := config.NewLive(configPath, nil, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
+	if err := live.Normalize(func(c *config.Config) error {
+		applyLinkedPlugins(c)
+		// The state directory is where the worker stream socket, the panes' secret files, and
+		// their home live; the registry refuses a second live legion on it, which only holds if
+		// every start names it the same way.
+		dir, err := filepath.Abs(c.StateDir)
+		if err != nil {
+			return fmt.Errorf("resolve state_dir: %w", err)
+		}
+		c.StateDir = dir
+		return nil
+	}); err != nil {
+		fmt.Fprintf(stderr, "legion start: %v\n", err)
+		return 1
+	}
+	cfg := *live.Snapshot()
 	// legion.yaml always resolves both bind and port, and both must name the inherited socket: the
 	// registry entry, the default daemon_url and `legion state --port` all dial them.
 	if inherited != nil {
@@ -372,17 +392,9 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 			return 1
 		}
 	}
-	applyLinkedPlugins(&cfg)
 	absoluteConfig, err := filepath.Abs(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: resolve %s: %v\n", configPath, err)
-		return 1
-	}
-	// The state directory is where the worker stream socket, the panes' secret files, and their
-	// home live; the registry refuses a second live legion on it, which only holds if every
-	// start names it the same way.
-	if cfg.StateDir, err = filepath.Abs(cfg.StateDir); err != nil {
-		fmt.Fprintf(stderr, "legion start: resolve state_dir: %v\n", err)
 		return 1
 	}
 	legions, err := registryPath()
@@ -418,7 +430,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
+	if err := daemon.Run(ctx, live, daemon.Build{Revision: revision, Repository: builtFromRepository}, log, inherited); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}

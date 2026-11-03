@@ -83,11 +83,14 @@ func TestAPullRequestInAnotherSpellingOfTheIssuesRepositoryIsItsOwn(t *testing.T
 var renamedLegion = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
 
 // renamedEngine is the workflow tests' engine (testEngine) under the repository equivalence
-// renames: the one field of Config a configured rename changes, set on the engine's own copy,
-// which New stores, so these tests read the one config every other workflow test reads.
+// renames: the one field of Config a configured rename changes, read through the engine's own
+// configuration (ReadConfigFrom), so these tests read the one config every other workflow test
+// reads.
 func renamedEngine(renames ghrepo.Renames) *Engine {
 	engine := testEngine(config.DesignGateRootIssues, nil)
-	engine.cfg.RepositoryRenames = renames
+	cfg := engine.settings()
+	cfg.RepositoryRenames = renames
+	engine.ReadConfigFrom(func() Config { return cfg })
 	return engine
 }
 

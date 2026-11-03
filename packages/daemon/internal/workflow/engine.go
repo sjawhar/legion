@@ -73,14 +73,44 @@ type Config struct {
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
 type Engine struct {
 	store record.Store
-	cfg   Config
-	log   *slog.Logger
+	// readConfig is where every decision reads the configuration (settings): the value New was
+	// given, or, once the daemon has registered its settings holder (ReadConfigFrom), that
+	// holder's current one. A decision-class setting — the review round cap, the fix attempts, the
+	// linger, the production-check bound, the design gate — is read as the decision is made and
+	// never copied into this struct, so a change of it takes effect at once.
+	readConfig func() Config
+	log        *slog.Logger
 }
 
 var _ intake.Handler = (*Engine)(nil)
 
 // New constructs a workflow engine with the shipped review and fix caps when callers omit them.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
+	settled := defaulted(cfg)
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Engine{store: store, readConfig: func() Config { return settled }, log: log}
+}
+
+// ReadConfigFrom makes every decision read its configuration through read, in place of the value
+// New was given: the daemon hands a read of its settings holder (config.Live.Snapshot) composed
+// into a workflow.Config, so a change of `review_round_cap`, `max_fix_attempts`, `linger_hours`,
+// `production_check_hours` or `gates.design` reaches the next decision with nothing rebuilt. Each
+// read is given the same defaults New fills. A nil read leaves the configuration as it was.
+func (e *Engine) ReadConfigFrom(read func() Config) {
+	if read != nil {
+		e.readConfig = func() Config { return defaulted(read()) }
+	}
+}
+
+// settings is the configuration this decision reads: the one place the engine asks for it.
+func (e *Engine) settings() Config { return e.readConfig() }
+
+// defaulted is cfg with the shipped caps, bound and clock filled where the caller omitted them.
+// Every read runs through it, so a configuration read again under a running daemon is defaulted
+// exactly as the one New was given.
+func defaulted(cfg Config) Config {
 	cfg.DesignGate = cfg.DesignGate.OrDefault()
 	if cfg.ReviewRoundCap <= 0 {
 		cfg.ReviewRoundCap = 3
@@ -94,23 +124,21 @@ func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	if log == nil {
-		log = slog.Default()
-	}
-	return &Engine{store: store, cfg: cfg, log: log}
+	return cfg
 }
 
-func (e *Engine) now() time.Time { return e.cfg.Clock().UTC() }
+func (e *Engine) now() time.Time { return e.settings().Clock().UTC() }
 
 // byReviewApp says whether login is the review App's bot (Config.ReviewAppLogin). With no login
 // configured, it is no one's.
 func (e *Engine) byReviewApp(login string) bool {
-	return e.cfg.ReviewAppLogin != "" && login == e.cfg.ReviewAppLogin
+	app := e.settings().ReviewAppLogin
+	return app != "" && login == app
 }
 
 // sameRepository is whether a and b name one repository: the same name, compared without case as
 // GitHub compares names, or the two names of a configured rename (Config.RepositoryRenames).
-func (e *Engine) sameRepository(a, b string) bool { return e.cfg.RepositoryRenames.Same(a, b) }
+func (e *Engine) sameRepository(a, b string) bool { return e.settings().RepositoryRenames.Same(a, b) }
 
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
@@ -480,7 +508,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, []string{child.Key})
+	rows, err := blockers.Load(ctx, tx, e.store, e.settings().Project, []string{child.Key})
 	if err != nil {
 		return err
 	}
@@ -976,7 +1004,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(members, nil))
+	rows, err := blockers.Load(ctx, tx, e.store, e.settings().Project, blockers.Judged(members, nil))
 	if err != nil {
 		return err
 	}
@@ -1169,7 +1197,7 @@ func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch str
 // configured one makes the second only when the first finds nothing, which is the common case —
 // an event of a pull request this daemon does not record at all.
 func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number int) (*record.PullRequest, error) {
-	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+	pr, err := ghrepo.Under(e.settings().RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
 		return e.store.PullRequestByNumber(ctx, tx, name, number)
 	})
 	if err != nil || pr == nil {
@@ -1182,7 +1210,7 @@ func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number
 // on repo. It reads under the same names as pullRequest, in the same order and for the same
 // reason.
 func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.PullRequest, error) {
-	pr, err := ghrepo.Under(e.cfg.RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
+	pr, err := ghrepo.Under(e.settings().RepositoryRenames, repo, func(name string) (*record.PullRequest, error) {
 		return e.store.PullRequestByBranch(ctx, tx, name, branch)
 	})
 	if err != nil || pr == nil {

@@ -271,10 +271,10 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
 		return err
 	}
-	if e.cfg.MergeQueueRole == "" {
+	if e.settings().MergeQueueRole == "" {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
+	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.settings().MergeQueueRole, Packet: packet})
 }
 
 // advancePendingReady advances every merger in the tree whose READY was refused while the gate was

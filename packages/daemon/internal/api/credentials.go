@@ -265,6 +265,5 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 }
 
 func (s *server) operatorAuthorized(r *http.Request) bool {
-	given, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return s.operatorSet && bearer && secureBearerEqual(s.operatorHash, given)
+	return s.operatorBearer(strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "))
 }

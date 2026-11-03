@@ -151,6 +151,11 @@ type overrides struct {
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
 	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
 	strandedReported func()
+	// settingsRebuilder is handed the daemon's one rebuild observer once boot has built it, so a
+	// test can ask it to read the credential files again (rebuilder.rereadCredentials), which is
+	// what the file watcher does for a rotation of a file whose path did not change. nil, in
+	// production, is nobody.
+	settingsRebuilder func(*rebuilder)
 	// pluginRelaunchable overrides whether a stale-plugin claim can be relaunched onto a plugin
 	// (supervise.Deps.PluginRelaunchable), bypassing the configuration-derived default: nil keeps
 	// that default, which a kubernetes-runtime test without a real cluster has no other way to
@@ -205,8 +210,14 @@ type Build struct {
 // and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
 // Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
 // listener is taken leaves it to the caller to close.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
-	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+// live is the daemon's one settings holder (config.Live): the resolved configuration it boots
+// on, the route overlay laid over it, and the pointer every reader of a value that can change
+// while the daemon runs goes through. Boot reads a snapshot of it wherever it genuinely reads
+// once; a decision reads it as the decision is made; and one observer of it builds each holder
+// of a changed setting again (rebuilder). Nothing in the daemon resolves the configuration a
+// second way.
+func Run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, live, build, log, overrides{listen: handed(listener)})
 }
 
 // handed is the listen of a daemon handed listener: it takes listener, whatever address it is
@@ -218,14 +229,24 @@ func handed(listener net.Listener) func(network, address string) (net.Listener, 
 	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
-func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
+func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, o overrides) error {
 	if log == nil {
 		log = slog.Default()
+	}
+	// The boot-time value: every read that happens once — the sockets, the store, the state
+	// directory, the runtime's own options — is this one, and every reader that must see a change
+	// goes through live instead.
+	cfg := *live.Snapshot()
+	rebuild := newRebuilder(log)
+	live.OnChange(rebuild.observe)
+	if o.settingsRebuilder != nil {
+		o.settingsRebuilder(rebuild)
 	}
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
 	}
+	plan.live, plan.rebuild = live, rebuild
 	if cfg.Runtime.Name == "kubernetes" {
 		logPlugins(log, plan.plugins, plan.pluginsSource)
 		logProbeBudget(log, cfg)
@@ -277,7 +298,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
 	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
 	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
+	workflow, err := openWorkflow(ctx, cfg, live, rebuild, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -389,7 +410,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		plan.nats.log(log)
 		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
 			readinessAttempt(func(attempt context.Context) error {
-				return workflow.connect(attempt, cfg, plan.nats)
+				return workflow.connect(attempt, *live.Snapshot(), rebuild, environLookup(plan.environ))
 			}, bootTimeout, natsauth.Unreachable))
 		if err == nil {
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
@@ -548,6 +569,15 @@ func closeStore(st *store.Store, log *slog.Logger) {
 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
+	// live is the daemon's settings holder, and rebuild the one observer of it that builds each
+	// holder of a changed setting again. run sets both once prepare has returned, so everything
+	// the boot builds after that registers its holder with the rebuilder and reads what it must
+	// read live through live.
+	live    *config.Live
+	rebuild *rebuilder
+	// environ is the environment the daemon's own reads resolve under (overrides.environment):
+	// the launch secrets a rebuilt launch spec reads again are read under it, as boot's were.
+	environ []string
 	// identity is the role's App bot identity for the owner whose installation holds the
 	// repository it works, from the workflow's token source (workflowRuntime.identity, which maps
 	// the record's repository to the one GitHub serves); nil without one.
@@ -591,6 +621,12 @@ type plan struct {
 	// it, or advertise_host at its port when the file sets one (shimAddress).
 	stream     string
 	newRuntime runtimeFactory
+	// runtimeFor is newRuntime for a configuration that has changed: the runtime is a rebuildable
+	// holder (config.HolderRuntime), and everything it is built from but the configuration — the
+	// launchers, the provider key directory, the cluster client's own reads — is resolved here at
+	// boot and read again where the configuration names it. nil for a runtime handed to the
+	// daemon by a test, which has nothing of its own to build again.
+	runtimeFor func(cfg config.Config) (runtimeFactory, error)
 	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
 	// no host Oh My Pi, and for a replaced runtime without one.
 	gate func(ctx context.Context) error
@@ -712,9 +748,10 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
+		environ: o.environment(),
 	}
 	if cfg.Runtime.Name == "kubernetes" {
-		err = prepareSandbox(cfg, o, reads.sandbox, &p)
+		err = prepareSandbox(cfg, log, o, reads, &p)
 	} else {
 		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.tmux, &p)
 	}
@@ -733,6 +770,11 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
 	invocation := reads.launches[runtime.BackendOmp].invocation
 	p.newRuntime, p.gate = o.runtime, o.gate
+	if o.runtime != nil {
+		// A test handed the daemon its runtime: a rebuild builds the same one again, from the
+		// same factory, since nothing of it comes from the configuration.
+		p.runtimeFor = func(config.Config) (runtimeFactory, error) { return o.runtime, nil }
+	}
 	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
 	launchers := map[runtime.Backend]tmux.Launcher{}
 	for _, backend := range cfg.Backends() {
@@ -792,6 +834,12 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			return state
 		}
 		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+		// Everything but the configuration — the launchers, the provider key directory, the
+		// Dispatch token file, the gh boot resolved — is this boot's; the rest is read again from
+		// the configuration a rebuild is given.
+		p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
+			return tmuxRuntime(c, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log), nil
+		}
 	}
 	return nil
 }
@@ -1060,6 +1108,9 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	draining, endDrain := context.WithCancel(context.Background())
 	tokens := api.NewBootTokens(st)
 	sup := newSupervisor(supervising, st, p.project, cfg.StateDir, log)
+	// The listener's RPC bound is a holder of its own: the socket is bound once here and never
+	// rebound, and a change of worker_rpc_timeout_seconds swaps the bound alone
+	// (workerStreamHolder), so no worker connection drops.
 	listener, err := stream.Listen(draining, p.stream,
 		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log})
 	if err != nil {
@@ -1073,24 +1124,62 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
+	built, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
 	if err != nil {
 		cancel()
 		endDrain()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
-	sup.deps = supervise.Deps{
-		Runtime: rt,
-		Conns:   listener,
-		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
-		Specs: specs{
-			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, prompts: p.prompts,
+	// The runtime behind its holder: a `runtime.*` change builds the runtime again over this same
+	// listener and address and swaps it, and every reader — the machines, the supervision, the
+	// API's tree releaser — holds the holder.
+	rt := newRuntimeHolder(built, func(c config.Config) (runtime.Runtime, error) {
+		if p.runtimeFor == nil {
+			return nil, errors.New("this daemon's runtime was handed to it rather than built from the configuration")
+		}
+		factory, err := p.runtimeFor(c)
+		if err != nil {
+			return nil, err
+		}
+		return factory(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
+	}, log)
+	// The launch specs behind theirs: everything a launch reads that the claim does not carry,
+	// built again from the configuration a `launch` change settled, read by the next launch.
+	buildSpecs := func(c config.Config) (specs, error) {
+		secrets, err := readLaunchSecrets(c, environLookup(p.environ))
+		if err != nil {
+			return specs{}, err
+		}
+		instructions := p.instructions
+		if contents, err := readInstructions(c); err != nil {
+			return specs{}, err
+		} else if contents != nil {
+			if instructions, err = config.WriteDeploymentInstructions(contents, c.StateDir, c.Project); err != nil {
+				return specs{}, err
+			}
+		}
+		return specs{
+			stateDir: c.StateDir, project: p.project, instructions: instructions, secrets: secrets, prompts: p.prompts,
 			identity: p.identity, repository: p.repository,
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
-			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
-			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
-			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
-		},
+			designGate:   c.Gates.Design, slackChannels: c.Projects[c.Project].SlackChannels,
+			mergeRules: c.Projects[c.Project].Merge, runtimeName: c.Runtime.Name, plugins: p.plugins,
+			backend: c.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
+		}, nil
+	}
+	settled, err := buildSpecs(cfg)
+	if err != nil {
+		cancel()
+		endDrain()
+		return nil, err
+	}
+	launchSpecs := newSpecsHolder(settled, buildSpecs)
+	p.rebuild.register(newWorkerStreamHolder(listener), rt, launchSpecs)
+	sup.deps = supervise.Deps{
+		Runtime:       rt,
+		Conns:         listener,
+		Store:         pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
+		Specs:         launchSpecs,
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,
 		PhaseHolds:    p.phaseHolds,
@@ -1100,22 +1189,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		TaskConfirmed: p.taskConfirmed,
 		Clock:         p.clock,
 		Log:           log,
-		Limits: supervise.Limits{
-			LaunchFailures: cfg.LaunchFailureLimit,
-			PromptFailures: cfg.PromptFailureLimit,
-			PromptRetires:  cfg.PromptRetireLimit,
-		},
-		Timeouts: supervise.Timeouts{
-			Boot:                  cfg.WorkerBootTimeout,
-			RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
-			RPC:                   cfg.WorkerRPCTimeout,
-			Probe:                 cfg.ProbeInterval,
-			Stop:                  cfg.WorkerStopTimeout,
-			LaunchBackoff:         launchBackoffFirst,
-		},
+		// Every budget and every bound a decision is held to is read as that decision is made
+		// (liveBudgets): `launch_failure_limit`, `worker_rpc_timeout_seconds` and their
+		// neighbours take effect at once, with no machine rebuilt.
+		Settings:           liveBudgets{live: p.live},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
-		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
+		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(*p.live.Snapshot(), c) },
 		PodUpdateRetask:    cfg.PodUpdateRetask,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
@@ -1546,14 +1626,21 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
-		consumerLag = workflow.consumers.Lag
+		consumerLag = workflow.nats.intake().Lag
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
-	// its ready. The liveness sweep runs beside it under either mode, never behind it.
+	// its ready. The liveness sweep runs beside it under either mode, never behind it. Both the
+	// launch mode and the wake are a holder of their own (keeperHolder): a change of either stops
+	// or starts the keeper's loop and moves the tick, and no running controller is touched.
 	var keeper *controllerKeeper
 	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
 		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
 	}
+	// The settings the API server holds, behind the pointer its routes read through: the operator
+	// bearer, the design gate, the repository equivalence and the projects' merge rules. Its
+	// socket is the one boot took and is never rebound.
+	held := newAPIHolder(cfg, p.operatorToken)
+	p.rebuild.register(held)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -1561,7 +1648,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			project:      cfg.Project,
 			projectToken: p.project,
 			runtime:      cfg.Runtime.Name,
-			admissionCap: cfg.AdmissionCap,
+			admissionCap: func() int { return p.live.Snapshot().AdmissionCap },
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
@@ -1577,12 +1664,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		BootTokens:         s.tokens,
 		Project:            p.project,
 		DispatchProject:    cfg.Project,
-		OperatorToken:      p.operatorToken,
+		Settings:           held.settings,
 		Controller:         st,
-		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
-		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
+		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(*p.live.Snapshot(), c) },
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,
@@ -1597,9 +1683,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Dispatch:           client,
 		Tokens:             tokens,
 		GitHubOwners:       p.repositories.Owners,
-		RepositoryRenames:  cfg.RepositoryRenames,
 		GitHubAPI:          githubAPI,
-		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
@@ -1658,9 +1742,31 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			return nil
 		})
 	}
+	// The keeper's loop runs under a context of its own, so the holder can stop it when
+	// `controller` moves to the operator and start it again when it moves back. The loop ends
+	// with serving either way.
+	keeping := newKeeperHolder(cfg.ControllerWakeInterval, keeper != nil, func() context.CancelFunc {
+		kept, stop := context.WithCancel(serving)
+		if keeper == nil {
+			keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
+		}
+		running := keeper
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			running.run(kept, p.orphanSweep)
+		}()
+		return stop
+	}, nil)
+	p.rebuild.register(keeping)
+	if workflow != nil {
+		workflow.keeper = keeping
+	}
 	if keeper != nil {
 		group.Go(func() error {
-			keeper.run(serving, p.orphanSweep)
+			kept, stop := context.WithCancel(serving)
+			keeping.hold(stop)
+			keeper.run(kept, p.orphanSweep)
 			return nil
 		})
 	}
@@ -1681,7 +1787,9 @@ type source struct {
 	project      string
 	projectToken string
 	runtime      string
-	admissionCap int
+	// admissionCap is the cap the state reports, read at every read of the state: a change of
+	// `admission_cap` takes effect at once, with nothing rebuilt.
+	admissionCap func() int
 	startedAt    time.Time
 	// secretsLogin is the daemon's own agent-secrets token login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
@@ -1834,7 +1942,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		StartedAt:     s.startedAt,
 	}
 	state.Settings = s.settings
-	state.Admission.Cap = s.admissionCap
+	state.Admission.Cap = s.admissionCap()
 	controller, _, err := s.store.ControllerTx(ctx, tx, s.projectToken)
 	if err != nil {
 		return api.State{}, err
@@ -1881,8 +1989,15 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 }
 
 // repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime that
-// keeps them, and nil under any other.
+// keeps them, and nil under any other. A runtime behind its holder answers through the holder, so
+// a rebuild of the runtime moves the answer with it.
 func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
+	if holder, held := rt.(*runtimeHolder); held {
+		if _, sandboxed := sandboxOf(rt); !sandboxed {
+			return nil
+		}
+		return holder.repositoryCaches
+	}
 	if keeper, ok := rt.(*sandbox.Runtime); ok {
 		return keeper.RepositoryCaches
 	}
@@ -1892,6 +2007,12 @@ func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
 // callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
 // pods, and nil under any other (api's Options.CallerPod).
 func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
+	if holder, held := rt.(*runtimeHolder); held {
+		if _, sandboxed := sandboxOf(rt); !sandboxed {
+			return nil
+		}
+		return holder.podAt
+	}
 	if pods, ok := rt.(*sandbox.Runtime); ok {
 		return pods.PodAt
 	}

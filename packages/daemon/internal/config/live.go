@@ -73,6 +73,9 @@ type Live struct {
 	env  func(string) string
 	// settled is the resolved configuration, never nil once the holder is built.
 	settled atomic.Pointer[Config]
+	// normalize is the caller's own fix of what the file says, run over every resolution before it
+	// settles (Normalize); nil fixes nothing.
+	normalize func(*Config) error
 	// mu orders the applies against each other and guards overlay and observers. An observer runs
 	// under it, in registration order, so no observer may call Apply, Snapshot excepted.
 	mu sync.Mutex
@@ -94,6 +97,39 @@ func NewLive(path string, env func(string) string, overlay map[string]any) (*Liv
 	}
 	live.settled.Store(&cfg)
 	return live, nil
+}
+
+// Settled is the holder of one configuration the caller resolved itself, with no file under it:
+// the daemon's own tests, which build a Config in memory rather than reading legion.yaml.
+// Snapshot answers it, no observer is ever called, and Apply refuses by name — nothing here reads
+// a file, so it is no second way to resolve one.
+func Settled(cfg Config) *Live {
+	live := &Live{overlay: map[string]any{}}
+	live.settled.Store(&cfg)
+	return live
+}
+
+// Normalize registers fn, which every resolution runs over the loaded configuration before it
+// settles, and resolves once more so the configuration the holder already settled carries it too.
+// It is the caller's own fix of what the file says — `legion start`'s absolute state_dir and the
+// plugin pair its binary links — so a file read again under a running daemon settles exactly as
+// the boot's read did. fn must decide from the configuration alone, since every later resolution
+// runs it again; a resolution whose fn fails changes nothing.
+//
+// One fn at a time: a second call replaces the first. Register it before anything takes a
+// snapshot.
+func (l *Live) Normalize(fn func(*Config) error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	previous := l.normalize
+	l.normalize = fn
+	cfg, err := l.resolve(l.overlay)
+	if err != nil {
+		l.normalize = previous
+		return err
+	}
+	l.settled.Store(&cfg)
+	return nil
 }
 
 // Snapshot is the configuration the daemon is running on, never nil.
@@ -159,9 +195,13 @@ func (l *Live) Apply(source, by string, overlay map[string]any) (applied []Chang
 	return applied, refused, nil
 }
 
-// resolve reads the file again, lays overlay over its document and runs the whole of it through
-// the loader, App private keys included, exactly as a boot's Load does.
+// resolve reads the file again, lays overlay over its document, runs the whole of it through the
+// loader, App private keys included, exactly as a boot's Load does, and then the caller's own fix
+// of what the file says (Normalize).
 func (l *Live) resolve(overlay map[string]any) (Config, error) {
+	if l.path == "" {
+		return Config{}, errors.New("this settings holder was built from a configuration value (config.Settled) and has no file to read again")
+	}
 	document, err := readDocument(l.path)
 	if err != nil {
 		return Config{}, err
@@ -169,7 +209,16 @@ func (l *Live) resolve(overlay map[string]any) (Config, error) {
 	if err := overlayDocument(document, overlay); err != nil {
 		return Config{}, err
 	}
-	return loadDocument(document, l.path, l.env, true)
+	cfg, err := loadDocument(document, l.path, l.env, true)
+	if err != nil {
+		return Config{}, err
+	}
+	if l.normalize != nil {
+		if err := l.normalize(&cfg); err != nil {
+			return Config{}, err
+		}
+	}
+	return cfg, nil
 }
 
 // overlayDocument lays the overlay over the file's own document, in place: each dotted path names

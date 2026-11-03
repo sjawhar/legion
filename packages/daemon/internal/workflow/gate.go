@@ -59,7 +59,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil {
 		return intake.Result{}, err
 	}
-	off := e.cfg.DesignGate == config.DesignGateOff
+	off := e.settings().DesignGate == config.DesignGateOff
 	sameDocument := stored != nil && stored.ArtifactID == fact.ArtifactID
 	// The version the gate is registered at is the newest either side knows of: the caller's, or
 	// Dispatch's latest as register_gate's read found it (register_gate refuses a caller's version
@@ -136,7 +136,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	e.logOnCommit(ctx, "workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
-		"version", version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.cfg.DesignGate)
+		"version", version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.settings().DesignGate)
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
@@ -474,7 +474,7 @@ func (e *Engine) gateAboveDispatch(ctx context.Context, tx pgx.Tx, fact intake.G
 	e.logOnCommit(ctx, "workflow: a gate above the version Dispatch holds is reset to it", "issue", issue.Key,
 		"artifact", gate.ArtifactID, "gate_version", gate.LatestVersion, "dispatch_version", fact.Read.Version)
 	reset := record.DesignGate{Issue: issue.Key, ArtifactID: gate.ArtifactID, LatestVersion: fact.Read.Version}
-	off := e.cfg.DesignGate == config.DesignGateOff
+	off := e.settings().DesignGate == config.DesignGateOff
 	if off {
 		reset = classify.ApplyDesignGateEvent(reset, classify.DesignGateApproved, fact.Read.Version, record.EventMark{})
 	}
@@ -616,7 +616,7 @@ func (e *Engine) recordHandover(ctx context.Context, tx pgx.Tx, gate record.Desi
 // version event is never stale. applyArtifact and recordHandover both read it, so the two never
 // disagree on which events a gate takes.
 func (e *Engine) artifactIgnored(gate record.DesignGate, fact intake.DispatchArtifact) (off, stale bool) {
-	off = e.cfg.DesignGate == config.DesignGateOff
+	off = e.settings().DesignGate == config.DesignGateOff
 	stale = fact.Kind != intake.DispatchArtifactVersion &&
 		(fact.Version < gate.LatestVersion || classify.StaleReview(gate, fact.Version, fact.Mark))
 	return off, stale

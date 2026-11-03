@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
@@ -42,18 +41,23 @@ import (
 // It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
 // Dispatch, Apps, or Envoy stream configured.
 type workflowRuntime struct {
+	// live is the daemon's settings holder: every value the workflow reads that can change while
+	// it runs is read through it, as the decision that reads it is made.
+	live      *config.Live
 	pool      *pgxpool.Pool
 	records   record.Store
 	engine    *workflow.Engine
 	admission *admit.Admission
 	handlers  []intake.Handler
 	dispatch  dispatch.Client
-	// designGate is the project's design-gate policy, which the send-time narrowing of a held
-	// architect task reads: a catch-up it writes to another tree's architect is composed under it
-	// (rootTask, workflow.CatchUpTheTreesOwed). The empty policy is the default one
-	// (config.DesignGate.OrDefault).
-	designGate config.DesignGate
-	tokens     appauth.Tokens
+	// nats is the NATS connection and its durable consumers behind their holder: a change of the
+	// server URLs or of either nkey seed opens a new connection, moves the consumers onto it and
+	// closes the old one (natsHolder). nil until connect opens the first one.
+	nats *natsHolder
+	// keeper is the controller keeper and the controller tick's wake behind their holder; nil in
+	// a runtime a test built by hand, which runs no keeper.
+	keeper *keeperHolder
+	tokens appauth.Tokens
 	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
 	// (tokenRefused).
 	forget          appauth.Forgetter
@@ -62,8 +66,6 @@ type workflowRuntime struct {
 	dispatchProject string
 	stateDir        string
 	log             *slog.Logger
-	conn            *nats.Conn
-	consumers       *intake.Consumers
 	outbox          *outbox
 	// outboxWake is the outbox as the records' wake reaches it (wakeOutbox): the records are built
 	// at open, before the outbox exists, and the facts the boot applies before attach write rows
@@ -255,14 +257,20 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
+func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, rebuild *rebuilder, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
 	log.Info("legion workflow boot stage", "stage", "config")
+	// The GitHub App manager behind its holder: a change of an App's credential builds a manager
+	// from the new one and swaps it, and every reader — the workflow, the outbox, the API, the
+	// runtime — holds the holder. A token source a test supplied is not the configuration's to
+	// build again, so it is held as it is and registers nothing.
+	var apps *appsHolder
 	tokens := suppliedTokens
 	if tokens == nil {
-		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
+		apps = newAppsHolder(appauth.New(cfg.GitHubApps, appauth.Options{}))
+		tokens = apps
 	}
 	installs, ok := tokens.(appauth.Installations)
 	if !ok {
@@ -276,12 +284,18 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
 	}
+	client := newDispatchHolder(dispatch.New(cfg.DispatchURL, dispatchToken))
 	w := &workflowRuntime{
-		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
+		live:   live,
+		tokens: tokens, forget: forget, installs: installs, dispatch: client, repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
 		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
+	}
+	rebuild.register(client)
+	if apps != nil {
+		rebuild.register(apps)
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
@@ -307,7 +321,16 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
+	// Every decision-class value the engine and admission read — the review round cap, the fix
+	// attempts, the linger, the production-check bound, the design gate, the admission cap — is
+	// read as the decision is made, from the settings holder, and never copied into either.
+	w.engine.ReadConfigFrom(func() workflow.Config {
+		settings := engineConfig(*live.Snapshot(), reviewAppLogin, build)
+		settings.Repositories, settings.NoteUnread = w, w.noteUnread
+		return settings
+	})
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	w.admission.ReadCapFrom(func() int { return live.Snapshot().AdmissionCap })
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
 	// whether to start a child and admission whether to admit a root inside this same
 	// transaction, from the mirror's rows, so the row an event carries must already be written
@@ -315,7 +338,6 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
 	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
 	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
-	w.designGate = cfg.Gates.Design
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
@@ -355,45 +377,38 @@ func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflo
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
-// connects as nc, the user readBoot chose (natsConnection), and logs what the server reports about
-// the connection: every permission it refuses at error, every disconnect at warn and every
-// reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect never
-// gives up: a NATS outage mid-run never closes the connection for good. A failed attempt here
-// closes whatever it opened and clears it, so a later call — this one retried after an unreachable
-// NATS — starts clean rather than leaking the connection this one could not finish setting up.
-// Close comes before natsauth.WithLastError on both failure paths, never after: WithLastError only
-// looks once the connection reports itself closed, and Close does not clear what the connection
-// last recorded.
-func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
-	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log), natsauth.ReconnectForever())
-	if err != nil {
-		return fmt.Errorf("connect Envoy NATS: %w", err)
-	}
-	w.conn = conn
-	js, err := jetstream.New(conn)
-	if err != nil {
-		conn.Close()
-		w.conn = nil
-		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
-	}
+// connects as the user the configuration names (readNATSConnection), and logs what the server
+// reports about the connection: every permission it refuses at error, every disconnect at warn and
+// every reconnect at info (natsauth.LogEvents), under natsauth.ReconnectForever so a reconnect
+// never gives up: a NATS outage mid-run never closes the connection for good. A failed attempt
+// closes whatever it opened, so a later call — this one retried after an unreachable NATS —
+// starts clean rather than leaking the connection this one could not finish setting up.
+//
+// The connection and its consumers are a rebuildable holder from here on (natsHolder): a change
+// of `nats_urls` or of either nkey seed opens a new connection through this very path, moves the
+// durable consumers onto it, and closes the old connection once its in-flight acks have settled.
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuild *rebuilder, lookup func(string) (string, bool)) error {
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	heard, err := w.heardAtBoot(ctx)
 	if err != nil {
-		conn.Close()
-		w.conn = nil
 		return err
 	}
-	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, Renames: cfg.RepositoryRenames,
-		AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
-		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
-		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
-	})
-	if err != nil {
-		conn.Close()
-		w.conn = nil
-		return natsauth.WithLastError(err, conn)
+	// The repositories this project hears about are read once, at boot: a mapping change moves
+	// them through the consumers themselves (SetRepositories), not through a rebuild.
+	open := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
+		return openNATS(ctx, w, c, lookup, intake.ConsumerSpec{
+			Project: c.Project, Repositories: heard, Deploys: c.Projects[c.Project].Deploys, Renames: c.RepositoryRenames,
+			AckWait: c.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+			ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
+			RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository, PrepareArtifact: w.prepareArtifact,
+		})
 	}
+	conn, consumers, err := open(cfg)
+	if err != nil {
+		return err
+	}
+	w.nats = newNATSHolder(conn, consumers, open, w.log)
+	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
 }
@@ -537,7 +552,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 		if err != nil {
 			return err
 		}
-		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.designGate, trees, time.Now().UTC())
+		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.live.Snapshot().Gates.Design, trees, time.Now().UTC())
 	}); err != nil {
 		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
 	}
@@ -658,11 +673,11 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 		scope = append(scope, summary)
 		listed = append(listed, fact)
 	}
-	target, err := w.consumers.DispatchTarget(ctx)
+	target, err := w.nats.intake().DispatchTarget(ctx)
 	if err != nil {
 		return fmt.Errorf("read notification stream target: %w", err)
 	}
-	position, err := w.consumers.DispatchPosition(ctx)
+	position, err := w.nats.intake().DispatchPosition(ctx)
 	if err != nil {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
@@ -933,13 +948,7 @@ func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
 // reads no events or has lost a held or worker-died fact looks healthy and does nothing.
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
-	group.Go(func() error {
-		if err := w.consumers.Run(running, w.handlers...); err != nil {
-			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
-			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
-		}
-		return nil
-	})
+	group.Go(func() error { return w.runIntake(running) })
 	group.Go(func() error {
 		w.outbox.Run(running)
 		return nil
@@ -969,19 +978,6 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
-		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
-		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
-			if err := w.outbox.rehold(running, data); err != nil {
-				w.log.Error("role-lane exception not re-held", "error", err)
-			}
-		})
-		if err != nil {
-			return err
-		}
-		<-running.Done()
-		return sub.Unsubscribe()
-	})
-	group.Go(func() error {
 		select {
 		case err := <-w.failed:
 			return fmt.Errorf("workflow supervision fact: %w", err)
@@ -990,6 +986,44 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		}
 	})
 	return group.Wait()
+}
+
+// runIntake drains the durable consumers until ctx ends, across every rebuild of the NATS
+// connection. One generation is one connection: its consumers run until the daemon stops or the
+// holder's rebuild cancels that generation, and the next turn of the loop runs the new
+// connection's consumers. A notice the role lanes could not forward is re-held on the same
+// connection (subscribeNoticeExceptions), so that subscription moves with each generation too.
+//
+// Only an intake that stopped on its own is an error: a daemon that answers its API while it
+// reads no events looks healthy and does nothing.
+func (w *workflowRuntime) runIntake(ctx context.Context) error {
+	for {
+		consumers, running, generation := w.nats.begin(ctx)
+		conn := w.nats.connection()
+		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
+		sub, err := subscribeNoticeExceptions(conn, func(data []byte) {
+			if err := w.outbox.rehold(running, data); err != nil {
+				w.log.Error("role-lane exception not re-held", "error", err)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		err = consumers.Run(running, w.handlers...)
+		_ = sub.Unsubscribe()
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case w.nats.rebuilt(generation):
+			// The holder swapped the connection under this run: the next turn is the new one's.
+			w.log.Info("legion settings: the workflow's intake moved to the rebuilt NATS connection")
+		case err != nil:
+			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
+			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, conn))
+		default:
+			return nil
+		}
+	}
 }
 
 // defaultHoldPollInterval is pollHoldRelease's production ticker period.
@@ -1032,7 +1066,7 @@ type positionReader interface {
 // hold's, which would otherwise be applied as that earlier release's duplicate, or skipped as
 // the reading last applied, and the hold never released.
 func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
-	w.pollHoldReleaseWith(ctx, w.consumers)
+	w.pollHoldReleaseWith(ctx, w.nats.intake())
 }
 
 func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positionReader) {
@@ -1144,7 +1178,7 @@ type connStatus interface {
 // instead of just the one disconnect line a reconnect that keeps failing never reaches a
 // reconnected or a closed line to follow.
 func (w *workflowRuntime) reconnectWatchdog(ctx context.Context) {
-	w.reconnectWatchdogWith(ctx, w.conn)
+	w.reconnectWatchdogWith(ctx, w.nats.connection())
 }
 
 func (w *workflowRuntime) reconnectWatchdogWith(ctx context.Context, conn connStatus) {
@@ -1194,7 +1228,7 @@ const firstControllerTick = time.Minute
 // own (the project, this boot, and the tick's time), since processed_events is shared by every
 // project's daemon. A failed apply is logged, and the next tick tries again.
 func (w *workflowRuntime) tickController(ctx context.Context) {
-	interval := w.controllerWake
+	interval := w.wakeInterval()
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -1304,7 +1338,17 @@ func (w *workflowRuntime) stop() {
 	if w == nil {
 		return
 	}
-	if w.conn != nil {
-		w.conn.Close()
+	if w.nats != nil {
+		w.nats.close()
 	}
+}
+
+// wakeInterval is how often the controller tick wakes the controller
+// (`controller_wake_interval_seconds`): the keeper's holder answers it, so a change of the
+// setting moves the next tick; a runtime a test built by hand reads its own field.
+func (w *workflowRuntime) wakeInterval() time.Duration {
+	if w.keeper != nil {
+		return w.keeper.interval()
+	}
+	return w.controllerWake
 }

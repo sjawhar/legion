@@ -285,7 +285,7 @@ func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record
 			admitted = append(admitted, member)
 		}
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(admitted, nil))
+	rows, err := blockers.Load(ctx, tx, e.store, e.settings().Project, blockers.Judged(admitted, nil))
 	if err != nil {
 		return nil, err
 	}

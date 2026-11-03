@@ -743,7 +743,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		if heard, err = w.heardRepositories(ctx, tx, served); err != nil {
 			return err
 		}
-		if err := w.consumers.SetRepositories(ctx, heard); err != nil {
+		if err := w.nats.intake().SetRepositories(ctx, heard); err != nil {
 			return err
 		}
 		before := readFailures(w.repositories.Refused())

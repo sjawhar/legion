@@ -27,9 +27,13 @@ import (
 // Admission assigns root issues and orphans to the configured number of architect slots.
 // All work occurs in the transaction supplied by intake or daemon boot reconciliation.
 type Admission struct {
-	store   record.Store
-	engine  *workflow.Engine
-	cap     int
+	store  record.Store
+	engine *workflow.Engine
+	// readCap answers the admission cap, read at every decision that needs one (capacity) rather
+	// than copied here: New sets it to the cap it was given, and the daemon replaces it with a
+	// read of its settings holder (ReadCapFrom), so an operator's `admission_cap` change reaches
+	// the next admission with nothing rebuilt.
+	readCap func() int
 	project string
 	log     *slog.Logger
 	now     func() time.Time
@@ -77,6 +81,20 @@ func (a *Admission) ReportCapabilities(open func() []string) {
 	a.openCapabilities = open
 }
 
+// ReadCapFrom makes admission read the cap through read at every decision that needs one, in
+// place of the constant New was given: the daemon hands a read of its settings holder
+// (config.Live.Snapshot), so a change of `admission_cap` takes effect at once, with nothing
+// rebuilt. A nil read is ignored, leaving the cap as it was.
+func (a *Admission) ReadCapFrom(read func() int) {
+	if read != nil {
+		a.readCap = read
+	}
+}
+
+// capacity is the admission cap as this decision reads it: the one place admission asks for it,
+// so a change of where it is read from is this accessor's alone.
+func (a *Admission) capacity() int { return a.readCap() }
+
 var _ intake.Handler = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
@@ -86,7 +104,7 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, engine: engine, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
+	return &Admission{store: store, engine: engine, readCap: func() int { return cap }, project: project, log: log, now: time.Now, pending: make(map[string]intake.DispatchIssue)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -342,7 +360,8 @@ const todoWakeDelay = 30 * time.Second
 // woken about it and takes nothing for it; only a person hands Legion work
 // (skill://legion-controller, "Free slots").
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
-	if a.cap <= 0 {
+	cap := a.capacity()
+	if cap <= 0 {
 		return false, nil
 	}
 	issues, err := a.store.LiveIssues(ctx, tx, a.project)
@@ -365,7 +384,7 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 			taking++
 		}
 	}
-	return len(own)+taking < a.cap, nil
+	return len(own)+taking < cap, nil
 }
 
 // wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
@@ -1080,7 +1099,7 @@ func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, r
 // logSlot logs a slot released or taken once the fact commits: the issue, the slots the project
 // holds after the change, and the cap.
 func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int) {
-	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.cap) })
+	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.capacity()) })
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
@@ -1147,7 +1166,8 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err != nil {
 		return 0, returned, err
 	}
-	if a.cap <= 0 {
+	cap := a.capacity()
+	if cap <= 0 {
 		return 0, returned, nil
 	}
 	if released {
@@ -1163,7 +1183,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		return 0, returned, err
 	}
 	admitted, resumed := 0, false
-	for len(own) < a.cap && len(waiting) > 0 {
+	for len(own) < cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
 		if respectHolds && a.held(candidate.Key) {

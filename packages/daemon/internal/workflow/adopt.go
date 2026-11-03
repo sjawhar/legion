@@ -153,7 +153,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 		return err
 	}
 	if len(decisions) > 0 || approved > 0 {
-		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.cfg.DesignGate, []string{root.Tree}, e.now()); err != nil {
+		if err := CatchUpTheTreesOwed(ctx, tx, e.store, e.settings().DesignGate, []string{root.Tree}, e.now()); err != nil {
 			return err
 		}
 	}

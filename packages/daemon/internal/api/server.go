@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,12 @@ type Options struct {
 	DispatchProject string
 	// OperatorToken is the bearer every operator route compares against; empty admits no one.
 	OperatorToken string
+	// Settings is where every request reads the configuration the server holds: nil, which every
+	// caller but the daemon means, is the OperatorToken, DesignGate, RepositoryRenames and
+	// MergeRules stated beside it, settled once. The daemon hands one of its own and swaps it
+	// when one of those settings changes (NewLiveSettings, LiveSettings.Store), so the change
+	// takes effect without rebinding the listening socket or dropping a request.
+	Settings *LiveSettings
 	// Controller is the project's controller record, which the controller secret route mints,
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
@@ -181,6 +188,59 @@ type TreeLifecycles interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
+// HeldSettings is the configuration the API server holds: everything it reads from legion.yaml
+// and nothing else, in one value, so a settings change swaps one pointer rather than reaching
+// into a server that is answering requests. It is not the state's settings report (Settings),
+// which is every setting the daemon runs on.
+type HeldSettings struct {
+	// OperatorToken is the bearer every operator route compares against (`operator_token_file`);
+	// empty admits no one.
+	OperatorToken string
+	// DesignGate is the project's `gates.design`, which the controller secret route answers.
+	DesignGate config.DesignGate
+	// RepositoryRenames is the deployment's repository equivalence (`repository_renames`): the
+	// rule that says which owner's installation holds a repository recorded under the name a
+	// transfer moved it away from, which the controller's gh bundle reads
+	// (appauth.GitHubCredential) and serving reads for the server's own GitHub calls. The zero
+	// value configures none.
+	RepositoryRenames ghrepo.Renames
+	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
+	MergeRules func(project string) config.MergeRules
+}
+
+// LiveSettings is HeldSettings behind the pointer every request reads through. The holder hashes
+// the operator bearer once per Store, never per request, so a swap costs a request nothing.
+type LiveSettings struct {
+	current atomic.Pointer[settledSettings]
+}
+
+// settledSettings is one HeldSettings with the operator bearer already hashed.
+type settledSettings struct {
+	HeldSettings
+	operatorSet  bool
+	operatorHash [sha256.Size]byte
+}
+
+// NewLiveSettings holds s, which Store replaces.
+func NewLiveSettings(s HeldSettings) *LiveSettings {
+	live := &LiveSettings{}
+	live.Store(s)
+	return live
+}
+
+// Store replaces the settings every later request reads. A request already in a route keeps the
+// ones it began on: it read the pointer once.
+func (l *LiveSettings) Store(s HeldSettings) {
+	next := &settledSettings{HeldSettings: s}
+	if s.OperatorToken != "" {
+		next.operatorSet, next.operatorHash = true, sha256.Sum256([]byte(s.OperatorToken))
+	}
+	l.current.Store(next)
+}
+
+// load is the settings this request reads.
+func (l *LiveSettings) load() *settledSettings { return l.current.Load() }
+
 type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
@@ -191,10 +251,11 @@ type server struct {
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
 	project         string
 	dispatchProject string
-	operatorSet     bool
-	operatorHash    [sha256.Size]byte
-	controller      ControllerStore
-	designGate      config.DesignGate
+	// settings is everything the server reads from legion.yaml, behind a pointer every request
+	// reads through (Options.Settings): the daemon swaps them when one of them changes, so the
+	// server answers the new value without rebinding its socket or dropping a request.
+	settings   *LiveSettings
+	controller ControllerStore
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
@@ -205,25 +266,19 @@ type server struct {
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
-	// that says which owner's installation holds a repository recorded under the name a transfer
-	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
-	// serving reads for this server's own GitHub calls. The zero value configures none.
-	renames    ghrepo.Renames
-	githubAPI  string
-	mergeRules func(project string) config.MergeRules
-	grants     *credential.Grants
-	releaser   store.TreeReleaser
-	trees      TreeLifecycles
-	pool       *pgxpool.Pool
-	handlers   []intake.Handler
-	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread     func(resolved string) bool
-	await      func(repo, tree, child, parent string)
-	roleFor    func(phase.Phase) claim.Role
-	records    record.Store
-	dispatch   dispatch.Client
-	claimReady func(c supervise.Claim)
+	githubAPI    string
+	grants       *credential.Grants
+	releaser     store.TreeReleaser
+	trees        TreeLifecycles
+	pool         *pgxpool.Pool
+	handlers     []intake.Handler
+	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread       func(resolved string) bool
+	await        func(repo, tree, child, parent string)
+	roleFor      func(phase.Phase) claim.Role
+	records      record.Store
+	dispatch     dispatch.Client
+	claimReady   func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -255,15 +310,13 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
-		designGate:         opts.DesignGate,
+		settings:           opts.Settings,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
-		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
-		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,
@@ -283,8 +336,13 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		drained:            opts.Drained,
 		decisions:          opts.Decisions,
 	}
-	if opts.OperatorToken != "" {
-		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	if s.settings == nil {
+		s.settings = NewLiveSettings(HeldSettings{
+			OperatorToken:     opts.OperatorToken,
+			DesignGate:        opts.DesignGate,
+			RepositoryRenames: opts.RepositoryRenames,
+			MergeRules:        opts.MergeRules,
+		})
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)
@@ -350,13 +408,37 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 }
 
+// designGate, renames and mergeRulesOf are the settings this request reads: the one place each is
+// read from, so the daemon's swap of them (LiveSettings.Store) reaches every route.
+func (s *server) designGate() config.DesignGate { return s.settings.load().DesignGate }
+
+func (s *server) renames() ghrepo.Renames { return s.settings.load().RepositoryRenames }
+
+// mergeRulesOf is the merge policy project configures, the zero policy when none is configured.
+func (s *server) mergeRulesOf(project string) config.MergeRules {
+	rules := s.settings.load().MergeRules
+	if rules == nil {
+		return config.MergeRules{}
+	}
+	return rules(project)
+}
+
+// operatorBearer is whether a request's Authorization header carries the operator's bearer:
+// given is what followed "Bearer ", and carried whether the header had that prefix at all. The
+// two hashes are compared in constant time, so neither the token nor its length leaks through
+// the comparison, and a daemon holding no operator token admits nobody.
+func (s *server) operatorBearer(given string, carried bool) bool {
+	current := s.settings.load()
+	return current.operatorSet && carried && secureBearerEqual(current.operatorHash, given)
+}
+
 // serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
 // other name of its configured pair when the project's owners make that name's owner the one
 // whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
 // one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
 // than written a second time.
 func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	return s.renames.Serving(recorded, s.ownsOwner)
+	return s.renames().Serving(recorded, s.ownsOwner)
 }
 
 // ownsOwner is whether owner is an owner of the project's repositories, compared without case as

@@ -67,7 +67,7 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 func (m *Machine) relaunchLater(relaunch func(context.Context) error) {
 	m.claim.State = StateLaunching
 	m.relaunch = relaunch
-	m.arm(TimerRelaunch, m.deps.Timeouts.Probe, "")
+	m.arm(TimerRelaunch, m.deps.timeouts().Probe, "")
 }
 
 // relaunchAgain is the relaunch relaunchLater left waiting (TimerRelaunch). A suspension held

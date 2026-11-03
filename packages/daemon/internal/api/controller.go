@@ -136,7 +136,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
-	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
+	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate()})
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
@@ -185,7 +185,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
+	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners, s.renames())(r.Context(), claim.RoleController, req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")

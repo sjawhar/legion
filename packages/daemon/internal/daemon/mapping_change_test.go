@@ -90,16 +90,17 @@ func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.consumers, err = intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(context.Background(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: heard, AckWait: ackWait, NakDelay: 10 * time.Millisecond, Logger: w.log,
 		RepositoryMapping: w.mappingChange,
 	})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
+	w.nats = newNATSHolder(nil, consumers, nil, w.log)
 	ctx, cancel := context.WithCancel(context.Background())
 	done, refreshed := make(chan error, 1), make(chan struct{})
-	go func() { done <- w.consumers.Run(ctx) }()
+	go func() { done <- w.nats.intake().Run(ctx) }()
 	go func() { w.refreshOnMappingChange(ctx); close(refreshed) }()
 	t.Cleanup(func() { cancel(); <-done; <-refreshed })
 

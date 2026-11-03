@@ -386,16 +386,34 @@ type Timeouts struct {
 	LaunchBackoff time.Duration
 }
 
+// Settings is where a decision reads the limits it is held to and the waits it times: the
+// daemon's settings holder, asked as the decision is made rather than copied when the machine was
+// built, so a change of `launch_failure_limit`, `prompt_failure_limit`, `prompt_retire_limit`,
+// `worker_boot_timeout_seconds` or `worker_rpc_timeout_seconds` reaches the next decision with no
+// machine rebuilt.
+type Settings interface {
+	Limits() Limits
+	Timeouts() Timeouts
+}
+
 // Deps is what a machine is built from.
 type Deps struct {
-	Runtime  runtime.Runtime
-	Conns    runtime.Conns
-	Store    Store
-	Specs    Specs
-	Clock    Clock
-	Log      *slog.Logger
+	Runtime runtime.Runtime
+	Conns   runtime.Conns
+	Store   Store
+	Specs   Specs
+	Clock   Clock
+	Log     *slog.Logger
+	// Limits and Timeouts are the budgets of a caller whose own never change — a test's, and the
+	// daemon's before it has a settings holder. Settings, when set, replaces both: every decision
+	// reads it instead, and these two are then read by nothing.
 	Limits   Limits
 	Timeouts Timeouts
+	// Settings, when set, is where every decision reads its limits and its waits, in place of the
+	// Limits and Timeouts above: the daemon hands its settings holder, so a change of one of
+	// those settings takes effect at once. nil reads the two copies, which is what a caller that
+	// states fixed ones means.
+	Settings Settings
 	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
@@ -479,15 +497,32 @@ type Deps struct {
 	PodUpdateRetask time.Duration
 }
 
+// limits is the limits this decision is held to, and timeouts the waits it times: the holder's
+// when the caller set one, else the copies Deps carries. Every read of either goes through them,
+// so a decision is never held to a budget settled before the machine was built.
+func (d Deps) limits() Limits {
+	if d.Settings != nil {
+		return d.Settings.Limits()
+	}
+	return d.Limits
+}
+
+func (d Deps) timeouts() Timeouts {
+	if d.Settings != nil {
+		return d.Settings.Timeouts()
+	}
+	return d.Timeouts
+}
+
 func (d Deps) check() error {
 	for _, bound := range []struct {
 		name  string
 		value int
 	}{
-		{"Limits.LaunchFailures", d.Limits.LaunchFailures},
-		{"Limits.PromptFailures", d.Limits.PromptFailures},
-		{"Limits.PromptRetires", d.Limits.PromptRetires},
-		{"Timeouts.RegistrationIntervals", d.Timeouts.RegistrationIntervals},
+		{"Limits.LaunchFailures", d.limits().LaunchFailures},
+		{"Limits.PromptFailures", d.limits().PromptFailures},
+		{"Limits.PromptRetires", d.limits().PromptRetires},
+		{"Timeouts.RegistrationIntervals", d.timeouts().RegistrationIntervals},
 		{"PluginContract", d.PluginContract},
 	} {
 		if bound.value < 1 {
@@ -498,11 +533,11 @@ func (d Deps) check() error {
 		name  string
 		value time.Duration
 	}{
-		{"Timeouts.Boot", d.Timeouts.Boot},
-		{"Timeouts.RPC", d.Timeouts.RPC},
-		{"Timeouts.Probe", d.Timeouts.Probe},
-		{"Timeouts.Stop", d.Timeouts.Stop},
-		{"Timeouts.LaunchBackoff", d.Timeouts.LaunchBackoff},
+		{"Timeouts.Boot", d.timeouts().Boot},
+		{"Timeouts.RPC", d.timeouts().RPC},
+		{"Timeouts.Probe", d.timeouts().Probe},
+		{"Timeouts.Stop", d.timeouts().Stop},
+		{"Timeouts.LaunchBackoff", d.timeouts().LaunchBackoff},
 	} {
 		if wait.value <= 0 {
 			return fmt.Errorf("supervise: %s must be positive, got %s", wait.name, wait.value)
@@ -1232,8 +1267,8 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		err = errors.Join(err, m.stopPrevious(ctx))
 		m.claim.Budgets.LaunchFailures++
 		m.log.Warn("supervise: launch failed", "generation", m.claim.Generation, "error", err,
-			"launchFailures", m.claim.Budgets.LaunchFailures, "limit", m.deps.Limits.LaunchFailures)
-		if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
+			"launchFailures", m.claim.Budgets.LaunchFailures, "limit", m.deps.limits().LaunchFailures)
+		if m.claim.Budgets.LaunchFailures >= m.deps.limits().LaunchFailures {
 			return errors.Join(err, m.fail(ctx, fmt.Sprintf("launch failures ran out: %v", err)))
 		}
 		charged = true
@@ -1275,7 +1310,7 @@ func (m *Machine) leftPodRoundAt(loc runtime.Locator) {
 // the daemon's stop ends forgives nothing: the next boot launches that claim again, as it does a
 // launch its context cut short.
 func (m *Machine) backOff(ctx context.Context) error {
-	wait := backoff.Wait(m.deps.Timeouts.LaunchBackoff, m.claim.Budgets.LaunchFailures)
+	wait := backoff.Wait(m.deps.timeouts().LaunchBackoff, m.claim.Budgets.LaunchFailures)
 	m.log.Info("supervise: waiting before the next launch", "after", wait, "launchFailures", m.claim.Budgets.LaunchFailures)
 	if err := m.deps.Clock.Sleep(ctx, wait); err != nil {
 		m.log.Info("supervise: the wait before the next launch was cut short; its context ended", "error", err)
@@ -1501,7 +1536,7 @@ func (m *Machine) probe(ctx context.Context, alive func(context.Context) error, 
 func nothing(context.Context) error { return nil }
 
 func (m *Machine) armBoot() {
-	m.arm(TimerBoot, m.deps.Timeouts.Boot, "")
+	m.arm(TimerBoot, m.deps.timeouts().Boot, "")
 	m.armRegistration()
 }
 
@@ -1516,7 +1551,7 @@ func (m *Machine) armRegistration() {
 	if m.claim.State == StateLaunching {
 		grace = m.deps.Runtime.ProvisionBound()
 	}
-	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
+	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.timeouts().Boot, m.deps.timeouts().RegistrationIntervals, grace), "")
 }
 
 // arm schedules one timer of a kind, replacing any of that kind already armed. Its event carries

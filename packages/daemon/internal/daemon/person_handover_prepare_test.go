@@ -263,7 +263,7 @@ func TestBootReconcileReadsWhoSetTheLabelOfAnUnrecordedTriageRoot(t *testing.T) 
 	admission := admit.New(records, engine, 2, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
-		dispatch: client, dispatchProject: "CAPTURE", bootID: "handover-boot", log: log, consumers: consumers,
+		dispatch: client, dispatchProject: "CAPTURE", bootID: "handover-boot", log: log, nats: newNATSHolder(nil, consumers, nil, log),
 	}
 
 	if err := w.reconcile(ctx); err != nil {

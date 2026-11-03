@@ -981,7 +981,7 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	seedWaiting(t, pool, "LEGION-B", "B")
 	seedWaiting(t, pool, "LEGION-A", "A")
 	seedWaiting(t, pool, "LEGION-C", "C")
-	admission.cap = 2
+	admission.ReadCapFrom(func() int { return 2 })
 	summaries := []dispatch.IssueSummary{
 		{Key: "LEGION-C", ResolvedRepo: "acme/widgets", Title: "C", Status: "todo", Rank: "C", HandedOver: handed},
 		{Key: "LEGION-B", ResolvedRepo: "acme/widgets", Title: "B", Status: "todo", Rank: "B", HandedOver: handed},

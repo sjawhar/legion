@@ -74,7 +74,7 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 	now := e.now().Truncate(time.Microsecond)
 	check := record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: pr.Repo, Number: pr.Number, MergeSHA: pr.MergeSHA,
-		OpenedAt: now, BoundAt: now.Add(e.cfg.ProductionCheckBound),
+		OpenedAt: now, BoundAt: now.Add(e.settings().ProductionCheckBound),
 	}
 	if err := e.enqueueAt(ctx, tx, issue.Key, record.CheckBound{}, check.BoundAt); err != nil {
 		return err
@@ -448,11 +448,11 @@ var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 // built from, compares nothing, and a build that is not a git SHA (buildShape) is refused, logged
 // with its cause and length and never its text.
 func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
-	if build == "" || e.cfg.BuiltFrom == "" {
+	if build == "" || e.settings().BuiltFrom == "" {
 		return nil
 	}
 	if !buildShape.MatchString(build) {
-		e.logOnCommit(ctx, "workflow: a build is not compared against the open production checks: its commit is not a git SHA", "cause", cause, "length", len(build), "repo", e.cfg.BuiltFrom)
+		e.logOnCommit(ctx, "workflow: a build is not compared against the open production checks: its commit is not a git SHA", "cause", cause, "length", len(build), "repo", e.settings().BuiltFrom)
 		return nil
 	}
 	open, err := e.store.OpenProductionChecks(ctx, tx)
@@ -461,7 +461,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, e.cfg.BuiltFrom) || check.Last {
+		if check.Project != e.settings().Project || !e.sameRepository(check.Repo, e.settings().BuiltFrom) || check.Last {
 			continue
 		}
 		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build, OpenedAt: check.OpenedAt}); err != nil {
@@ -470,7 +470,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 		compared++
 	}
 	if compared > 0 {
-		e.logOnCommit(ctx, "workflow: a build is compared against the open production checks", "cause", cause, "build", build, "repo", e.cfg.BuiltFrom, "checks", compared)
+		e.logOnCommit(ctx, "workflow: a build is compared against the open production checks", "cause", cause, "build", build, "repo", e.settings().BuiltFrom, "checks", compared)
 	}
 	return nil
 }
@@ -486,7 +486,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 // than choosing what to read. A check whose last look has started gets none, since no look follows,
 // and a run of no deploy, or of another branch, queues nothing and costs no GitHub read.
 func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.WorkflowRunCompleted) (intake.Result, error) {
-	deploy, ok := intake.DeployOf(e.cfg.Deploys, e.cfg.RepositoryRenames, fact.Repo, fact.Path)
+	deploy, ok := intake.DeployOf(e.settings().Deploys, e.settings().RepositoryRenames, fact.Repo, fact.Path)
 	if !ok {
 		return intake.Result{}, nil
 	}
@@ -496,7 +496,7 @@ func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, fact.Repo) || check.Last {
+		if check.Project != e.settings().Project || !e.sameRepository(check.Repo, fact.Repo) || check.Last {
 			continue
 		}
 		issue, err := e.store.Issue(ctx, tx, check.Issue)
@@ -572,5 +572,5 @@ func (e *Engine) checkBound(ctx context.Context, tx pgx.Tx, fact intake.CheckBou
 		return intake.Result{}, e.closeCheck(ctx, tx, check, record.CheckNotRun)
 	}
 	return intake.Result{}, e.startLook(ctx, tx, issue, check, wakeBound,
-		fmt.Sprintf("production did not carry the merge within %s", boundText(e.cfg.ProductionCheckBound)), true)
+		fmt.Sprintf("production did not carry the merge within %s", boundText(e.settings().ProductionCheckBound)), true)
 }

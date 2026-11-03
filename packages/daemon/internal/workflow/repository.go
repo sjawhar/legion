@@ -46,10 +46,10 @@ func (e *Engine) ResolveRepository(resolved string) (Resolution, error) {
 	if resolved == "" {
 		return Resolution{Refusal: resolvesToNone}, nil
 	}
-	if e.cfg.Repositories == nil {
+	if e.settings().Repositories == nil {
 		return Resolution{}, errors.New("the workflow holds no repository mapping to record an issue's repository from")
 	}
-	return e.cfg.Repositories.ResolveRepository(resolved)
+	return e.settings().Repositories.ResolveRepository(resolved)
 }
 
 // SettleRetainedRepository is fact with a retained event's missing repository
@@ -83,7 +83,7 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // recovered.
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	if refused.Unread {
-		if note := e.cfg.NoteUnread; note != nil {
+		if note := e.settings().NoteUnread; note != nil {
 			note(key, resolved)
 		}
 		return false, nil

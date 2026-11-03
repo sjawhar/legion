@@ -115,10 +115,12 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
-		AckWait: time.Second, NakDelay: 10 * time.Millisecond, PrepareRepository: w.prepareRepository, RepositoryMapping: w.mappingChange}); err != nil {
+	consumers, err := intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger(),
+		AckWait: time.Second, NakDelay: 10 * time.Millisecond, PrepareRepository: w.prepareRepository, RepositoryMapping: w.mappingChange})
+	if err != nil {
 		t.Fatal(err)
 	}
+	w.nats = newNATSHolder(nil, consumers, nil, quietLogger())
 	running, stop := context.WithCancel(ctx)
 	refreshed := make(chan struct{})
 	go func() { w.refreshOnMappingChange(running); close(refreshed) }()
@@ -925,13 +927,13 @@ func TestAnUnreadEventIsAcknowledgedSoTheBootAdmitsRootsOnServedRepositories(t *
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, engine, admission) }()
+	go func() { done <- w.nats.intake().Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
 
 	if !within(10*time.Second, func() bool { return recordedIssue(t, w, served.Key) != nil }) {
-		position, _ := w.consumers.DispatchPosition(ctx)
+		position, _ := w.nats.intake().DispatchPosition(ctx)
 		t.Fatalf("%s on served acme/widgets not admitted while zeta/tools' read fails: admission held %t, consumer at %+v", served.Key, admission.Held(), position)
 	}
 	if got := recordedIssue(t, w, failing.Key); got != nil {
@@ -1347,7 +1349,7 @@ func TestARecoveryWhileTheConsumerIsBehindAdmitsOnceItCatchesUp(t *testing.T) {
 	}
 	run, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(run, engine, admission) }()
+	go func() { done <- w.nats.intake().Run(run, engine, admission) }()
 	polled := make(chan struct{})
 	go func() { w.pollHoldRelease(run); close(polled) }()
 	t.Cleanup(func() { cancel(); <-done; <-polled })
@@ -1635,7 +1637,7 @@ func newHeldRecovery(t *testing.T, backoff, bound time.Duration, reader ...posit
 	liveRoot(t, h.w, h.client, heldTree)
 	h.client.show(issue(heldParent, "acme/widgets", "todo", false, heldTree, 1), issue(heldChild, "zeta/tools", "todo", false, heldParent, 1))
 	h.w.awaitRecovery("zeta/tools", heldTree, heldChild, heldParent)
-	var poll positionReader = h.w.consumers
+	var poll positionReader = h.w.nats.intake()
 	if len(reader) != 0 {
 		poll = reader[0]
 	}
@@ -1660,7 +1662,7 @@ func (h *heldRecovery) behind(t *testing.T, key string) {
 func (h *heldRecovery) consume() {
 	run, cancel := context.WithCancel(context.Background())
 	h.cancel, h.done = cancel, make(chan error, 1)
-	go func() { h.done <- h.w.consumers.Run(run, h.w.handlers...) }()
+	go func() { h.done <- h.w.nats.intake().Run(run, h.w.handlers...) }()
 }
 
 func (h *heldRecovery) pause() {

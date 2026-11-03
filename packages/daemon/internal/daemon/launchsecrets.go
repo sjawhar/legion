@@ -27,7 +27,7 @@ func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []laun
 	var secrets []launchSecret
 	if cfg.EnvoyTokenFile != "" {
 		secrets = append(secrets, launchSecret{"ENVOY_TOKEN", func() (string, error) {
-			return config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile)
+			return readEnvoyToken(cfg)
 		}})
 	}
 	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
