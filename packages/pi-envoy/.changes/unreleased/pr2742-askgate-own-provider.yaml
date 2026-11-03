@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    AskGate reviews a session whose model is on another provider than the gate role's model. It
+    asks the role's model and its fallback chain's models on the session's own provider, then the
+    session's own model, so the transcript still goes to no provider it is not already on. Before,
+    such a session was not reviewed at all (outcome `skipped`): a session that fell back from a
+    gateway to the direct login, a Sol session and a per-token OpenAI session. A write that goes out
+    unreviewed now also tells its session once per cause, apart from its result: a displayed aside
+    that starts no turn, and a line in the host's log.
+time: 2026-11-03T20:30:00.000000Z
+custom:
+    Issue: pr2742

@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+    AskGate's charter gains two failures. Content 14 refuses an ask, message, comment or approval
+    summary that states a count, amount, cost, duration, date or scope as fact with no command,
+    file, record or link beside it. Content 15 refuses a write that states a rule, a standing order
+    or a "from now on" directive for agents that the person never called a rule. AskGate also
+    reviews a main agent's message to other agents (`write` to `agent://`, `envoy_send`,
+    `envoy_publish`) that reaches every agent (`agent://all`, a `notifications.team.` topic) or
+    holds the word "rule", against failure 15 alone. A refused message is sent anyway with a first
+    line `advisor-rebuttal: <line>`, which AskGate records and removes.
+time: 2026-11-03T20:30:01.000000Z
+custom:
+    Issue: pr2742
