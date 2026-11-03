@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The Inbox reads a person''s threads: `GET /api/v1/me/replies` takes `kind` (`reply`, `agent`, or both) and `state` (`unread` or `all`), answers every matching row when no `limit` is given, and carries each row''s priority, project, read mark, unread count, document anchor and, for an agent thread, its session and the ids of its unread replies, with the `as_of` of the one snapshot they were read in.'
+time: 2026-11-03T18:52:56.469631905Z
+custom:
+    Issue: pr2713

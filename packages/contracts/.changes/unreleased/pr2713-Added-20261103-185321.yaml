@@ -1,0 +1,5 @@
+kind: Added
+body: 'The request and answer types of `POST /api/v1/me/inbox/read`: `MarkInboxReadRequest`, `MarkInboxReadPriority` and `MarkInboxReadResponse`.'
+time: 2026-11-03T18:53:21.645294058Z
+custom:
+    Issue: pr2713

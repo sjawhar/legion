@@ -1,0 +1,5 @@
+kind: Added
+body: 'One request marks every listed Inbox thread read: `POST /api/v1/me/inbox/read` takes a `read_through` and the list''s own narrowing (`kind`, `priority`, `urgency`, `project`, and an issue or a document) and marks exactly the threads the list read would answer whose newest reply is at or before that mark, answering how many it marked.'
+time: 2026-11-03T18:53:06.496277849Z
+custom:
+    Issue: pr2713

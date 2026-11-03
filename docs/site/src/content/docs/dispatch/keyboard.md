@@ -59,15 +59,19 @@ the right column is showing. Below that width, and in the Inbox drawer, they act
 
 | Keys | Action |
 | --- | --- |
-| `j` / `k` | Next / previous ask |
-| `↓` / `↑` | Next / previous ask, while the focus is in the list (below 1280 px, while a row is focused) |
+| `j` / `k` | Next / previous row |
+| `↓` / `↑` | Next / previous row, while the focus is in the list (below 1280 px, while a row is focused) |
 | `Enter` | Answer the selected ask (moves into its answer box, opening the note field of a decision block first) |
 | `1` – `9` | Pick option 1–9 of the selected ask |
-| `o` | Open the ask's issue or document |
-| `y` | Copy the selected ask's reference |
+| `o` | Open the row's issue, document or thread |
+| `y` | Copy the selected row's reference |
 | `x` | Tick or untick the selected ask, for a snooze of several at once |
 | `h` | Snooze the selected ask, or every ticked ask |
-| `Escape` | From the right column, back to its row; then back to the ask row, then off it; from the bulk snooze menu, back to the list; with no row focused, drop every tick |
+| `Escape` | From the right column, back to its row; then back to the row, then off it; from the bulk snooze menu, back to the list; with no row focused, drop every tick |
+
+`Enter`, `1` – `9`, `x` and `h` are an open question's: a thread row has no options, no answer
+box and no snooze, so they do nothing on one. An agent-message row has no `dispatch://`
+reference, so `y` does nothing on one either.
 
 ## Project
 

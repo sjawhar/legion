@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The Inbox''s thread types follow the server: `MyReplyRow` gains `priority`, `project`, `read_through`, `unread`, `unread_count`, `unread_reply_ids`, `anchor` and `session`, and its `kind` takes `agent`; `MyRepliesResponse` gains `as_of`; `UserThreadStateUpdatedEventPayload.thread_id` is optional, since a mark-all names a project and no thread; and `thread_logins` now names every login whose Inbox a write can have moved, a direct conversation''s root author and an assignee move included.'
+time: 2026-11-03T18:53:18.922470997Z
+custom:
+    Issue: pr2713

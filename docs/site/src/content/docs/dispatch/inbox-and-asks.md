@@ -1,13 +1,17 @@
 ---
 title: The Inbox and asks
-description: How the Inbox sorts open questions, and how to answer, ask back, snooze, and approve.
+description: How the Inbox lists your questions and threads, and how to answer, reply, ask back, snooze, and approve.
 sidebar:
   order: 1
 ---
 
 An **ask** is a question that needs a person's answer. An agent opens it on an issue or on a
 project document. It can offer options to pick from, allow more than one pick, and carry an
-urgency: Blocking, High, Medium, or Low. The Inbox is where you find and answer them.
+urgency: Blocking, High, Medium, or Low.
+
+The Inbox is where you find and answer them, and it holds your threads as well: a thread you
+wrote in that somebody has written in since, and a message you sent an agent that it has
+answered. One list, one bar over it, one place to look.
 
 <video controls preload="metadata" poster="/legion/media/videos/answer-an-ask.jpg" style="width: 100%" aria-label="Walkthrough: answering an ask in the Inbox">
   <source src="/legion/media/videos/answer-an-ask.mp4" type="video/mp4">
@@ -16,14 +20,18 @@ urgency: Blocking, High, Medium, or Low. The Inbox is where you find and answer 
 
 ## The two columns
 
-From a window 1280 px wide or wider, the Inbox page is two columns. The left column lists every
-open question as a short row: the issue or document it belongs to, what kind of question it is,
-its first line, and its age. The right column holds the selected question itself, with the
-controls that act on it at its head.
+From a window 1280 px wide or wider, the Inbox page is two columns. The left column lists
+everything waiting for you, each as a short row: what kind of row it is, what it is about, when
+it was last written in, and the issue or document it belongs to. The right column holds the row
+you selected, whole.
 
-![The Dispatch Inbox in two columns: the open questions as short rows on the left, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
+![The Dispatch Inbox in two columns: the list of open questions and unread threads on the left, grouped by priority, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
 
-What the right column shows follows the question:
+Drag the line between the two columns to change how wide each one is. It is also a slider: give
+it the keyboard focus and the arrow keys move it one step at a time, and double-click it to put
+it back where it started. Dispatch keeps the width you leave it at, in this browser.
+
+What the right column shows follows the row:
 
 - A question an agent wrote as a decision block opens as its own document, at the section the
   block sits in. **Skip to the answer** brings the block itself into view.
@@ -31,26 +39,54 @@ What the right column shows follows the question:
   **Request changes** at the head of the column.
 - A question anchored on a quote, and a question on no document, open as the card described in
   [Answering an ask](#answering-an-ask).
+- A thread opens whole — every message in it, and the box to reply at the end. A thread anchored
+  in a document opens inside that document, under the text it is anchored to.
 
 The Inbox selects its first row when it opens. Click a row to select it, or press `j` or `k`.
 The arrow keys do the same while the focus is in the list. The selected row is in the page's
 address as `?item=<id>`, so a link or a reload keeps your place. A question the agent withdraws,
 or that somebody answers elsewhere, leaves the list at once, and the next row is selected.
 
-Two questions stay in the column until you select another row: one you had typed an answer into,
-which is shown closed with your text to copy, and one whose answer you sent and the server has
-not decided yet.
+Three things stay in the column until you select another row: a question you had typed an answer
+into, which is shown closed with your text to copy; a question whose answer you sent and the
+server has not decided yet; and a thread you have just read, which is drawn as read where it
+stands rather than disappearing under you.
 
 Below 1280 px, and in the [Inbox drawer](#opening-the-inbox-as-a-drawer) at any width, there is
-no second column. Each row holds its own card and its own controls, as the whole Inbox always
-did.
+no second column. Each row holds its own card: a question with its controls, a thread with its
+messages, **Open** and **Mark read**.
 
-## How the Inbox is sorted
+## How the list is ordered and grouped
 
-Every open ask is either waiting on a person or waiting on an agent. The Inbox splits them that
-way:
+The Inbox opens newest first, grouped by priority: one band per priority, P0 at the top, rows
+whose issue has no priority last, and everything you snoozed in a folded **Later** band at the
+end.
 
-- **Waiting on you** holds the asks where it is a person's turn.
+A band draws 50 rows. Where it holds more, **Show more** under it draws the next 50.
+
+**View**, at the right end of the bar, changes all of that:
+
+- **Sort by**: **Newest first**, the default, or Priority, Urgency, Type, Project, or Assignee.
+  Whichever you pick, rows that match on it are newest first within it.
+- **Group by**: the same five fields, plus **Waiting on** and **None**. **None** is one list with
+  no headings. A band is drawn only when it holds a row, and a snoozed ask is in **Later**
+  whatever you group by.
+- **Show read threads**: **Unread**, the default, or **All threads**, which keeps the threads you
+  have already read in the list, drawn as read. Each choice shows how many threads it holds.
+- **Thread order**: whether a thread's replies read **Oldest first**, the default, or **Newest
+  first**. This choice is yours everywhere: it sets the order of every thread in Dispatch, not
+  only the ones in the Inbox.
+
+The sort, the grouping and the read-thread switch are part of the page's address, so a link
+carries the view you are looking at. The thread order, the column width and the bands you folded
+are kept for your browser instead.
+
+### Waiting on
+
+**Group by → Waiting on** bands the list by whose turn it is:
+
+- **Waiting on you** holds the asks where it is a person's turn, and every thread, since a thread
+  is waiting for you to read it.
 - **Waiting on agents** holds the asks where an agent owes the next reply. Your own **Ask back**
   puts an ask here, and so does an agent's progress note.
 
@@ -58,39 +94,43 @@ The split follows whose turn it is, not who wrote last. Where a row holds its ow
 shows a chip such as `Planner replied` when an agent wrote last and the turn is still yours.
 Each card also says `Waiting on you` or `Waiting on <agent>` on its status line.
 
-Within each section, higher priority comes first and unset priority last. The banner at the top,
-for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting on you — the ones on
-issues assigned to you that you have not snoozed — and every credential request waiting on you,
-whatever the filter below it is set to.
+### Filter
+
+**Filter**, at the left of the bar, narrows the list by the same five fields: Priority, Urgency,
+Type, Project and Assignee. Each opens a list you can search, and every value in it carries how
+many rows it holds, counted inside what the other four fields have already narrowed — so a value
+that reads 3 has three rows behind it, and picking it never empties the list.
+
+Type is the field that tells the kinds apart: Question, Decision, Approval, Reply and Agent
+message.
+
+Each value you pick becomes a chip under the bar. Remove one with its ×, or all of them with
+**Clear filters**. The filters are in the address as well, so a narrowed list is a link.
+
+The banner at the top, for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting
+on you — the ones on issues assigned to you that you have not snoozed — and every credential
+request waiting on you, whatever the filter below it is set to.
 
 A credential request is an agent asking you to let it use a secret, or a machine asking to start
-agent sessions as you. Pending ones are listed under **Credential requests**, above the sections.
+agent sessions as you. Pending ones are listed under **Credential requests**, above the list.
 A **Secret request** links to its page on the Secrets Broker, where you approve or deny it, signed
 in to the broker ([approve a request](/legion/broker/guides/approve-a-request/)); Dispatch itself
 decides no secret request. A **Machine login** links to Dispatch's machine-login page, where you
 type the code the machine shows and approve or deny it
-([log a machine in](/legion/broker/guides/log-a-machine-in/)). They count toward **Needs you** and the
-banner like an ask that waits on you. The Inbox says `Nothing needs you` only when your own list
-holds no ask and no credential request; with the filter on someone else it says `Nothing matches
-this filter`, and with the filter cleared, `Nothing needs anyone`. An open Inbox picks up a new
-request, or one that is no longer pending, within moments on its own - no reload needed.
-
-### Asks grouped by issue
-
-When an issue or a document has more than one ask in a section, its asks sit together under one
-header that names the issue or document and how many asks it has, for example
-`CORE-12 Release train · 3 asks`. The group sits where that issue's first ask in the section would,
-so the order between issues is unchanged. An issue with one ask in a section has no header.
-
-The headers are labels only: `j` and `k` move from row to row.
+([log a machine in](/legion/broker/guides/log-a-machine-in/)). They count toward the sidebar's
+**Inbox** number and the banner like an ask that waits on you. The Inbox says `Nothing needs you`
+only when your own list holds no ask and no credential request; with the filter on someone else it
+says `Nothing matches this filter`, and with the filter cleared, `Nothing needs anyone`. An open
+Inbox picks up a new request, or one that is no longer pending, within moments on its own - no
+reload needed.
 
 The list does not move under a moving pointer. If the Inbox refreshes while your pointer travels
 across it, the rows stay put until the pointer rests, leaves the list, or you click.
 
 ### Whose asks you see
 
-Every issue has an assignee: the person who answers its asks. The **Assignee** filter above the
-list picks whose asks the Inbox holds. Its button reads `Assignee · you` while it is on you, and
+Every issue has an assignee: the person who answers its asks. The **Assignee** field inside
+**Filter** picks whose asks the Inbox holds. Its button reads `Assignee · you` while it is on you, and
 the list it opens offers **Unassigned** and everyone who has signed in to Dispatch. Pick as many
 people as you like; the button then names the one you picked, or how many.
 
@@ -109,12 +149,13 @@ The filter is part of the page's address: one `?assignee=` value per person, eac
 word `unassigned`, so a link carries the list you are looking at. `?assignee=everyone` is the
 cleared filter, and an address with no `assignee` is your own asks.
 
-While the filter names anybody but you alone, the first section reads **Waiting on a person**
-rather than **Waiting on you**, since those asks wait on whoever holds them.
+While the filter names anybody but you alone, the **Waiting on you** band reads **Waiting on a
+person** instead, since those asks wait on whoever holds them.
 
-**Needs you**, the banner, and a project's **Blocked on you** pill mean one thing wherever they
-appear: the open asks whose turn is a person's, on issues assigned to you, that you have not
-snoozed. **Needs you** and the banner add the credential requests waiting on you; a project's
+The banner, a project's **Blocked on you** pill and the Agents page's **Needs you** pill mean
+one thing wherever they appear: the open asks whose turn is a person's, on issues assigned to
+you, that you have not snoozed. The banner adds the credential requests waiting on you, and so
+does the sidebar's **Inbox** number, which adds your unread threads on top of both; a project's
 pill counts no credential request, because a request belongs to no project. None of them follows
 the filter, so a widened filter lists more asks than the number beside the Inbox.
 
@@ -136,15 +177,46 @@ column:
 | Next week | At 09:00 next Monday, in your own time zone. |
 | Until I clear it | Only when you end the snooze. |
 
-A snoozed ask moves into the folded **Later** band. Open the band to see when each ask comes back
-and to end a snooze early. A snooze outranks whose turn it is: an agent replying to a snoozed ask
-does not bring it back, and it does not count toward **Needs you** or the banner.
+A snoozed ask moves into the folded **Later** band, which is there whatever you group the list
+by. Open the band to see when each ask comes back and to end a snooze early. A snooze outranks
+whose turn it is: an agent replying to a snoozed ask does not bring it back, and it does not
+count toward the sidebar's **Inbox** number or the banner. A thread cannot be snoozed: it is
+read or it is not.
 
 To snooze several asks at once, tick each row's checkbox, or press `x` on the row the right
 column is showing (on the focused row where there is no second column). A bar appears above the
 list reading `3 selected`, with the same four choices and **Clear**. If the server refuses some
 of them, the bar says how many and why, and those rows stay ticked. Press `Escape` with no row
 focused to drop every tick.
+
+## Replies and agent messages
+
+Two kinds of row in the Inbox are threads rather than questions:
+
+- A **Reply** row is a thread you wrote in — an ask, a comment thread, a message thread on an
+  issue — that somebody else has written in since you last read it.
+- An **Agent message** row is a one-off message you sent an agent session that the session has
+  answered.
+
+A thread row shows what the thread is about, who it belongs to, and when it was last written in,
+with a dot while it holds something you have not read. Open the row and the thread is drawn
+whole: every message, each one you have not read marked **New**, and the box to reply at the end.
+A reply you write here goes exactly where one written on the thread's own page goes.
+
+Reading a thread marks it read. The row stays where you read it, drawn as read, rather than
+vanishing under you; it leaves the list the next time the list is read. Where you would rather
+not read them one at a time, **Mark all read**, in the bar between **Filter** and **View**, marks
+every thread the list is showing. It asks nothing first: the rows go and every count drops at
+once, and if the server refuses the press the rows come back and the bar says `Nothing was marked
+read.` A filtered list marks only what it is showing, and a thread somebody wrote in after the
+list was read stays unread.
+
+Threads you have already read are behind **View → Show read threads → All threads**. The
+**Type** filter has a value for each kind, so **Reply** narrows the list to those threads alone,
+which is also what the address `/replies` opens.
+
+Where there is no second column each thread row is a card, with **Open**, which goes to the
+thread's own page, and **Mark read**.
 
 ## Answering an ask
 
@@ -196,20 +268,24 @@ and the card stays open with both answers.
 ### Ask back
 
 When you cannot answer yet, type what you need to know and choose **Ask back**. Your question is
-posted as a reply on the ask. The ask stays open and moves to **Waiting on agents** until the agent
-replies.
+posted as a reply on the ask. The ask stays open and waits on the agent until it replies.
 
 If you type a question and choose **Answer** with no option picked, Dispatch checks first. It
 offers **Ask back instead** and **Answer with it anyway**.
 
 ### Reply thread
 
-Replies appear newest first. The two newest replies stay visible. When there are older replies,
-choose **Show N more replies** to reveal them below the newest pair; choose **Show fewer replies**
-to collapse the thread again. After an ask is answered, write a follow-up in **Reply**; in the
-Conversation tab and in document decisions, choose **Write a reply** first. A new reply appears at
-the top of the thread, and a reply you are still typing survives if its card remounts elsewhere,
-such as switching margin tabs away and back.
+An ask's replies read in the order you chose in **View → Thread order**: **Oldest first**, the
+default, or **Newest first**. That order is the same for every thread in Dispatch — the Inbox,
+the margin, a document's decision block, the Conversation tab — and the reply box sits next to
+the newest message, so it is under the root in **Newest first** and at the end in **Oldest
+first**.
+
+The root and the two newest replies always show. Older ones fold behind **Show N earlier
+replies**, and **Show fewer replies** folds them back; a reply you have not read never folds.
+After an ask is answered, write a follow-up in **Reply**; in the Conversation tab and in document
+decisions, choose **Write a reply** first. A reply you are still typing survives if its card
+remounts elsewhere, such as switching margin tabs away and back.
 
 ### Approvals
 
@@ -266,19 +342,20 @@ You don't have to leave a page to answer an ask. The `i` key opens the Inbox as 
 whatever page you're on, and so does a header button, which differs by screen width:
 
 - **On a phone or a narrow window**, the sidebar collapses into a top header whose **Inbox**
-  badge (or **Needs you N**, once something needs you) opens the drawer instead of navigating.
+  badge (or **Inbox N**, once something is waiting) opens the drawer instead of navigating.
 - **On a wide screen**, the sidebar's **Inbox** link still navigates to the Inbox page and keeps
-  its own **Needs you N** badge; a separate **Peek** button beside it, with no count of its own,
-  opens the drawer instead.
+  its own count; a separate **Peek** button beside it, with no count of its own, opens the drawer
+  instead.
 
-The drawer holds no second column at any width: every ask is a card in its own row, as it is on
-the narrow Inbox page. The actions are the same: answer, ask back, snooze, or open an ask
+The drawer holds no second column at any width: every row is a card, as it is on the narrow
+Inbox page. The actions are the same: answer, ask back, snooze, read a thread or open a row
 without losing your place. The page underneath keeps its state, a half-typed message included,
 so a reply you were drafting is still there when you close the drawer.
 
-The drawer carries the same **Assignee** filter, with a selection of its own. It opens on your
-own asks, and picking people there changes the drawer alone: the address of the page underneath
-never moves.
+The drawer carries the same **Filter** and **View**, with choices of its own. It opens on your
+own work, and what you pick there changes the drawer alone: the address of the page underneath
+never moves. The two settings that are yours rather than the list's — the thread order and the
+bands you folded — are shared with the page, since they belong to your browser.
 
 `Escape` closes the drawer before it closes anything else behind it, and returns focus to the
 button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the
@@ -286,8 +363,9 @@ Inbox page itself, since the page already shows everything the drawer would.
 
 ## On a phone
 
-The Inbox works the same on a phone. Each row keeps its shape: the issue on the left, and its
-priority, **Assign to me** and **Snooze** on the right.
+The Inbox works the same on a phone: the same bar, the same bands, and each row a card with its
+own controls — a question with its options, **Assign to me** and **Snooze**, a thread with its
+messages, **Open** and **Mark read**.
 
 ![The Inbox on a phone](/legion/media/dispatch/inbox-phone.png)
 

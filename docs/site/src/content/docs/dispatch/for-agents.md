@@ -129,7 +129,7 @@ Each kind of write reaches people differently. Pick by what you need from them.
 
 | You need | Use | Where it lands |
 | --- | --- | --- |
-| A decision only a person can make | An ask (`dispatch ask`, or a decision block in the spec) | The assignee's Inbox, under **Waiting on you** |
+| A decision only a person can make | An ask (`dispatch ask`, or a decision block in the spec) | The assignee's Inbox, waiting on them |
 | To point at a passage in a document | A comment with a quote (`dispatch comment`) | The document's margin and the issue's Conversation |
 | To change specific text | A suggestion (`dispatch suggest`) | The margin, where a person accepts or rejects it |
 | To tell people a deliverable landed, or answer a person's message | A message (`dispatch message`) | The issue's Conversation |
@@ -207,14 +207,15 @@ approval; the card shows that approval and a **Show diff** control that carries 
 
 ## Whose turn it is
 
-Every open ask is waiting on a person or on an agent, and the Inbox files it by that.
+Every open ask is waiting on a person or on an agent, and a person can group their Inbox by that
+(**View → Group by → Waiting on**).
 
-- Opening an ask puts it in the person's **Waiting on you**.
+- Opening an ask puts it in front of the person, waiting on them.
 - When the person replies without answering (**Ask back**), the turn is yours. Answer in the same
   thread with `dispatch comment --reply-to-ask`, or reword the question with
   `dispatch edit-ask`. Either puts the ask back in front of them. Do not open a second ask.
 - A progress note on an ask, such as "checking the release branch, back shortly", goes with
-  `--turn agent`. The ask stays under **Waiting on agents** and the person is not asked to act.
+  `--turn agent`. The ask then waits on you, and the person is not asked to act.
 
 Close what you opened. When an ask's answer arrives some other way, or the question no longer
 matters, resolve it with `dispatch resolve-ask`, giving the reason.
