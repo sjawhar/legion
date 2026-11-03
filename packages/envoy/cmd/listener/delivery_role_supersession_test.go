@@ -61,7 +61,7 @@ func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValu
 // session the fresh claim already superseded, which would tell the sender
 // something false about role state.
 func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const (
 		role        = "reviewer"
 		oldHolder   = "ses_lapsed"
@@ -98,13 +98,13 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 	var forwardedMu sync.Mutex
 	forwardedSubjects := []string{}
 	config := harness.config
-	config.forwardRole = inlineForward(func(subject string, item contracts.Envelope, timeout time.Duration) error {
+	config.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
 		forwardedMu.Lock()
 		defer forwardedMu.Unlock()
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
 	})
-	config = wireTestDeliveryWorkers(t, config)
+	config = wireTestRoleForwarder(t, config)
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)

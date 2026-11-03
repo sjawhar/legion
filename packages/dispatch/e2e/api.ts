@@ -7,6 +7,8 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -28,6 +30,7 @@ import type {
   CreateProjectInput,
   EditAskInput,
   Event,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueDetails,
@@ -637,6 +640,21 @@ export function requestApproval(
   );
 }
 
+/** Reviews the document's latest settled version as a person does from its header, with no
+ *  approval request needed: Approve, or Request changes with a reason. */
+export function reviewArtifact(
+  id: string,
+  input: { state: ArtifactReviewState; reason?: string },
+  options: ApiOptions = {}
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
+    "POST",
+    input,
+    options
+  );
+}
+
 export function createNamedVersion(
   id: string,
   summary: string,
@@ -827,6 +845,23 @@ export function replyToCommentDelivery(
       actor,
       as: "agent",
     }
+  );
+}
+
+/** A session records the next version of `phase`'s handoff on the issue, as `dispatch
+ *  handoff-write` does: under the agent bearer, naming itself in `actor`. `body` is sent as the
+ *  one JSON object's text the server stores verbatim. */
+export function createHandoff(
+  issue: string,
+  phase: string,
+  body: object,
+  actor: Actor = seedActor
+): Promise<HandoffSummary> {
+  return request<HandoffSummary>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs/${encodeURIComponent(phase)}`,
+    "POST",
+    { body: JSON.stringify(body) },
+    { actor, as: "agent" }
   );
 }
 

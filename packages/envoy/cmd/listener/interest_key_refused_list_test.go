@@ -57,7 +57,7 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		t.Fatalf("open the session registry: %v", err)
 	}
 	t.Cleanup(sessions.StopWatch)
-	if err := sessions.Put(ordinary, session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/test/ordinary", Title: ordinary}); err != nil {
+	if err := sessions.Put(ordinary, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/ordinary", Title: ordinary}); err != nil {
 		t.Fatalf("register %s: %v", ordinary, err)
 	}
 	if _, err := registry.Upsert(store.Interest{SessionID: ordinary, MachineID: "test-machine", Dir: "/test/ordinary"},
@@ -77,7 +77,7 @@ func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T
 		t.Fatalf("open the session bucket: %v", err)
 	}
 	stored := func(id string) []byte {
-		value, err := json.Marshal(session.SessionEntry{Port: 1, MachineID: "earlier", Dir: "/test/refused", Title: "refused", UpdatedAt: time.Now().UnixMilli()})
+		value, err := json.Marshal(session.SessionEntry{SelfSubscribed: true, MachineID: "earlier", Dir: "/test/refused", Title: "refused", UpdatedAt: time.Now().UnixMilli()})
 		if err != nil {
 			t.Fatalf("encode %d-byte session %.16s's entry: %v", len(id), id, err)
 		}

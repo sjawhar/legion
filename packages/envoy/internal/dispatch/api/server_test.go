@@ -736,6 +736,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "project default assignee", event: model.Event{Type: "settings.project_default_assignee.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
+		{name: "user decision kept", event: model.Event{Type: "decision.kept", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {
@@ -1575,11 +1576,14 @@ func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
 	if markdown.Code != http.StatusCreated {
 		t.Fatalf("upload report.md: status=%d body=%s", markdown.Code, markdown.Body.String())
 	}
+	// A name of its own whose slug another artifact already holds gets the next free slug. A name
+	// that is that slug is the artifact's own next version
+	// (TestAnUploadNamedAfterAnArtifactsSlugIsItsNextVersion).
 	dashed := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-		"name": "report-md",
-	}, "report-md", "application/octet-stream", []byte("report"), "alice")
+		"name": "Report.md",
+	}, "Report.md", "application/octet-stream", []byte("report"), "alice")
 	if dashed.Code != http.StatusCreated {
-		t.Fatalf("upload report-md: status=%d body=%s", dashed.Code, dashed.Body.String())
+		t.Fatalf("upload Report.md: status=%d body=%s", dashed.Code, dashed.Body.String())
 	}
 	versioned := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "report.md",

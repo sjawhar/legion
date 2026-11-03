@@ -443,4 +443,61 @@ package api
 // holds this daemon and the image that runs its roles together. This change adds no store
 // migration. (This branch took 43; main then landed the consumer lag at 43, so this branch takes
 // the number above it, as the collision note says.)
-const DaemonAPIVersion = 44
+//
+// 45: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
+// worker writes with `dispatch handoff-write` under its own session, rather than a committed
+// `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
+// `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
+// reviewing) names, and the daemon refuses such a completion without one
+// (HANDOFF_RECORD_REQUIRED); it reads the record back from Dispatch and refuses one Dispatch has
+// not (HANDOFF_RECORD_NOT_FOUND), cannot read (DISPATCH_READ_FAILED), of another issue, phase or
+// version (HANDOFF_RECORD_MISMATCH), or written by another session than the claim's
+// (HANDOFF_SESSION_MISMATCH), and `HANDOFF_NOT_NEW` and the completion's idempotency key name the
+// record id in place of the commit. `commit` stays the implementer's (its pushed tip, and retro's
+// commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
+// requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
+// worker's completion of its current file-backed phase names one; store migration 20261101144900_handoff_records keeps it
+// on the phase row. A 44 plugin posts a commit and no record, which this daemon refuses, and its
+// strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
+// landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
+// migration 0059, so this change took 41 and store migration 0060; main then landed
+// `pull_request_head_move_starts` as store migration 0060 at 40, so this change took store
+// migration 0061; main then landed `pull_request_head_run` as store migration 0061, so this change
+// took store migration 0062; main then landed the controller start command at 41 and the worker
+// stall and Claude session environment at 42, so this change took 43 and kept store migration
+// 0062; main then landed the lost-event pass at 43 with store migrations 0062 to 0064, so this
+// change took 44 and store migration 0065; main then landed background work at 44 with store
+// migrations 0065 to 0067, which closed the numbered series (sjawhar/legion#2411), so this change
+// takes 45 and a store migration named for the UTC moment it was written, as the collision note
+// says.)
+//
+// 46: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
+// `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
+// (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, `round`, and
+// an optional `head`), answering 204: it is the worker's answer to the update task — everything
+// it wants kept is pushed, and its process may now be replaced. `round` is the round the task it
+// read named, and the daemon takes the answer only for the round that claim stands in, refusing
+// any other with 409 and a sentence naming both rounds. `head` is the commit the worker reports
+// as the head of its issue branch at `origin`, empty when the branch is not there. Both
+// plugins gain the `ready_for_update` op that posts it, so a worker under either one can end its
+// round. A claim whose update round is open is served on its contract of before the round, on
+// every route: the claim routes, the grants route's claim form and every grant-bearing route,
+// where a stale plugin contract otherwise refuses. Every claim view gains the round it is in and
+// the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
+// when there is none — on the state's claims (`api.ClaimView`) and on the operator's
+// (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
+// before 46 refuses a state carrying either, so `GET /legion/v1/state`, which authenticates
+// nobody, serves a caller from a pod whose claims record a contract below 46 the claim views
+// without them (api's stateFor): the round serves that worker until its pod is replaced, and
+// every reader from 46 on takes both as optional. `legion.yaml` gains `pod_update_retask_hours` and
+// `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
+// before 46 has no op to signal with, so its worker answers by ending the turn the task started
+// (supervise.PodUpdateContract names this number), and a daemon before 46 answers that op's post
+// a 404; the boot gate and `legion probe-image` refuse either pair. (This branch took 43 while
+// main's consumer lag was unmerged, then 44, then 45, and its store
+// migration 0065; main landed the consumer lag at 43, the Claude Code background-task variable at
+// 44 and the handoff records at 45 first, with store migrations 0065, 0066 and 0067, so this
+// change takes the number above them. Its migration is named for the moment it was written,
+// 20261029195520, since main closed the numbered series at 0067.)
+const DaemonAPIVersion = 46

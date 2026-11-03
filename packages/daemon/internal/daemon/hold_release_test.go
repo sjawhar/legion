@@ -272,6 +272,9 @@ func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 func (d *pilotDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *pilotDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *pilotDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -320,6 +323,9 @@ func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval
 	return dispatch.Approval{}, nil
 }
 func (d *filteringDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *filteringDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *filteringDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -364,7 +370,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: &filteringDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
 		}},
@@ -425,7 +431,7 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
 		dispatch: &pilotDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "CAPTURE-1", ResolvedRepo: "sjawhar/legion", Title: "todo root", Status: "todo", Rank: "A", HandedOver: true},
 			{Key: "CAPTURE-2", ResolvedRepo: "sjawhar/legion", Title: "backlog root", Status: "backlog", Rank: "B", HandedOver: true},

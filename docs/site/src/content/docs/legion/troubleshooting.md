@@ -314,11 +314,15 @@ start it by hand. Without `answeredAt`, check, in order:
 4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
    answered after `since` and none of the above holds, the answer's event never reached the
    daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
-   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
-   its catch-up cursor, with the root held until the whole window is in, then decides it once.
-   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
-   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
-   own event.
+   (`legion restart`) catches the root up from its catch-up cursor: the boot applies the root's
+   Dispatch event log after the cursor, with the root held until the whole window is in, then
+   decides it once. A restart does not read an answer recorded before the root's first catch-up
+   on this release, for a root recorded before the catch-up cursor existed and given no work
+   since: that first catch-up only sets the cursor to the issue's latest sequence and replays
+   nothing, and a boot whose read of the root Dispatch refused leaves it with no cursor, so the
+   next boot's catch-up is that first one. In that case, or without a restart, have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
@@ -329,6 +333,60 @@ gives its slot back at that daemon's first boot. The gate stays closed until a p
 spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
 until someone approves the latest version from the document's header or the Inbox. An approval of an
 earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
+
+## A parked tree did not come back after a decision
+
+A root in `backlog` or `icebox` runs again when a person sets it to `todo`, or when the controller
+parked it for a hold of its own and judges that a person's decision gives its work a next step. The
+controller marks such a park with a comment on the root that begins `Parked by Legion while it
+waits on:`. First find whether the daemon relayed the decision. Its JSON log names the issue and
+the root on each of these lines:
+
+- `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
+  tree goes to the controller`: the controller received the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened under
+  `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
+  lingering root someone moved back into the workflow is not relayed`: someone moved the
+  lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's
+  parked tree.
+- `outbox parked decision not relayed: its tree hears it` or `outbox parked decision not relayed:
+  its root has no record`: the tree runs and its architect hears the decision, or the daemon keeps
+  no record of the root.
+- `outbox parked decision handled before under this key`: the same notice came through again (a
+  re-held copy, or a run of its row again); the first line logged under that key says what became
+  of it.
+- `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
+  person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
+  set to `todo` already, so no controller is told, and its architect's start names the decision.
+  The daemon keeps the decision under the issue it was made on, so the architect it is owed to is
+  the one of the tree that issue stands in now: a child handed over into a tree of its own, an
+  orphaned child and a queued root adopted into a live tree each take what was decided on them
+  with them. It is kept until the one start or catch-up that names it has told an architect of
+  that tree — a catch-up at its publish, a start's task at the moment the turn that takes it
+  starts — and one that reaches no architect hands it to a fresh catch-up of that tree's current
+  architect (`outbox start finished without giving its claim the task; the decisions it named are
+  handed over`), or leaves it for the next start while the tree is parked.
+- `supervise: the root of this task's tree has no architect to hear it; the task stays pending`: a
+  root architect's start task met a parked, lingering or waiting tree. It is sent when the tree's
+  next start runs; nothing to do.
+- `supervise: a decision this held task named is owed to another tree now; the task is sent without
+  it`, or `supervise: everything this held task named is owed to another tree now; it is retired
+  rather than sent`: while the task waited, an issue it named left this tree. What left is owed to
+  the tree it stands in now, whose architect is written a catch-up naming it at once; nothing to do.
+- `workflow: a session's reply on a parked tree is not relayed`, `workflow: a session's answer or
+  resolution on a parked tree is not relayed`, or `workflow: a session's decision on a tree waiting
+  for its slot is not kept`: an agent wrote it. It stays on the ask for the person who asked.
+
+Then read the controller's comment that begins `Parked decision read:`, on the root and on the
+issue where the decision was made. For a question, it is a reply on the question's own ask, which
+answers it or says that `todo` on the root brings the architect back to answer. It says what the
+controller judged. The tree stays parked when the park is not the controller's own hold, the park
+with its `Parked by Legion while it waits on:` comment beside it: a person's park, another agent's
+session's, or an operator's `legion status` (the comment names who, and the tree runs when they set
+it to `todo`). It stays parked too when the decision is older than the park, when the root is
+`done` or `triage`, or when the decision only questions the work. When the controller was down,
+its next start walks the parked roots. That walk reads only the last 10 events of each issue.
 
 ## An issue is held
 
@@ -642,39 +700,23 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
-- **A review round stuck on an approval of an earlier head.** The architect is told `the reviewer
-  approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
-  changed code`. The approval counts at a later head only when everything above it changed only
-  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code, as `READY` counts
-  it. The daemon learns that from each push's webhook, and every two minutes, while the round sits
-  so, it also asks GitHub's compare of the approved head with the head: when the head is built on
-  the approved head and only `.legion/<issue>/` changed between them, it applies that push and the
-  round ends, logged at warn as `workflow: only the issue's handoffs changed above the approved
-  head, and no recorded push says so; applying the push GitHub's compare shows`. Any other answer
-  is logged once at info as `workflow: the reviewer's approval stays set aside below the head; …`
-  with its `reason` (a path outside `.legion/<issue>/`; a head not built on the approved one; 300
-  or no changed files; an approved head GitHub does not know), and the remedy is the reviewer's
-  approval of the head itself, which ends the round once the record reaches that head, whether or
-  not its push webhook ever arrives.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
-  removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and the
+  removal of files under `.legion/` that `legion handoffs import` commits
+  (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
   gives no file list or lists 300 files, the most it lists), or
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
-  `reviewing`. It is refused while the head still carries
-  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
-  to `retro`); while the head conflicts with its base, which GitHub cannot merge and starts no
-  pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges forward);
-  and while the design gate is closed. The refusal names the head and the directory, the base, or the spec version
-  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  `reviewing`. It is refused while the head conflicts with its base, which GitHub cannot merge and
+  starts no pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges
+  forward); and while the design gate is closed. The refusal names the base or the spec version
+  that needs approval. A refusal saying one of GitHub's reads failed is GitHub's
   failure, and the merger completes again. `READY` reads no check of the head: whether the merge
   happens is GitHub's to decide, under the base branch's own rules. None of these reads applies
   to a pull request a
   person already merged: its `READY` is published unread, and the merge closes the issue the moment
   it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
-  that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
-  for a pull request that deletes it.
+  that tree is done or parked.
 - **An implementer's completion refused `HANDOFF_NO_PULL_REQUEST`.** The implementer's completion
   of implementing reads GitHub, as the implement App, for the open pull request on the issue's
   branch, `legion/<KEY>`: the issue moves to testing only on an open pull request, or one the

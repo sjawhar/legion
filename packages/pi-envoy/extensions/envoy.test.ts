@@ -21,13 +21,19 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
-import { askgateState } from "@legion/envoy-client/askgate-marker";
+import {
+  askgateState,
+  MARKER_MAX_AGE_MS,
+  STORE_BEAT_MS,
+} from "@legion/envoy-client/askgate-marker";
 import { RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { forgetKeyedLayerMemory } from "@legion/envoy-client/dispatch-http";
@@ -123,6 +129,18 @@ const natsState = {
   /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
    *  nats.js reports a reconnect to every reader of the connection's status iterator. */
   statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
+  /** Every subject the connection had been asked to subscribe to when a `flush()` was called:
+   *  the round trip the server answers, which is what makes a subscription live. */
+  flushes: [] as string[][],
+  /** A `flush()` a test parks on, so what the extension does before the server confirms a
+   *  subscription can be watched. */
+  heldFlush: undefined as Promise<void> | undefined,
+  /** Refuses a `flush()` it answers true for, given the subjects then subscribed: the round trip
+   *  nats.js rejects when the connection drops while it is in flight. */
+  refuseFlush: undefined as ((subscribed: readonly string[]) => boolean) | undefined,
+  /** When set, each `flush()` parks on a gate of its own, pushed here in call order, so a test can
+   *  answer one round trip and not another. */
+  flushGates: undefined as PromiseWithResolvers<void>[] | undefined,
 };
 
 /** Reports `{ type }` to every reader of a mocked connection's `status()`. */
@@ -203,6 +221,19 @@ mock.module("nats", () => ({
             },
           }),
         };
+      },
+      // nats.js's round trip: the server has every SUB written before it when this resolves.
+      flush: async () => {
+        const subscribed = [...natsState.subscriptions.keys()];
+        natsState.flushes.push(subscribed);
+        if (natsState.refuseFlush?.(subscribed) === true) throw new Error("FLUSH_FAILED");
+        if (natsState.heldFlush !== undefined) await natsState.heldFlush;
+        const gates = natsState.flushGates;
+        if (gates !== undefined) {
+          const gate = Promise.withResolvers<void>();
+          gates.push(gate);
+          await gate.promise;
+        }
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -444,6 +475,11 @@ afterEach(async () => {
   natsState.drainHangs = false;
   natsState.drainStarted = false;
   natsState.statusReaders.length = 0;
+  // As for `heldConnect`: a parked flush left behind would park every later test's subscribe.
+  natsState.heldFlush = undefined;
+  natsState.refuseFlush = undefined;
+  natsState.flushGates = undefined;
+  natsState.flushes.length = 0;
   hostBuiltins.length = 0;
 });
 
@@ -1250,6 +1286,28 @@ async function bootAskNudge(
  */
 function withSelfCheck(context: SessionContext): SessionContext {
   return { ...context, runEphemeralTurn: async () => ({ replyText: "PROCEEDING" }) };
+}
+
+// Lets every promise and I/O callback queued so far run: the mocked NATS and listener paths settle
+// within a few turns, since nothing in them waits on a clock.
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 25; turn += 1) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    await promise;
+  }
+}
+
+// Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+// (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms in these tests), which no fake clock reaches, and a busy
+// machine runs it later than any fixed sleep allows; the deadline is measured on the monotonic
+// clock, which `setSystemTime` leaves alone.
+async function until(condition: () => boolean, what: string): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await settle();
+  }
 }
 
 describe("envoy OMP extension", () => {
@@ -2879,6 +2937,7 @@ describe("envoy OMP extension", () => {
         urgency: "blocking",
         expects_reply: "required",
         expires_at: 1_788_956_000_000,
+        idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
       });
     expect(sent?.content[0]?.text).toBe(
       "sent evt_1 to ses_target (recipient unconfirmed by listener)"
@@ -2937,7 +2996,7 @@ describe("envoy OMP extension", () => {
           urgency: "blocking",
           expects_reply: "required",
           expires_at: 1_788_956_000_000,
-          idempotency_key: expect.any(String),
+          idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
         },
       },
       {
@@ -3062,7 +3121,7 @@ describe("envoy OMP extension", () => {
       [
         "envoy_send was not called: 2 problems",
         '- expects_reply must be one of none|optional|required; got "no"',
-        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
       ].join("\n")
     );
     expect(requests).toBe(0);
@@ -3550,6 +3609,22 @@ describe("envoy OMP extension", () => {
     expect(shim.isFile()).toBe(true);
     expect(shim.mode & 0o111).toBe(0o111);
     expect(process.env.DISPATCH_HOST).toBe("omp");
+  });
+
+  test("adds nothing to PATH when another name for its bin directory is already on it", async () => {
+    // What Oh My Pi does for the manifest's `omp.bin`: the directory goes on PATH under the
+    // plugin's installed path, a name that this module's own location (its realpath) never shows.
+    const installed = mkdtempSync(join(tmpdir(), "pi-envoy-installed-"));
+    const installedBin = join(installed, "bin");
+    symlinkSync(join(import.meta.dir, "..", "bin"), installedBin);
+    try {
+      process.env.PATH = [installedBin, "/usr/bin", "/bin"].join(delimiter);
+      await import("./envoy.ts?plugin-bin-installed-path");
+
+      expect(process.env.PATH).toBe([installedBin, "/usr/bin", "/bin"].join(delimiter));
+    } finally {
+      rmSync(installed, { recursive: true, force: true });
+    }
   });
 
   test("names the top-level session in DISPATCH_SESSION_ID at start and after a switch", async () => {
@@ -4137,6 +4212,37 @@ console.log(JSON.stringify(args));
       expect(recordOf("ses_askgate_next")).toBeNull();
       expect(existsSync(store)).toBe(false);
       expect(notifications).toEqual([]);
+    }, 30_000);
+    // A process of another pid namespace that shares the state directory (the host, seen from an
+    // agent box, or the other way round) cannot look this one up by its pid: it counts the record
+    // live, and its prune keeps the store, only while the store keeps changing. So the instance
+    // touches its store every STORE_BEAT_MS while it keeps a record, makes it again when such a
+    // process removed it, and stops at shutdown.
+    test("while it keeps a record, the instance touches its store every beat and makes it again when it is gone", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-beat");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      jest.useFakeTimers();
+      try {
+        await fixture.handlers.get("session_start")?.({}, context);
+        const store = recordOf("ses_askgate")?.[0]?.store ?? "";
+        const idle = new Date(Date.now() - MARKER_MAX_AGE_MS - 60_000);
+        utimesSync(store, idle, idle);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(Date.now() - statSync(store).mtimeMs).toBeLessThan(STORE_BEAT_MS);
+        rmSync(store, { recursive: true });
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(statSync(join(store, "markers")).isDirectory()).toBe(true);
+        expect(askgateState(sessionDirectory(process.env, "ses_askgate")).kind).toBe("on");
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(existsSync(store)).toBe(false);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(existsSync(store)).toBe(false);
+      } finally {
+        jest.useRealTimers();
+      }
     }, 30_000);
     // The independent review at 6fd926853, item 1: every session start, switch, branch and host
     // move rebinds a session, and the rebind wrote this process's owner file from OMP_ASKGATE
@@ -14591,6 +14697,331 @@ console.log(JSON.stringify(args));
     expect(natsState.connectedNames.length).toBe(connectionsAfterRecovery);
   });
 
+  /** The extension started for `session`, every listener call it makes recorded by path, the
+   *  topics of each registration, what the pane was told, its `envoy_subscribe` tool, and a run of
+   *  the first interval it set: the heartbeat, or the start's retry when the start failed. */
+  async function confirmingFixture(query: string, session: string) {
+    const paths: string[] = [];
+    const registered: (readonly string[])[] = [];
+    const notifications: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      paths.push(path);
+      if (path === "/v1/interests/subscribe") {
+        registered.push(JSON.parse(init?.body?.toString() ?? "{}").topics);
+      }
+      return responseWithRegistration(input, init, []);
+    };
+    // A query per caller: each test needs its own instance of the module's state.
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext(session),
+        setInterval: (callback) => intervals.push(callback),
+        ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+      }
+    );
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const tick = () => {
+      if (intervals[0] === undefined) throw new Error("no interval was set");
+      intervals[0]();
+    };
+    return { paths, registered, notifications, intervals, subscribeTool, tick };
+  }
+
+  /** Lets a pass a tick started run to its end. */
+  const passSettles = async () => {
+    for (let step = 0; step < 10; step += 1) await new Promise<void>((r) => setImmediate(r));
+  };
+
+  test("a topic is registered only once the server has confirmed its subscription", async () => {
+    // The listener routes to a session the moment its interest names a topic, and core NATS drops
+    // a publish no subscription matches yet: a registration sent while the SUB is still in the
+    // connection's out buffer costs the session whatever is published next on that topic. So the
+    // round trip comes between the two.
+    const { paths, subscribeTool } = await confirmingFixture("subscribe-flush", "ses_flush");
+
+    const topic = "team.confirmed";
+    const confirmed = Promise.withResolvers<void>();
+    natsState.heldFlush = confirmed.promise;
+    natsState.flushes.length = 0;
+    paths.length = 0;
+    // The hook refuses nothing: it answers false, and its call says the round trip has started.
+    const reached = Promise.withResolvers<void>();
+    natsState.refuseFlush = () => {
+      reached.resolve();
+      return false;
+    };
+    const subscribing = subscribeTool.execute("", { topics: [topic] });
+    await reached.promise;
+
+    // The SUB is written and its round trip is in flight; the listener has been told nothing.
+    expect(natsState.subscriptions.has(topic)).toBe(true);
+    expect(natsState.flushes[0]).toContain(topic);
+    expect(paths).not.toContain("/v1/interests/subscribe");
+
+    natsState.heldFlush = undefined;
+    confirmed.resolve();
+    await subscribing;
+
+    expect(paths).toContain("/v1/interests/subscribe");
+  });
+
+  test("a topic whose round trip failed is registered by the next subscribe of it", async () => {
+    // A failed round trip leaves the SUB written and the subject in the session's map, so a
+    // second subscribe has nothing to open. It still has the round trip to make, and then the
+    // registration the first call never reached.
+    const { paths, subscribeTool } = await confirmingFixture("flush-refused", "ses_flush_refused");
+    const topic = "team.refused";
+    paths.length = 0;
+    natsState.refuseFlush = () => true;
+    const refused = await subscribeTool.execute("", { topics: [topic] });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain("FLUSH_FAILED");
+    expect(paths).not.toContain("/v1/interests/subscribe");
+
+    natsState.refuseFlush = undefined;
+    const retried = await subscribeTool.execute("", { topics: [topic] });
+    expect(retried.content[0]?.text).toBe(`Subscribed: ${topic}`);
+    expect(retried.details).toMatchObject({ added: [topic], already: [] });
+    expect(paths).toContain("/v1/interests/subscribe");
+
+    // Confirmed, the subject is open: a third subscribe makes no round trip and registers nothing.
+    paths.length = 0;
+    const flushes = natsState.flushes.length;
+    const third = await subscribeTool.execute("", { topics: [topic] });
+    expect(third.details).toMatchObject({ added: [], already: [topic] });
+    expect(natsState.flushes.length).toBe(flushes);
+    expect(paths).not.toContain("/v1/interests/subscribe");
+  });
+
+  test("a round trip the server never answers fails the subscribe at 10 s, and the next subscribe confirms it", async () => {
+    const { paths, subscribeTool } = await confirmingFixture("flush-silent", "ses_flush_silent");
+    const topic = "team.silent";
+    paths.length = 0;
+    natsState.heldFlush = Promise.withResolvers<void>().promise;
+    const silent = await onTestClock(() => subscribeTool.execute("", { topics: [topic] }));
+    expect(silent.isError).toBe(true);
+    expect(silent.content[0]?.text).toBe(
+      `confirming the subscription to ${topic} timed out after 10000 ms`
+    );
+    expect(paths).not.toContain("/v1/interests/subscribe");
+
+    natsState.heldFlush = undefined;
+    const retried = await subscribeTool.execute("", { topics: [topic] });
+    expect(retried.details).toMatchObject({ added: [topic], already: [] });
+    expect(paths).toContain("/v1/interests/subscribe");
+  });
+
+  test("a dropped topic whose reopen the server did not confirm is confirmed, and swept, by the next retry", async () => {
+    // The pump's retry chain reopens a dropped topic, and a reopen whose round trip fails is
+    // retried in 15 s. That retry finds the subject in the map (the failed reopen wrote its SUB),
+    // and confirms it rather than taking it as open, then sweeps what was published meanwhile.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const { paths, subscribeTool } = await confirmingFixture(
+      "flush-retry-chain",
+      "ses_flush_chain"
+    );
+    const topic = "team.chain";
+    await subscribeTool.execute("", { topics: [topic] });
+    const first = natsState.controls.get(topic);
+    if (first === undefined) throw new Error("the topic was not subscribed");
+    const settle = async () => {
+      for (let step = 0; step < 100; step += 1) await Promise.resolve();
+    };
+    jest.useFakeTimers();
+    try {
+      natsState.refuseFlush = () => true;
+      const before = natsState.flushes.length;
+      first.end();
+      await settle();
+      jest.advanceTimersByTime(10);
+      await settle();
+      // The reopen wrote its SUB; its round trip failed.
+      expect(natsState.controls.get(topic)).not.toBe(first);
+      expect(natsState.flushes.length).toBe(before + 1);
+
+      natsState.refuseFlush = undefined;
+      paths.length = 0;
+      jest.advanceTimersByTime(15_000);
+      await settle();
+      expect(natsState.flushes.length).toBe(before + 2);
+      expect(paths).toContain("/v1/replay");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("a pass after one whose viewer control subject was not confirmed confirms it", async () => {
+    // The pass opens the agent stream control subject after the agent subject. Its round trip
+    // fails, so the pass reports an inbound failure, and the next heartbeat's pass runs the open
+    // again: it finds the control subscription in place and confirms it, rather than taking it as
+    // open, and subscribes it no second time.
+    const session = "ses_flush_control";
+    const control = `agentstream.${session}.control`;
+    let refused = 0;
+    natsState.refuseFlush = (subscribed) => subscribed.includes(control) && refused++ === 0;
+    const { tick } = await confirmingFixture("flush-control", session);
+    expect(refused).toBe(1);
+    const before = natsState.flushes.length;
+
+    tick();
+    await passSettles();
+    expect(natsState.flushes.length).toBe(before + 1);
+    expect(natsState.controlsByTopic.get(control)).toHaveLength(1);
+    expect(natsState.controls.get(control)?.active()).toBe(true);
+  });
+
+  test("a registration leaves out a subject whose round trip failed, until a pass confirms it", async () => {
+    // A refused `envoy_subscribe` leaves its SUB written and the subject in the session's map. The
+    // heartbeat's registration must not name it while the server may not have it: each pass makes
+    // the round trip again, and the registration after the one that answers names it.
+    const session = "ses_flush_heartbeat";
+    const { registered, subscribeTool, tick } = await confirmingFixture("flush-heartbeat", session);
+    const topic = "team.unconfirmed";
+    natsState.refuseFlush = () => true;
+    expect((await subscribeTool.execute("", { topics: [topic] })).isError).toBe(true);
+    registered.length = 0;
+    const before = natsState.flushes.length;
+
+    tick();
+    await passSettles();
+    expect(natsState.flushes.length).toBe(before + 1);
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).toContain(`notifications.agent.${session}`);
+    expect(registered[0]).not.toContain(topic);
+
+    natsState.refuseFlush = undefined;
+    tick();
+    await passSettles();
+    expect(natsState.flushes.length).toBe(before + 2);
+    expect(registered).toHaveLength(2);
+    expect(registered[1]).toContain(topic);
+  });
+
+  test("a session whose agent subject's round trip fails is not registered, and the start's retry confirms and registers it", async () => {
+    // The start's pass writes the agent subject's SUB and its round trip fails. The session is
+    // left unregistered and the start reports the confirmation's error. The start's retry makes
+    // the round trip again and registers the session, and only then is there a heartbeat.
+    const session = "ses_flush_start";
+    let refused = 0;
+    natsState.refuseFlush = () => refused++ === 0;
+    const { registered, notifications, intervals, tick } = await confirmingFixture(
+      "flush-start",
+      session
+    );
+    expect(refused).toBe(1);
+    expect(registered).toEqual([]);
+    expect(notifications).toContain(
+      "envoy: NATS unavailable (FLUSH_FAILED); retrying in the background"
+    );
+    expect(intervals).toHaveLength(1);
+    const before = natsState.flushes.length;
+
+    tick();
+    await passSettles();
+    expect(natsState.flushes.length).toBeGreaterThan(before);
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).toContain(`notifications.agent.${session}`);
+    // Established now: the heartbeat is set beside the retry.
+    expect(intervals).toHaveLength(2);
+    expect(notifications).toContain("envoy: NATS connection established");
+  });
+
+  /** Lets queued promise callbacks run, on the fake clock or off it. */
+  const microtasksSettle = async () => {
+    for (let step = 0; step < 200; step += 1) await Promise.resolve();
+  };
+
+  /** Ends `topic`'s subscription and lets the pump's retry open its replacement, on the test clock
+   *  (the retry delay is 10 ms); answers the subscription it ended. */
+  const replaceSubscription = async (topic: string) => {
+    const ended = natsState.controls.get(topic);
+    if (ended === undefined) throw new Error(`${topic} was not subscribed`);
+    jest.useFakeTimers();
+    try {
+      ended.end();
+      await microtasksSettle();
+      jest.advanceTimersByTime(10);
+      await microtasksSettle();
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(natsState.controls.get(topic)).not.toBe(ended);
+  };
+
+  test("a subscribe's round trip for a subscription since replaced does not confirm its replacement", async () => {
+    // The round trip of subscription A is in flight when A ends and the pump's retry opens B on the
+    // same subject. A's round trip says nothing of B's SUB: until B's own answers, no registration
+    // names the subject.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const { registered, subscribeTool, tick } = await confirmingFixture(
+      "flush-replaced-subscribe",
+      "ses_flush_replaced"
+    );
+    const topic = "team.replaced";
+    const gates: PromiseWithResolvers<void>[] = [];
+    natsState.flushGates = gates;
+    registered.length = 0;
+    const subscribing = subscribeTool.execute("", { topics: [topic] });
+    await microtasksSettle();
+    expect(gates).toHaveLength(1);
+
+    await replaceSubscription(topic);
+    expect(gates).toHaveLength(2);
+    gates[0]?.resolve();
+    await subscribing;
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).not.toContain(topic);
+
+    natsState.flushGates = undefined;
+    gates[1]?.resolve();
+    await passSettles();
+    tick();
+    await passSettles();
+    expect(registered.at(-1)).toContain(topic);
+  });
+
+  test("a pass's round trip for a subscription since replaced does not confirm its replacement", async () => {
+    // A refused subscribe leaves subscription A unconfirmed. The heartbeat's pass makes the round
+    // trip for it, and while that is in flight A ends and the pump's retry opens B. The pass's
+    // registration leaves the subject out, and the one after B's round trip answers names it.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const { registered, subscribeTool, tick } = await confirmingFixture(
+      "flush-replaced-pass",
+      "ses_flush_replaced_pass"
+    );
+    const topic = "team.replaced-pass";
+    natsState.refuseFlush = () => true;
+    expect((await subscribeTool.execute("", { topics: [topic] })).isError).toBe(true);
+    natsState.refuseFlush = undefined;
+    const gates: PromiseWithResolvers<void>[] = [];
+    natsState.flushGates = gates;
+    registered.length = 0;
+    tick();
+    await microtasksSettle();
+    expect(gates).toHaveLength(1);
+
+    await replaceSubscription(topic);
+    expect(gates).toHaveLength(2);
+    gates[0]?.resolve();
+    await passSettles();
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).not.toContain(topic);
+
+    natsState.flushGates = undefined;
+    gates[1]?.resolve();
+    await passSettles();
+    tick();
+    await passSettles();
+    expect(registered.at(-1)).toContain(topic);
+  });
+
   test("rebinds the direct subscription after an in-process session switch", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?session-switch");
@@ -14959,7 +15390,10 @@ console.log(JSON.stringify(args));
     // Now kill it the way a dropped connection does. The close marker from the
     // first switch must have been consumed, so recovery still happens.
     reopened?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_home") !== reopened,
+      "the topic to be subscribed again after its genuine death"
+    );
 
     const recovered = natsState.controls.get("notifications.agent.ses_home");
     expect(recovered).toBeDefined();
@@ -14972,11 +15406,10 @@ console.log(JSON.stringify(args));
         "genuine-death"
       )
     );
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    expect(
-      fixture.messages.some((m) => m.includes("delivered after a genuine iterator death"))
-    ).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("delivered after a genuine iterator death")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("permits redelivery after a failed injection and warns with the envelope id", async () => {
@@ -15299,15 +15732,20 @@ console.log(JSON.stringify(args));
 
     // Kill the iterator the way a closed/errored connection does.
     first?.end();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await until(
+      () => natsState.controls.get("notifications.agent.ses_deaf") !== first,
+      "the topic to be subscribed again after its iterator ended"
+    );
 
     const second = natsState.controls.get("notifications.agent.ses_deaf");
     expect(second).toBeDefined();
     expect(second).not.toBe(first);
 
     second?.push(forwardedRoleEnvelope("legion-controller", "post-recovery message", "recovery"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(fixture.messages.some((m) => m.includes("post-recovery message"))).toBe(true);
+    await until(
+      () => fixture.messages.some((m) => m.includes("post-recovery message")),
+      "the message sent on the recovered subscription"
+    );
   });
 
   test("a heartbeat tick during a registry outage warns once instead of rejecting unhandled", async () => {
@@ -15690,27 +16128,6 @@ describe("messages missed while the subscription was down", () => {
   interface ReplayRequest {
     readonly session_id: string;
     readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
-  }
-
-  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
-  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
-  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
-  // measured on the monotonic clock, which `setSystemTime` leaves alone.
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
   }
 
   // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
@@ -17685,23 +18102,6 @@ describe("consumer delivery", () => {
   const AGENT = `notifications.agent.${SESSION}`;
   const RELAY = `notifications.envoy.deliver.${SESSION}`;
   const STREAM = "stream-1";
-
-  // Lets every promise and I/O callback queued so far run.
-  async function settle(): Promise<void> {
-    for (let turn = 0; turn < 25; turn += 1) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-  }
-
-  async function until(condition: () => boolean, what: string): Promise<void> {
-    const deadline = performance.now() + 2_000;
-    while (!condition()) {
-      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await settle();
-    }
-  }
 
   /** A peer session's message to the session under test. */
   function peer(label: string): string {

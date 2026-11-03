@@ -30,8 +30,8 @@ specification (never post a second "spec" artifact — that replaces the human's
 as `skill://dispatch-writing-specs` says. Before you design, follow best practice and design the
 world-class answer as `skill://following-best-practices` says, writing its
 `### Best practice and world-class` entry in the spec. Your decomposition, its waves and how each
-outcome is proven go in the child issues and the planner's `.legion/<issue>/plan.json`, not the root
-spec. Once its ask blocks are settled (`skill://dispatch-writing-specs`, "Approval"), follow
+outcome is proven go in the child issues and the planner's `plan` handoff, not the root spec. Once
+its ask blocks are settled (`skill://dispatch-writing-specs`, "Approval"), follow
 `skill://legion-architect/references/design-gate.md`'s exact review sequence: the gap review, claim
 review, the best-practice and world-class reviews with problem-only first messages and whole-spec
 follow-ups, then the final `plan-reviewer` review. Resolve every finding, recording the
@@ -55,8 +55,11 @@ with the person. A root waiting on a person gets no `design-approved` notice: wh
 "this resume is your design-approved wake", act on it as on `design-approved`.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
-change since the version they approved: Dispatch records an `approved` review in their name at
-that version, the daemon reopens the gate and sends `design-approved`, and you request nothing.
+change since the version they approved, and a version whose text is exactly the text of the
+version they approved with no decision block in it decided since, such as an accidental edit
+undone exactly: Dispatch records an `approved` review in their name at that version, the daemon
+reopens the gate and sends `design-approved`, and you request nothing. When the spec does not
+read Approved at such a version, request approval as after any change.
 After approval, follow `skill://legion-architect/references/design-gate.md` for whether the root
 spec changes, when to repeat the complete review sequence, and when a rewrite requires approval again.
 After revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
@@ -135,5 +138,5 @@ A merge is never a human to-do: open no `dispatch ask` for it. The daemon submit
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
 that a person merges under the repository's rules.
 
-The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
-phase, and its root-issue close plus Envoy messaging are the durable record of its work.
+The root architect writes no handoff: unlike a phase worker, it is not a file-backed phase, and
+its root-issue close plus Envoy messaging are the durable record of its work.

@@ -22,8 +22,8 @@ Each admitted issue gets an architect, which writes the spec, splits the work an
 only you can answer. Once you approve the spec, the daemon runs the phase workers in turn: planner,
 implementer, tester, reviewer and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
-restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
+pod on Kubernetes, and each phase records a handoff on the issue in Dispatch for the next role,
+and a restarted agent, to read. The daemon writes the issue's status back to Dispatch as it moves
 from Todo through In Progress, Testing, Needs Review and Retro to Done. The architect accepts the
 reviewed change, the merger posts `READY` on the issue and submits the merge, the pull request
 merges under the repository's own rules and closes the issue, and the implementer then checks the
@@ -74,7 +74,8 @@ request, decision and use is recorded. Legion enrolls every worker pod it starts
 its deployment names a broker.
 
 [The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
-[a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/)
+[a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/) ·
+[install `agent-secrets` and give a machine access](packages/envoy/cmd/agent-secrets/README.md#install)
 
 [![The secrets broker's approval page for one secret request: the secret, the enrollment the broker verified asked, the reason, how long the grant lasts, the approver, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://sjawhar.github.io/legion/broker/walkthrough/)
 

@@ -722,6 +722,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
   if (changesReferenceGraph(event)) {
     targets.push({ exact: true, queryKey: ["issue", key, "references"] });
   }
+  if (event.type === "decision.kept") {
+    // A Keep moves one decision's row of the issue's Decisions view and nothing else: it writes
+    // no document version, no ask and no issue field.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
+    return targets;
+  }
 
   if (
     event.type === "issue.created" ||
@@ -755,6 +761,11 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
+      // The Decisions view reads two of the issue's documents - its decisions.md for the
+      // decisions and its spec for each link's target - and the event names its document by
+      // name alone, which does not say which the spec is, so every version of the issue
+      // refreshes it. The query exists only while that tab is open.
+      targets.push({ exact: true, queryKey: ["decisions", key] });
     } else {
       // An uploaded document is an `attached_to` edge into its issue.
       targets.push(referencePanel(issueReference));
@@ -783,6 +794,9 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       return targets;
     }
     targets.push({ queryKey: ["asks", key] });
+    // The view lists the spec's open questions beside the decisions, and a decision's turn is
+    // its ask's.
+    targets.push({ exact: true, queryKey: ["decisions", key] });
     if (movesOpenAsks(event)) {
       targets.push({ queryKey: projectsKey }, pinnedRow(key));
     }
@@ -834,6 +848,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // its root): a reply changes its root's read, and a payload need not name the root.
     targets.push({ queryKey: ["issue-messages", key] }, { queryKey: ["issue-message", key] });
     appendRepliedBlock(targets, event);
+    return targets;
+  }
+  if (event.type === "handoff.recorded") {
+    // A handoff write lands in the issue's handoff list; its log line is the `["events", key]`
+    // target above.
+    targets.push({ queryKey: ["handoffs", key] });
     return targets;
   }
   if (event.type === "subscription.removed") {

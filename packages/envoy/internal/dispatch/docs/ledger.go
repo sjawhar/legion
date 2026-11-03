@@ -11,6 +11,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
@@ -45,6 +46,10 @@ type Ledger struct {
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
+	// readBacks holds, per document this transaction wrote whole (SeedText, ReplaceText), the
+	// read-back its parse already made of the markdown it stores (pmdoc.ParseWritten), so a step
+	// of the same request that reads that markdown again shares the parse (ReadBackOf).
+	readBacks map[string]pmdoc.WrittenReadBack
 	// copies are the documents showing a copy of an ask this transaction answered or resolved,
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
 	copies []string
@@ -198,9 +203,28 @@ func (l *Ledger) commit(ctx context.Context) error {
 			l.service.scheduleSettleAfterAppend(flush.room)
 		}
 	}
+	l.noteAppended()
 	l.flushes = nil
 	l.creditRooms()
 	return nil
+}
+
+// noteAppended notes to the compaction queue (noteStoredUpdates) the last version each append of
+// the committed transaction made durable: each live write's own appends, and the room updates it
+// flushed ahead of them. A document the transaction both wrote and flushed is noted once for
+// each, which asks the queue for the one check a single note would (compactionQueue.note). A
+// seed's row is its document's first, which leaves nothing to fold.
+func (l *Ledger) noteAppended() {
+	for _, artifactID := range l.order {
+		if versions := l.live[artifactID].versions; len(versions) > 0 {
+			l.service.noteStoredUpdates(artifactID, int64(versions[len(versions)-1]))
+		}
+	}
+	for _, flush := range l.flushes {
+		if appended := flush.appended(nil); len(appended) > 0 {
+			l.service.noteStoredUpdates(flush.room, int64(appended[len(appended)-1]))
+		}
+	}
 }
 
 // takeRoomCursors records on each room instance a write was made on, and on the room instance its
@@ -526,6 +550,34 @@ func (l *Ledger) writtenRendering(artifactID string) renderedTree {
 		return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}
 	}
 	return l.seeds[artifactID].rendered
+}
+
+// wroteReadBack records the read-back a write of artifactID's whole text already made of the
+// markdown it stores (pmdoc.ParseWritten): the parse ReadBackOf hands to the rest of the request.
+func (l *Ledger) wroteReadBack(artifactID string, read pmdoc.WrittenReadBack) {
+	if l == nil || read.Tree == nil {
+		return
+	}
+	if l.readBacks == nil {
+		l.readBacks = make(map[string]pmdoc.WrittenReadBack)
+	}
+	l.readBacks[artifactID] = read
+}
+
+// ReadBackOf is markdown's tree, read back by this transaction's own write of artifactID while it
+// parsed what it stored (pmdoc.ParseWritten), or nil when this transaction made no such read-back
+// or made one of another rendering: a caller holds the markdown it stored and shares that parse
+// only where the two are the same text, as IndexDocumentReferences shares the write's rendering
+// only where it is the version's markdown. A caller that reads nil parses the markdown itself.
+func (l *Ledger) ReadBackOf(artifactID, markdown string) *pmdoc.Node {
+	if l == nil {
+		return nil
+	}
+	read, held := l.readBacks[artifactID]
+	if !held || read.Markdown != markdown {
+		return nil
+	}
+	return read.Tree
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.

@@ -35,6 +35,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -373,6 +374,25 @@ func (r *Runtime) ProvisionBound() time.Duration { return 0 }
 // each invocation already bounded by its own command timeout (runTmux).
 func (r *Runtime) LaunchBound() time.Duration { return 0 }
 
+// PodDrift is nil: a pane is not a place built from a configuration — it has no pod, no image and
+// no template — so no process of this runtime ever drifts from one, and no update round is ever
+// opened over a pane.
+func (r *Runtime) PodDrift(context.Context, runtime.Known) ([]string, error) { return nil, nil }
+
+// ReplacePod does nothing and returns nil: this runtime has no pod to replace, and a pane is
+// ended by the claim's own Suspend and Release. due is never asked, because nothing here waits
+// and nothing here is ended: there is no write for a caller's re-read to come one statement
+// before.
+func (r *Runtime) ReplacePod(context.Context, runtime.Known, func(context.Context) error) error {
+	return nil
+}
+
+// RescueUnpushed checks nothing and answers nil: a pane's workspace is a directory on the daemon's
+// host, which no replacement deletes (ReplacePod does nothing here).
+func (r *Runtime) RescueUnpushed(context.Context, runtime.Known, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, nil
+}
+
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).
 func (r *Runtime) CleanupTree(context.Context, string) error { return nil }
@@ -387,13 +407,17 @@ type result struct {
 
 // runTmux runs one argv against the private server under the pane environment, bounded by the
 // command timeout. A client that ran and failed is a result; one that could not run at all, or
-// whose caller's context ended, is an error.
+// whose caller's context ended, is an error. The client timed out only when the timeout killed it
+// (procgroup.KilledByContext): once the client has exited on its own, pipeDrainDelay can hold Run
+// open past the timeout for a server still holding the client's pipes, and the client's exit is
+// then its answer.
 func (r *Runtime) runTmux(ctx context.Context, argv []string) (result, error) {
 	bounded, cancel := context.WithTimeout(ctx, r.commandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(bounded, r.tmuxPath, argv[1:]...)
 	cmd.Env = r.environ
 	cmd.WaitDelay = pipeDrainDelay
+	killed := procgroup.KilledByContext(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -404,16 +428,15 @@ func (r *Runtime) runTmux(ctx context.Context, argv []string) (result, error) {
 	if ctx.Err() != nil {
 		return result{}, ctx.Err()
 	}
-	if bounded.Err() != nil {
+	if killed() {
 		res.exitCode, res.timedOut = -1, r.commandTimeout
 		return res, nil
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		res.exitCode = exit.ExitCode()
-		return res, nil
+	if runErr := procgroup.Err(err); runErr != nil {
+		return result{}, fmt.Errorf("run tmux %s: %w", verb(argv), runErr)
 	}
-	return result{}, fmt.Errorf("run tmux %s: %w", verb(argv), err)
+	res.exitCode = cmd.ProcessState.ExitCode()
+	return res, nil
 }
 
 // verb is the tmux command an argv runs: the word after `-L <socket>`.

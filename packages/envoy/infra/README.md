@@ -66,7 +66,10 @@ pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/le
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
-`envoy-infra-v<version>`. `pulumi package add` records the package in `Pulumi.yaml`:
+`envoy-infra-v<version>`. The address after `--server` is the one the release built into the
+plugin from the repository it ran in,
+`https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
+`pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
 packages:
@@ -558,8 +561,8 @@ those is, the sandbox in the paragraph under it.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
-| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, the component's own `tags`, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so a Service that already exists under that name is adopted and its comment, ports and tags overwritten ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
-| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
+| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so one that already exists under that name is adopted, its comment and ports overwritten; the request carries no tags, and Tailscale's API reference does not say whether the live Service keeps its own ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. The RoleBinding names the Role by an output that waits on the Role's ID, so a preview that creates the Role leaves the name unknown and pulumi-kubernetes sends no server-side dry run of the binding, which an account without the `bind` verb would see refused as "not found" while the Role does not exist. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
 | Three ClusterIP Services and three NetworkPolicies (two Services with `natsInCluster`) | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener, neither the Service nor that rule rendered with `natsInCluster`, which leaves the front door's policy admitting nothing; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
 | Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. | Not built |
@@ -679,7 +682,7 @@ PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 The component declares the Tailscale Service itself, so no input names it and a consumer has one
 thing to apply: `svc:<hostname>`, the name the certificate and the URL carry, with its one port
-`tcp:443`, the component's own `tags`, and a comment naming the tailnet name it serves,
+`tcp:443`, no tags, and a comment naming the tailnet name it serves,
 `<hostname>.<tailnetDnsName>`. What a consumer passes instead is a `tailscale` provider, which
 the component requires wherever it builds the front door — every deployment but the sandbox and
 `clusterOnly`, neither of which builds one — and the tailnet that provider is configured for is
@@ -694,15 +697,24 @@ it, so on a fresh stack no pod advertises the Service before it exists: a node t
 Service before it exists is not approved when the Service appears.
 
 **The component adopts a Service that already exists under that name.** The Tailscale provider's
-create is an upsert (`VIPServices().CreateOrUpdate`), so a first apply does not fail on a live
-`svc:<hostname>`: it takes the Service over and overwrites its comment, its ports and its tags
-with the component's. A stack that declared that Service itself must therefore hand it over
-before the apply that moves the pin, with `retainOnDelete: true` on its own declaration rather
-than a state edit
+create is an upsert (`VIPServices().CreateOrUpdate`, a `PUT` of the Service), so a first apply
+does not fail on a live `svc:<hostname>`: it takes the Service over and overwrites its comment
+and its ports with the component's. It sends no tags: the provider's `tags` defaults to the
+empty set, and its client leaves an empty list out of the request (`tags,omitempty` in
+tailscale-client-go-v2 v2.9.0). Tailscale's API reference does not say whether a `PUT` without
+`tags` keeps the tags a live Service already carries; the component's state records none either
+way. A stack that declared that Service itself must therefore hand it over before the apply that
+moves the pin, with `retainOnDelete: true` on its own declaration rather than a state edit
 ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)
 below); removing the declaration without that, while the component's own Service is in the same
 apply, deletes the Service the component has just adopted, and readers lose
 `<hostname>.<tailnetDnsName>`.
+
+**The Service requests no tags.** Tailscale refuses a Service whose requested tags the OAuth
+client creating it may not set (`requested tags ... are invalid or not permitted`), so a
+consumer whose `services` client may set no tags could not create a Service that requested any.
+The component's `tags` input is unchanged and still reaches the front door's nodes, which is
+where it is needed: the nodes' own tag is what the tailnet policy's auto-approval names.
 
 The tailnet policy is still the operator's. The Service's hosts are approved there, so give
 `tags` an auto-approval for `svc:<hostname>` before an apply creates the front door's pods; that
@@ -710,8 +722,9 @@ auto-approval only lets those nodes host the Service, and gives no client access
 Service is a grant destination of its own
 ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services),
 "Configure Service access"), so the tailnet policy also needs a grant that reaches it for every
-client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or one whose `dst`
-names `tags`, since the Service carries the same `tags` the front door's nodes do.
+client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`. A grant whose `dst`
+names `tags` does not reach a Service the component creates, which carries none, so name the
+Service in the grant for an adopted Service too.
 
 `frontDoorToolsImage`, one of the tailnet group and pinned by digest like the other three
 images, is the image the front door's `cert-publish` container runs on. Its scripts call
@@ -1193,8 +1206,13 @@ process" in `packages/envoy/cmd/dispatch/README.md` holds the preconditions. The
 the first, since every pod reads the one `DISPATCH_SIGNING_KEY` in the Secret
 `<hostname>-dispatch`. The second bounds what a migration may change, since the rolling update
 runs the new image's migrations while the previous build is still serving: "Database migrations"
-in the same README holds the rule. Event writes on different issues commit out of id order, and a
-process reads the event log for its live readers only up to the safe horizon below which every
+in the same README holds the rule. The events outbox publishes from one process at a time, under
+a hold another process takes over when its holder stops or loses it (the same README's "Running
+more than one process"). A build from before that hold (#2395) takes none and publishes
+beside the holder, so the roll that first brings the hold, at more than one replica, runs both
+publishers until the last old pod stops; deploy that release at one replica, which recreates the
+pod, and raise the count afterwards. Event writes on different issues commit out of id order, and
+a process reads the event log for its live readers only up to the safe horizon below which every
 event is final. A build from before that change (#2392) reads past an event still open below the
 newest one, so during a roll that first brings the change, at more than one replica, an old pod's
 live stream and delivery hub can skip an event a new pod commits out of id order; deploy that
@@ -1401,13 +1419,13 @@ and selector are unchanged. Before it:
 
 1. Prepare the tailnet policy: an auto-approval for `svc:<hostname>` to the front door's `tags`,
    and access for every client of Dispatch. A Tailscale Service is a grant destination of its
-   own, so a grant reaches it either with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or with a
-   `dst` naming `tags`, since the component gives the Service the same `tags` its nodes carry.
-   Without a grant of one of those two shapes, no client reaches Dispatch after the move.
+   own, so a grant reaches it with `dst: ["svc:<hostname>"]` and `ip: ["443"]`; the Service
+   carries no tags, so a grant whose `dst` names `tags` does not reach it. Without a grant of
+   that shape, no client reaches Dispatch after the move.
 2. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
    name a machine holds. Dispatch is off the tailnet from here on.
 3. Pass the stack a `tailscale` provider for the tailnet: the component declares `svc:<hostname>`
-   itself, with its port `tcp:443` and its `tags`, after the Cloud SQL instance, and the Serve
+   itself, with its port `tcp:443` and no tags, after the Cloud SQL instance, and the Serve
    ConfigMap and the front door's Deployment wait for it.
 4. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
    ([The front door](#the-front-door)).
@@ -1444,8 +1462,8 @@ in one apply:
 2. In the next apply, remove that resource and the `tailnetService` argument from the program and
    pass the component a `tailscale` provider. The component registers the Service without the
    consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and
-   writes the component's comment, port `tcp:443` and `tags` over it; the consumer's retained
-   delete then removes its own state entry and leaves the Service where it is.
+   writes the component's comment and port `tcp:443` over it, sending no tags; the consumer's
+   retained delete then removes its own state entry and leaves the Service where it is.
 
 Do not reach for `pulumi state delete` on the consumer's Service instead. A stack that passed
 that Service's `Name` as `tailnetService` has the component depending on it — the SDK puts the
@@ -1458,7 +1476,7 @@ Removing the consumer's declaration without the retain deletes the Service in th
 after the component has adopted it: readers lose `<hostname>.<tailnetDnsName>`, and the
 component's state still records a Service that is gone, so the next `up` plans nothing until a
 `pulumi refresh`. Keeping both declarations is no better: two resources then own one Service and
-each apply overwrites the other's tags.
+each apply overwrites what the other declared.
 
 ### YAML
 
@@ -1571,8 +1589,6 @@ Its environment comes from the inputs:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL in `natsUrls` names a host other than `localhost` or a loopback address. The URL is read, never resolved. |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when set |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true`; unset otherwise |
 | `NATS_NKEY_SEED` | `seed`, when set. The whole environment is then a secret in the stack's state. |
 
 The listener serves on the host's loopback, `127.0.0.1:<port>`. This version sets no listen host,
@@ -1590,8 +1606,6 @@ The listener's outputs are `containerName` and `port`.
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
-| `hostBridge` | unset | The address the listener delivers to this machine's sessions at: those registered through it, and those recording `machineId` as their host. Unset, the listener uses the host each session recorded, then `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, such as a `gcp:NatsHub` user with `machineId` or `listenerMachineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
 | `waitForHealthy` | `true` | Whether `pulumi up` waits on the container's health check. See [Readiness](#readiness). |
 | `watchdog` | unset | `{host}`: deploys the watchdog on that SSH address. See [The watchdog](#the-watchdog). |
@@ -1613,7 +1627,7 @@ The listener refuses these before it registers anything, with an error naming wh
 
 - an nkey seed of any type, in any spelling listed under "What `check` and `verify` print",
   anywhere in its name or in any input but `seed`: `machineId`, `image`, `containerName`,
-  `hostBridge`, `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
+  `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
   names the input and never the value, as `envoy-infra:host:Listener example-host-a: image holds an
   nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
   `seed` is the one input that is a seed;
@@ -1621,9 +1635,7 @@ The listener refuses these before it registers anything, with an error naming wh
   `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be used
   the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>` the
   listener uses;
-- a `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
-- a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
@@ -1785,7 +1797,6 @@ resources:
       natsUrls:
         - nats://nats.internal.example:4222
       image: ghcr.io/sjawhar/legion/envoy:<tag>
-      hostBridge: 127.0.0.1
       seed: ${natsSeed}
     options:
       providers:
@@ -1832,7 +1843,6 @@ const listener = new envoyInfra.host.Listener(
     machineId: "example-host-a",
     natsUrls: nats.requireOutput("natsUrls"),
     image: "ghcr.io/sjawhar/legion/envoy:<tag>",
-    hostBridge: "127.0.0.1",
     watchdog: { host: "example-host-a.internal.example" },
   },
   { providers: [dockerHost, commandHost] }
@@ -1958,8 +1968,6 @@ environment, in this order:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true` |
 | `ENVOY_NATS_REPLICAS` | `natsReplicas` |
 | `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
 | `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
@@ -2012,9 +2020,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `family`, `cpu`, `memory` | required | The task definition's family and size. |
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
-| `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
 | `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
 | `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
@@ -2043,9 +2049,9 @@ the input:
   counts as missing) or given while it does not, each input checked before the list; then a
   `webhooks` other than `[]` or exactly `["github", "slack"]`; an empty `machineId`, one with
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
-  whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
-  control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
+  whitespace other than an interior ordinary space, or one over 246 bytes; a `listenHost` holding
+  a control character; a blank `listenHost`; a `natsReplicas` below 1 or above 5; an empty
+  `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2264,7 +2270,6 @@ listener = envoy_infra.aws.WebhookListener(
     cpu="256",
     memory="512",
     listen_host="0.0.0.0",
-    host_bridge="127.0.0.1",
     nats_replicas=1,
     alarm_topic_arn=f"arn:aws:sns:{region}:000000000000:example-alarms",
     base_tags=base_tags,
@@ -2353,7 +2358,7 @@ authorization {
 ### webhook-listener-env
 
 ```text
-envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n> [--subscribe-all-topics]
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --nats-replicas <n>
 ```
 
 Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
@@ -2361,13 +2366,12 @@ container's order. The secrets ECS injects are not printed. It refuses what the 
 these inputs, and a value holding a line break, which no line could carry:
 
 ```text
-$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1
+$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --nats-replicas 1
 PORT=9020
 ENVOY_LISTEN_HOST=0.0.0.0
 ENVOY_MACHINE_ID=example-fargate
 NATS_URLS=nats://example-bus.example-namespace.internal.example:4222
 ENVOY_ALLOW_REMOTE_NATS=1
-ENVOY_HOST_BRIDGE=127.0.0.1
 ENVOY_NATS_REPLICAS=1
 ENVOY_WEBHOOKS=github,slack
 ENVOY_GITHUB_MENTION_TRIGGER=@legion
@@ -2376,9 +2380,6 @@ ENVOY_REVIEWER_APP_ID=1234567
 
 With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
 none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
-
-With `--subscribe-all-topics`, the component's `subscribeAllTopics: true`, it prints
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` right after the `ENVOY_HOST_BRIDGE` line; without it, no such line.
 
 Without `--reviewer-app-id`, it prints
 `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
@@ -2898,30 +2899,16 @@ lane queue groups, and the session user's refusal of a consumer create; `AGENTS.
 directory says how.
 
 `ListenerHostPermissions(machineID)` is the grant of a listener's own NATS user, one no session
-shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then the plain
-`notifications.>` subscribe `ENVOY_SUBSCRIBE_ALL_TOPICS` needs. It is the one set under which a
-listener both keeps its sessions' consumers and subscribes to every notification topic. A
-`gcp:NatsHub` user with `listenerMachineId` holds it, for a listener whose process is the only
-thing holding that seed: a session connecting as it could create, pull and delete any session's
-consumer. A host whose sessions share the listener's user takes `machineId` and
-`HostPermissions` instead, and keeps its sessions on the core path. This repository's listener
-runs under this set, opted in, against the real servers below: it answers a registration
-`consumer`, relays a send on the session's relay subject, and pushes a topic the stream does not
-store to a session's serving port, with no refusal.
-
-`HostPermissions` and `ListenerHostPermissions` are the sets under which a listener may set
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` (`host:Listener`'s and `aws:WebhookListener`'s
-`subscribeAllTopics`). The listener then holds a core subscription on `notifications.>` in its
-machine's queue group `envoy-listener-live-<m>`, so a session served on its machine receives a
-topic the stream does not store, which the sets' plain `notifications.>` subscribe entry allows in
-any queue group. `ListenerPermissions` and `DispatchPermissions` subscribe only to the role lanes
-and `_INBOX.>`, so the server refuses that subscription, and the listener's start ends with exit 1
-and an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and
-`gcp:Dispatch`'s listener therefore never set it, and neither component takes the input. Both
-outcomes are checked against the real servers above: the listener opted in as a user holding
-`HostPermissions` delivers an ad-hoc topic to a session's serving port with no refusal, and opted
-in as a user holding `ListenerPermissions` ends its start, the server's one refusal its
-subscription to `notifications.>`.
+shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then a plain
+`notifications.>` subscribe that no Envoy program uses any more. A `gcp:NatsHub` user with
+`listenerMachineId` holds it, for a listener whose process is the only thing holding that seed: a
+session connecting as it could create, pull and delete any session's consumer. A host whose
+sessions share the listener's user takes `machineId` and `HostPermissions` instead, and keeps its
+sessions on the core path. The two sets therefore allow the same calls a listener makes; the
+subscribe stays rather than being dropped because a change to a set rewrites every hub's rendered
+authorization, which replaces a VM hub's instance and reaches a clustered hub only as a live
+reload. This repository's listener runs under this set against the real servers below: it answers
+a registration `consumer` and relays a send on the session's relay subject, with no refusal.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, its stored-message get

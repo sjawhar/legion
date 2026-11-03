@@ -271,12 +271,58 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.Approval.Seq != nil {
 		approved.Seq = *response.Approval.Seq
 	}
+	if response.Approval.By != nil {
+		approved.By = Actor(*response.Approval.By)
+	}
 	// Only an open request is named: Dispatch names the ask an older review answered too, which is
 	// no request anyone is asked to act on now.
 	if response.Approval.State == "awaiting" {
 		approved.AskID, approved.WaitingOn = deref(response.Approval.AskID), response.Approval.WaitingOn
 	}
 	return approved, nil
+}
+
+// Handoff reads GET /api/v1/handoffs/{id}: one handoff record with its issue, phase, version and
+// author. A record Dispatch does not have is its 404 HANDOFF_NOT_FOUND (Missing).
+func (c *HTTPClient) Handoff(ctx context.Context, id string) (Handoff, error) {
+	var response handoffResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v1/handoffs/"+url.PathEscape(id), nil, &response); err != nil {
+		return Handoff{}, err
+	}
+	return response.handoff(), nil
+}
+
+// LatestHandoff reads GET /api/v1/issues/{key}/handoffs/{phase}/latest: the newest record of the
+// issue's phase with its body, the exact text written. found is false when Dispatch has none, its
+// 404 HANDOFF_NOT_FOUND; a 404 with any other code is an error (Missing), as a Dispatch without the
+// handoff routes answers with its NOT_FOUND "no route for".
+func (c *HTTPClient) LatestHandoff(ctx context.Context, key, phase string) (handoff Handoff, found bool, err error) {
+	var response handoffBodyResponse
+	err = c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase)+"/latest", nil, &response)
+	var refusal *Error
+	if errors.As(err, &refusal) && refusal.Status == http.StatusNotFound && refusal.Code == HandoffNotFound {
+		return Handoff{}, false, nil
+	}
+	if err != nil {
+		return Handoff{}, false, err
+	}
+	handoff = response.handoff()
+	handoff.Body = response.Body
+	return handoff, true, nil
+}
+
+// WriteHandoff records body as the next version of the issue's phase through POST
+// /api/v1/issues/{key}/handoffs/{phase}, under the daemon's session (DaemonSession), and answers
+// the record Dispatch made, without its body.
+func (c *HTTPClient) WriteHandoff(ctx context.Context, key, phase, body string) (Handoff, error) {
+	var response handoffResponse
+	if err := c.request(ctx, http.MethodPost, "/api/v1/issues/"+url.PathEscape(key)+"/handoffs/"+url.PathEscape(phase), daemonWrite{
+		Body:  body,
+		Actor: daemonActor(key),
+	}, &response); err != nil {
+		return Handoff{}, err
+	}
+	return response.handoff(), nil
 }
 
 // BuildCommit reads GET /healthz and returns the build Dispatch's server fleet serves: its
@@ -505,6 +551,35 @@ type approvalResponse struct {
 	// that predates the sequence, or a review recorded before it kept one, sends no seq.
 	At  *string `json:"at"`
 	Seq *int64  `json:"seq"`
+	// By is who gave the review State shows, and is absent where Dispatch names nobody.
+	By *actor `json:"by"`
+}
+
+// handoffResponse is a handoff record as Dispatch answers it, its body left undecoded: Handoff's
+// and WriteHandoff's callers hold a completion to who wrote which record, never to what it says.
+type handoffResponse struct {
+	ID       string `json:"id"`
+	IssueKey string `json:"issue_key"`
+	Phase    string `json:"phase"`
+	Version  int    `json:"version"`
+	Author   actor  `json:"author"`
+}
+
+// handoffBodyResponse is a handoff record with its body, as LatestHandoff reads it.
+type handoffBodyResponse struct {
+	handoffResponse
+	Body string `json:"body"`
+}
+
+// handoff is the record without its body.
+func (r handoffResponse) handoff() Handoff {
+	return Handoff{
+		ID:       r.ID,
+		IssueKey: r.IssueKey,
+		Phase:    r.Phase,
+		Version:  r.Version,
+		Author:   HandoffAuthor{Kind: r.Author.Kind, ID: r.Author.ID},
+	}
 }
 
 type actor struct {

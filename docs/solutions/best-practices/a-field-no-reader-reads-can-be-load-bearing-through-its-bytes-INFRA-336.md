@@ -40,9 +40,9 @@ non-emptiness, length, ordering.
 
 ## Evidence
 
-In Legion, every file-backed phase ends with a committed `.legion/<issue>/<phase>.json` handoff.
-Nothing has read the `completed` time in that file since the handoff CLI was removed: the daemon
-reads no handoff body, and `findHandoffCommit` locates the commit carrying the path without
+In Legion, every file-backed phase then ended with a committed `.legion/<issue>/<phase>.json`
+handoff. Nothing had read the `completed` time in that file since the handoff CLI was removed: the
+daemon read no handoff body, and `findHandoffCommit` located the commit carrying the path without
 parsing it.
 
 The field was still load-bearing. It made each round's handoff bytes differ from the round
@@ -52,13 +52,18 @@ predecessor's decision, counts and findings then writes the same bytes: `jj spli
 completion `HANDOFF_NOT_NEW`, because it compares the reported commit with the role's last
 recorded one (`packages/daemon/internal/workflow/engine.go`).
 
-The replacement, `previousHandoff`, is the newest commit on the branch that changed the handoff's
+The replacement, `previousHandoff`, was the newest commit on the branch that changed the handoff's
 file (usually the role's previous handoff of the phase; after a retro, retro's removal), read with
-a command rather than recalled. It is a writer-side token, so the residual is real and was measured
+a command rather than recalled. It was a writer-side token, so the residual was real and was measured
 instead of argued: three rounds in a scratch jj repository showed round 2 with the field set
 producing a non-empty commit the revset answers, and a byte-identical round 3 producing an empty
 commit and the previous answer — the refusal the field exists to close, still reachable by a writer
 that does not run the command.
+
+sjawhar/legion#2354 then closed the requirement where it is enforced, as the second rule says: a
+handoff is a record on the Dispatch issue, each `dispatch handoff-write` adds a version with an id
+of its own, and the daemon keys `HANDOFF_NOT_NEW` on that id. Two rounds with the same bytes are
+two records, so neither `completed` nor `previousHandoff` is written now.
 
 Related: `docs/solutions/legion/a-round-that-changes-no-code-writes-its-handoff-again-so-its-completion-keys-to-a-fresh-commit-and-strips-the-four-keys-the-cli-stamps-LEGION-629.md`
 records the same refusal from the writer's side.

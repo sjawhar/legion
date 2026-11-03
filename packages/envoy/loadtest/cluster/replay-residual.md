@@ -1,0 +1,54 @@
+- The replay does not reproduce production's reads. It assumes ρ = 1 read per write, with INFRA-639's read mix.
+- The replay assumes the split between document edits and uploads, at an upload share of U = 0.25.
+- The replay does not send browser document edits or settlements.
+- The replay does not reproduce the time that a CLI process takes to start between its requests.
+- The seed's historical versions hold the 22:55 text with a marker line. Each synthetic version changes as many bytes as the real version that it replaces.
+- The seed's anchor count, document sizes and history bytes are faithful. The placement of an anchor in its document is approximate when the seed puts the anchor on the nearest surviving block. The cost of the anchor refresh on each write scales with the anchor count and the document size, which are faithful. The cost of quote matching can depend on the placement of the anchors.
+- Some small synthetic versions in the seed change the logged number of bytes in the opposite direction: they add bytes where the real version removed bytes, or remove bytes where it added bytes. INFRA-639's seed check counts these versions in `sign_flipped`.
+- When the client's text does not hold the logged quote of an anchored comment, the replay sends a substitute quote. `summary.json` counts these in `replay.substitutes.quote`.
+- For a cut diff, and for a version with no diff, the replay sends substitute content of the logged size change. `summary.json` counts these in `replay.substitutes.edit`.
+- When version 1 of a created issue's spec was unreadable, the replay sends synthetic text of the logged size. `spec_sizes` counts these specs.
+- The replay does not reproduce the cold rooms that the 22:47Z restart left.
+- The replay does not send the writes of other projects (2.6% of the window).
+- The replay does not reproduce browser tabs beyond 2 streams.
+- The replay does not reproduce embeddings.
+- The copy runs Dispatch at 9b92ac14, not at the outage's 35efd326. `git log 35efd326..9b92ac14 -- packages/envoy/cmd/dispatch packages/envoy/internal/dispatch` gives these 29 commits, newest first:
+  - `9b92ac14` fix(dispatch): the outbox publishes each batch as one pipelined window on its own connection, and the shared pool holds 64 (#2302)
+  - `4bbb2a9c` ci(pr-title): drop the comment triggers and bound runs per pull request (#2247)
+  - `7f7edb8d` perf(dispatch): keep one route roster per process for issue reads (#2267)
+  - `1357b95c` feat(dispatch): serve net/http/pprof on loopback when DISPATCH_PPROF_PORT is set (#2264)
+  - `d1f4b8a6` feat(dispatch): write one access log line per request, so a load spike can name its callers (#2181)
+  - `72a2fb58` feat(dispatch): keep each review's event sequence and order reviews by it (#2251)
+  - `ea460e50` feat(skills): three Dispatch skills under 2,000 words
+  - `eee16056` test(dispatch): read the architecture-source warnings from a locked log, not a buffer the server writes (#2252)
+  - `c79379d9` fix(dispatch): credit a browser's edit when another change's observer reaches the room first (#2236)
+  - `f45fd509` feat(dispatch): embed through Bedrock or Azure AI Foundry, chosen by DISPATCH_EMBEDDER (#2208)
+  - `383b889d` feat(dispatch): the live view shows and switches a session's model and thinking level (#2205)
+  - `8f3d4237` feat(dispatch): a project imports its architecture components from several repositories (#2209)
+  - `5bc72900` fix(dispatch): reload a document room another process left behind, and keep a force-closed room's record (INFRA-218, INFRA-352) (#2212)
+  - `c8974e2e` test(dispatch): suggestion deadline tests prove the allowance ends a query waiting behind the lock, with no stopwatch (#2217)
+  - `f1ea47ae` fix(dispatch): a reader on another process gets the stored document back within the stale-room window (#2211)
+  - `a9c9542f` fix(dispatch): boot from the App key as Secret Manager stores it, and read large branch heads (#2202)
+  - `4ceb3aa9` test(envoy): run the NATS test server in the test process, so a pod runs the Go suite (#2189)
+  - `d5a8e37a` fix(dispatch): a graph read skips an edge to a node kind it does not know (#2201)
+  - `c16fc690` feat(broker)!: every caller gets an identity of its own — an RFC 8693 token exchange, introspection, and no shared bearer (#2187)
+  - `4792c8fa` fix(dispatch): the two-process tests never start both processes on one port (#2183)
+  - `52359246` fix(envoy): answer a Dispatch mention, broadcast and claim from the session store, not the live list (#2191)
+  - `3ca092a6` feat(broker): run more than one pod — drain on stop, and a reread that reaches every pod (#2162)
+  - `c03eee9a` feat(dispatch): a project's default assignee ends a create's assignee chain (#2178)
+  - `f36869db` fix(dispatch): the three texts an agent is given after a write are true for that agent (#2157)
+  - `116821eb` fix(dispatch): a test sets the suggestion allowance the flaky ask test used to time (#2158)
+  - `365c8cb7` feat(broker)!: kind-tagged secrets mint GitHub App and Google login tokens (#2126)
+  - `2668745d` refactor(broker)!: remove the hand-built machine login (#2145)
+  - `9a0d549f` ci(scripts): hold the Dispatch body limit to what the embedder reads whole (#2138)
+  - `f4d53009` feat(dispatch): serve correctly from more than one process (#2087)
+- The copy has no cloud-sql-proxy sidecar. In production, the sidecar uses 0.14 to 0.19 cores (BG-11).
+- Postgres runs in a pod, not in Cloud SQL. The copy turns `track_commit_timestamp` on and installs the commit-time trigger.
+- The copy's database serves only Dispatch, with no synthetic load for the secrets broker and Legion's daemons that production's instance also serves. This holds for the 4 vCPU database too.
+- Dispatch reaches NATS directly, not through the tailnet SOCKS5 proxy.
+- NATS has no auth. It runs on three pods, not on one e2-small VM.
+- Clients identify themselves by header, not by cookies.
+- The copy has no tailnet front door.
+- `meta.json`'s `pg_clock` gives the copy's Postgres round trip, not the round trip of production's proxy path.
+- Each step records the CPU model of the copy's nodes. The worker cannot read production's machine type, because nodes are outside the load-test Role.
+- The database's disk is a 20Gi claim on the run's storage class. Production's Cloud SQL disk is 14.7 GiB of PD_SSD, so the IOPS ceiling differs. Each step and replay records Postgres's write-out counters before and after it (`pg_stat_bgwriter`, and `pg_stat_checkpointer` on Postgres 17 and later) in `pg-stats-before.json` and `pg-stats-after.json`, so a disk-bound step shows in them.

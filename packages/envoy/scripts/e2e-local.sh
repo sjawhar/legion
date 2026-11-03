@@ -4,14 +4,14 @@
 #
 # Builds and starts a NATS server of its own (internal/testnats/cmd/natsd) and the
 # listener, then leaves evidence in out/e2e/.
-# The listener needs ENVOY_HOST_BRIDGE=127.0.0.1 because it runs on this host and
-# delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
-# bounded acceptance run responsive while retaining the production settle logic.
+# ENVOY_CI_DEBOUNCE=250ms keeps this bounded acceptance run responsive while retaining the
+# production settle logic.
 #
 # Ports: the OS chooses each one, and each URL is built from the port its own process reports
 # (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
-# addr, the fake session's "ready <port>"). E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT set a port
-# explicitly; it is used as given, and one already in use fails with "address already in use".
+# addr). E2E_NATS_PORT and E2E_PORT set a port explicitly; it is used as given, and one already in
+# use fails with "address already in use". The session opens no port of its own: it takes its
+# messages from its session consumer over NATS, as every shipped plugin does.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -23,10 +23,12 @@ usage() {
 Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
-fixtures plus one direct message, prove how a send to an unknown session and a
-send whose bus is gone are refused, and write raw and rendered acceptance
-evidence to packages/envoy/out/e2e/. NATS is a server of this checkout's own
-build (internal/testnats/cmd/natsd), so no container runtime is needed.
+fixtures plus one direct message to a session that takes them from its own NATS
+consumer, prove that a registration naming a port is refused and how a send to
+an unknown session and a send whose bus is gone are refused, and write raw and
+rendered acceptance evidence to packages/envoy/out/e2e/. NATS is a server of
+this checkout's own build (internal/testnats/cmd/natsd), so no container
+runtime is needed.
 EOF
 }
 
@@ -64,13 +66,14 @@ absent_session_id="ses_e2e_local_absent"
 readonly absent_session_id
 
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
-readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
+readonly session_frames_file="${out_dir}/session-frames.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
-readonly rendered_go_file="${out_dir}/rendered-go.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
 readonly registry_session_response_file="${out_dir}/registry-session-response.json"
 readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
+readonly subscribe_response_file="${out_dir}/subscribe-response.json"
 readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
+readonly port_registration_response_file="${out_dir}/port-registration-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
 readonly role_claim_response_file="${out_dir}/role-claim-response.json"
 readonly held_role_response_file="${out_dir}/held-role-response.json"
@@ -138,15 +141,15 @@ trap 'cleanup "$?"' EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
 
-rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
-  "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+rm -f "$envelopes_file" "$session_frames_file" "$rendered_ts_file" \
+  "$direct_response_file" "$subscribe_response_file" "$unwired_response_file" "$port_registration_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
   "$registry_session_response_file" "$registry_missing_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
   "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 rm -rf "$nats_store_dir"
 : >"$envelopes_file"
-: >"$session_prompts_file"
+: >"$session_frames_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
 printf 'building listener and NATS server\n'
@@ -223,7 +226,6 @@ PORT="${E2E_PORT:-0}" \
   ENVOY_WEBHOOKS=github \
   ENVOY_GITHUB_WEBHOOK_SECRET="$webhook_secret" \
   ENVOY_REVIEWER_APP_ID=1 \
-  ENVOY_HOST_BRIDGE=127.0.0.1 \
   ENVOY_CI_DEBOUNCE=250ms \
   "$listener_binary" >"$listener_log_file" 2>&1 &
 listener_pid=$!
@@ -274,46 +276,71 @@ wait_for_health() {
 printf 'waiting for listener health\n'
 wait_for_health
 
-E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="${E2E_SESSION_PORT:-0}" \
-  bun -e '
+# The session: a NATS consumer stand-in, which is what every shipped plugin is. The listener opens
+# no connection to a session at all, so the session takes each stored message of its agent subject
+# and its followed topics as a relay frame of its own durable consumer, on the deliver subject
+# (bus.DeliverSubjectPrefix; packages/envoy-client/src/consumer-delivery.ts and
+# packages/envoy/loadtest/relay.go are the two clients this follows). Each frame is answered
+# `received` at once, its data — the stored envelope — is appended to the frames file, and it is
+# answered `done`, which is what acks the message and moves the resume point.
+#
+# The stand-in holds that NATS connection, so it also holds its own agent subject, where the role
+# lane forwards a role message and waits for its holder's receipt; the capture subscriber below
+# answers no receipt of its own.
+(
+  cd "$repo_root"
+  exec env E2E_NATS_URL="$nats_url" E2E_SESSION_FRAMES_FILE="$session_frames_file" \
+    E2E_SESSION_ID="$session_id" bun -e '
     import { appendFileSync } from "node:fs";
+    import { connect, StringCodec } from "nats";
 
-    const output = process.env.E2E_SESSION_PROMPTS_FILE;
-    const port = Number(process.env.E2E_SESSION_PORT);
-    if (output === undefined || !Number.isInteger(port) || port < 0) {
-      throw new Error("fake-session configuration is invalid");
+    const url = process.env.E2E_NATS_URL;
+    const output = process.env.E2E_SESSION_FRAMES_FILE;
+    const sessionID = process.env.E2E_SESSION_ID;
+    if ([url, output, sessionID].some((value) => value === undefined)) {
+      throw new Error("session stand-in configuration is invalid");
     }
-    let server;
-    try {
-      server = Bun.serve({
-        hostname: "127.0.0.1",
-        port,
-        async fetch(request) {
-          const url = new URL(request.url);
-          if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
-            return new Response("not found", { status: 404 });
-          }
-          appendFileSync(output, `${await request.text()}\n`);
-          return new Response(null, { status: 204 });
-        },
-      });
-    } catch (error) {
-      // Bun says "Is port N in use?"; this names the failure as the other servers here do.
-      if (error?.code !== "EADDRINUSE") throw error;
-      process.stderr.write(`fake session: listen 127.0.0.1:${port}: address already in use\n`);
-      process.exit(1);
+    const codec = StringCodec();
+    const connection = await connect({ servers: url, name: "envoy-e2e-session" });
+    const agent = connection.subscribe(`notifications.agent.${sessionID}`);
+    const frames = connection.subscribe(`notifications.envoy.deliver.${sessionID}`);
+    // Every relay frame carries these; Envoy-Gap is left out because it marks only the first
+    // frame after a retention gap, which a run that creates its own stream never has.
+    const headers = ["Envoy-Subject", "Envoy-Stream-Seq", "Envoy-Stream-Id", "Envoy-Delivered", "Envoy-Stored-At"];
+    void (async () => {
+      for await (const message of agent) {
+        // A role forward: an envelope naming another topic, sent to this subject and asking for a
+        // reply, which the publish route waits for before it answers the sender (envoy-client
+        // expectsLaneReceipt). Messages this session sends arrive here too, from the publish into
+        // the stream, and name this subject; that reply belongs to the sender, not to a receipt.
+        if (!message.reply) continue;
+        let topic;
+        try {
+          topic = JSON.parse(codec.decode(message.data)).topic;
+        } catch {}
+        if (topic !== undefined && topic !== message.subject) message.respond();
+      }
+    })();
+    await connection.flush();
+    process.stdout.write("ready\n");
+    for await (const message of frames) {
+      if (!message.reply) throw new Error("a relay frame carries no reply subject");
+      for (const header of headers) {
+        if (!message.headers?.get(header)) throw new Error(`a relay frame carries no ${header} header`);
+      }
+      message.respond(codec.encode("received"));
+      appendFileSync(output, `${codec.decode(message.data)}\n`);
+      message.respond(codec.encode("done"));
     }
-    process.stdout.write(`ready ${server.port}\n`);
-  ' >"$session_ready_fifo" 2>"$session_log_file" &
+  ' >"$session_ready_fifo" 2>"$session_log_file"
+) &
 session_pid=$!
 
-if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ ! "$session_ready" =~ ^ready\ ([0-9]+)$ ]]; then
-  printf 'ERR: the fake session did not report its port.\n' >&2
+if ! IFS= read -r -t 10 session_ready <"$session_ready_fifo" || [[ "$session_ready" != "ready" ]]; then
+  printf 'ERR: the session consumer stand-in did not become ready.\n' >&2
   cat "$session_log_file" >&2
   exit 3
 fi
-session_port="${BASH_REMATCH[1]}"
-readonly session_port
 
 (
   cd "$repo_root"
@@ -326,21 +353,15 @@ readonly session_port
     if (url === undefined || output === undefined) throw new Error("capture configuration is invalid");
     const codec = StringCodec();
     const connection = await connect({ servers: url, name: "envoy-e2e-capture" });
+    // Everything the listener publishes, except the relay frames of the session above: a frame
+    // carries a copy of a stored envelope, on notifications.envoy.deliver.<session id>, so
+    // counting one here would count its message twice. The frames are evidence of their own, and
+    // the stand-in that writes them also answers the role-forward receipts answered here before.
     const subscription = connection.subscribe("notifications.>");
     process.stdout.write("ready\n");
     for await (const message of subscription) {
-      const raw = codec.decode(message.data);
-      appendFileSync(output, `${raw}\n`);
-      // The fake session holds the role below, and the publish route answers a role message only
-      // once its holder confirms the forward to its agent subject with an empty receipt, as the
-      // plugins do for a frame whose envelope names another topic (envoy-client expectsLaneReceipt).
-      if (message.reply && message.subject.startsWith("notifications.agent.")) {
-        let topic;
-        try {
-          topic = JSON.parse(raw).topic;
-        } catch {}
-        if (topic !== undefined && topic !== message.subject) message.respond();
-      }
+      if (message.subject.startsWith("notifications.envoy.deliver.")) continue;
+      appendFileSync(output, `${codec.decode(message.data)}\n`);
     }
   ' >"$subscriber_ready_fifo" 2>"$subscriber_log_file"
 ) &
@@ -352,15 +373,42 @@ if ! IFS= read -r -t 5 subscriber_ready <"$subscriber_ready_fifo" || [[ "$subscr
   exit 3
 fi
 
+# The registration every shipped plugin sends: no port — one above 0 is refused below — and a
+# consumer delivery carrying the epoch of the NATS connection the stand-in above holds.
+session_epoch="$(openssl rand -hex 6)"
+readonly session_epoch
 subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
   --arg dir "/tmp/envoy-e2e-local" \
   --arg title "Envoy local acceptance" \
   --arg topic "notifications.github.example-org.example-repo.>" \
-  --argjson port "$session_port" \
-  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],port:$port,driving:true}')"
+  --arg epoch "$session_epoch" \
+  '{session_id:$session_id,dir:$dir,title:$title,topics:[$topic],driving:true,self_subscribed:true,delivery:{consumer:true,epoch:$epoch}}')"
 curl -fsS -X POST -H 'Content-Type: application/json' \
-  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >/dev/null
+  "${listener_url}/v1/interests/subscribe" -d "$subscribe_body" >"$subscribe_response_file"
+jq -e '.delivery.mode == "consumer"' "$subscribe_response_file" >/dev/null || {
+  printf 'ERR: the registration was not answered a consumer delivery, so the session has nothing to receive on.\n' >&2
+  cat "$subscribe_response_file" >&2
+  exit 1
+}
+
+# The run's negative control. This listener opens no connection to a session, so a registration
+# naming a port is refused by name rather than stored: were it accepted, a session could still ask
+# to be pushed to and then wait forever, and every consumer assertion below would prove nothing
+# about what such a session receives.
+printf 'posting a registration that names a port\n'
+port_registration_body="$(jq -nc --arg session_id "ses_e2e_local_ported" \
+  '{session_id:$session_id,topics:[],port:1}')"
+port_registration_status="$(curl -sS -o "$port_registration_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/interests/subscribe" -d "$port_registration_body")"
+if [[ "$port_registration_status" != 400 ]] || ! jq -e '.expected == ["port"]' "$port_registration_response_file" >/dev/null; then
+  printf 'ERR: a registration naming port 1 was answered HTTP %s, want 400 naming port: this listener still takes a port it will never deliver to.\n' "$port_registration_status" >&2
+  cat "$port_registration_response_file" >&2
+  exit 1
+fi
+printf 'port registration: HTTP %s %s (expected %s)\n' "$port_registration_status" \
+  "$(jq -r '.error' "$port_registration_response_file")" "$(jq -rc '.expected' "$port_registration_response_file")"
 
 unwired_subscribe_body="$(jq -nc \
   --arg session_id "$session_id" \
@@ -414,18 +462,20 @@ wait_for_topic_count() {
   return 1
 }
 
-wait_for_prompt_count() {
+# wait_for_consumer_frame_count returns once the session has taken at least expected frames of its
+# consumer: one line of the frames file per frame it answered done.
+wait_for_consumer_frame_count() {
   local expected=$1
   local deadline=$((SECONDS + 20))
   local count
   while ((SECONDS < deadline)); do
-    count="$(wc -l <"$session_prompts_file")"
+    count="$(wc -l <"$session_frames_file")"
     if ((count >= expected)); then
       return 0
     fi
     sleep 0.25
   done
-  printf 'ERR: expected %s fake-session prompts within 20 seconds.\n' "$expected" >&2
+  printf 'ERR: expected %s consumer frames at the session within 20 seconds.\n' "$expected" >&2
   return 1
 }
 
@@ -589,46 +639,49 @@ post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_prompt_count 14
+wait_for_consumer_frame_count 15
+
+# What the session itself took, which is the whole point of a consumer: every GitHub delivery, the
+# direct message and the role forward reached it as frames of its own consumer, each exactly once,
+# with no connection opened to it from anywhere.
+printf 'consumer frames by topic:\n'
+jq -r '.topic' "$session_frames_file" | sort | uniq -c
+jq -es --arg session_id "$session_id" --arg role_topic "notifications.role.${role}" --arg message "$direct_message" '
+  (map(select(.topic == "notifications.agent." + $session_id)) | length == 1 and .[0].payload == $message)
+  and (map(select(.topic == $role_topic)) | length) == 1
+  and (map(select(.topic | startswith("notifications.github.example-org.example-repo."))) | length) == 13
+' "$session_frames_file" >/dev/null || {
+  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its role forward from its consumer.\n' >&2
+  exit 1
+}
 
 (
   cd "$repo_root/packages/envoy-client"
   E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
-    E2E_RENDERED_GO_FILE="$rendered_go_file" E2E_SESSION_PROMPTS_FILE="$session_prompts_file" \
     E2E_SESSION_ID="$session_id" bun -e '
       import { readFileSync, writeFileSync } from "node:fs";
       import { renderInbound } from "@legion/envoy-client/delivery";
 
       const envelopesFile = process.env.E2E_ENVELOPES_FILE;
       const renderedTSFile = process.env.E2E_RENDERED_TS_FILE;
-      const renderedGoFile = process.env.E2E_RENDERED_GO_FILE;
-      const promptsFile = process.env.E2E_SESSION_PROMPTS_FILE;
       const sessionID = process.env.E2E_SESSION_ID;
-      if ([envelopesFile, renderedTSFile, renderedGoFile, promptsFile, sessionID].some((value) => value === undefined)) {
+      if ([envelopesFile, renderedTSFile, sessionID].some((value) => value === undefined)) {
         throw new Error("renderer configuration is invalid");
       }
       const envelopes = readFileSync(envelopesFile, "utf8").trim().split("\n").filter(Boolean);
       const rendered = envelopes.map((raw) => renderInbound(raw, sessionID).content);
       writeFileSync(renderedTSFile, `${rendered.join("\n\n")}\n`);
-      const texts = readFileSync(promptsFile, "utf8").trim().split("\n").filter(Boolean).map((raw) => {
-        const prompt = JSON.parse(raw);
-        const text = prompt.parts?.find((part) => part.type === "text")?.text;
-        if (typeof text !== "string") throw new Error("prompt_async body has no text part");
-        return text;
-      });
-      writeFileSync(renderedGoFile, `${texts.join("\n\n")}\n`);
     '
 )
 
 E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
-  E2E_RENDERED_GO_FILE="$rendered_go_file" E2E_SESSION_ID="$session_id" bun -e '
+  E2E_SESSION_ID="$session_id" bun -e '
     import { readFileSync } from "node:fs";
 
     const envelopesFile = process.env.E2E_ENVELOPES_FILE;
     const renderedTSFile = process.env.E2E_RENDERED_TS_FILE;
-    const renderedGoFile = process.env.E2E_RENDERED_GO_FILE;
     const sessionID = process.env.E2E_SESSION_ID;
-    if ([envelopesFile, renderedTSFile, renderedGoFile, sessionID].some((value) => value === undefined)) {
+    if ([envelopesFile, renderedTSFile, sessionID].some((value) => value === undefined)) {
       throw new Error("assertion configuration is invalid");
     }
     const envelopes = readFileSync(envelopesFile, "utf8").trim().split("\n").filter(Boolean).map((raw) => JSON.parse(raw));
@@ -739,17 +792,13 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     for (const suffix of obsolete) require(withTopic(topic(suffix)).length === 0, `obsolete topic was published: ${suffix}`);
 
     const tsFirst = readFileSync(renderedTSFile, "utf8").split("\n\nenvoy:")[0];
-    const goFirst = readFileSync(renderedGoFile, "utf8").split("\n[NOTIFICATION")[0];
-    // The direct summary is the message head, so both renderers drop the separate summary line
-    // and print the full message once: the summary text appears only where the message opens.
-    const assertDirectRender = (rendered, fullMessage, renderer) => {
-      require(rendered.split(fullMessage).length === 2, `${renderer} did not render the full direct message exactly once`);
-      require(rendered.split(directSummary).length === 2, `${renderer} repeats the direct summary outside the message it opens`);
-    };
-    assertDirectRender(tsFirst, `message: ${JSON.stringify(directBody)}`, "TypeScript");
-    assertDirectRender(goFirst, `Message:\n${directBody}`, "Go");
+    // The direct summary is the message head, so the renderer drops the separate summary line and
+    // prints the full message once: the summary text appears only where the message opens.
+    const fullMessage = `message: ${JSON.stringify(directBody)}`;
+    require(tsFirst.split(fullMessage).length === 2, "the renderer did not render the full direct message exactly once");
+    require(tsFirst.split(directSummary).length === 2, "the renderer repeats the direct summary outside the message it opens");
 
-    console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
+    console.log("PASS: topic set, structured payloads, checks settlement, and what renderInbound shows a session match the local acceptance contract");
   '
 
 # Last of all, because it ends this rig's NATS and every step above needs the bus. A send the bus
@@ -794,15 +843,21 @@ printf 'bus-down send: HTTP %s in %s seconds\n' "$bus_down_status" "$bus_down_se
 
 # The same refusal through the client a session actually sends with. It retries a >= 500 answer
 # once, after 250 ms (packages/envoy-client/src/transport.ts), so two refusals and one wait are
-# expected here; what has to hold is that the send ends in a named EnvoyApiError rather than in a
-# timeout, which is why this asserts what was thrown and never how long it took.
+# expected here; what has to hold is that the send ends in a named refusal rather than in a
+# timeout, which is why this asserts what was thrown and never how long it took. A 5xx may follow
+# a stored copy, so the client reports the send as not confirmed delivered, naming the key a resend
+# reuses, with the listener's 503 as its last answer.
 printf 'sending through the real client with the bus down\n'
 (
   cd "$repo_root/packages/envoy-client"
   E2E_LISTENER_URL="$listener_url" E2E_SESSION_ID="$session_id" \
     E2E_BUS_DOWN_CLIENT_FILE="$bus_down_client_file" bun -e '
       import { writeFileSync } from "node:fs";
-      import { createEnvoyClient, EnvoyApiError } from "@legion/envoy-client/transport";
+      import {
+        createEnvoyClient,
+        EnvoyApiError,
+        EnvoySendUnconfirmedError,
+      } from "@legion/envoy-client/transport";
 
       const baseUrl = process.env.E2E_LISTENER_URL;
       const sessionID = process.env.E2E_SESSION_ID;
@@ -821,15 +876,19 @@ printf 'sending through the real client with the bus down\n'
       } catch (error) {
         thrown = error;
       }
-      if (!(thrown instanceof EnvoyApiError)) {
+      if (!(thrown instanceof EnvoySendUnconfirmedError) || !(thrown.last instanceof EnvoyApiError)) {
         const what = thrown === undefined ? "nothing: the send was accepted" : String(thrown);
-        throw new Error(`the client threw ${what}, want an EnvoyApiError`);
+        throw new Error(`the client threw ${what}, want an EnvoySendUnconfirmedError after an EnvoyApiError`);
       }
+      const last = thrown.last;
       const prefix = "envoy: the message bus did not answer";
-      if (thrown.details.status !== 503 || !thrown.message.startsWith(prefix)) {
-        throw new Error(`the client threw ${thrown.details.status}: ${thrown.message}, want 503 opening with ${JSON.stringify(prefix)}`);
+      if (last.details.status !== 503 || !last.message.startsWith(prefix)) {
+        throw new Error(`the client threw ${last.details.status}: ${last.message}, want 503 opening with ${JSON.stringify(prefix)}`);
       }
-      const record = { name: thrown.name, status: thrown.details.status, message: thrown.message };
+      if (!thrown.resendSafe || !thrown.message.includes(`idempotency_key ${thrown.idempotencyKey} within`)) {
+        throw new Error(`the client error names no resend key: ${thrown.message}`);
+      }
+      const record = { name: thrown.name, status: last.details.status, message: thrown.message };
       writeFileSync(output, `${JSON.stringify(record, null, 2)}\n`);
       console.log(`client refusal: ${record.name} ${record.status} ${record.message}`);
     '

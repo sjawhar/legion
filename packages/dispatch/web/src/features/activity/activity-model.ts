@@ -69,6 +69,8 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
       return "updated agent conversation state";
     case "user_thread_state.updated":
       return "read a thread";
+    case "decision.kept":
+      return "kept a decision";
     case "issue.created":
       return "created the issue";
     case "issue.updated":
@@ -95,6 +97,8 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
     }
     case "issue.deployed":
       return `deployed ${event.payload.repo}#${event.payload.number} to production (run ${event.payload.run_id})`;
+    case "handoff.recorded":
+      return `recorded the ${event.payload.phase} handoff, version ${event.payload.version}`;
     case "artifact.created":
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":

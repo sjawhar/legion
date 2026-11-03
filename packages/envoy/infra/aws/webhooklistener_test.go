@@ -70,7 +70,6 @@ func exampleListenerArgs() *envoyaws.WebhookListenerArgs {
 		Memory:           "512",
 
 		ListenHost:     "0.0.0.0",
-		HostBridge:     "127.0.0.1",
 		NatsReplicas:   1,
 		MentionTrigger: pulumi.StringRef("@legion"),
 
@@ -402,25 +401,9 @@ func TestWebhookListenerWithNoWebhooksWritesNoWebhookSetting(t *testing.T) {
 		return out
 	}
 	require.Equal(t, []string{
-		"PORT", "ENVOY_LISTEN_HOST", "ENVOY_MACHINE_ID", "NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_HOST_BRIDGE", "ENVOY_NATS_REPLICAS",
+		"PORT", "ENVOY_LISTEN_HOST", "ENVOY_MACHINE_ID", "NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_NATS_REPLICAS",
 	}, names(containers[0].Environment))
 	require.Equal(t, []string{"ENVOY_API_TOKEN", "NATS_NKEY_SEED"}, names(containers[0].Secrets))
-}
-
-// subscribeAllTopics, sent through the plugin's schema, adds ENVOY_SUBSCRIBE_ALL_TOPICS=1 right
-// after ENVOY_HOST_BRIDGE and changes nothing else the container definitions hold; left unset, the
-// goldens above pin that the definitions are what they were before the input existed.
-func TestWebhookListenerSubscribeAllTopicsAddsOnlyItsVariable(t *testing.T) {
-	in := listenerInputs(t, fromUpstream)
-	in["subscribeAllTopics"] = property.New(true)
-	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
-	require.NoError(t, err)
-
-	const bridge = `{"name": "ENVOY_HOST_BRIDGE", "value": "127.0.0.1"}`
-	golden := readGolden(t, "listener-github-slack-seed.golden")
-	require.Equal(t, 1, strings.Count(golden, bridge))
-	want := strings.Replace(golden, bridge, bridge+`, {"name": "ENVOY_SUBSCRIBE_ALL_TOPICS", "value": "1"}`, 1)
-	require.Equal(t, want, m.One(t, taskDefinitionType).Inputs["containerDefinitions"].StringValue())
 }
 
 // The alarms' descriptions send the reader to the log group the filters read, whatever its name.
@@ -611,7 +594,6 @@ func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T
 				MachineID:      "example-machine",
 				NatsUrls:       []string{"nats://example-bus.example-namespace.internal.example:4222"},
 				ListenHost:     "0.0.0.0",
-				HostBridge:     "127.0.0.1",
 				NatsReplicas:   1,
 				Webhooks:       webhooks,
 				ReviewerAppId:  &appID,

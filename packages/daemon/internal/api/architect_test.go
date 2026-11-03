@@ -83,6 +83,10 @@ type statusRecorder struct {
 	// approved.
 	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// handoffs is each Dispatch handoff record this fake knows, by id; handoffErr, when set, is
+	// every handoff read's answer instead, Dispatch's trouble.
+	handoffs   map[string]dispatch.Handoff
+	handoffErr error
 	// readFails names the issues whose detail read fails with the error given, as Dispatch's did
 	// for some children in a deployment; the listing still carries them unless listFails is set.
 	readFails map[string]error
@@ -169,9 +173,20 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 		return approval, nil
 	}
 	if version, approved := r.approved[artifactID]; approved {
-		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
+		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version, By: dispatch.Actor{Kind: "user", ID: "alice"}}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
+}
+
+func (r *statusRecorder) Handoff(_ context.Context, id string) (dispatch.Handoff, error) {
+	if r.handoffErr != nil {
+		return dispatch.Handoff{}, r.handoffErr
+	}
+	handoff, ok := r.handoffs[id]
+	if !ok {
+		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: "HANDOFF_NOT_FOUND", Message: "handoff not found"}
+	}
+	return handoff, nil
 }
 
 func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }
@@ -943,7 +958,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3,
+			ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
@@ -952,8 +968,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 }
 
 // register_gate carries a changes request Dispatch shows on the document's latest version, with its
-// reason and the review's place in the issue's event log, so a request given between the
-// architect's approval request and its registration closes the gate with the architect told. An
+// reason, who asked it and the review's place in the issue's event log, so a request given between
+// the architect's approval request and its registration closes the gate with the architect told. An
 // open request carries no review, and a changes request a newer version superseded carries nothing.
 // Each registration reads the issue's event sequence before the approval, and the read begins at
 // that sequence alone: the latest review's time is that review's, never the read's.
@@ -964,9 +980,9 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 	reason := "name the rollback path"
 	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)
 	statuses.approvals = map[string]dispatch.Approval{
-		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6},
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 		open:       {State: "awaiting", LatestVersion: 4, Version: new(3), At: reviewed},
-		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 	}
 	seedTree(t, h, "LEGION-208")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
@@ -980,7 +996,7 @@ func TestGateRegistrationCarriesAChangesRequestDispatchAlreadyShows(t *testing.T
 	since := record.EventMark{Seq: 7}
 	want := []intake.Fact{
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
-			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},
+			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, ReviewedBy: dispatch.Actor{Kind: "user", ID: "bob"}, DispatchVersion: 4, Since: since},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: open, Version: 4, DispatchVersion: 4, Since: since},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5, Since: since},
 	}

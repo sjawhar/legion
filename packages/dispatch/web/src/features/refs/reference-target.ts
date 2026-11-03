@@ -1,4 +1,13 @@
-import { type QueryClient, type QueryStatus, queryOptions, useQuery } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  type QueryKey,
+  QueryObserver,
+  type QueryObserverOptions,
+  type QueryObserverResult,
+  type QueryStatus,
+  queryOptions,
+  useQuery,
+} from "@tanstack/react-query";
 
 import { ApiError, api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
@@ -21,6 +30,7 @@ import {
   buildReferencePath,
   type DispatchReferenceRoute,
   type IssueRoute,
+  type ReferencedArtifact,
   referencedArtifact,
 } from "./routes";
 import { referenceTargetKind } from "./target-id";
@@ -488,15 +498,85 @@ export function useReferenceTarget(
   }
   const text = markdown !== undefined && markdown.trim() !== "" ? markdown : undefined;
   const named = route === undefined ? undefined : referencedArtifact(route);
-  const pictureVersion = named?.version ?? artifact?.latest_version;
   return {
     title: artifact?.name ?? issue?.title,
     description: text ?? (artifact === undefined ? issue?.status : undefined),
-    picture:
-      named === undefined || artifact?.kind !== "image" || !pictureVersion
-        ? undefined
-        : artifactVersionPath(named.owner, named.slug, pictureVersion),
+    picture: named === undefined ? undefined : picturePath(named, artifact),
   };
+}
+
+/** The bytes route of the picture `named` shows: the version it pins, else `artifact`'s latest.
+ *  Undefined unless `artifact` (the document the reference names, once read) is an image with a
+ *  version, since a document or another file is no picture the browser can draw. */
+function picturePath(
+  named: ReferencedArtifact,
+  artifact: Pick<ReferenceArtifact, "kind" | "latest_version"> | undefined
+): string | undefined {
+  const version = named.version ?? artifact?.latest_version;
+  return artifact?.kind !== "image" || !version
+    ? undefined
+    : artifactVersionPath(named.owner, named.slug, version);
+}
+
+/** Calls `onPicture` with the picture path a summary's data gives, now and whenever the summary
+ *  query changes (an event refreshes it, a failed read recovers), until the returned function
+ *  unsubscribes. Undefined while the summary is unread or unreadable. */
+function observePicturePath<TData, TKey extends QueryKey>(
+  queryClient: QueryClient,
+  options: QueryObserverOptions<TData, Error, TData, TData, TKey>,
+  artifactOf: (data: TData) => ReferenceArtifact | undefined,
+  named: ReferencedArtifact,
+  onPicture: (path: string | undefined) => void
+): () => void {
+  const observer = new QueryObserver(queryClient, options);
+  const report = (result: QueryObserverResult<TData, Error>) =>
+    onPicture(result.data === undefined ? undefined : picturePath(named, artifactOf(result.data)));
+  const unsubscribe = observer.subscribe(report);
+  report(observer.getCurrentResult());
+  return unsubscribe;
+}
+
+/** `useReferenceTarget`'s `picture`, for a caller outside React (the document editors' picture
+ *  node view): it observes the same summary queries through `queryClient`, so every picture of
+ *  one issue shares one summary read with the links and cards on the page, and follows the
+ *  summary as an event refreshes it - a new version uploaded, a failed read recovered. Calls
+ *  `onPicture` at once and on every change, with undefined for a reference to anything but an
+ *  image artifact or while its summary is unread or unreadable; the returned function stops. */
+export function watchPicturePath(
+  queryClient: QueryClient,
+  route: DispatchReferenceRoute,
+  onPicture: (path: string | undefined) => void
+): () => void {
+  const named = referencedArtifact(route);
+  if (named !== undefined && route.kind === "document") {
+    return observePicturePath(
+      queryClient,
+      documentSummaryQuery(route.project, route.slug),
+      (summary) => summary,
+      named,
+      onPicture
+    );
+  }
+  if (named !== undefined && route.kind === "agent-artifact") {
+    return observePicturePath(
+      queryClient,
+      agentArtifactQuery(route.session, route.slug),
+      agentReferenceArtifact,
+      named,
+      onPicture
+    );
+  }
+  if (named !== undefined && route.kind === "artifact") {
+    return observePicturePath(
+      queryClient,
+      issueSummaryQuery(route.key),
+      (summary) => summary.documents.find((candidate) => candidate.slug === route.slug),
+      named,
+      onPicture
+    );
+  }
+  onPicture(undefined);
+  return () => {};
 }
 
 /** Whether a reference's path waits on its issue: a block of an issue's spec pinned to a version

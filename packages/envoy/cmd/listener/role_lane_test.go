@@ -29,14 +29,14 @@ import (
 // and another holder's forwards are published and settled.
 func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOutcomes(t *testing.T) {
 	const perHolder = 50
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	silent, live := contracts.AgentSubject("ses_forwarder_silent"), contracts.AgentSubject("ses_forwarder_live")
 	release := make(chan struct{})
 	var mu sync.Mutex
 	published := map[string][]string{}
 	var settled atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(subject string, item contracts.Envelope, _ time.Duration, _ bool) (func() error, error) {
+	cfg.forwardRole = func(subject string, item contracts.Envelope, _ string, _ time.Duration) (func() error, error) {
 		mu.Lock()
 		published[subject] = append(published[subject], item.EventID)
 		mu.Unlock()
@@ -393,7 +393,8 @@ func TestRoleLaneSilentHolderDoesNotDelayAnotherRole(t *testing.T) {
 // On a hub whose grant predates the shared queue group, each listener subscribes the role lane in
 // its machine's group, so each of two listeners on two machine ids forwards every role message:
 // the holder receives each live twice, and the stream still stores one forward per message, since
-// each forward carries the message's dedupe key and the holder's subject as its Nats-Msg-Id.
+// each forward carries the message's event id and the holder's subject as its Nats-Msg-Id (its
+// dedupe key is the sender's choice, so roleForward.msgID names it by its event id).
 func TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy(t *testing.T) {
 	const messages = 20
 	machines := []string{"role-lane-grant-a", "role-lane-grant-b"}
@@ -483,46 +484,5 @@ func TestRoleLaneForwardTheStreamDoesNotStoreIsDeliveryFailed(t *testing.T) {
 	})
 	if roleForwardsLogged(role, listener) != 0 {
 		t.Fatalf("the listener logged the unstored forward as delivered:\n%s", listener.Output.String())
-	}
-}
-
-// A serving-port session holding a role answers no receipt, since it has no NATS subscriber: when
-// its entry records consumer delivery, the stored forward is its delivery, pushed to the port from
-// its consumer, so the role message is delivered on the stream's acknowledgement, raises no
-// receipt_timeout, and reaches the port once.
-func TestRoleLaneServingPortHolderWithConsumerDeliveryNeedsNoReceipt(t *testing.T) {
-	uri := testnats.URL(t)
-	listener := startRoleLaneListeners(t, uri, nil, "role-lane-serving")[0]
-	sessionID := "ses_role_lane_serving_" + id.New()
-	role := "role-lane-serving-" + id.New()
-	port := startScriptedPort(t, sessionID)
-	registerScriptedSession(t, listener, port)
-	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
-	client := connectPublisher(t, uri)
-	exceptions, err := client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + contracts.RoleTopicPrefix + role)
-	if err != nil {
-		t.Fatalf("subscribe to the role's exceptions: %v", err)
-	}
-	if err := client.Conn.Flush(); err != nil {
-		t.Fatalf("flush the exception subscription: %v", err)
-	}
-
-	item := publishRoleMessage(t, client.Conn, role, "a role message for a serving port")
-	push := port.next(t, 10*time.Second)
-	if push.status != http.StatusNoContent {
-		t.Fatalf("the push answered %d, want 204", push.status)
-	}
-	requirePromptCarries(t, push.text, item)
-	waitFor(t, 5*time.Second, "the listener to log the forward delivered", func() bool {
-		return countRecords(listener, "listener role forwarded", func(record map[string]any) bool { return record["event_id"] == item.EventID }) == 1
-	})
-	// The receipt window is 2 s: past it, a forward that waited for a receipt would have raised its
-	// exception.
-	port.noPush(t, roleReceiptTimeout+time.Second)
-	if message, err := exceptions.NextMsg(100 * time.Millisecond); err == nil {
-		t.Fatalf("the role message raised an exception: %s", message.Data)
-	}
-	if count := countRecords(listener, "listener role receipt timed out", func(map[string]any) bool { return true }); count != 0 {
-		t.Fatalf("the listener logged %d receipt timeouts for a holder that answers none", count)
 	}
 }

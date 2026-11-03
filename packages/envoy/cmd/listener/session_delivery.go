@@ -56,8 +56,8 @@ const noGrantBackoff = 10 * time.Minute
 const sessionConsumerDrain = 2 * time.Second
 
 // deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery),
-// present whenever the registration carried delivery or registered a serving port. A listener of an
-// earlier release answers without it, which the plugin reads as core.
+// present whenever the registration carried a delivery object. A listener of an earlier release
+// answers without it, which the plugin reads as core.
 type deliveryAnswer struct {
 	Mode string `json:"mode"`
 	// Subject is the session's relay subject (bus.DeliverSubject), in consumer mode.
@@ -179,15 +179,16 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 }
 
 // register gives a registration the delivery it asks for, once its topics are stored: topics are
-// the session's stored interest topics. A registration that carried delivery with consumer set, or
-// registered a serving port, gets the session's consumer, created when the stream holds none (at
-// the sequence after its resume point when that names the stream's current identity, else at the
-// stream's end) and otherwise updated to the current filter, before the registration answers.
+// the session's stored interest topics. A registration that carried delivery with consumer set
+// gets the session's consumer, created when the stream holds none (at the sequence after its
+// resume point when that names the stream's current identity, else at the stream's end) and
+// otherwise updated to the current filter, before the registration answers. A registration that
+// asks for nothing stays on the core path: it takes its messages off its own NATS subscription.
 func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) sessionDeliveryOutcome {
-	if body.Delivery == nil && body.Port <= 0 {
+	if body.Delivery == nil {
 		return sessionDeliveryOutcome{}
 	}
-	if body.Port <= 0 && !body.Delivery.Consumer {
+	if !body.Delivery.Consumer {
 		return coreDeliveryOutcome(deliveryReasonNotRequested)
 	}
 	if _, ok := bus.SessionConsumerName(body.SessionID); !ok {
@@ -206,12 +207,9 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 		return m.refused(body.SessionID, err)
 	}
 	var startSeq uint64
-	var epoch string
-	if body.Delivery != nil {
-		epoch = body.Delivery.Epoch
-		if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
-			startSeq = resume.Seq + 1
-		}
+	epoch := body.Delivery.Epoch
+	if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
+		startSeq = resume.Seq + 1
 	}
 	unlock := m.locks.lock(body.SessionID)
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)

@@ -37,6 +37,7 @@ type Client interface {
 	// serves it: the boot catch-up's read of what a root's durable stream may not have delivered.
 	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
+	Handoff(ctx context.Context, id string) (Handoff, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
 	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
@@ -159,6 +160,15 @@ type Actor struct {
 // Person says whether the actor is a person.
 func (a Actor) Person() bool { return a.Kind == "user" }
 
+// Name is the actor as `<kind>:<id>`, the form a claim's holder takes and Legion's notices name a
+// decision's author in (record.Notice.Actor), or empty for no actor.
+func (a Actor) Name() string {
+	if a == (Actor{}) {
+		return ""
+	}
+	return a.Kind + ":" + a.ID
+}
+
 // SettlementActor is Dispatch's document settlement, which closes an ask whose decision block left
 // its document in its own name (Dispatch's docs.SettlementActor).
 var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
@@ -170,7 +180,8 @@ var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
 // whatever State shows: At is Dispatch's time of it (its `created_at`, which its artifact.* event
 // shares, since one transaction writes both), and Seq that event's sequence on the issue. Each is
 // zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
-// recorded before it kept the sequence, and from a Dispatch that predates it.
+// recorded before it kept the sequence, and from a Dispatch that predates it. By is who gave the
+// review State shows (an approval or a changes request), zero when Dispatch names nobody.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -181,6 +192,7 @@ type Approval struct {
 	WaitingOn     string
 	At            time.Time
 	Seq           int64
+	By            Actor
 }
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
@@ -205,6 +217,46 @@ func (a Approval) ChangesRequestedLatest() (int, string) {
 	}
 	return *a.Version, reason
 }
+
+// LatestReviewer is who gave the review Dispatch shows on its latest version, an approval
+// (ApprovedLatest) or a changes request (ChangesRequestedLatest), and zero when the latest version
+// has neither.
+func (a Approval) LatestReviewer() Actor {
+	if changes, _ := a.ChangesRequestedLatest(); a.ApprovedLatest() == 0 && changes == 0 {
+		return Actor{}
+	}
+	return a.By
+}
+
+// Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
+// the issue carrying it, its phase word (plan, implement, test or review; phase.Handoff), its
+// version among that phase's records, and the actor that wrote it. Body, the record's exact text,
+// is read only by LatestHandoff, for `legion handoffs import` to compare with a branch's file: the
+// daemon holds a completion to who wrote which record, and what a handoff says is the next role's
+// to read with `dispatch handoff-read`.
+type Handoff struct {
+	ID       string
+	IssueKey string
+	Phase    string
+	Version  int
+	Author   HandoffAuthor
+	Body     string
+}
+
+// HandoffNotFound is the code Dispatch answers a handoff read with when it has no such record
+// (packages/envoy/internal/dispatch/api/handoffs.go, writeHandoff). No mechanism shares a value
+// between this module and Dispatch's, so the two spellings change together.
+const HandoffNotFound = "HANDOFF_NOT_FOUND"
+
+// HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
+// wrote with `dispatch handoff-write`, ID that session.
+type HandoffAuthor struct {
+	Kind string
+	ID   string
+}
+
+// IsSession says whether the record's author is the session id.
+func (a HandoffAuthor) IsSession(id string) bool { return a.Kind == "session" && a.ID == id }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not
 // carry Dispatch's normal error body.

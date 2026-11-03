@@ -28,6 +28,10 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
 		ControllerNotice{Kind: TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}},
+		ControllerNotice{Kind: UpdateStalledNotice, Reason: "the round has waited 4h0m0s", Update: &UpdateStalled{
+			Round: "pod:9d3f0c7a", Pod: "9d3f0c7a", Reasons: "image ghcr.io/sjawhar/legion-worker:v1, now ghcr.io/sjawhar/legion-worker:v2",
+			Waiting: []UpdateWaiting{{Claim: "legion-LEGION-208-implementer", Role: claim.RoleImplementer, State: "failed"}},
+		}},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
@@ -196,6 +200,26 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a slot-free notice for an architect", payload: Notice{Kind: SlotFreeNotice}, reason: "unknown notice kind"},
 		{name: "a todo notice for an architect", payload: Notice{Kind: TodoNotice}, reason: "unknown notice kind"},
 		{name: "a tick notice for an architect", payload: Notice{Kind: TickNotice}, reason: "unknown notice kind"},
+		{name: "a parked-decision notice for an architect", payload: Notice{Kind: ParkedDecisionNotice}, reason: "unknown notice kind"},
+		{name: "an actor on a phase-finished notice", payload: Notice{Kind: "phase-finished", Actor: "user:a"}, reason: "only a spec decision's does"},
+		{name: "a ref on a child-status notice", payload: Notice{Kind: "child-status", Ref: "dispatch://LEGION-1/spec"}, reason: "only a spec decision's does"},
+		{name: "a decision on an architect's notice", payload: Notice{Kind: "design-approved", Decision: DecisionDesignApproved}, reason: "only a parked-decision controller notice does"},
+		{name: "a root on an architect's notice", payload: Notice{Kind: "design-approved", Root: "LEGION-1"}, reason: "only a parked-decision controller notice does"},
+		{name: "a parked decision with no root", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Ref: "dispatch://LEGION-1/ask/a", Actor: "user:a"}, reason: "a parked-decision notice needs"},
+		{name: "a parked decision with no ref", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Actor: "user:a"}, reason: "a parked-decision notice needs"},
+		{name: "a parked decision by no person", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "session:s"}, reason: "a parked-decision notice needs"},
+		{name: "a parked decision by an empty user", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "user:"}, reason: "a parked-decision notice needs"},
+		{name: "an unknown decision", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: "ask-ignored", Root: "LEGION-1", Ref: "dispatch://LEGION-1", Actor: "user:a"}, reason: "a parked-decision notice needs"},
+		{name: "a parked decision with no decision", payload: ControllerNotice{Kind: ParkedDecisionNotice, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "user:a"}, reason: "a parked-decision notice needs"},
+		{name: "a decision on a slot-free wake", payload: ControllerNotice{Kind: SlotFreeNotice, Decision: DecisionAskAnswered}, reason: "only a parked-decision does"},
+		{name: "an actor on a tick", payload: ControllerNotice{Kind: TickNotice, Actor: "user:a"}, reason: "only a parked-decision does"},
+		{name: "a root on a held notice to the controller", payload: ControllerNotice{Kind: "held", Root: "LEGION-1"}, reason: "only a parked-decision does"},
+		{name: "an update-stalled notice for an architect", payload: Notice{Kind: UpdateStalledNotice}, reason: "unknown notice kind"},
+		{name: "an architect's notice carrying an update round", payload: Notice{Kind: "held", Update: &UpdateStalled{Round: "pod:9d3f0c7a"}}, reason: "only the controller's update-stalled notice does"},
+		{name: "a tick notice carrying an update round", payload: ControllerNotice{Kind: TickNotice, Update: &UpdateStalled{Round: "pod:9d3f0c7a"}}, reason: "carries an update round only when it is one"},
+		{name: "an update-stalled notice carrying no update round", payload: ControllerNotice{Kind: UpdateStalledNotice}, reason: "carries an update round only when it is one"},
+		{name: "an update-stalled notice with no claims", payload: ControllerNotice{Kind: UpdateStalledNotice, Update: &UpdateStalled{Round: "pod:9d3f0c7a"}}, reason: "requires its round and the claims it waits on"},
+		{name: "an update-stalled notice with no round", payload: ControllerNotice{Kind: UpdateStalledNotice, Update: &UpdateStalled{Waiting: []UpdateWaiting{{Claim: "legion-LEGION-208-tester", State: "working"}}}}, reason: "requires its round and the claims it waits on"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
@@ -366,5 +390,48 @@ func TestATickNoticeCarriesItsOpenCapabilitiesThroughTheRow(t *testing.T) {
 				t.Fatalf("payload = %#v, want %#v", got, tc.payload)
 			}
 		})
+	}
+}
+
+// A parked-decision notice keeps every field through its outbox row, and a spec decision's
+// architect notice keeps who made it and where.
+func TestAParkedDecisionKeepsItsDecisionThroughTheRow(t *testing.T) {
+	now := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	for _, payload := range []OutboxPayload{
+		ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionDesignChangesRequested, Root: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
+			Actor: "user:alice", Version: 3, Reason: "name the rollback path"},
+		ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskReply, Root: "LEGION-1", Ref: "dispatch://LEGION-2/comment/c-1", Actor: "user:alice"},
+		Notice{Kind: "design-approved", Version: 3, Actor: "user:alice", Ref: "dispatch://LEGION-1/spec"},
+	} {
+		row, err := NewOutboxRow("LEGION-1", payload, now)
+		if err != nil {
+			t.Fatalf("NewOutboxRow(%#v): %v", payload, err)
+		}
+		got, err := DecodeOutboxPayload(row)
+		if err != nil || !reflect.DeepEqual(got, payload) {
+			t.Fatalf("decoded %#v, %v; want %#v", got, err, payload)
+		}
+	}
+}
+
+// SpecDecision names the three notice kinds a person's spec decision writes, and no other.
+func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) {
+	for kind, want := range map[NoticeKind]DecisionKind{
+		"design-approved":          DecisionDesignApproved,
+		"design-changes-requested": DecisionDesignChangesRequested,
+		"carried-gate-opened":      DecisionCarriedGateOpened,
+		"child-status":             "",
+		"worker-died":              "",
+		ParkedDecisionNotice:       "",
+	} {
+		got, ok := SpecDecision(kind)
+		if got != want || ok != (want != "") {
+			t.Errorf("SpecDecision(%q) = %q, %t; want %q, %t", kind, got, ok, want, want != "")
+		}
+	}
+	for actor, want := range map[string]bool{"user:alice": true, "user:": false, "session:s": false, "": false, "agent:user:alice": false} {
+		if got := PersonActor(actor); got != want {
+			t.Errorf("PersonActor(%q) = %t, want %t", actor, got, want)
+		}
 	}
 }

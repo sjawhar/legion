@@ -868,8 +868,13 @@ type Ask struct {
 	CreatedAt     time.Time      `json:"created_at"`
 	// ReferencedByCount is batched with ask-list reads so a card can suppress an empty backlink
 	// disclosure without issuing one graph request per ask. It is absent from mutation responses.
-	ReferencedByCount *int    `json:"referenced_by_count,omitempty"`
-	EditedAt          *string `json:"edited_at"`
+	ReferencedByCount *int `json:"referenced_by_count,omitempty"`
+	// Revision is the current revision of the ask's parts, the number a reference to one of them
+	// pins (`dispatch://<key>/ask/<id>#b-<part>@v<N>`). Batched with the part ids of the options
+	// and the answer (api.attachAskPartIDs), so it is absent from mutation responses and zero
+	// while the ask's parts are not indexed yet, where no revision can be pinned.
+	Revision int     `json:"revision,omitempty"`
+	EditedAt *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
 	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
@@ -1088,14 +1093,22 @@ type BlockInvalidEventPayload struct {
 	DisturbedBy Actor  `json:"disturbed_by"`
 }
 
-// AskOption is an answer choice.
+// AskOption is an answer choice. ID is the id of the block this option is stored as - the part
+// `dispatch://<key>/ask/<ask id>#b-<id>` names (refs.IndexAskParts) - which every read that shows
+// an ask's options carries (api.attachAskPartIDs) and no write accepts: a caller that sends an
+// option back as it read it has its id emptied (api.validateAskOptions). Absent on a write's own
+// response and while the ask's parts are not indexed yet.
 type AskOption struct {
+	ID          string `json:"id,omitempty"`
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
 }
 
-// AskAnswer is a human response to an ask.
+// AskAnswer is a human response to an ask. ID is the id of the block the ask's current answer is
+// stored as, read as an option's is and never written by a caller; a superseded answer, which no
+// part of the ask holds, carries none.
 type AskAnswer struct {
+	ID       string    `json:"id,omitempty"`
 	User     string    `json:"user"`
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
@@ -1656,6 +1669,34 @@ type MessageAcceptedEventPayload struct {
 	Target     string `json:"target"`
 }
 
+// HandoffSummary is one phase handoff without its body: what GET /api/v1/issues/{key}/handoffs
+// lists, newest first, and what POST /api/v1/issues/{key}/handoffs/{phase} answers. Phase is a
+// lowercase slug (Legion writes plan, implement, test and review), Version counts from 1 within
+// the issue and phase, and Author is the session that wrote it.
+type HandoffSummary struct {
+	ID        string    `json:"id"`
+	IssueKey  string    `json:"issue_key"`
+	Phase     string    `json:"phase"`
+	Version   int       `json:"version"`
+	Author    Actor     `json:"author"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Handoff is one phase handoff with its body: Body is the exact text the session sent, one JSON
+// object, stored as text so a read answers the bytes written.
+type Handoff struct {
+	HandoffSummary
+	Body string `json:"body"`
+}
+
+// HandoffRecordedEventPayload is `handoff.recorded`: a session recorded Version of the issue's
+// Phase handoff, the record HandoffID. It never carries the body; a reader fetches the record.
+type HandoffRecordedEventPayload struct {
+	HandoffID string `json:"handoff_id"`
+	Phase     string `json:"phase"`
+	Version   int    `json:"version"`
+}
+
 // ReferencedBy identifies a post or artifact that mentions an artifact.
 type ReferencedBy struct {
 	Kind     string  `json:"kind"`
@@ -1805,6 +1846,66 @@ type BlockLinks struct {
 	From  GraphNode   `json:"from"`
 	To    GraphNode   `json:"to"`
 	Links []BlockLink `json:"links"`
+}
+
+// DecisionKeep is one person's agreement with a decision: the decision's heading block, the sum
+// of its whole text when they pressed Keep, the version it then stood at, and who did when. The
+// sum, not the version, is what tells a kept decision from one waiting for review again: a
+// decision's ChangedVersion is the greatest of the blocks it holds now, so it does not move when
+// a block is removed from the decision or moved into or out of it, where the text changes and
+// every remaining block keeps its version.
+type DecisionKeep struct {
+	ArtifactID     string    `json:"artifact_id"`
+	BlockID        string    `json:"block_id"`
+	ChangedVersion int       `json:"changed_version"`
+	KeptBy         string    `json:"kept_by"`
+	KeptAt         time.Time `json:"kept_at"`
+	// TextSHA256 is the sum the view compares; a reader is served the decision's Text and
+	// WaitingReview, so it is no part of the wire shape.
+	TextSHA256 string `json:"-"`
+}
+
+// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
+// decision's own block that holds it, the spec block it names, when and in which version of
+// decisions.md the link was first written, and whether the spec block is out of date - the
+// decision changed after it first linked that block, and that block has not changed since.
+type DecisionLink struct {
+	FromBlock      string    `json:"from_block"`
+	To             GraphNode `json:"to"`
+	CreatedVersion int       `json:"created_version"`
+	CreatedAt      time.Time `json:"created_at"`
+	Stale          bool      `json:"stale"`
+}
+
+// Decision is one decision of an issue's decisions.md: its heading block and every block after
+// it up to the next heading of its level or higher. Kind is "person" when its blocks mention an
+// ask (a person's decision links the answered ask) and "agent" otherwise; Unsure is set by a
+// paragraph that starts "Unsure:"; Replaced is set by sitting under the section headed exactly
+// "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. TextSHA256 is the
+// sum of Text, which a Keep carries back to say which text it agreed with. WaitingReview is an
+// agent's decision, not replaced, whose text nobody has kept as it stands.
+type Decision struct {
+	BlockID        string         `json:"block_id"`
+	Heading        string         `json:"heading"`
+	Ref            string         `json:"ref"`
+	Text           string         `json:"text"`
+	TextSHA256     string         `json:"text_sha256"`
+	Kind           string         `json:"kind"`
+	Unsure         bool           `json:"unsure"`
+	Replaced       bool           `json:"replaced"`
+	Asks           []string       `json:"asks"`
+	Links          []DecisionLink `json:"links"`
+	ChangedVersion int            `json:"changed_version"`
+	ChangedAt      *time.Time     `json:"changed_at"`
+	Kept           *DecisionKeep  `json:"kept"`
+	WaitingReview  bool           `json:"waiting_review"`
+}
+
+// DocumentRead is one person's last read version of a document: null when they have read none.
+type DocumentRead struct {
+	ArtifactID string     `json:"artifact_id"`
+	Version    *int       `json:"version"`
+	ReadAt     *time.Time `json:"read_at"`
 }
 
 // Event is the immutable event-log record for a Dispatch mutation.

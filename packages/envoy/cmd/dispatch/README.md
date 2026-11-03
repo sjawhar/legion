@@ -97,14 +97,24 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_FILE_STORE_BUCKET`
 
   Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres.
-  The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
-  without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
-  The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+  The value chooses the store (`files.Open`), and the server and `backfill-files` both open it there, so they never read one value as two stores:
+
+  - `gs://<bucket>` is a Google Cloud Storage bucket, reached through the JSON API with Application Default Credentials (on GKE, the pod's Workload Identity principal; elsewhere `GOOGLE_APPLICATION_CREDENTIALS` or a gcloud login).
+    The principal needs `storage.objects.create` and `storage.objects.get` on the bucket and nothing more (`roles/storage.objectCreator` and `roles/storage.objectViewer`):
+    an upload reads the key's metadata first and writes nothing when the bucket already holds it, then writes in one request with `ifGenerationMatch=0`, carrying the body's CRC32C and MD5, which GCS checks, so no object is ever overwritten and none is deleted;
+    a write that loses that precondition to a concurrent writer of the same key is an object already held.
+    A value after `gs://` that is not a Cloud Storage bucket name (a path after the bucket among them) refuses the boot.
+  - Any other value is an S3 bucket's name.
+    The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
+    without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
+    The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+
+  An image whose Dispatch does not know `gs://` reads the value as an S3 bucket's name and fails every call, so a deployment sets a `gs://` value only on an image that carries it.
   An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version.
   The version route serves a row still holding bytes from the row and any other from the bucket:
   it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes;
   a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole.
-  `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`;
+  `/healthz` reports `files`: null when unset, else whether the bucket answered within two seconds (S3: a `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, whose absence is a healthy answer, so `storage.objects.get` alone serves it, while a bucket that does not exist or a refused grant fails it);
   it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down.
   `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below).
 
@@ -255,8 +265,9 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
   When the sweep had made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once, with `requests`, the number of requests the delivery took.
 
 - A process killed between claiming a delivery and recording GitHub's answer (a SIGKILL, an OOM kill, a lost node) leaves a claim that stands for one minute, three GitHub request timeouts.
-  Until then every other sweep counts the delivery `claimed_elsewhere` (`claimed-elsewhere` in the command's table, `--dry-run` included);
-  after it the delivery is asked for again (`--dry-run` reports `would-redeliver`), even once its failed attempt is older than the sweep's hour.
+  Until then a sweep that reads the delivery counts it `claimed_elsewhere` (`claimed-elsewhere` in the command's table, `--dry-run` included):
+  the running sweep while the listing still carries its failed attempt, since the index holds an open delivery back until its claim can be void, and the operator command whether the delivery is listed or not.
+  After the claim ends the delivery is asked for again (`--dry-run` reports `would-redeliver`), even once its failed attempt is older than the sweep's look-back.
   If GitHub had already taken the dead process's request, its log shows the redelivery by then:
   an `OK` attempt closes the delivery with no second request, and a failed one is redelivered like any other.
   A claim whose answer could not be written logs `level=ERROR msg="webhook redelivery
@@ -264,19 +275,27 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
 
 - Every sweep logs an INFO `msg="webhook redelivery sweep"` line:
   `failed_attempts` (the failed attempts listed), `deliveries` (the deliveries the sweep decided:
-  the GUIDs of the listed failed attempts, plus the open deliveries the listing no longer returns, one whose claim was never answered included), and one count per outcome, which add up to `deliveries`.
+  the GUIDs of the listed failed attempts, plus the open deliveries the listing no longer returns that the index says are due, one whose claim was never answered included), `index_entries` (the entries the index read returned, none in the operator command, which reads no index), and one count per outcome, which add up to `deliveries`.
   `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, or it expired):
-  its failed attempt stays listed until it is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
-  `waiting` is a delivery whose next request is not due yet.
+  its failed attempt stays listed until it is older than the sweep's look-back, so after a burst of failures is redelivered, the sweeps of the next hour and six minutes count the burst as `closed`.
+  `waiting` is a delivery whose next request is not due yet:
+  in the running sweep one the listing returned, one whose index entry is keyed to the sweep's own minute with its request later in that minute, since the index is keyed by the minute and brings back only the deliveries due by it, or one whose entry the sweep adopts because a build without the sweep's index rewrote its record, which the sweep indexes again before it waits, whatever minute that entry is keyed to;
+  and in the operator command every open delivery it reads that is not due and not claimed, listed or not.
   `claimed_elsewhere` is a delivery another sweep is asking GitHub for.
   A delivery the sweep's cap of 300 requests left over is not counted; the next sweep takes it.
 
-- A sweep looks back one hour, and decides every delivery whose record is still open, neither delivered nor expired, even when its attempts are older than that.
-  After a gap in sweeping (Dispatch down), it resumes from its cursor, back to GitHub's three days.
+- The running sweep lists the last hour and six minutes (`redeliver.Lookback`, the longest backoff plus three sweep intervals), long enough that a delivery coming due still sees GitHub's answer to its last request in the listing.
+  To that it adds the open deliveries the listing no longer returns that its index says are due, one still owed a request and one whose claim has run out alike.
+  It reads the index from two minutes before its last sweep's start up to now, and over the last three days when it has no cursor yet.
+  The operator command reads every record in the bucket instead, so it decides every delivery whose record is still open, neither delivered nor expired, even when its attempts are older than its window.
+  After a gap in sweeping (Dispatch down), the running sweep resumes its listing from its cursor, back to GitHub's three days.
   The first sweep ever made, with no cursor, looks back 72 hours.
 
-The cursor and one record per delivery acted on live in the JetStream KV bucket `envoy_webhook_redelivery`.
-Its 72-hour TTL matches GitHub's horizon.
+The cursor, one record per delivery acted on, one index entry per open delivery, keyed `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>` by the minute that delivery next needs a sweep, and the marker that says when a back-fill last gave every open record an entry live in the JetStream KV bucket `envoy_webhook_redelivery`.
+Its 72-hour TTL matches GitHub's horizon, and an index entry a sweeper died before deleting expires with the records.
+A sweep that meets open records an older build wrote without entries gives each one an entry and then writes the marker, which holds the moment that sweep started, at or before the scan it read the records with.
+Once that moment is further behind than the sweep's look-back, the next sweep reads every record again, so the whole-bucket read costs one sweep an hour at most for as long as those back-fills land: a back-fill that leaves a record unindexed writes no marker, so the sweep after it reads every record again;
+a sweep that reads a cursor an older build wrote — one carrying no mark of this build's — back-fills at once rather than waiting out that hour.
 The server opens the bucket on the first sweep that finds NATS connected, not at boot, so a NATS that is down at boot skips the sweeps until it answers, each logged as failed.
 A compare-and-swap claim, written before the request and replaced by GitHub's answer after it, keeps two Dispatch processes from requesting the same attempt twice, and the operator command honours the same rate limits.
 
@@ -304,7 +323,7 @@ a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket;
 the files uploaded before it stay in their rows until `backfill-files` moves them, oldest first, one row at a time:
-it writes the object under the row's hash (a write S3 verifies against that hash, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
+it writes the object under the row's hash (a write the bucket verifies, S3 against that hash and Cloud Storage against its CRC32C and MD5, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
 A row it cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
 the run exits 1 when any row failed, and can be run again at any time, since each row is done or untouched and the server serves a row until its bytes are cleared.
 Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the
@@ -325,7 +344,7 @@ envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 
 envoy-dispatch backfill-files --restore       # the rollback: write every moved row's bytes back from the bucket
 ```
 
-It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket` before touching a row, and reads nothing else of the server's configuration.
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, which it opens as the server does (`gs://<bucket>` or an S3 bucket's name, with the same credentials and grant), refuses a bucket whose health probe fails (the one `/healthz` runs) before touching a row, and reads nothing else of the server's configuration.
 Clearing a row's bytes leaves dead tuples behind:
 the table shrinks on disk only after `VACUUM FULL` or `pg_repack`, while the nightly dump shrinks at once; measure the dump, or vacuum first.
 
@@ -583,9 +602,28 @@ A tab opened before the deploy needs a reload:
 
 What the two processes share, and what each keeps to itself:
 
-- Each event is published once.
-  The outbox claims a batch (`for update skip locked`) before it publishes it, so two processes never publish one event twice.
-  A process that dies between a publish and its `published_at` write republishes once the claim's minute lapses, which is at-least-once on the `notifications.role.*` core-NATS lanes, whose receivers dedupe by key.
+- One process publishes the events outbox at a time.
+  Each process's outbox reads and sends events only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration `20261101143201_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the other holds it;
+  `/healthz` says which (`outbox_publisher`).
+  A holder that stops sends nothing more, records what NATS already answered, releases the rest of each batch in flight and then the hold, which wakes the standby at once;
+  a graceful stop waits for that before it closes the database pool, up to `outboxStopBudget` after its shutdown starts.
+  One that is killed is replaced once its hold lapses, six seconds after its last renewal;
+  one whose NATS stays down for three seconds, or whose failed sends meet a connection that does not answer a probe, releases the hold too.
+  One that finds its hold lost releases it as well, which stops its renewal and deletes the row only while the row still names it.
+  A holder sends nothing once its hold's deadline has passed, a send already waiting for a connection included (`bus.Client.WindowUntil`), so one that freezes and resumes publishes nothing beside the new holder.
+  Each owner's events (an issue's, a document's or a project's) keep their order per destination:
+  an event goes to a session's subject, or to the owner's topic family, only after every earlier unpublished event of its owner bound there has reached it.
+
+- A batch does not block the next.
+  The holder runs up to four side by side, each reading only owners no other batch holds in flight, so an event waiting out a role holder's five-second receipt holds back its own owner's later events and nothing else;
+  every other owner's events are read, sent and recorded beside it.
+  An owner is settled, recorded and given back as soon as its own sends are answered rather than at its batch's end, so its next events follow at once.
+  The batches run one statement at a time on the outbox's two connections, so the hold's renewal never waits behind them.
+
+- Each event reaches each receiver once, delivered at least once.
+  A holder that dies between NATS's acknowledgement and the write that records it leaves the batch to be sent again by the next holder:
+  JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a role's holder, to which the outbox forwards a role-routed event itself with a receipt, drops a repeat forward by its dedupe key.
+  Dispatch publishes nothing on `notifications.role.*`.
 
 - A reader's events subscription on its live socket carries the other process's events.
   It is re-sourced from Postgres through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an event committed on either process reaches every open subscription with no reconnect.
@@ -625,7 +663,7 @@ What the two processes share, and what each keeps to itself:
 
 - No leased background loop runs a pass beside another process's pass of the same loop.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a process whose attempt lands inside another's pass finds it held and logs a skip.
-  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the outbox's daily document compaction, the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
+  The nine timer loops — the delivery reconcile, the architecture import, the webhook redelivery sweep, the hourly document compaction sweep (lease `document-compaction`, first tick at start, with or without NATS), the block index reconciliation, the term-statistics refresh, the repair of closed and reopened issues' asks, the keyed writes' maintenance sweep (lease `suggestion-outcomes`) and the prune of the registry of live server processes
   — also record each pass in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip: each runs once per period across the processes.
@@ -633,7 +671,7 @@ What the two processes share, and what each keeps to itself:
   a process that finds it held tries again until a pass of its own runs, since the other process's pass may have read before the change that woke this one.
   The suggestion outcome sweep takes no lease at all:
   each of its pages holds the `suggestion_outcome_cursor` row `for update`, which serialises two processes by itself (Background loops, below).
-  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by design (below), and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
+  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor, the shared wake listener and the document rooms' timers stay per-process by design (below), the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
@@ -790,7 +828,7 @@ A process that finds it held tries again
   a key passes its window by the clock alone, and a delivery is owed because the process holding it died, which commits nothing to announce.
   It keeps the lease name the suggestion outcome sweep carried this work under, so during a roll the earlier release's pass and this one still exclude each other on it.
 
-Outside these classes, the outbox still scans on a 5 s retry ticker and compacts daily, the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor) keep their own connections and keep-alive pings.
+Outside these classes, the document compaction sweep (lease `document-compaction`) runs every hour from a tick at start whether or not NATS is configured, the outbox's publish scan is woken, never periodic (`outbox.Run`), the settlement resumption still runs every minute, the block index reconciliation (lease `block-index`) runs every 30 s (every 2 s while a batch is full) and the repair of closed and reopened issues' asks (lease `issue-ask-repair`, Database migrations below) every 10 minutes after its boot pass, each recording its passes in `duty_passes` with its period, and the per-feature listeners (the delivery live hub, the event stream relay, the stale-room evictor and the events outbox) keep their own connections and keep-alive pings.
 
 **One shared listener per process.**
 Every woken loop waits on one `pglisten.Hub` (owner `dispatch background wakes` in its log lines), which holds one connection from the store's listener pool and LISTENs on every loop's channel.
@@ -1309,12 +1347,55 @@ A caller presenting an access token the secrets broker issued signs a fresh proo
 the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
 It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
 
+Migration `20261028195714_doc_compaction_owed` creates `doc_compaction_owed`, the documents with rows a compaction could fold, which the hourly compaction sweep reads in place of a scan of `doc_updates`:
+every append names its document there in the statement that inserts its row once that row is not the document's first, and a compaction that leaves no row above its fold point, a rebuild, a delete and the sweep (for a document with no row after its first) remove it, each under the document's lock.
+It has no foreign key, so no append that names a document locks `artifacts`.
+Its one insert names every document holding more than one row; it reads `doc_updates` under `ACCESS SHARE` and writes only the table it creates, so `doc_updates`, which may be past the census's 1 GiB limit, is not a table it touches.
+The release before it neither reads nor writes the table: a document only that release appends to during the roll is compacted by the new release's queue on its next append or load.
+It refuses and rewrites no existing row; its census answers `0`.
+
+Migration `20261101143201_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name a process holds by renewing it (`duty.Hold`):
+the events outbox's publisher holds `dispatch-outbox` there (Running more than one process, above).
+`expires_at` is always the database's `now()` plus the hold's TTL, so a lapse is judged on the database's clock and never on two hosts' wall clocks, and `token` is free text the holder records, the outbox's host and process id.
+A release deletes the row and notifies `dispatch_duty_holds` with the name in one statement, which wakes a standby at once.
+It creates a table and touches no row, and the release before it neither reads nor writes it; its census answers `0`.
+
+Migration `20261101143203_outbox_claim` gives the outbox's batch read three partial indexes and drops the two the per-row claim read.
+`events_outbox_fresh` on `(id)` holds the unpublished events never tried, `events_outbox_retry` on `(next_attempt_at, id)` those waiting on a back-off, and `events_outbox_owner` on `(coalesce(issue_key, artifact_id::text, project_key), id)` each owner's unpublished events;
+none holds a published event or a pending subscription command, so the read walks past neither.
+It adds `events.publish_error`, nullable text with no default, a catalog change that rewrites no row:
+why an event's last attempt failed, cleared once it is published.
+It drops `events_unpublished` (`0003`) and `events_unpublished_ready` (`0020`), which only the per-row claim read;
+the release before it reads neither the new column nor the new indexes, and its claim still runs without the dropped ones, at a cost.
+That claim's predicate, `coalesce(payload ->> 'pending', 'false') <> 'true'`, proves none of the three new indexes' `(payload ->> 'pending') is distinct from 'true'`, so the earlier release reads the whole of `events` in a sequential scan on every scan it makes:
+on 1,000,000 event rows, the last 100 unpublished, on Postgres 17, 125 ms and every one of the table's 19,231 pages, where `events_unpublished` took 3.4 ms.
+It pays that while it serves beside this release in a rolling update, which is one more reason to deploy this release with `strategy: Recreate` (below), and for as long as a rollback to it lasts.
+The migration runs in one transaction, so every lock it takes is held until it commits.
+It builds the three indexes first: each reads every row of `events` under `SHARE`, which holds writes to `events` from then until the commit and lets reads go on (no `concurrently`, which a migration's transaction cannot run):
+1.1 s on 1,000,000 event rows and 7.2 s on 5,000,000, on Postgres 17 with two cores.
+It then adds the column and drops the two old indexes, each under `ACCESS EXCLUSIVE`, which holds reads of `events` too, so reads wait only for those last statements, which rewrite no row, and for the commit.
+Its census answers `0`, since it refuses and rewrites no row, and the census reports `events`, the table it locks, with its row count and size.
+
+From `20261101143203`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back its owner's later events from each destination it has not reached.
+The rows that start doing so at the deploy are the unpublished events that are not pending commands;
+count them by attempt before the deploy with `select attempt_count, count(*) from events where published_at is null and
+(payload ->> 'pending') is distinct from 'true' group by attempt_count order by attempt_count`.
+The release before it takes no publisher hold and still claims and publishes batches of its own, and this release reads those one-minute claims as back-offs alone, so while a rolling update runs both the two publish side by side:
+an issue's events can arrive out of order, as they could between two processes of the earlier release, and one event can be sent by both, its second copy dropped by JetStream's MsgId or by its receiver's dedupe.
+A deployment that wants neither, nor the earlier release's whole-table claim scans, replaces the running server rather than rolling it for this one release (`strategy: Recreate`).
+
 Migration `20261101144855_block_pointer_links` gives `block_refs` a nullable `to_types text[]`, the types a typed block's `block[]` pointer may point at (null:
 any), creates the function `block_ref_listed(to_types, to_id)`, true when `to_types` is null or no current `document_blocks` row of the target has a type outside it, and re-states `graph_edges` with `0142`'s arms, its `block_refs` arm listing a row only while `block_ref_listed` holds (`packages/envoy/AGENTS.md`, the typed block rules).
 The column is added with no default, so no row is rewritten, and the previous release, which neither reads nor writes it, keeps writing rows that hold null and so are listed as before.
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
 No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+
+Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `graph_edges` once with the arms of both migrations of this release that wrote it.
+`20261101143211` added an ask's parts and `20261101144855` filtered the `block_refs` arm by `block_ref_listed`, each from `0142`'s arms, and timestamps sort them, so the later one replaced the view the earlier one wrote.
+This states every arm of both, and is the arm list a later migration re-states from.
+It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
+It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1478,16 +1559,20 @@ It reads `DATABASE_URL` as the other subcommands do and runs no migration; with 
 Each document is read in one repeatable-read transaction, which stays open while the check renders the document at every checked update: tens of thousands of updates hold one snapshot for minutes, and an open snapshot on the primary holds back vacuum.
 On production, pass `--since` or point `DATABASE_URL` at a read replica.
 
-The oldest retained row is the base: compaction folds older history into it and a rebuild seeds the history there, so its own class is not checked and a version recorded before it is skipped.
+The oldest retained row is the base: compaction folds older history into it and a rebuild seeds the history there, so its own class is not checked and a version recording an update below it is compared with nothing.
+Compaction runs on its own, and no setting holds it off: a resident room's rows fold once 16 of them are older than two minutes or one is older than fifteen minutes, and an hourly sweep folds every document due that rule.
+So a version created inside the checked window can record an update a compaction has already folded into the base.
+The check counts those versions `versions_compacted` and prints a reason naming the base; a document's first version, recorded before any row of it was stored, names no update and is skipped as it always was.
+A document the counted versions leave with no version compared is `unchecked`, never clean, whatever classes the fold measured, and a document with versions at or above the base is clean only on what it compared.
 A history a prune rewrote after the base (a checkpoint standing, a gap, a version past the head or behind an earlier one) is refused.
-`--since` folds rows and versions created before that time without checking them, so history an earlier build wrote is not read as this build's: run it with the start of the window under test, while the rooms are resident and nothing is compacted.
+`--since` folds rows and versions created before that time without checking them, so history an earlier build wrote is not read as this build's: run it with the start of the window under test, and read `versions_compacted` for how much of that window a compaction folded away.
 
 The check holds only for one renderer: run it from the same commit as the Dispatch whose history it reads.
 A version an earlier build rendered (a change to `pmdoc`'s Markdown output) differs from this build's render of the same state.
 
-Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… mismatches=…`, with `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
+Output, every line starting `stored-order: `: one line per document (`<uuid> base=… updates_checked=… updates_skipped=… versions_checked=… versions_skipped=… versions_compacted=… mismatches=…`, with `compacted="<reason>"` for a document whose versions record updates below its base and `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=… expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=… doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary (`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`).
 It prints no document text.
-A document whose check compared no update and no version is `unchecked`, never clean.
+A document whose check compared no update and no version, one whose versions inside the window all sit below the base included, is `unchecked`, never clean.
 Exit 0 when every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`, unchecked document `--artifact` names, or a run that checked no document at all (an empty database included), 2 on a usage error.
 So exit 0 always means the check compared something.
 
@@ -1508,7 +1593,7 @@ Each block of a document is a node of the graph too (migration `0121`; `packages
 Its reference is the document's with `#b-` and the block's id, percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`.
 Text cites a block only while its id holds at most 256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its edge is stored under (`text.TargetID`:
-an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's `<item kind>/<item id>#<id>`, an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
+an issue's key, a document's `<KEY or PROJECT>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's or an ask's part's `<item kind>/<item id>#<id>` (`ask/<ask uuid>#<part id>`), an ask's, a comment's or a message's id), holds at most 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and neither a slug nor an item id has a bound of its own:
 text citing past either is written with no edge.
 The bounds decide only what the graph indexes.
 Every write is taken whatever the length of a block id it names (a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion, a browser's edit);
@@ -1544,11 +1629,29 @@ A reply names the block it answers with `reply_to_block` (a comment) or `in_repl
 `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` list an item's current blocks.
 A comment or message an earlier build writes during the roll, or after a rollback, is owed its blocks (`owed_at`, set by the triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a tick, with no command run.
 
+An ask's parts are blocks too (migrations `20261101143211` and `20261101143212`):
+its question, each of its options and its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of one body, since an ask has no body — the question as the row holds it, an option as `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered` summary renders it.
+What identifies a part is its type and its text, and for the answer part its answerer, so the same answer from another person is a part of its own (`askAnswerPart`).
+Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each id the same way, except that an answer is replaced rather than reworded:
+`itemblocks.Align` takes a variadic list of the types a new block replaces instead of rewording, and the ask's index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's passes none.
+A later answer is a new part, so a reference to the answer it replaced reads `removed` where one to a reworded option reads `changed`.
+A part's reference is the ask's with `#b-` and the id: `dispatch://KEY/ask/<id>#b-<part>` or `dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>`, and an ask's dashboard page with a `#b-` fragment names it too;
+pinned, `#b-<part>@v<N>` names a revision of the ask's parts, as a comment's block pins a revision of the comment, and reads the part as that revision held it.
+Its graph node is kind `block`, id `ask/<ask uuid>#<part id>`, whose `parent` is the ask;
+`graph_edges` stores it under the kind `ask_block`, which a build without ask parts skips as an unknown kind.
+An ask's detail read, its owner's ask list, the Inbox and the ask payloads the events route serves carry the part id of each option and of the answer, with the ask's `revision`, the number a pin names (`attachAskPartIDs`);
+a write's own response carries neither, nor does an ask the index has not reached, whose revision reads 0.
+An ask's own read lists the edges at its parts, each naming its part as `block`, and leaves out both its `replies_to` edges, its clarification thread, and its parts' `part_of` edges unless `?kind=` names them (`refs.AskBacklinkExclusions`).
+A reply names a part of an ask only when its request names the ask, `ask_id` with `reply_to_block`:
+a reply to a comment names a block of that comment, whether or not the comment's thread hangs under an ask, and so does the delivery callback `POST /api/v1/comments/{id}/reply`.
+A reference to a part no current revision of the ask holds is `404 NOT_FOUND` `no part "<part>" in ask <id>`.
+An ask any build writes is owed a part index (`20261101143212`'s trigger on `asks`), which the same block-index reconciliation drains.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
-reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment and message owed a block index of its own blocks, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments and messages.
+reparses every source and reconciles the index with the text (surviving edges keep their provenance, edges of deleted sources are removed), marks every document owed a block index and every comment, message and ask owed a block index of its own blocks, an ask's parts included, which the server's block-index reconciliation then indexes, and prints `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`, `blocks_owed` being the documents it marked and `items_owed` the comments, messages and asks.
 It reads `dispatch.server_url` from the envoy config the same way the server does and refuses an empty value:
 dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -1717,9 +1820,9 @@ and one that gave the key up meanwhile is `KEY_IN_FLIGHT` with `Retry-After: 1`,
 An `Expect: 100-continue` repeat is `KEY_IN_FLIGHT` at once, with nothing read.
 The key is claimed, and its answer recorded, on a context the client's leaving does not end, bounded at 10 s.
 
-Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before decoding - is written only once the rest of the body has been read and discarded, never spooled, up to the route's limit (26 MiB on the upload routes, 1 MiB on every other).
+Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before decoding - is written only once the rest of the body has been read and discarded, never spooled, up to the route's limit (26 MiB on the upload routes, 1,576,960 bytes - six times the 256 KiB handoff body cap, plus 4 KiB - on the handoff write, 1 MiB on every other).
 A browser that sends a whole upload before it reads the answer (WebKit, Firefox) otherwise met the connection's close as a reset and never saw the answer.
-A body past the limit is answered `413 CAP_EXCEEDED` (uploads) or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes;
+A body past the limit is answered `413 CAP_EXCEEDED` (the upload routes and the handoff write) or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes;
 a `401` is the one early answer that stands, since a caller nobody resolves is refused before any limit is judged.
 Both reads wait at most a minute for a body: one that stops arriving is given its answer with `Connection: close`.
 An `Expect: 100-continue` request answered early is never asked for its body: Dispatch sends no `100 Continue`, sends the answer and closes the connection.
@@ -1790,7 +1893,7 @@ A send to one session answers once its own attempt has settled, which keeps a pe
 a broadcast answers once its messages are committed, with its deliveries behind the answer.
 
 The layer reads a keyed body before its handler runs, spooling at most the route's own limit:
-26 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`, `/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1 MiB for every other.
+26 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`, `/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1,576,960 bytes for the handoff write (`POST /api/v1/issues/{key}/handoffs/{phase}`), 1 MiB for every other.
 A body past it runs unkeyed and its route refuses it.
 A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`;
 one Dispatch cannot spool to its temporary directory is Dispatch's own failure, a 5xx with the key echoed, which the client asks again.
@@ -1970,12 +2073,15 @@ Each item below names a path with its method and identity, then its purpose.
   Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`):
   `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus;
   the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds;
-  `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
+  `files`, whether the file store's bucket answers its two-second probe (S3: `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, which a missing object answers healthy) where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
   `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured).
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
   The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;
   `null` in an unstamped build); `fleet_commit`, the commit of the latest announcement that every live server process serves one build, the one `server.started` carries (`null` when there is none, or before this process's announcer has first read the table, and up to one announcer pass, five seconds, behind it);
   and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false).
+  `outbox_publisher` says whether this process publishes the events outbox now:
+  `true` while it holds the outbox's publisher hold and the hold's deadline has not passed, `false` while it stands by for another process's, after it lost the hold, and with NATS disabled.
+  One process of a deployment publishes at a time, so a healthy process may report `false`, and the field never decides `ok` or the status.
 
 - `/livez` (GET; none)
 
@@ -1985,7 +2091,8 @@ Each item below names a path with its method and identity, then its purpose.
 - `/metrics` (GET; none)
 
   The process's metrics in the Prometheus text format:
-  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that did not reach NATS, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried) or `failed` (every other failure).
+  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
+  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 
@@ -2219,14 +2326,19 @@ Each item below names a path with its method and identity, then its purpose.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
   A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
   a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-  and a mention a block of a comment or issue message holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message);
-  a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block.
+  and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+  a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
   A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
-  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
   `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
-  `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block.
+  `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+  A caller with no cursor starts from `since=0`, which lists every mention committed before the read that carries a `source_seq`, and after that reads again from the highest `source_seq` an answer showed it.
+  A mention written with no event (a rebuild, a backfill, an older build) carries no `source_seq` until a later write of its source stamps it with that write's event, and until then only a read without `since` lists it.
+  A signed-in page may start from `GET /auth/whoami`'s `event_head` instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from `0`.
+  Never take a `since` from `max(events.id)` read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later.
+  An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.
 
 - `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
 
@@ -2333,9 +2445,10 @@ Each item below names a path with its method and identity, then its purpose.
 
   Create a comment, root-level reply, or suggestion.
   An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none.
-  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head:
-  `400 INVALID_COMMENT` without `reply_to`, for a block that comment does not hold now, and in an ask's thread.
-  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}` the same way.
+  A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head, and against that comment even when the climb reaches an ask;
+  with `ask_id` instead of `reply_to` it names a part of that ask.
+  `400 INVALID_COMMENT` with neither `reply_to` nor `ask_id`, and for a block or part the named item does not hold now.
+  The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}`, never for a part of the ask its thread hangs under.
   A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB:
   a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes.
   A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's.
@@ -2401,6 +2514,26 @@ Each item below names a path with its method and identity, then its purpose.
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.
 
+- `/api/v1/issues/{key}/handoffs/{phase}` (POST; bearer (an agent session naming itself in `actor`))
+
+  Record the session's handoff for one phase of the issue, `{actor, body}`:
+  `body` is one JSON object as a string of at most `contracts.DispatchHandoffBodyMax` (262,144) bytes, stored exactly as sent, and the record is the phase's next version from 1, numbered under the issue's row lock.
+  A cookie caller is `403 HANDOFF_FORBIDDEN`, an actor that is not a session `400 ACTOR_KIND`, a phase that is not a lowercase slug or a body that is not one JSON object `400 HANDOFF_INPUT`, an over-cap body `413 CAP_EXCEEDED` naming the cap, and a closed issue `409 ISSUE_CLOSED`.
+  Answers `201 {id, issue_key, phase, version, author, created_at}` and appends `handoff.recorded` `{handoff_id, phase, version}` in the same transaction, which never carries the body and notifies no one.
+  A keyed write: a retry under the same `Idempotency-Key` is answered the first call's `201` and records no second version.
+
+- `/api/v1/issues/{key}/handoffs` (GET; cookie, trusted header, or bearer)
+
+  List the issue's handoffs, newest first, without their bodies; a closed issue's read too.
+
+- `/api/v1/issues/{key}/handoffs/{phase}/latest` (GET; cookie, trusted header, or bearer)
+
+  The phase's newest handoff with its body, byte for byte as written; `404 HANDOFF_NOT_FOUND` when it has none.
+
+- `/api/v1/handoffs/{id}` (GET; cookie, trusted header, or bearer)
+
+  One handoff by id with its body; `404 HANDOFF_NOT_FOUND` when there is none, `400 HANDOFF_ID_INPUT` for an id that is not a uuid.
+
 - `/api/v1/issues/{key}/artifacts` (GET, POST; cookie, trusted header, or bearer)
 
   List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`.
@@ -2408,7 +2541,8 @@ Each item below names a path with its method and identity, then its purpose.
   A `text/markdown` file is a document.
   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
-  A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`.
+  An upload's name finds the issue's artifact whose name or slug it is, so a name that is an artifact's slug (`plan-md` for `plan.md`) is that artifact's next version, never a second artifact the same reference would also name.
+  A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the artifact's slug, name and kind.
   A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;
   an upload under an existing artifact's name, one stored longer included, is never refused for its length.
   An ask block whose body breaks its content rule (`paragraph+ bullet_list?`:

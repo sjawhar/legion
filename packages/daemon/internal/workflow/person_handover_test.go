@@ -158,11 +158,11 @@ func lingeringRoot(status string) record.Issue {
 
 // A parked labelled root the daemon recorded — one that ran and was parked, its tree lingering —
 // is queued by a person's approval of its spec as an unrecorded one is: the write re-admits it as a
-// new generation, as a person's todo does. The gate its earlier run registered is not applied: the
-// re-admission clears it and the new architect's register_gate reads the approval from Dispatch,
-// so the gate row stands as the park left it and no design-approved notice is written for a tree
-// with no architect.
-func TestAPersonsApprovalOfARecordedParkedRootsSpecQueuesItAndLeavesItsGateAlone(t *testing.T) {
+// new generation, as a person's todo does. The gate its earlier run registered records the approved
+// version and nothing else: no design-approved notice is written for a tree with no architect, and
+// the re-admission then keeps no stale approval pair before it clears the gate, while the new
+// architect's register_gate reads the approval from Dispatch.
+func TestAPersonsApprovalOfARecordedParkedRootsSpecQueuesItAndRecordsItQuietly(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, lingeringRoot("backlog"))
 	gate := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}
@@ -175,11 +175,50 @@ func TestAPersonsApprovalOfARecordedParkedRootsSpecQueuesItAndLeavesItsGateAlone
 	if got, want := statusWrites(t, pool, "LEGION-208"), []record.StatusWrite{personHandoverWrite("backlog")}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("status writes = %#v, want %#v", got, want)
 	}
-	if got := gateState(t, pool, "LEGION-208"); !reflect.DeepEqual(got, gate) {
-		t.Fatalf("the parked root's gate = %#v, want it as the park left it, %#v", got, gate)
+	if got := gateState(t, pool, "LEGION-208"); got.ApprovedVersion == nil || *got.ApprovedVersion != 2 || got.LatestVersion != 2 {
+		t.Fatalf("the parked root's gate = %#v, want the person's approval of version 2 recorded", got)
 	}
 	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 {
 		t.Fatalf("notices for a parked root with no architect = %v, want none", kinds)
+	}
+}
+
+// A person's approval that queues a parked root as their handover records on the root's gate only
+// what applyArtifact would record: an approval of a version older than the gate's latest, one the
+// gate has already seen superseded by a later changes request of that version, and any approval
+// under gates.design off leave the gate as it was, while the root is still queued. Recording any
+// of them would set an approved version the spec has moved past, which the re-admission's
+// keepStaleApproval would then hand the new architect as a stale pair.
+func TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas(t *testing.T) {
+	two := 2
+	for _, tc := range []struct {
+		name   string
+		policy config.DesignGate
+		gate   record.DesignGate
+	}{
+		{name: "an approval of a version older than the gate's latest", policy: config.DesignGateRootIssues,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}},
+		{name: "an approval a later changes request of its version superseded", policy: config.DesignGateRootIssues,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+				ToldChangesVersion: &two, ToldChangesReason: "split the migration", ToldChangesMark: askSeq(12)}},
+		{name: "an approval under gates.design off", policy: config.DesignGateOff,
+			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, lingeringRoot("backlog"))
+			seedGate(t, pool, tc.gate)
+			apply := applyFacts(t, pool, testEngine(tc.policy, nil))
+
+			apply("approval", approvalOf(askPerson, parkedRootView("backlog")))
+
+			if got, want := statusWrites(t, pool, "LEGION-208"), []record.StatusWrite{personHandoverWrite("backlog")}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("status writes = %#v, want %#v", got, want)
+			}
+			if got := gateState(t, pool, "LEGION-208"); !reflect.DeepEqual(got, tc.gate) {
+				t.Fatalf("the parked root's gate = %#v, want it left as %#v", got, tc.gate)
+			}
+		})
 	}
 }
 
@@ -227,8 +266,8 @@ func TestAnApprovalOfALiveOrClosedRootsSpecIsAppliedToItsGateAsToday(t *testing.
 
 // A copy of the parked root's gate that a hand-over carried to a child of its tree, now a root of
 // its own, belongs to a tree that is its own and is applied as today: the approval opens the copy
-// carried closed and its architect is told carried-gate-opened. The parked owner's own gate is
-// skipped and the owner queued.
+// carried closed and its architect is told carried-gate-opened. The parked owner is queued, and its
+// own gate records the approval with no notice.
 func TestACarriedCopyOfAParkedRootsGateTakesTheApprovalWhileTheOwnerIsQueued(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, lingeringRoot("backlog"))
@@ -248,8 +287,8 @@ func TestACarriedCopyOfAParkedRootsGateTakesTheApprovalWhileTheOwnerIsQueued(t *
 	if writes := statusWrites(t, pool, "LEGION-209"); len(writes) != 0 {
 		t.Fatalf("the carried root's status writes = %#v, want none", writes)
 	}
-	if got := gateState(t, pool, "LEGION-208"); !reflect.DeepEqual(got, owner) {
-		t.Fatalf("the owner's gate = %#v, want it as the park left it, %#v", got, owner)
+	if got := gateState(t, pool, "LEGION-208"); got.ApprovedVersion == nil || *got.ApprovedVersion != 2 || got.LatestVersion != 2 {
+		t.Fatalf("the owner's gate = %#v, want the person's approval of version 2 recorded", got)
 	}
 	if copied := gateState(t, pool, "LEGION-209"); copied.ApprovedVersion == nil || *copied.ApprovedVersion != 2 {
 		t.Fatalf("the carried copy = %#v, want it opened at version 2", copied)

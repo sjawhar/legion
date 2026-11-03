@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -90,6 +91,7 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
+	"handoffs":       {runHandoffs, "copy each in-flight branch's committed .legion/ handoff files onto its Dispatch issue, then remove .legion/ from the branch"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
 	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, provision the issue's workspace; and a repository cache pod's process"},
@@ -263,8 +265,11 @@ func pluginsLine(cfg config.Config) string {
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed. After it, one line per deployment capability the file alone leaves open, in the words
-// boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// the seed. After it, one line per configured repository rename (`repository_renames`), so an
+// operator reads back what the daemon will treat as one repository before a transfer moves the
+// events onto the new name; a file that configures none prints no such line. Then one line per
+// deployment capability the file alone leaves open, in the words boot logs it with
+// (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
 // `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
@@ -298,6 +303,10 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
+	for _, rename := range cfg.RepositoryRenames.Pairs() {
+		fmt.Fprintf(stdout, "repository rename: %s and %s are one repository wherever the daemon compares a name; keep the pair configured for as long as any record names %s\n",
+			rename.From, rename.To, rename.From)
+	}
 	deployment := daemon.Deployment(cfg)
 	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
@@ -543,6 +552,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
+	fmt.Fprintln(stdout, roundsSummary(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
@@ -680,6 +690,71 @@ func checksSummary(checks []issueCheck) string {
 	}
 	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, bound %s",
 		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
+}
+
+// issueRound is one update round an issue has open, and the claims in it, by role: the round a
+// pod's drift opened over every role of the issue (`pod:<pod uid>`), or one role's own plugin
+// round (`plugin:<daemon contract>`).
+type issueRound struct {
+	issue string
+	round string
+	roles []string
+}
+
+// openRounds is every update round the state's issues have open, by issue and then round, each
+// with its claims in role order: a round is the daemon holding a process back from replacement
+// until its worker has pushed its work and answered.
+func openRounds(issues map[string]api.Issue) []issueRound {
+	rounds := map[string]*issueRound{}
+	var keys []string
+	add := func(issue, role string, view api.ClaimView) {
+		if view.UpdateRound == "" {
+			return
+		}
+		key := issue + " " + view.UpdateRound
+		if _, open := rounds[key]; !open {
+			rounds[key] = &issueRound{issue: issue, round: view.UpdateRound}
+			keys = append(keys, key)
+		}
+		named := role
+		if view.UpdateHead != "" {
+			// The head is the worker's own word, which nothing verifies, so it is quoted: a
+			// newline in it would otherwise forge a row of this summary (claims.go's
+			// quotedOrNone).
+			named += " answered at " + strconv.Quote(view.UpdateHead)
+		}
+		rounds[key].roles = append(rounds[key].roles, named)
+	}
+	for key, issue := range issues {
+		if issue.Architect != nil {
+			add(key, string(legionclaim.RoleArchitect), *issue.Architect)
+		}
+		for _, role := range slices.Sorted(maps.Keys(issue.Workers)) {
+			add(key, string(role), issue.Workers[role].Claim)
+		}
+	}
+	slices.Sort(keys)
+	open := make([]issueRound, len(keys))
+	for i, key := range keys {
+		open[i] = *rounds[key]
+	}
+	return open
+}
+
+// roundsSummary is the one line an operator reads for the update rounds still open: how many, and
+// each by issue, round and the roles in it, with the head a role reported when it answered. While
+// a round is open the daemon holds those roles' next tasks and replaces nothing, so a round that
+// does not end is work that is not moving.
+func roundsSummary(issues map[string]api.Issue) string {
+	rounds := openRounds(issues)
+	if len(rounds) == 0 {
+		return "open update rounds: none"
+	}
+	named := make([]string, len(rounds))
+	for i, round := range rounds {
+		named[i] = fmt.Sprintf("%s on %s: %s", round.issue, round.round, strings.Join(round.roles, ", "))
+	}
+	return fmt.Sprintf("open update rounds: %d — %s", len(rounds), strings.Join(named, "; "))
 }
 
 // heldSummary is the one line an operator reads for the lifecycle rows the daemon holds behind

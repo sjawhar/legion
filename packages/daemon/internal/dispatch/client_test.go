@@ -303,8 +303,8 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
-// The artifact read carries the approval Dispatch derives, the latest review's time and its event's
-// sequence (none from a Dispatch that predates the sequence).
+// The artifact read carries the approval Dispatch derives, who gave the review it shows, the latest
+// review's time and its event's sequence (none from a Dispatch that predates the sequence).
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertBearer(t, r)
@@ -314,7 +314,8 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/artifacts/artifact-6":
 			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{
-				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12}})
+				"state": "approved", "latest_version": 3, "version": 3, "at": "2026-10-23T18:00:00.123456Z", "seq": 12,
+				"by": map[string]any{"kind": "user", "id": "alice"}}})
 		case "/api/v1/artifacts/artifact-7":
 			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
 				"state": "awaiting", "latest_version": 4, "version": 3, "at": "2026-10-23T17:00:00Z"}})
@@ -332,16 +333,17 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		t.Fatalf("read approval: %v", err)
 	}
 	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
-		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by the review at sequence 12", approval)
+		!approval.At.Equal(time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)) || approval.Seq != 12 ||
+		approval.By != (Actor{Kind: "user", ID: "alice"}) || approval.By.Name() != "user:alice" {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by user:alice, the review at sequence 12", approval)
 	}
 	awaiting, err := client.Approval(context.Background(), "artifact-7")
 	if err != nil {
 		t.Fatalf("read awaiting approval: %v", err)
 	}
-	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 ||
+	if awaiting.State != "awaiting" || awaiting.ApprovedLatest() != 0 || awaiting.By != (Actor{}) ||
 		!awaiting.At.Equal(time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)) || awaiting.Seq != 0 {
-		t.Fatalf("awaiting approval = %#v, want an open request, its review's time and no sequence", awaiting)
+		t.Fatalf("awaiting approval = %#v, want an open request reviewed by nobody, its review's time and no sequence", awaiting)
 	}
 	draft, err := client.Approval(context.Background(), "artifact-8")
 	if err != nil {
@@ -454,6 +456,107 @@ func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
 	}
 	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
 		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
+	}
+}
+
+// A handoff record reads back with its issue, phase, version and the actor that wrote it; the body
+// Dispatch answers with is not the daemon's to read. A record Dispatch does not have is Missing.
+func TestHandoffReadsTheRecordAndItsAuthor(t *testing.T) {
+	const id = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		if r.Method != http.MethodGet {
+			t.Fatalf("request = %s %s, want GET", r.Method, r.URL.Path)
+		}
+		if r.URL.Path != "/api/v1/handoffs/"+id {
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "handoff not found"})
+			return
+		}
+		writeJSON(t, w, map[string]any{
+			"id": id, "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+			"author":     map[string]any{"kind": "session", "id": "ses_implementer_6", "origin": map[string]any{"title": "implementer"}},
+			"created_at": "2026-10-26T08:00:00Z", "body": `{"schemaVersion":1}`,
+		})
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, err := client.Handoff(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read handoff: %v", err)
+	}
+	want := Handoff{ID: id, IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}}
+	if handoff != want {
+		t.Fatalf("handoff = %#v, want %#v", handoff, want)
+	}
+	if _, err := client.Handoff(context.Background(), "00000000-0000-0000-0000-000000000001"); !Missing(err) {
+		t.Fatalf("an unknown handoff = %v, want Dispatch's 404", err)
+	}
+}
+
+// The newest record of a phase reads back with its body exactly as Dispatch stores it; a phase with
+// none is Dispatch's 404 HANDOFF_NOT_FOUND, not found; a 404 with another code, a Dispatch without
+// the route, is an error.
+func TestLatestHandoffReadsTheBodyAndTellsNoneFromNoRoute(t *testing.T) {
+	const body = "{\"schemaVersion\":1,\n  \"phase\": \"implement\"}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBearer(t, r)
+		switch r.URL.Path {
+		case "/api/v1/issues/LEGION-6/handoffs/implement/latest":
+			writeJSON(t, w, map[string]any{
+				"id": "h-2", "issue_key": "LEGION-6", "phase": "implement", "version": 2,
+				"author": map[string]any{"kind": "session", "id": "ses_implementer_6"}, "body": body,
+			})
+		case "/api/v1/issues/LEGION-6/handoffs/test/latest":
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "HANDOFF_NOT_FOUND", "error": "issue LEGION-6 has no test handoff"})
+		default:
+			writeJSONStatus(t, w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "error": "no route for GET " + r.URL.Path})
+		}
+	}))
+	defer server.Close()
+
+	client := New(server.URL, dispatchToken)
+	handoff, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "implement")
+	want := Handoff{ID: "h-2", IssueKey: "LEGION-6", Phase: "implement", Version: 2, Author: HandoffAuthor{Kind: "session", ID: "ses_implementer_6"}, Body: body}
+	if err != nil || !found || handoff != want {
+		t.Fatalf("latest implement = %#v, %v, %v; want %#v", handoff, found, err, want)
+	}
+	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "test"); err != nil || found {
+		t.Fatalf("latest test = %v, %v; want none and no error", found, err)
+	}
+	if _, found, err := client.LatestHandoff(context.Background(), "LEGION-6", "review"); found || !Missing(err) {
+		t.Fatalf("latest review on a Dispatch without the route = %v, %v; want its 404", found, err)
+	}
+}
+
+// A handoff write sends the body exactly as given, under the daemon's session, and reads back the
+// record Dispatch made.
+func TestWriteHandoffSendsTheBodyUnderTheDaemonSession(t *testing.T) {
+	const text = "{\"schemaVersion\": 1}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/issues/LEGION-7/handoffs/plan" {
+			t.Fatalf("request = %s %s, want POST /api/v1/issues/LEGION-7/handoffs/plan", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		var request struct {
+			Body  string `json:"body"`
+			Actor actor  `json:"actor"`
+		}
+		decodeJSON(t, r, &request)
+		if request.Body != text || request.Actor != (actor{Kind: "session", ID: "legion-daemon:LEGION"}) {
+			t.Fatalf("write = %#v, want the file's text under legion-daemon:LEGION", request)
+		}
+		writeJSONStatus(t, w, http.StatusCreated, map[string]any{
+			"id": "h-1", "issue_key": "LEGION-7", "phase": "plan", "version": 1,
+			"author": map[string]any{"kind": "session", "id": "legion-daemon:LEGION"}, "created_at": "2026-10-27T08:00:00Z",
+		})
+	}))
+	defer server.Close()
+
+	handoff, err := New(server.URL, dispatchToken).WriteHandoff(context.Background(), "LEGION-7", "plan", text)
+	want := Handoff{ID: "h-1", IssueKey: "LEGION-7", Phase: "plan", Version: 1, Author: HandoffAuthor{Kind: "session", ID: "legion-daemon:LEGION"}}
+	if err != nil || handoff != want {
+		t.Fatalf("write = %#v, %v; want %#v", handoff, err, want)
 	}
 }
 

@@ -26,10 +26,11 @@ export type IssueRoute =
   | ({ key: string; kind: "spec" } & BlockTarget)
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
+  | { key: string; kind: "decisions" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
-  | { key: string; kind: "ask"; id: string }
+  | ({ key: string; kind: "ask"; id: string } & BlockTarget)
   | ({ key: string; kind: "comment"; id: string } & BlockTarget)
   | ({ key: string; kind: "message"; id: string } & BlockTarget);
 
@@ -73,7 +74,16 @@ export interface InboxRoute {
    *  literal `unassigned`. */
   assignees?: readonly string[];
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
+export type IssueTab =
+  | "spec"
+  | "conversation"
+  | "children"
+  | "artifacts"
+  | "activity"
+  | "decisions";
+
+/** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
+export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -133,6 +143,9 @@ export function issueTabForRoute(
   }
   if (route.kind === "activity") {
     return "activity";
+  }
+  if (route.kind === "decisions") {
+    return "decisions";
   }
   if (route.kind === "artifacts") {
     return "artifacts";
@@ -343,6 +356,9 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "activity") {
     return { key, kind: "activity" };
   }
+  if (target === "decisions") {
+    return { key, kind: "decisions" };
+  }
   if (target === "children") {
     return { key, kind: "children" };
   }
@@ -460,12 +476,11 @@ export function nodeRouteFromHref(
  * control character, naming a slug Dispatch never gives a document, or that is no issue/document
  * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item whatever
  * its fragment, at any version of the document: the dashboard writes a document block's fragment
- * beside `?comment=`, never a block of the comment. A version of the spec (`?v=N`) is the spec's
- * artifact at N, as `dispatch read` reads the page. The fragment names a block of a live
- * document, or of the issue comment or message its own page shows; no block of an ask, nor of a
- * document's version page, whose stored text holds no block ids (`withBlock`). A raw `@` in a
- * fragment is no pin, since pins are written only in `dispatch://` references; any other fragment
- * leaves the page. */
+ * beside it, never a block of the item. A version of the spec (`?v=N`) is the spec's artifact at
+ * N, as `dispatch read` reads the page. The fragment names a block of a live document, or of the
+ * issue ask, comment or message its own page shows; no block of a document's version page, whose
+ * stored text holds no block ids (`withBlock`). A raw `@` in a fragment is no pin, since pins are
+ * written only in `dispatch://` references; any other fragment leaves the page. */
 function pageRoutes(
   href: string,
   appOrigin: string
@@ -488,6 +503,14 @@ function pageRoutes(
     parseAgentArtifactPath(url.pathname, url.search);
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
+  }
+  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
+  // whatever its fragment, as the server's `text` and the agent client read the page.
+  if (route.kind === "decisions") {
+    return {
+      block: undefined,
+      page: { key: route.key, kind: "artifact", slug: DECISIONS_DOCUMENT_SLUG },
+    };
   }
   if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
     return undefined;
@@ -579,6 +602,9 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   }
   if (route.kind === "activity") {
     return `${issue}/activity`;
+  }
+  if (route.kind === "decisions") {
+    return `${issue}/artifact/${DECISIONS_DOCUMENT_SLUG}`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -758,6 +784,8 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} log`;
     case "activity":
       return `${route.key} activity`;
+    case "decisions":
+      return `${route.key} decisions`;
     case "children":
       return `${route.key} children`;
     case "artifacts":
@@ -765,7 +793,7 @@ export function shortForm(route: DispatchReferenceRoute): string {
     case "artifact":
       return `${route.key} ${route.slug}${block}`;
     case "ask":
-      return `${route.key} ask`;
+      return `${route.key} ask${block}`;
     case "comment":
       return `${route.key} comment${block}`;
     case "message":
@@ -824,6 +852,9 @@ export function buildIssuePath(route: IssueRoute): string {
   }
   if (route.kind === "activity") {
     return `${issue}/activity`;
+  }
+  if (route.kind === "decisions") {
+    return `${issue}/decisions`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -937,9 +968,16 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
   );
 }
 
-/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add. */
+/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add.
+ *  `app.tsx` renders `InboxPage` at `/credentials/*` as well, for an address kept from before
+ *  Dispatch's credential record page was deleted, and ranks `/credentials/machine`, a page of its
+ *  own, above that splat, as this does. */
 export function routeIsInbox(pathname: string): boolean {
-  return pathname === "/";
+  return (
+    pathname === "/" ||
+    (matchPath("/credentials/*", pathname) !== null &&
+      matchPath("/credentials/machine", pathname) === null)
+  );
 }
 
 /** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */

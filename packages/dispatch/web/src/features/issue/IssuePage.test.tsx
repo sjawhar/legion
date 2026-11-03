@@ -155,6 +155,7 @@ function stubIssuePage(
   const originalListIssueAskThreads = api.listIssueAskThreads;
   const originalListComments = api.listComments;
   const originalListIssueMessages = api.listIssueMessages;
+  const originalListHandoffs = api.listHandoffs;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -163,12 +164,13 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
-  // The Conversation builds its list from the issue's own asks, comments and messages; it asks
-  // the ask list for each thread, where the margin reads the same route without one.
+  // The Conversation builds its list from the issue's own asks, comments, messages and handoffs;
+  // it asks the ask list for each thread, where the margin reads the same route without one.
   api.listIssueAsks = async () => [];
   api.listIssueAskThreads = async () => [];
   api.listComments = async () => [];
   api.listIssueMessages = async () => [];
+  api.listHandoffs = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -180,6 +182,7 @@ function stubIssuePage(
     api.listIssueAskThreads = originalListIssueAskThreads;
     api.listComments = originalListComments;
     api.listIssueMessages = originalListIssueMessages;
+    api.listHandoffs = originalListHandoffs;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };
@@ -943,6 +946,30 @@ test("IssuePage opens the Activity tab with the t v chord", async () => {
     expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/activity");
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage opens the Decisions tab with the t d chord", async () => {
+  const restore = stubIssuePage(issue);
+  const decisions = spyOn(api, "getIssueDecisions").mockResolvedValue({
+    decisions: [],
+    document: null,
+    open_questions: [],
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "d" });
+
+    await screen.findByRole("tab", { name: "Decisions", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/decisions");
+    await waitFor(() => expect(decisions).toHaveBeenCalledWith("CORE-1"));
+  } finally {
+    view.unmount();
+    decisions.mockRestore();
     restore();
   }
 });

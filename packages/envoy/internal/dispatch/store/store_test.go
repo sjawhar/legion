@@ -58,7 +58,8 @@ func openEmptyTestStore(t *testing.T) *Store {
 	t.Cleanup(admin.Close)
 
 	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+databaseName); err != nil {
+	// A copy of template1's files, as storetest makes every database (its package comment says why).
+	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
 		t.Fatalf("create isolated database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -224,6 +225,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_block_state",
 		"comment_block_refs",
 		"message_block_refs",
+		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -238,7 +240,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"refs_excerpt_drift",
-		"events_unpublished",
+		"events_outbox_fresh",
+		"events_outbox_retry",
+		"events_outbox_owner",
 		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
@@ -358,6 +362,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 		"user_agent_state_pkey",
+		"handoffs_pkey",
+		"handoffs_issue_key_fkey",
+		"handoffs_phase_check",
+		"handoffs_version_check",
+		"handoffs_issue_key_phase_version_key",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select conname

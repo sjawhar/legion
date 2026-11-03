@@ -4,18 +4,26 @@ name: CI
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
-# failed). The last job, `ci-ok`, condenses every job's result into one check: it fails when a job
-# `changes` selected did not succeed. Main's ruleset requires ci-ok and pr-title. The docs site's
-# build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a workflow of its own
-# whose header says why. Its paths are held to the docs filter below.
+# failed). ci-ok condenses every job's result into one check: it fails when a job `changes`
+# selected did not succeed. Main's ruleset requires ci-ok and pr-title, and neither is a job: a job
+# of its own would wait for a runner after the others, behind every job the account started
+# meanwhile. Every job but `changes` ends with the ci-ok-report step
+# (.github/actions/ci-ok-report), and the last job of the run to finish posts ci-ok from it
+# (.github/scripts/ci-ok-report.sh says how); lint posts pr-title at a push (pr-title.yaml posts
+# it when the pull request is opened, reopened or edited, a review is submitted or edited, or the
+# merge queue runs its group). The docs site's build on a push to main, and its GitHub Pages
+# deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
+# to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
-# output, an entry in `ci-ok`'s `needs:`, an entry in `ci-ok`'s SELECTED_BY mapping the job to
-# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request), and a gate in
-# .github/scripts/ci_job_reads.py. A job that runs on no push gets its output set false there,
-# in `changes`' outputs, as docs does. The ci-filters job's
-# .github/scripts/check-ci-filters.sh holds the filter to that gate and SELECTED_BY to the `if:`s.
+# output, an entry in CI_OK_SELECTED_BY (this file's env) mapping the job to that output (and in
+# CI_OK_PULL_REQUEST_ONLY when its `if:` admits only pull_request), the ci-ok-report step as the
+# job's last step (a job that calls a workflow passes `ci-ok-changes` to it, and that workflow's
+# job ends with the step, as docs-site.yaml's and worker-image.yaml's do), and a gate in
+# .github/scripts/ci_job_reads.py. A job that runs on no push gets its output set false there, in
+# `changes`' outputs, as docs does. The ci-filters job's .github/scripts/check-ci-filters.sh holds
+# the filter to that gate, CI_OK_SELECTED_BY to the `if:`s and the report step to every job.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
@@ -63,13 +71,17 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Read-only: the token clones, downloads pinned tools, and, in `changes`, reads the pull request's
-# file list, which this public repository serves without `pull-requests: read`. The jobs that need
-# more declare it in blocks of their own: lint (what check-pr-text.sh reads), ci-images (the
-# ghcr.io push its copy makes) and worker-image (the image push and its attestation's scopes).
-# docs-pages.yaml publishes the site to GitHub Pages.
+# Read-only but for the two scopes every job's ci-ok-report step uses: `actions: read` lists the
+# run's artifacts, which are the jobs' reports, and `checks: write` posts ci-ok (and lint's
+# pr-title). The token also clones, downloads pinned tools, and, in `changes`, reads the pull
+# request's file list, which this public repository serves without `pull-requests: read`. The
+# jobs that need more declare it in blocks of their own, each repeating those two: lint (what
+# check-pr-text.sh reads), ci-images (the ghcr.io push its copy makes) and worker-image (the image
+# push and its attestation's scopes). docs-pages.yaml publishes the site to GitHub Pages.
 permissions:
   contents: read
+  actions: read
+  checks: write
 
 # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
@@ -79,6 +91,42 @@ permissions:
 # weaker check.
 env:
   GOPROXY: https://proxy.golang.org|direct
+  # ci-ok's map of every job but `changes` and lint to the `changes` output its `if:` tests, and
+  # the list of those jobs whose `if:` also admits only pull_request (ci-ok.sh and ci-ok.jq say how
+  # they decide a job's selection). ci-ok-report.sh reads both from this file at the commit the run
+  # checked out; check-ci-filters.sh holds both to the jobs' `if:`s.
+  CI_OK_SELECTED_BY: |
+    {
+      "typecheck": "typecheck",
+      "test": "test",
+      "docs": "docs",
+      "contracts": "contracts",
+      "conflicts-script": "conflicts_script",
+      "envoy-client": "envoy_client",
+      "pi-shared": "pi_shared",
+      "pi-envoy": "pi_envoy",
+      "pi-legion": "pi_legion",
+      "dispatch": "dispatch",
+      "dispatch-browser-multiprocess": "dispatch_browser_multiprocess",
+      "claude-envoy": "claude_envoy",
+      "envoy-go": "envoy_go",
+      "envoy-infra-go": "envoy_infra_go",
+      "envoy-go-race": "envoy_go_race",
+      "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
+      "envoy-go-race-api": "envoy_go_race_api",
+      "envoy-go-race-docs": "envoy_go_race_docs",
+      "dispatch-memory": "dispatch_memory",
+      "dispatch-multiprocess": "dispatch_multiprocess",
+      "listener-server-change": "listener_server_change",
+      "broker-multiprocess": "broker_multiprocess",
+      "envoy-smoke": "envoy_smoke",
+      "envoy-e2e-local": "envoy_e2e_local",
+      "envoy-session-stall": "envoy_session_stall",
+      "ci-filters": "ci_filters",
+      "ci-images": "ci_images",
+      "worker-image": "worker_image"
+    }
+  CI_OK_PULL_REQUEST_ONLY: '["worker-image"]'
 
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
@@ -228,6 +276,8 @@ jobs:
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
             # internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch imports them
             # (INFRA-559, INFRA-555).
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -273,13 +323,17 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
@@ -309,6 +363,7 @@ jobs:
               - 'packages/daemon/internal/ghconfig/*'
               - 'packages/daemon/internal/ghrepo/*'
               - 'packages/daemon/internal/githubrest/*'
+              - 'packages/daemon/internal/handoffimport/*'
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'
@@ -328,6 +383,7 @@ jobs:
               - 'packages/daemon/internal/registry/*'
               - 'packages/daemon/internal/repocache/*'
               - 'packages/daemon/internal/requiredchecks/*'
+              - 'packages/daemon/internal/rescue/*'
               - 'packages/daemon/internal/runtime/*'
               - 'packages/daemon/internal/runtime/sandbox/*'
               - 'packages/daemon/internal/runtime/shellprefix/*'
@@ -360,6 +416,7 @@ jobs:
               - 'packages/envoy/internal/logging/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
@@ -370,6 +427,8 @@ jobs:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
             # cmd/dispatch/pod_grace_period_test.go:17 reads.
+            # internal/roles and, through it, internal/store, internal/session and internal/kvwatch:
+            # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
@@ -381,6 +440,7 @@ jobs:
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
               - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/**'
@@ -388,7 +448,10 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
@@ -470,6 +533,9 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
               - '.claude-plugin/marketplace.json'
+              # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
+              # scripts/build-inputs.txt matches.
+              - '.github/workflows/claude-envoy-rebuild.yaml'
             # The daemon's tests (`go test ./...`, the -race subset, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -574,6 +640,9 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # The built site's private-name check.
               - '.github/scripts/check-private-names.sh'
+              # The site's own URL, base and edit links are the repository's name, which it reads
+              # from this script (docs/site/repo-paths.ts) rather than holding as literals.
+              - '.github/scripts/repo-paths.sh'
             contracts:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -834,11 +903,14 @@ jobs:
             # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
             # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
             # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too.
+            # render_readback_test.go:32), so the editor's package is here too, and
+            # heavy_bodies_test.go:10 reads the body cap every writer of a comment meets
+            # (contracts.DispatchBodyMax), so the contracts package is too.
             envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
+              - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/cputest/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
@@ -1082,6 +1154,8 @@ jobs:
               # The Pulumi CLI the live tests run, and the image pull before the build and tests.
               - '.github/actions/install-pulumi/**'
               - '.github/actions/pull-test-images/**'
+              # The download URL the schema step stamps into the plugin and asserts on.
+              - '.github/scripts/repo-paths.sh'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1273,15 +1347,54 @@ jobs:
     timeout-minutes: 30
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
-    # (`issues: read`).
+    # (`issues: read`); pr-title's post and the ci-ok-report step need `checks: write`, and that
+    # step `actions: read`.
     permissions:
       contents: read
       issues: read
       pull-requests: read
+      actions: read
+      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # A pull request's title, body and commit messages reach main's squash commit, the
+      # generated release notes and GitHub's pages, and its comments and reviews are public on its
+      # page, so this job checks them, and that the title is a conventional commit subject, at
+      # every push to a pull request that is not a draft and when a draft is marked ready, and
+      # posts the verdict on the head as pr-title, the check main's ruleset requires.
+      # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
+      # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
+      # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
+      # check further down cannot keep pr-title from the head; a fork pull request's read-only
+      # token posts nothing (.github/actions/ci-ok-report says why that is no loss here).
+      - name: Check the pull request's title, body, branch name, commits, comments and reviews
+        id: pr-text
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-pr-text.sh
+
+      - name: Post pr-title on the head
+        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECK_NAME: pr-title
+          CONCLUSION: ${{ steps.pr-text.outcome == 'success' && 'success' || 'failure' }}
+          OUTCOME: ${{ steps.pr-text.outcome }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}
+        run: |
+          export SUMMARY_FILE="$RUNNER_TEMP/pr-title-summary.md"
+          echo "check-pr-text.sh in this run's lint job: $OUTCOME. Its log names what it refused." > "$SUMMARY_FILE"
+          if [ "$CONCLUSION" = success ]; then
+            TITLE="The title is conventional and the pull request's text names nothing private"
+          else
+            TITLE="check-pr-text.sh ended $OUTCOME; see the lint job's log"
+          fi
+          TITLE=$TITLE .github/scripts/post-check-run.sh
 
       # This job runs on every change, so the pin check runs on every change rather than only on
       # one that touches a package.
@@ -1328,19 +1441,6 @@ jobs:
         run: |
           # shellcheck disable=SC2046 # the file is the spec list, split on purpose
           .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
-
-      # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this job checks them at every push to a pull request that is not a draft and when
-      # a draft is marked ready. pr-title.yaml checks them at every push too, draft or not, and
-      # when the pull request is opened, reopened or edited, a review is submitted or edited, or
-      # the merge queue runs its group. A push to main or a merge-queue run of this workflow carries
-      # no pull request.
-      - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/check-pr-text.sh
 
       # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices),
       # keyed on the Go version this step installs.
@@ -1448,6 +1548,13 @@ jobs:
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then reads the
   # package to check that it holds every row. The order is the point: the read fails a row the
   # package does not hold, so the copy for this change runs first. The ci_images filter selects
@@ -1463,10 +1570,13 @@ jobs:
     if: needs.changes.outputs.ci_images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # packages: write is the ghcr.io push `crane copy` makes.
+    # packages: write is the ghcr.io push `crane copy` makes; actions: read and checks: write are
+    # the ci-ok-report step's.
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1486,11 +1596,19 @@ jobs:
       - name: Check the package holds every row of .github/ci-images.yaml
         run: .github/scripts/check-ci-images.sh package
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # lint, typecheck and test are jobs ci-ok condenses; their names are no longer checks the ruleset
   # requires. Each covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when
   # `changes` did not succeed, typecheck and test run rather than skip. ci-ok fails then anyway
-  # (ci-ok.sh), so this buys signal: their results while `changes` is broken, and a green ci-ok after
-  # a re-run of only the failed jobs.
+  # (ci-ok.sh), so this buys signal: their results while `changes` is broken. A re-run of only the
+  # failed jobs can leave the jobs `changes` then selects skipped, which report nothing, so that
+  # run posts no new ci-ok and the failed one stands: re-run every job instead.
   typecheck:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
@@ -1532,12 +1650,23 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
 
   test:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
+    # prints the dump that names it: about 5 minutes of the steps before the Go daemon's, then
+    # that step's 20 minutes and the race step's 30, then a minute for the Stage 1 proof, which
+    # is 56.
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1645,6 +1774,9 @@ jobs:
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
 
+      - name: Test the repository path derivation
+        run: .github/scripts/repo-paths.test.sh
+
       # The proof selector e2e.yaml's select job runs, over fixture trees and over this
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
       - name: Test the e2e proof selector
@@ -1652,6 +1784,9 @@ jobs:
 
       - name: Test ci-ok's verdict
         run: .github/scripts/ci-ok.test.sh
+
+      - name: Test ci-ok's report and the check-run post (a stand-in gh)
+        run: .github/scripts/ci-ok-report.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
@@ -1755,8 +1890,14 @@ jobs:
       # launcher that wires it, whose accept loop, copy pairs, pair tracking and bounded drain share
       # state across goroutines. The detector needs cgo, which the runners have gcc for. The lane
       # tests hold a fake clock, so they are deterministic under it.
+      #
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
+      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
+      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof
@@ -1770,9 +1911,17 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
-  # site to GitHub Pages (https://sjawhar.github.io/legion/), one push at a time in push order.
+  # site to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the repository
+  # it runs in (https://sjawhar.github.io/legion/ today), one push at a time in push order.
   # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
   # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
   # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
@@ -1784,6 +1933,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
     uses: ./.github/workflows/docs-site.yaml
+    with:
+      ci-ok-changes: ${{ toJSON(needs.changes) }}
 
   contracts:
     needs: changes
@@ -1809,6 +1960,13 @@ jobs:
         run: bun run build
         working-directory: packages/contracts
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   conflicts-script:
     needs: changes
     if: needs.changes.outputs.conflicts_script == 'true'
@@ -1826,6 +1984,13 @@ jobs:
         run: bunx tsc --noEmit -p scripts/conflicts
       - name: Test the conflict measurement script
         run: bun test scripts/conflicts
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   envoy-client:
     needs: changes
@@ -1864,6 +2029,13 @@ jobs:
         run: bun run build
         working-directory: packages/envoy-client
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   pi-shared:
     needs: changes
     if: needs.changes.outputs.pi_shared == 'true'
@@ -1886,6 +2058,13 @@ jobs:
       - name: Test pi-shared
         run: bun run test
         working-directory: packages/pi-shared
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   pi-envoy:
     needs: changes
@@ -1955,6 +2134,13 @@ jobs:
         with:
           name: pi-envoy-pr
           path: out/pr-artifacts/*.tgz
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   pi-legion:
     needs: changes
@@ -2047,6 +2233,13 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   dispatch:
     needs: changes
@@ -2172,6 +2365,13 @@ jobs:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
           path: packages/dispatch/e2e/test-results
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # The browser suite's two-process mode (packages/dispatch/e2e/harness-processes.ts): two
   # envoy-dispatch processes against one Postgres, behind e2e/round-robin-proxy.ts, B serving a
   # second build of the dashboard, which is what a rolling release puts in front of a browser. It
@@ -2253,6 +2453,13 @@ jobs:
           name: dispatch-browser-multiprocess-test-results-${{ github.run_attempt }}
           path: packages/dispatch/e2e/test-results
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   claude-envoy:
     needs: changes
     if: needs.changes.outputs.claude_envoy == 'true'
@@ -2293,6 +2500,13 @@ jobs:
         with:
           name: claude-envoy-pr
           path: out/pr-artifacts/*.tgz
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   envoy-go:
     needs: changes
@@ -2392,6 +2606,9 @@ jobs:
       - name: Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)
         run: bash loadtest/common.test.sh
         working-directory: packages/envoy
+      - name: Test loadtest/cluster/cluster.sh (fakes kubectl, gh and curl; no cluster) and compare nats.yaml with a fresh render
+        run: bash loadtest/cluster/cluster.test.sh
+        working-directory: packages/envoy
       # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,
       # to hold the deployer's URL grammar to ASCII; it refuses to run without that locale.
       - name: Rollback and credential test for deploy/scripts/autodeploy.sh (fakes docker/jj/curl and a libpq client; no real Compose or Postgres)
@@ -2423,6 +2640,13 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
@@ -2494,6 +2718,13 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # The race lane: delivery (its intake handler reads the routing settings the poll loop
   # publishes, from NATS's delivery goroutine), the Dispatch store (the pool's one-connection
   # guard, and the hold mark of its own each concurrent read takes), the bus (two connects on one
@@ -2531,7 +2762,7 @@ jobs:
   # the test process (internal/testnats), so no job here needs a container runtime of its own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
-  # kvwatch share this runner. The Dispatch store's tests (store_test.go:27, storetest.go:34) and
+  # kvwatch share this runner. The Dispatch store's tests (store_test.go:28, storetest.go:44) and
   # delivery's (internal/dispatch/delivery/intake_test.go:39-41) read DISPATCH_TEST_DATABASE_URL
   # and skip without it, and cmd/listener/dispatch_resolution_test.go:158 gets its database
   # through internal/testpg, so the job carries the lane's Postgres service; the registry store
@@ -2570,6 +2801,13 @@ jobs:
         run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The
   # one race job that installs Bun: its tests run pmdoc/gen's TypeScript through it. No Postgres:
   # the package talks to no database. Its step is the one in the lane whose deadline is 40 minutes
@@ -2597,6 +2835,13 @@ jobs:
       - name: Race-test pmdoc
         run: go test -race -timeout 40m ./internal/dispatch/pmdoc/...
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The Dispatch API under the race detector, on a runner of its own (the lane's comment above
   # says why). Its tests drive the store, so the job carries the lane's Postgres service.
@@ -2634,6 +2879,13 @@ jobs:
         run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # The document service alone, under the race detector, with a deadline of its own. It is by far
   # the slowest package of the race lane - 1773 s of the 1842 s the first step of envoy-go-race
   # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
@@ -2667,7 +2919,7 @@ jobs:
     # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
     # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
     # opens the store when DISPATCH_TEST_DATABASE_URL is unset
-    # (internal/dispatch/store/storetest/storetest.go:57-61). A skip is a pass, so without the
+    # (internal/dispatch/store/storetest/storetest.go:67-71). A skip is a pass, so without the
     # service this job would be green having run almost nothing.
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
@@ -2694,6 +2946,13 @@ jobs:
       - name: Race-test the document service
         run: go test -race -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
@@ -2730,6 +2989,13 @@ jobs:
       - name: Memory tests of the Dispatch server
         run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The two-process tests (packages/envoy/cmd/dispatch/multiprocess_test.go, INFRA-66): each row
   # starts two real envoy-dispatch processes against one Postgres and one NATS - which is what
@@ -2770,6 +3036,13 @@ jobs:
       - name: Two-process tests of the Dispatch server
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The server-change soak (packages/envoy/cmd/listener/server_change_test.go, INFRA-547): it
   # drives two real envoy-listener binaries over a three-server NATS cluster, with a session
@@ -2815,6 +3088,13 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The two-process tests of the secrets broker (packages/envoy/cmd/broker/multiprocess_test.go,
   # INFRA-236): each row starts real cmd/broker binaries against one Postgres - which is what the
@@ -2863,6 +3143,13 @@ jobs:
       - name: Two-process tests of the secrets broker
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_smoke: the image is built from the Dispatch SPA and the Bun workspace as
@@ -3006,11 +3293,30 @@ jobs:
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
-      - name: The envoy-infra plugin's schema carries the version it was built with
-        run: >-
-          go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&
-          pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'
+      # The schema carries both of the things the release build stamps into the plugin: the
+      # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
+      # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its
+      # build step). That workflow runs on main alone, so this build is what proves the stamp
+      # before a merge, and it proves it under the name the transfer gives the repository rather
+      # than today's: a provider.go that pinned the address instead of taking the -X would still
+      # serve sjawhar/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
+      # install, so the URL is compared literally. The step runs in the module, so the script is
+      # reached by its path from the repository root, and the binary goes under $RUNNER_TEMP as
+      # the docker provider's tarball above does.
+      - name: The envoy-infra plugin's schema carries the version and the download URL it was built with
+        run: |
+          url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)
+          go build -ldflags "-X main.version=1.2.3 -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'" -o "$RUNNER_TEMP/pr" ./cmd/pulumi-resource-envoy-infra
+          # shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion
+          pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'
         working-directory: packages/envoy/infra
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real
   # listener and NATS, every frame rendered by both inbound renderers (renderInbound and Go's
@@ -3063,6 +3369,13 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
 
   # The session stall suites (INFRA-548): each freezes a session's NATS path behind
   # envoy-client's stall proxy (test/stall-proxy.ts) on a real natsd and listener, which
@@ -3127,6 +3440,13 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # Holds every filter in `changes` to every file its job reads, recomputing each Go job's closure
   # with go list (.github/scripts/check-ci-filters.sh). go list runs with GOPROXY=off over an empty
   # module cache, so the job needs Go but downloads no module and restores no cache.
@@ -3146,6 +3466,13 @@ jobs:
       - name: Check every CI filter matches every file its job reads
         run: .github/scripts/check-ci-filters.sh
 
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
   # The worker image's pull-request build: worker-image.yaml builds the head and publishes its
   # sha- tag only. Main's image builds are release.yaml's call of the same workflow.
   worker-image:
@@ -3154,98 +3481,16 @@ jobs:
     uses: ./.github/workflows/worker-image.yaml
     # GitHub refuses a run whose calling job grants less than the called workflow's jobs declare,
     # whatever their `if:` (release.yaml's worker_image job says the same): its workflow-level block
-    # (the build's packages: write) and its `attest` job's id-token and attestations: write. A pull
-    # request run still skips `attest` (its `if:` requires `github.event_name != 'pull_request'`),
-    # and, passing no `with:`, leaves `attest_digest` empty, so the build job runs.
+    # (the build's packages: write, and the actions: read and checks: write of its ci-ok-report
+    # step) and its `attest` job's id-token and attestations: write. A pull request run still skips
+    # `attest` (its `if:` requires `github.event_name != 'pull_request'`), and, passing no
+    # `attest_digest`, leaves it empty, so the build job runs.
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
       id-token: write
       attestations: write
-
-  # The one check that condenses every job above into a verdict: .github/scripts/ci-ok.sh, whose
-  # header says what it decides and why. It passes only when `changes` succeeded (it selected the
-  # jobs from this head's diff), lint succeeded (it runs on every change), every job `changes`
-  # selected succeeded, and every job it did not select succeeded or was skipped. A selected
-  # job's skip fails: a skipped job reports success, and a failed-only re-run of a run whose
-  # `changes` failed can make `changes` succeed and leave the jobs it selects skipped.
-  # SELECTED_BY maps every needed job but `changes` and lint to the output its `if:` tests, and
-  # PULL_REQUEST_ONLY lists the jobs whose `if:` also admits only pull_request;
-  # check-ci-filters.sh holds both to those `if:`s.
-  ci-ok:
-    needs:
-      - changes
-      - lint
-      - ci-images
-      - typecheck
-      - test
-      - docs
-      - contracts
-      - conflicts-script
-      - envoy-client
-      - pi-shared
-      - pi-envoy
-      - pi-legion
-      - dispatch
-      - dispatch-browser-multiprocess
-      - claude-envoy
-      - envoy-go
-      - envoy-infra-go
-      - envoy-go-race
-      - envoy-go-race-pmdoc
-      - envoy-go-race-api
-      - envoy-go-race-docs
-      - dispatch-memory
-      - dispatch-multiprocess
-      - listener-server-change
-      - broker-multiprocess
-      - envoy-smoke
-      - envoy-e2e-local
-      - envoy-session-stall
-      - ci-filters
-      - worker-image
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Condense the selected jobs' results
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-          DRAFT: ${{ github.event.pull_request.draft || false }}
-          EVENT: ${{ github.event_name }}
-          SELECTED_BY: |
-            {
-              "typecheck": "typecheck",
-              "test": "test",
-              "docs": "docs",
-              "contracts": "contracts",
-              "conflicts-script": "conflicts_script",
-              "envoy-client": "envoy_client",
-              "pi-shared": "pi_shared",
-              "pi-envoy": "pi_envoy",
-              "pi-legion": "pi_legion",
-              "dispatch": "dispatch",
-              "dispatch-browser-multiprocess": "dispatch_browser_multiprocess",
-              "claude-envoy": "claude_envoy",
-              "envoy-go": "envoy_go",
-              "envoy-infra-go": "envoy_infra_go",
-              "envoy-go-race": "envoy_go_race",
-              "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
-              "envoy-go-race-api": "envoy_go_race_api",
-              "envoy-go-race-docs": "envoy_go_race_docs",
-              "dispatch-memory": "dispatch_memory",
-              "dispatch-multiprocess": "dispatch_multiprocess",
-              "listener-server-change": "listener_server_change",
-              "broker-multiprocess": "broker_multiprocess",
-              "envoy-smoke": "envoy_smoke",
-              "envoy-e2e-local": "envoy_e2e_local",
-              "envoy-session-stall": "envoy_session_stall",
-              "ci-filters": "ci_filters",
-              "ci-images": "ci_images",
-              "worker-image": "worker_image"
-            }
-          PULL_REQUEST_ONLY: '["worker-image"]'
-        run: .github/scripts/ci-ok.sh
+    with:
+      ci-ok-changes: ${{ toJSON(needs.changes) }}

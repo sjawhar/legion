@@ -58,7 +58,8 @@ func emptyStore(t *testing.T) *Store {
 	t.Cleanup(admin.Close)
 
 	name := "legion_store_test_" + randomSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -924,7 +925,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				}
 				// The merger's phase row is written as the schema under test holds it, for the same
 				// reason: the record store's PutPhase writes columns later migrations add (0067's
-				// assignment).
+				// assignment, and the handoff_records migration's handoff_record and handoff_version).
 				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, merge_note)
 					values ($1, $2, 'merge-claim', 'ready-head', 0, '', '', $3)`,
 					seeded.issue.Key, string(claim.RoleMerger), seeded.mergeNote); err != nil {

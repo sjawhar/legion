@@ -223,7 +223,10 @@ const (
 // gate seed read from Dispatch carries none, and says instead whether that read showed the
 // document's approval request waiting on the agent (RequestWaitsOnAgent), which is what a newer
 // version does to it: a version with neither a mark nor that cannot be placed against a root's
-// wait on its gate, and answers none.
+// wait on its gate, and answers none. Actor is the event's actor: for a review, the person who
+// reviewed, named on the notice the review sends, since that notice goes to the controller when
+// nobody in its tree can hear it (the daemon's parkDecision); the gate seed's read names the
+// reviewer that read found (dispatch.Approval.LatestReviewer).
 type DispatchArtifact struct {
 	Key                 string
 	ArtifactID          string
@@ -252,7 +255,8 @@ func (DispatchArtifact) isFact() {}
 
 // CarriedApprovalReasonPrefix opens the reason of a carried approval: the review Dispatch writes
 // in a person's name when their answer to a decision block was the whole change since the version
-// they approved (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason, whose
+// they approved, or when a later version's text is the text of the version they approved
+// (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason and restoreReason, whose
 // format is "Carried forward from the approval of version %d: ..."). The daemon cannot import that
 // package, so it holds the prefix before the version number as a literal of its own.
 const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
@@ -337,7 +341,9 @@ func (DispatchAskClosed) isFact() {}
 // through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
 // record.AskApproval and its Artifact; a comment names neither), with whose turn it leaves the ask
 // on (WaitingOn: `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one),
-// the actor who made it, and its event's place in the issue's Dispatch event log (Mark).
+// the actor who made it, its event's place in the issue's Dispatch event log (Mark), and the
+// comment's own id (Comment, empty for a hand-back), which is where in Dispatch a person's reply
+// relayed to the controller was made (workflow's relayParkedDecision).
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
@@ -346,6 +352,7 @@ type DispatchAskReply struct {
 	WaitingOn string
 	Actor     dispatch.Actor
 	Mark      record.EventMark
+	Comment   string
 }
 
 func (DispatchAskReply) isFact() {}
@@ -673,18 +680,13 @@ type MergeFailed struct {
 
 func (MergeFailed) isFact() {}
 
-// Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
+// Push records a branch push.
 type Push struct {
 	Repo   string
 	Branch string
 	// Before is the head the push replaced, After the head it left.
-	Before       string
-	After        string
-	ChangedPaths *string
-	Truncated    *string
-	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
-	// a listener that predates the field.
-	Forced *string
+	Before string
+	After  string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
@@ -727,7 +729,16 @@ type HandoffComplete struct {
 	Summary    string
 	Verdict    string
 	Ready      bool
-	Commit     string
+	// Commit is the commit the completion reports: the implementer's pushed tip for an implementing
+	// round, the commit retro stands on, the head the merger's READY names; none for the planner,
+	// the tester or the reviewer.
+	Commit string
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record the completion of a phase
+	// with a handoff ends with (phase.Handoff): the route read it back from Dispatch and held it to
+	// the issue, the phase's word, this version and the claim's session before it applied the fact.
+	// Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
 	// answer the route's READY checks give a pull request whose change touches a path the project's
 	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.
@@ -795,7 +806,10 @@ func (SignOff) isFact() {}
 // RequestAsk is the approval request the read found open (dispatch.Approval.AskID, "" when none
 // was), and RequestWaitsOnAgent says it waited on the agent (a reply or a newer version since it
 // was handed to the person): the registration writes that request's mirror row as the read found
-// it, at Since.
+// it, at Since. ReviewedBy is who gave the review either version names
+// (dispatch.Approval.LatestReviewer), zero with neither: the notice the registration sends names
+// that person, since it goes to the controller when nobody in the tree can hear it (the daemon's
+// parkDecision).
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -809,6 +823,7 @@ type GateRegistered struct {
 	Since                   record.EventMark
 	RequestAsk              string
 	RequestWaitsOnAgent     bool
+	ReviewedBy              dispatch.Actor
 }
 
 func (GateRegistered) isFact() {}

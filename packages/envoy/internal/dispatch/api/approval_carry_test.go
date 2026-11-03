@@ -314,6 +314,12 @@ func documentReviews(t *testing.T, handler http.Handler, artifactID string) []se
 // latest. It returns that review.
 func requireCarriedReview(t *testing.T, handler http.Handler, artifactID string, version, from int, askID *string) servedReview {
 	t.Helper()
+	return requireReviewCarriedWith(t, handler, artifactID, version, from, carrySentence(from), askID)
+}
+
+// requireReviewCarriedWith is requireCarriedReview for a carry whose review records reason.
+func requireReviewCarriedWith(t *testing.T, handler http.Handler, artifactID string, version, from int, reason string, askID *string) servedReview {
+	t.Helper()
 	reviews := documentReviews(t, handler, artifactID)
 	var approval *servedReview
 	for index := range reviews {
@@ -332,8 +338,8 @@ func requireCarriedReview(t *testing.T, handler http.Handler, artifactID string,
 	if string(carried.Actor) != string(approval.Actor) {
 		t.Fatalf("carried review actor = %s, want the approval's %s", carried.Actor, approval.Actor)
 	}
-	if carried.Reason == nil || *carried.Reason != carrySentence(from) {
-		t.Fatalf("carried review reason = %v, want %q", carried.Reason, carrySentence(from))
+	if carried.Reason == nil || *carried.Reason != reason {
+		t.Fatalf("carried review reason = %v, want %q", carried.Reason, reason)
 	}
 	if !reflect.DeepEqual(carried.AskID, askID) {
 		t.Fatalf("carried review ask_id = %v, want %v", carried.AskID, askID)
@@ -586,23 +592,12 @@ func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
 
 // setLiveBlockAttributes writes attributes onto the typed block blockID of the document through
 // the server's own live attribute write, as the answer route writes an answer into its block:
-// inside a transaction joined with Docs.Join, committed through its ledger, as the agent's
-// session.
+// setBlockAttributes' write (block_pointers_test.go), as the agent's session, failing the test
+// where that write is refused.
 func setLiveBlockAttributes(t *testing.T, database *store.Store, documents docs.API, artifactID, blockID string, attributes map[string]any) {
 	t.Helper()
-	ctx := context.Background()
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the attribute write: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	documentCtx, ledger := documents.Join(ctx, tx)
-	defer ledger.Discard()
-	if err := documents.SetBlockAttributes(documentCtx, artifactID, blockID, attributes, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if err := setBlockAttributes(database, documents, artifactID, blockID, attributes, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 		t.Fatalf("set block %q attributes %v: %v", blockID, attributes, err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit the attribute write: %v", err)
 	}
 }
 
@@ -781,13 +776,15 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }
 
-// Stale: the agent deletes a block the human answered and approved, then inserts it again with
-// its id and wording. Its row stays answered - settlement retracts only an open ask - so the row
-// says the block he answered is back, with no action of his. The inserted block shows open until
+// The agent deletes a block the human answered and approved, then inserts it again with its id and
+// wording. Its row stays answered - settlement retracts only an open ask - so the row says the
+// block he answered is back, with no action of his. The inserted block shows open until
 // settlement writes the row's answer back into it, and a block that shows other than its row's
-// state carries nothing; once it does, the version holds every block as the approved version held
-// it, which is nothing new of his. Neither version carries.
-func TestADeletedAndRestoredAnsweredBlockCarriesNothing(t *testing.T) {
+// state carries nothing: that version stays stale. Once settlement writes the answer back, the
+// version holds every block as the approved version held it, which is no answer of his, so the
+// answer carry carries nothing; but its text is then the approved version's again, and that
+// carries the approval (approval_restore_test.go).
+func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -821,7 +818,11 @@ func TestADeletedAndRestoredAnsweredBlockCarriesNothing(t *testing.T) {
 	if ask := readBlockAsk(t, handler, asks["region"]); ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "alice" {
 		t.Fatalf("the block's ask after the delete and the insert = state %q answer %#v, want alice's answer kept", ask.State, ask.Answer)
 	}
-	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+	if restoredText, approvedText := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5), versionMarkdown(t, handler, issue.PrimaryArtifactID, 2); restoredText != approvedText {
+		t.Fatalf("version 5 = %s, want the approved version 2's text, %s", restoredText, approvedText)
+	}
+	requireReviewCarriedWith(t, handler, issue.PrimaryArtifactID, 5, 2, restoreSentence(2), nil)
 }
 
 // Stale: a block the human answered before his approval, which the approved version did not

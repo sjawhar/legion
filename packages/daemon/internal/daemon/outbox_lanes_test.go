@@ -177,6 +177,9 @@ func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, 
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -234,6 +237,9 @@ func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error)
 	return dispatch.Approval{}, nil
 }
 func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
+	return dispatch.Handoff{}, nil
+}
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -446,6 +452,45 @@ func TestACommittedRowRunsOnItsLaneWithoutASweep(t *testing.T) {
 	testwait.Eventually(t, "the sweep ran the unwoken row", func() bool {
 		return client.postsTo("LEGION-209") == 1 && outboxRows(t, pool) == 0
 	})
+}
+
+// enqueuingByID writes rows with their ids, as workflow.EnqueueNaming writes a start or catch-up
+// that claims kept decisions.
+type enqueuingByID struct {
+	records record.Store
+	rows    []record.OutboxRow
+}
+
+func (h enqueuingByID) Apply(ctx context.Context, tx pgx.Tx, _ intake.Fact) (intake.Result, error) {
+	for _, row := range h.rows {
+		if _, err := h.records.EnqueueID(ctx, tx, row); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	return intake.Result{}, nil
+}
+
+// A row written with its id through the workflow's store wakes its lane as it commits, as a row
+// written without one does: a catch-up that claims kept decisions (workflow.EnqueueNaming, the
+// hand-over's and the ready's) is published at once rather than after the next sweep.
+func TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	clock := microClock()
+	client := &postingDispatch{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: client, log: quietLogger()}
+	runLanes(t, runner, clock)
+
+	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "committed with its id"}, clock.Now())
+	if _, err := intake.ApplyFact(context.Background(), pool, "lanes-test", "by-id", intake.DaemonBooted{Boot: 1},
+		enqueuingByID{records: wakingRecords(runner), rows: []record.OutboxRow{row}}); err != nil {
+		t.Fatalf("commit the row: %v", err)
+	}
+	testwait.Eventually(t, "the row written with its id was posted", func() bool {
+		return client.postsTo("LEGION-208") == 1 && outboxRowsOf(t, pool, "LEGION-208") == 0
+	})
+	if _, sweeps := clock.armed(outboxLease); sweeps != 1 {
+		t.Fatalf("sweep timers armed = %d, want the one Run armed at boot and never fired", sweeps)
+	}
 }
 
 // A row due later runs at its moment and not before: the commit wakes its lane, which finds

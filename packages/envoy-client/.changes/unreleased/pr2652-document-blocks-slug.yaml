@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+    `readDocumentBlocks` returns the document's `slug` beside its `name`, since Dispatch now finds the
+    document an upload replaces by its name or its slug.
+time: 2026-11-02T01:10:00.000000000Z
+custom:
+    Issue: pr2652
