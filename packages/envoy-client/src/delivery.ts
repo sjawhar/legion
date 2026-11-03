@@ -536,9 +536,9 @@ function wholeItemRoute(item: CarriedItem): string {
   return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
 }
 
-/** The note a reader is given when an event carries only the first part of an item's body: the
- *  same sentence the Go deliverer writes as its `Note:` line (`internal/session/session.go`).
- *  Undefined when the event says nothing was cut. */
+/** The note a reader is given when an event carries only the first part of an item's body,
+ *  naming the route that answers the item whole. Undefined when the event says nothing was
+ *  cut. */
 function carriedBodyNote(event: DispatchEvent): string | undefined {
   if (!bodyWasCut(event.payload)) return undefined;
   const item = carriedItem(event);
@@ -1044,8 +1044,8 @@ export function renderInbound(
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
   let pictures: string[] = [];
-  // The note a cut body earns on the rendered record, the one the Go deliverer writes as its
-  // `Note:` line (`internal/session/session.go`); undefined when nothing was cut.
+  // The note a cut body earns on the rendered record (carriedBodyNote); undefined when nothing
+  // was cut.
   let bodyNote: string | undefined;
   let inReplyTo = envelope.in_reply_to;
   // On an ask event the payload is the ask itself, whose author is another follower's

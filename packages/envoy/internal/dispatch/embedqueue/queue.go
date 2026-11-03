@@ -513,9 +513,9 @@ type budgetedGroup struct {
 // has to reserve more than one minute's worth of budget for a single group, or its bytes
 // (embed.BoundedBytes) past MaxBatchBytes when that is set, so every background call fits the
 // place's request timeout (Azure's, azureMaxBatchBytes' comment). Each row is in exactly one
-// group. A row that alone meets or passes either limit - a maxInputChars-length document under
+// group. A row that alone meets or passes either limit - a MaxInputRunes-length document under
 // a small quota, say - still gets a group of its own rather than being split further: both counts
-// already truncate at maxInputChars, so even that worst case is a known, bounded size (at most
+// already truncate at MaxInputRunes, so even that worst case is a known, bounded size (at most
 // 128,000 bytes, under Azure's 320,000), and one row is the smallest unit this package ever
 // embeds. Each group's tokens field is the sum of its own rows' estimates, computed here once and
 // carried forward rather than re-estimated from the group's joined texts later.

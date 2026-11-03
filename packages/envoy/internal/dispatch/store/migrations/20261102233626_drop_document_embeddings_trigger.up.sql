@@ -15,7 +15,7 @@
 -- is the one kind that is still embedded whole.
 --
 -- The rows the dropped trigger wrote stay as they are. The release before this one reads them
--- while it serves, and a later release deletes each one whose owner holds a window whose
--- vector is current.
+-- while it serves, and this release's block index (docs retireWholeText) deletes each one whose
+-- owner holds a window whose vector is current.
 drop trigger artifact_versions_embeddings_enqueue on artifact_versions;
 drop function embeddings_enqueue_document();

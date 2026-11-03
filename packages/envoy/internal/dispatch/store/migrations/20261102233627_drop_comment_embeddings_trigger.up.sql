@@ -8,7 +8,7 @@
 -- add the trigger.
 --
 -- The rows the dropped trigger wrote stay as they are. The release before this one reads them
--- while it serves, and a later release deletes each one whose owner holds a window whose
--- vector is current.
+-- while it serves, and this release's block index (docs retireWholeText) deletes each one whose
+-- owner holds a window whose vector is current.
 drop trigger comments_embeddings_enqueue on comments;
 drop function embeddings_enqueue_comment();

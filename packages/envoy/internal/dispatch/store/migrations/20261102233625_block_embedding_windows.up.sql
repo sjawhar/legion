@@ -15,8 +15,8 @@
 -- and reads: document_block, comment_block and message_block for a window of a document's, a
 -- comment's or a message's blocks, and ask_part for a window of an ask's question, options and
 -- answers. Both builds' kinds are admitted at once, because the release before this one keeps
--- writing the whole-text rows while it serves, and a later release deletes them once each
--- owner holds a window whose vector is current.
+-- writing the whole-text rows while it serves, and this release's block index deletes them
+-- (docs retireWholeText) once each owner holds a window whose vector is current.
 --
 -- The new list admits every kind the old one did, so no row stored under it can fail the new
 -- check. It is added `not valid` all the same, the one shape this set adds a constraint in: a

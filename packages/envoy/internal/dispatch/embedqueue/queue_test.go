@@ -778,7 +778,7 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 // TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce proves both
 // halves of embedRows' own contract at once: chunkForBudget actually produces more than one
 // group once a batch's combined estimated tokens exceed the embedder's BackgroundTokensPerMinute
-// (Bedrock's 200,000: 25 rows at maxInputChars, each truncated to exactly 8,000 estimated tokens,
+// (Bedrock's 200,000: 25 rows at embed.MaxInputRunes, each truncated to exactly 8,000 estimated tokens,
 // fill one 200,000-token group exactly; a 26th, poisoned row starts a second), and a later
 // group's failure never re-embeds an earlier group's already-committed rows: Embed is called
 // exactly three times (once for each group, plus confirmSoloFailure's own canary probe once the
@@ -787,7 +787,7 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce(t *testing.T) {
 	database := storetest.Open(t)
 	const healthyCount = 25                    // 25 * 8,000 = 200,000 = Bedrock's BackgroundTokensPerMinute exactly
-	healthyTitle := strings.Repeat("h", 32000) // embed.maxInputChars (unexported): truncates to exactly 8,000 estimated tokens
+	healthyTitle := strings.Repeat("h", 32000) // embed.MaxInputRunes: truncates to exactly 8,000 estimated tokens
 	poisonTitle := "poisoned"
 	seedManyIssues(t, database, "CHNK", healthyCount+1, func(i int) string {
 		if i == healthyCount {
