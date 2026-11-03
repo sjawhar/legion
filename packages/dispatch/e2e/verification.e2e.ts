@@ -123,7 +123,7 @@ A check nobody has run yet reads no result.
     await expect(result).toHaveCount(1);
     await expect(result.getByTestId("verification-result-verdict")).toHaveText("Pass");
     // The commit the result ran at is the pull request's head, so the result still stands.
-    await expect(result.getByTestId("verification-result-currency")).toHaveText("current");
+    await expect(result.getByTestId("verification-result-currency")).toHaveText("Current");
     await expect(result.getByTestId("verification-result-role")).toHaveText("tester");
     await expect(result.getByTestId("verification-result-surface")).toHaveText("browser");
     await expect(result.getByTestId("verification-result-observed")).toHaveText("3 checks listed");
@@ -210,14 +210,14 @@ A result at the head reads passed.
     // The result itself still says it passed; what changed is that it no longer speaks for the
     // work as it stands.
     await expect(older.getByTestId("verification-result-verdict")).toHaveText("Pass");
-    await expect(older.getByTestId("verification-result-currency")).toHaveText("older");
+    await expect(older.getByTestId("verification-result-currency")).toHaveText("Older");
     await expect(older.getByTestId("verification-result-commit")).toHaveText(
       firstHead.slice(0, 12)
     );
 
     const head = checks.filter({ hasText: "A result at the head reads passed." });
     await expect(head).toHaveAttribute("data-check-state", "passed");
-    await expect(head.getByTestId("verification-result-currency")).toHaveText("current");
+    await expect(head.getByTestId("verification-result-currency")).toHaveText("Current");
   } finally {
     await alice.close();
   }
