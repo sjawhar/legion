@@ -148,7 +148,8 @@ func serve(cfg config) error {
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
-		MinRenew: 30 * time.Second,
+		// MinRenew unset is leasetime.HelperMinRenew, the floor the lease bound in
+		// internal/broker/config counts this renewer's cadence against.
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()

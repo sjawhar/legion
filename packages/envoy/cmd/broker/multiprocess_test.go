@@ -329,7 +329,7 @@ func (f *brokerFleet) Stop(t *testing.T, i int) {
 // fastSweep is the BROKER_SWEEP_SECONDS the rows that watch the replica count move start their
 // processes with. A pod counts the fleet at each beat of its serving clock, which beats once a
 // sweep, and a stopped pod's row stops counting three sweeps after its last beat
-// (config.NotServingSweeps), so one second makes the whole settling of a stopped pod about four
+// (leasetime.NotServingSweeps), so one second makes the whole settling of a stopped pod about four
 // seconds where the default five would make it twenty. It changes nothing else about these
 // brokers: the default lease is far longer than the shortest one a sweep this short allows.
 const fastSweep = "BROKER_SWEEP_SECONDS=1"
@@ -1341,7 +1341,7 @@ func TestTwoBrokers(t *testing.T) {
 	//
 	// Coming back down is not immediate, and the row waits out what the design states rather
 	// than a figure of its own: the stopped pod's row has to age past its not_serving_after
-	// (config.NotServingSweeps sweeps) and each surviving pod has to beat once more. At
+	// (leasetime.NotServingSweeps sweeps) and each surviving pod has to beat once more. At
 	// BROKER_SWEEP_SECONDS=1 that is about four seconds, and the wait ends on the surviving
 	// pods' own log lines rather than on a clock.
 	t.Run("10_TheRereadRefusalFollowsThePodCountUpAndBackDown", func(t *testing.T) {

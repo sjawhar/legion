@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/redact"
@@ -30,6 +31,8 @@ type Server struct {
 	PeerOf   func(*net.UnixConn) (*Peer, error)
 	Log      *slog.Logger
 	// MinRenew floors the renew cadence; the interval is a third of the lease the broker gave.
+	// Unset, it is leasetime.HelperMinRenew, the wait the broker's lease bound counts this
+	// renewer by, so the two are one number rather than two that can drift.
 	MinRenew time.Duration
 }
 
@@ -616,7 +619,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 // retry: a corrected clock can make the next proof valid.
 func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
 	for {
-		interval := max(s.MinRenew, time.Until(lease)/3)
+		interval := max(s.minRenew(), time.Until(lease)/3)
 		select {
 		case <-time.After(interval):
 		case <-sess.stop:
@@ -638,6 +641,15 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		}
 		lease = next
 	}
+}
+
+// minRenew is the floor under the renew cadence: MinRenew, or leasetime.HelperMinRenew when
+// nothing set one.
+func (s *Server) minRenew() time.Duration {
+	if s.MinRenew <= 0 {
+		return leasetime.HelperMinRenew
+	}
+	return s.MinRenew
 }
 
 // revokeLapsed retries a lapsed enrollment's revoke (revokeOnce) until it succeeds, the session

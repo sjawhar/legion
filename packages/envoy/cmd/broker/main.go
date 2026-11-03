@@ -37,6 +37,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -477,7 +478,7 @@ func main() {
 	// leases that run out swept. It beats on serving, not ctx: this pod still answers renewals
 	// through its drain, so it is still a broker serving, and a gap in the beats there would read
 	// as an outage.
-	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: config.NotServingSweeps * sweep,
+	clock := &enroll.ServingClock{Enrollments: enr, Interval: sweep, NotServingAfter: leasetime.NotServingSweeps * sweep,
 		OnReplicas: rereadRate.SetReplicas}
 	go clock.Run(serving)
 	go func() {

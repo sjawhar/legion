@@ -84,6 +84,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/buildversion"
@@ -532,13 +533,12 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// nextBackoff advances the 2s -> 10s backoff every poll loop in this package uses.
+// nextBackoff advances the backoff every poll loop in this package uses, from
+// leasetime.RenewBackoffInitial to leasetime.RenewBackoffMax. Those two live in
+// internal/broker/leasetime because the broker's lease bound counts this renewer's waits by
+// them: config.Load refuses a lease that cannot outlive an outage and this schedule.
 func nextBackoff(cur time.Duration) time.Duration {
-	next := cur * 2
-	if next > 10*time.Second {
-		next = 10 * time.Second
-	}
-	return next
+	return min(2*cur, leasetime.RenewBackoffMax)
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +674,7 @@ func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
 }
 
 func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
-	backoff := 2 * time.Second
+	backoff := leasetime.RenewBackoffInitial
 	for {
 		var token string
 		var tokenErr error
@@ -712,7 +712,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 			backoff = nextBackoff(backoff)
 			continue
 		}
-		backoff = 2 * time.Second
+		backoff = leasetime.RenewBackoffInitial
 		lease := time.Until(expires)
 		if lease <= 0 {
 			lease = time.Second
