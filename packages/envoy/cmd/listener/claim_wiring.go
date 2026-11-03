@@ -20,8 +20,9 @@ type subscribeBody struct {
 	Title          string   `json:"title"`
 	Capabilities   []string `json:"capabilities"`
 	SelfSubscribed bool     `json:"self_subscribed"`
-	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
-	// hostname): where the session process actually runs, as opposed to machineID below,
+	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, then an agent box's AGENTBOX_HOST,
+	// falling back to the kernel hostname): where the session process actually runs, as opposed
+	// to machineID below,
 	// which is always the registering listener's own machine (unrelated to the caller). No
 	// delivery reads it: an inbox message is the owner's to deliver - the listener the session's
 	// stored subscription names (the one store.Registry.Match delivers on), which this

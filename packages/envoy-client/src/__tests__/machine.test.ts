@@ -1,34 +1,45 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { hostname } from "node:os";
 import { machineID } from "../machine";
 
-describe("machineID", () => {
-  test("uses the OS hostname instead of the HOSTNAME environment variable", () => {
-    const originalHostname = process.env.HOSTNAME;
-    const originalMachineId = process.env.ENVOY_MACHINE_ID;
-    process.env.HOSTNAME = "envoy-test-hostname-override";
-    delete process.env.ENVOY_MACHINE_ID;
+const KEYS = ["HOSTNAME", "ENVOY_MACHINE_ID", "AGENTBOX_HOST"] as const;
 
-    try {
-      expect(machineID()).toBe(hostname());
-      expect(machineID()).not.toBe(process.env.HOSTNAME);
-    } finally {
-      if (originalHostname === undefined) delete process.env.HOSTNAME;
-      else process.env.HOSTNAME = originalHostname;
-      if (originalMachineId === undefined) delete process.env.ENVOY_MACHINE_ID;
-      else process.env.ENVOY_MACHINE_ID = originalMachineId;
+describe("machineID", () => {
+  let saved: Partial<Record<(typeof KEYS)[number], string>>;
+  beforeEach(() => {
+    saved = {};
+    for (const key of KEYS) {
+      if (process.env[key] !== undefined) saved[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+  afterEach(() => {
+    for (const key of KEYS) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   });
 
-  test("honors the listener's logical machine name when ENVOY_MACHINE_ID is set", () => {
-    const originalMachineId = process.env.ENVOY_MACHINE_ID;
-    process.env.ENVOY_MACHINE_ID = "logical-machine-name";
+  test("uses the OS hostname instead of the HOSTNAME environment variable", () => {
+    process.env.HOSTNAME = "envoy-test-hostname-override";
+    expect(machineID()).toBe(hostname());
+    expect(machineID()).not.toBe(process.env.HOSTNAME);
+  });
 
-    try {
-      expect(machineID()).toBe("logical-machine-name");
-    } finally {
-      if (originalMachineId === undefined) delete process.env.ENVOY_MACHINE_ID;
-      else process.env.ENVOY_MACHINE_ID = originalMachineId;
-    }
+  test("honors the listener's logical machine name when ENVOY_MACHINE_ID is set", () => {
+    process.env.ENVOY_MACHINE_ID = "logical-machine-name";
+    process.env.AGENTBOX_HOST = "example-host-devbox";
+    expect(machineID()).toBe("logical-machine-name");
+  });
+
+  test("inside an agent box, names the machine the box runs on, not the container's hostname", () => {
+    process.env.AGENTBOX_HOST = "example-host-devbox";
+    expect(machineID()).toBe("example-host-devbox");
+  });
+
+  test("an empty AGENTBOX_HOST falls back to the kernel hostname", () => {
+    process.env.AGENTBOX_HOST = "";
+    expect(machineID()).toBe(hostname());
   });
 });
