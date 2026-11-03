@@ -90,10 +90,18 @@ func New(t testing.TB, issue string) *Disk {
 // Environment is the environment a disk's commands run in: the process's own without any git or
 // jj configuration or identity it carries — a Legion pod hands every process a GIT_CONFIG_*
 // block of its own — and with a home, an empty user configuration and an identity of the test's.
+//
+// It drops every LEGION_ variable too, and that is not tidiness: the check under test reads
+// LEGION_WORKSPACE out of this environment and rescues the whole disk that workspace sits on
+// (rescue.StateDirOf). Run inside a Legion pod, a fixture that carried the pod's own
+// LEGION_WORKSPACE would push the live issue workspace's unpushed commits to the real
+// repository under the fixture's rescue branch name, and a case that means to give the shim no
+// workspace at all would instead give it the pod's.
 func Environment(home string) []string {
 	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
 		key, _, _ := strings.Cut(entry, "=")
-		return strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "JJ_") || key == "HOME" || key == "XDG_CONFIG_HOME"
+		return strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "JJ_") || strings.HasPrefix(key, "LEGION_") ||
+			key == "HOME" || key == "XDG_CONFIG_HOME"
 	})
 	return append(env,
 		"HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
