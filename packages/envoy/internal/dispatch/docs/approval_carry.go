@@ -61,13 +61,16 @@ import (
 //
 // A version whose text is the approved text carries that approval too. The document's newest
 // review approves version A; a later version, N, is stored with A's markdown byte for byte - an
-// accidental edit undone exactly, or a version a route wrote over a document that changed nothing.
-// N holds nothing its reviewer has not agreed to, so Dispatch records his approval of N in his
-// name, in the transaction that writes N, rather than asking him to approve A's text again. Only
-// the newest review carries this way: when it requests changes no approval stands, and an older
-// approval was superseded by it. A's markdown is compared as it was stored, so a renderer change
-// between A and N leaves N a change, as N's diff against A shows. A version whose decision blocks
-// differ from A's does not hold A's text, so the answer carry alone decides it, as before this rule.
+// accidental edit undone exactly, or a version a route wrote over a document that changed nothing -
+// and each decision block of N is as its row has it (rowBackedBlocks), so no block in it shows
+// other than what was decided: a block A showed open that someone answered since comes back in A's
+// bytes while its row holds that answer, and carries nothing. Such an N holds nothing its reviewer
+// has not agreed to, so Dispatch records his approval of N in his name, in the transaction that
+// writes N, rather than asking him to approve A's text again. Only the newest review carries this
+// way: when it requests changes no approval stands, and an older approval was superseded by it.
+// A's markdown is compared as it was stored, so a renderer change between A and N leaves N a
+// change, as N's diff against A shows. A version whose decision blocks differ from A's does not
+// hold A's text, so the answer carry alone decides it, as before this rule.
 
 // carryReason is the reason a carried review records, naming the approval it follows.
 const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
@@ -118,7 +121,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 		return nil, err
 	}
 	if review == nil {
-		return restoreApproval(ctx, tx, s.events, artifactID, version.Number, rendered.markdown, *newest, s.serverURL)
+		return restoreApproval(ctx, tx, s.events, artifactID, version.Number, rendered.markdown, rendered.tree, *newest, s.serverURL)
 	}
 	return writeCarriedReview(ctx, tx, s.events, artifactID, version.Number, *review, fmt.Sprintf(carryReason, review.Version), s.serverURL)
 }
@@ -126,24 +129,49 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 // CarryRestoredApproval is the restore alone, for the route that writes a document version itself
 // rather than through writeVersionTx - an upload that replaces a document (the api package's
 // storeArtifact) - once that version, number, is written with markdown and the open approval
-// request has moved to it (MoveApprovalAsk). The answer carry has nothing to read there: an
-// upload's markdown writes no answer, since the server takes a block's server-owned attributes
-// off an upload. It returns the events it appended, as carryApproval does.
-func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown, serverURL string) ([]model.Event, error) {
+// request has moved to it (MoveApprovalAsk). tree is markdown's read-back, which the caller holds
+// when its write left one, and nil otherwise, when markdown is parsed here if the bytes match.
+// The answer carry has nothing to read there: an upload's markdown writes no answer, since the
+// server takes a block's server-owned attributes off an upload. It returns the events it
+// appended, as carryApproval does.
+func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, serverURL string) ([]model.Event, error) {
 	newest, err := NewestReview(ctx, tx, artifactID)
 	if err != nil || newest == nil || newest.State != "approved" {
 		return nil, err
 	}
-	return restoreApproval(ctx, tx, broker, artifactID, number, markdown, *newest, serverURL)
+	return restoreApproval(ctx, tx, broker, artifactID, number, markdown, tree, *newest, serverURL)
 }
 
 // restoreApproval carries newest, the document's newest review and an approval, to version number
-// of artifactID when that version's markdown is the text newest approved (restoresApprovedText),
-// and appends nothing otherwise.
-func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, newest model.ArtifactReview, serverURL string) ([]model.Event, error) {
+// of artifactID when that version's markdown is the text newest approved (restoresApprovedText)
+// and every decision block it holds is as its row has it, and appends nothing otherwise. The text
+// alone is not the approved document: a block the approved version showed open, answered by
+// someone since, comes back in the same bytes while its row holds a decision nobody approved,
+// which settlement then writes into the next version. So the blocks are read as the answer carry
+// reads N's (askNodes, rowBackedBlocks), from tree, the version's own, or from markdown parsed
+// when tree is nil; that read is made only once the bytes match.
+func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, newest model.ArtifactReview, serverURL string) ([]model.Event, error) {
 	restored, err := restoresApprovedText(ctx, tx, artifactID, newest.Version, markdown)
 	if err != nil || !restored {
 		return nil, err
+	}
+	if tree == nil {
+		if tree, err = pmdoc.ParseRendering(markdown); err != nil {
+			return nil, skipUnreadableVersion(artifactID, number, err)
+		}
+	}
+	nodes, readable := askNodes(tree)
+	if !readable {
+		return nil, nil
+	}
+	if len(nodes) > 0 {
+		rows, err := loadAskBlocks(ctx, tx, artifactID)
+		if err != nil {
+			return nil, err
+		}
+		if _, backed := rowBackedBlocks(nodes, rows); !backed {
+			return nil, nil
+		}
 	}
 	return writeCarriedReview(ctx, tx, broker, artifactID, number, newest, fmt.Sprintf(restoreReason, newest.Version), serverURL)
 }

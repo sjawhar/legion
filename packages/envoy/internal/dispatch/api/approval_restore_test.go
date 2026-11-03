@@ -188,6 +188,62 @@ func TestAnUploadOfTheApprovedTextCarriesTheApproval(t *testing.T) {
 	}
 }
 
+// approveThenOthersAnswer writes restoreSpec and waveAsk into a new issue's spec, has alice approve
+// version 1 while the block is open, and has bob answer the block, which settlement writes into
+// version 2: the approval is stale, and the block's row now holds bob's decision.
+func approveThenOthersAnswer(t *testing.T, handler http.Handler, title string) approvedDocument {
+	t.Helper()
+	issue := createInteractionIssue(t, handler, "TEST", title, restoreSpec+"\n"+waveAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveBlock)
+	if review := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", ""); review.Version != 1 {
+		t.Fatalf("review = %#v, want an approval of version 1", review)
+	}
+	answerDecisionBlock(t, handler, asks["wave"], "bob", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+	return approvedDocument{issueKey: issue.Key, artifactID: issue.PrimaryArtifactID, asks: asks}
+}
+
+// The approved text is not the approved document once a decision block in it was decided since:
+// bob answered the block alice approved open, and the agent deletes the block and inserts its
+// approved markdown again. Version 4 is version 1 byte for byte, but its block shows open while
+// its row holds bob's answer, which settlement writes back next. The restore holds each block to
+// its row as the answer carry does, so nothing is carried: no review in alice's name, and the
+// approval request the agent opened at version 2 stays open.
+func TestTheApprovedTextOverABlockDecidedSinceCarriesNothing(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	document := approveThenOthersAnswer(t, handler, "Approved text over a decided block")
+	request := requestApproval(t, handler, document.artifactID)
+
+	agentEdit(t, handler, document.artifactID, 3, map[string]string{"op": "delete", "block": "wave"})
+	agentEdit(t, handler, document.artifactID, 4, map[string]string{"op": "insert", "after": "end", "markdown": waveAsk})
+	if restored, approved := versionMarkdown(t, handler, document.artifactID, 4), versionMarkdown(t, handler, document.artifactID, 1); restored != approved {
+		t.Fatalf("version 4 = %q, want version 1's text %q", restored, approved)
+	}
+	// The open request makes the document read awaiting rather than stale.
+	requireNoCarry(t, handler, document.artifactID, 1, "awaiting")
+	if ask := readBlockAsk(t, handler, request.ID); ask.State != "open" {
+		t.Fatalf("approval request after version 4 = state %q answer %#v, want it still open", ask.State, ask.Answer)
+	}
+}
+
+// The upload route holds the blocks to their rows too: an upload of version 1's text over a block
+// bob decided since carries nothing.
+func TestAnUploadOfTheApprovedTextOverABlockDecidedSinceCarriesNothing(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	document := approveThenOthersAnswer(t, handler, "Uploaded approved text over a decided block")
+
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+document.issueKey+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec.md", "content": versionMarkdown(t, handler, document.artifactID, 1),
+	})
+	adviceFromResponse(t, uploaded.Code, uploaded.Body.String())
+	waitForArtifactVersion(t, handler, document.artifactID, 3)
+	if restored, approved := versionMarkdown(t, handler, document.artifactID, 3), versionMarkdown(t, handler, document.artifactID, 1); restored != approved {
+		t.Fatalf("version 3 = %q, want version 1's text %q", restored, approved)
+	}
+	requireNoCarry(t, handler, document.artifactID, 1, "stale")
+}
+
 // (b) The undo misses by one character: version 3 is version 1 with its period an exclamation
 // mark, which is a change, so the approval stays stale, the undo supersedes nothing (the approval
 // was already stale) and a request for approval opens one.

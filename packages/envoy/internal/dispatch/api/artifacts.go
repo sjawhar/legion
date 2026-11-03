@@ -603,7 +603,7 @@ func (s *server) storeArtifact(
 		// every version the document service writes does (docs.carryApproval): an exact undo
 		// uploaded is the approved document.
 		carried, err := docs.CarryRestoredApproval(
-			r.Context(), tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, s.deps.ServerURL,
+			r.Context(), tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, documentReadBack, s.deps.ServerURL,
 		)
 		if err != nil {
 			s.writeHandlerError(w, err)
