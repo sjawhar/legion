@@ -43,7 +43,7 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status with `dispatch` or route it, and claim it only as a role of its tree, whatever its claim reads. An outside claim can take the tree out of the workflow. A status write is set back or stands.
 
-A claim holds while its holder is `live` or `unresponsive`: stopped registering, not stopped working. Take its issue only once that session is `gone`, or 20 minutes past its `last_seen`.
+When an issue becomes takeable from its holder: `skill://envoy`.
 
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet.
 
@@ -68,6 +68,7 @@ Link each item you name:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
+dispatch://KEY/spec#b-<block>[@vN]
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/ask/<id>#b-<part>[@vN]

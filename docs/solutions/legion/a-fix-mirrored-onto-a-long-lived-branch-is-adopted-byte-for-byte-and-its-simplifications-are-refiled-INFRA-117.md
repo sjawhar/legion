@@ -32,9 +32,13 @@ mirroring branch:
   `jj new` resurrects the obsolete copy and leaves the change id divergent
   (`Change ID … is divergent`). Recover with `jj new <described commit>` then
   `jj abandon <stale commit>`, and check `jj log -r 'change_id(<prefix>)'` prints one commit.
-- **Prove the tree, with a fileset.** The adoption sits on the issue's handoff commits, so the
-  equality check is `jj diff --from <source sha> --to <adopted sha> --git '~.legion'` printing
-  nothing. Without the fileset the handoffs read as a difference and the check looks failed.
+- **Prove the tree, with a fileset.** The equality check is `jj diff --from <source sha> --to
+  <adopted sha> --git '<fileset>'` printing nothing, where the fileset excludes whatever your
+  branch carries above the fix that is no part of it; without it that content reads as a
+  difference and the check looks failed. The live fileset is
+  `'~(.legion | docs/solutions)'` (`skills/legion-worker/references/conflicts-and-rewrites.md`);
+  it still names `.legion/` because handoffs were committed there until sjawhar/legion#2354, and
+  the adoption of the day sat on the issue's handoff commits.
 - **Equivalence is the fix's hunks, not the file lists.** Two lines that have diverged by hundreds
   of commits cannot match file for file. Name the hunks in the plan (here: `usesCoreTransport`,
   `streamCaptures`, the permission constructor's publish list, the API's prefix refusal), extract
