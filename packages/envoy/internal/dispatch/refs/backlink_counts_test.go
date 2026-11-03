@@ -20,8 +20,11 @@ import (
 
 // backlinkFixture is one graph that fills every arm of graph_edges: each of the view's 26 arms
 // emits at least one edge over it, and every node kind nodeLoaders resolves has a node with an
-// inbound edge. The three tests below read it, so a count, its plan and the view's own shape are
-// all held to the same rows.
+// inbound edge. Every item kind holds a block that is no longer current, carrying a link of its
+// own and pointed at by a mention, an ask's part and a message's block by a reply as well, so
+// each place the view filters a removed block out is a place a count that kept it answers high.
+// The three tests below read it, so a count, its plan and the view's own shape are all held to
+// the same rows.
 type backlinkFixture struct {
 	database *store.Store
 	// manyArms is the issue several arms of the view point at - a child issue, a blocking
@@ -41,6 +44,13 @@ type backlinkFixture struct {
 	// suppresses the comment's own edge, so the link is in no count at all: it is the one row
 	// that tells a count copying that asymmetry from one correcting it.
 	removedBlock string
+	// askPart is a current part of an ask and commentBlock a current block of a comment. A
+	// reply names either in one column (comments.replies_to_block) and only the node id's
+	// prefix tells the two kinds apart, so each is asked for under the other's kind: a count
+	// of comment_block backlinks over a part, or of ask_block backlinks over a block, answers
+	// one where the view answers none the moment an arm loses that prefix test.
+	askPart      string
+	commentBlock string
 }
 
 // newBacklinkFixture writes the fixture into a fresh database. The rows are written as SQL
@@ -206,27 +216,46 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		insertReference(t, tx, "comment", blockComment, "issue", issue)
 	}
 
-	// message_blocks: a message block's part_of; message_block_refs: its mentions.
+	// message_blocks: a message block's part_of; message_block_refs: its mentions. b2 is the
+	// block that is no longer current, which keeps its row with no position and its reference,
+	// as the comment's b3 does.
 	messageBlock := "message/" + rootMessage + "#b1"
-	execFixture(t, tx, "index a message block", `
-		insert into message_blocks (message_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_at)
-		values ($1::uuid, 'b1', $2, 0, 'paragraph', 'sha', 'excerpt', now(), now())
-	`, rootMessage, messageBlock)
-	execFixture(t, tx, "cite the notes document from a message block", `
-		insert into message_block_refs (message_id, block_id, from_node, to_kind, to_id, kind)
-		values ($1::uuid, 'b1', $2, 'artifact', $3, 'mentions')
-	`, rootMessage, messageBlock, notesRef)
+	removedMessageBlock := "message/" + rootMessage + "#b2"
+	for _, block := range []struct {
+		id       string
+		position *int
+	}{{id: "b1", position: new(0)}, {id: "b2"}} {
+		execFixture(t, tx, "index message block "+block.id, `
+			insert into message_blocks (message_id, block_id, node_id, position, type, text_sha256, excerpt,
+			                            made_at, changed_at, removed_at)
+			values ($1::uuid, $2, 'message/' || $1 || '#' || $2, $3, 'paragraph', 'sha', 'excerpt',
+			        now(), now(), case when $3::int is null then now() end)
+		`, rootMessage, block.id, block.position)
+	}
+	// Both blocks cite the notes document, the removed one included: the view drops the removed
+	// block's citation, so a count that kept it answers one too many.
+	for _, block := range []string{"b1", "b2"} {
+		execFixture(t, tx, "cite the notes document from message block "+block, `
+			insert into message_block_refs (message_id, block_id, from_node, to_kind, to_id, kind)
+			values ($1::uuid, $2, 'message/' || $1 || '#' || $2, 'artifact', $3, 'mentions')
+		`, rootMessage, block, notesRef)
+	}
 
-	// comments.replies_to_block and messages.replies_to_block: a reply that names a block.
+	// comments.replies_to_block and messages.replies_to_block: a reply that names a block. A
+	// removed block is answered too, and the edge is the view's: it is counted under the block
+	// itself and never under the item the block has left.
 	commentBlock := "comment/" + blockComment + "#b1"
+	removedCommentBlock := "comment/" + blockComment + "#b3"
 	execFixture(t, tx, "reply to a comment block", `
 		insert into comments (issue_key, author, body, replies_to_block)
 		values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that paragraph', $1)
 	`, commentBlock)
-	execFixture(t, tx, "reply to a message block", `
-		insert into messages (issue_key, author, body, replies_to_block)
-		values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that paragraph', $1)
-	`, messageBlock)
+	for _, block := range []string{messageBlock, removedMessageBlock} {
+		execFixture(t, tx, "reply to message block "+block, `
+			insert into messages (issue_key, author, body, replies_to_block)
+			values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that paragraph', $1)
+		`, block)
+	}
 
 	// ask_blocks: a part's part_of its ask; ask_block_refs: a link a part holds; a reply naming
 	// a part in comments.replies_to_block, which the view tells from a reply to a comment's
@@ -237,31 +266,41 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		returning id::text
 	`)
 	askPart := "ask/" + partedAsk + "#b1"
+	removedAskPart := "ask/" + partedAsk + "#b3"
 	for _, part := range []struct {
 		id       string
-		position int
-	}{{id: "b1", position: 0}, {id: "b2", position: 1}} {
+		position *int
+	}{{id: "b1", position: new(0)}, {id: "b2", position: new(1)}, {id: "b3"}} {
 		execFixture(t, tx, "index ask part "+part.id, `
 			insert into ask_blocks (ask_id, block_id, node_id, position, type, text_sha256, excerpt,
-			                        made_at, changed_revision, changed_at)
-			values ($1::uuid, $2, 'ask/' || $1 || '#' || $2, $3, 'paragraph', 'sha', 'excerpt', now(), 1, now())
+			                        made_at, changed_revision, changed_at, removed_at)
+			values ($1::uuid, $2, 'ask/' || $1 || '#' || $2, $3, 'paragraph', 'sha', 'excerpt',
+			        now(), 1, now(), case when $3::int is null then now() end)
 		`, partedAsk, part.id, part.position)
 	}
-	execFixture(t, tx, "cite CORE-1 from an ask part", `
-		insert into ask_block_refs (ask_id, block_id, from_node, to_kind, to_id, kind)
-		values ($1::uuid, 'b1', $2, 'issue', 'CORE-1', 'mentions')
-	`, partedAsk, askPart)
+	// The removed part cites what the current one cites, so the link is in the view once: a
+	// count that read the removed part's citation too would answer twice.
+	for _, part := range []string{"b1", "b3"} {
+		execFixture(t, tx, "cite CORE-1 from ask part "+part, `
+			insert into ask_block_refs (ask_id, block_id, from_node, to_kind, to_id, kind)
+			values ($1::uuid, $2, 'ask/' || $1 || '#' || $2, 'issue', 'CORE-1', 'mentions')
+		`, partedAsk, part)
+	}
 	// The ask's own mention of the issue its part cites: the part's edge is counted and the
 	// ask's own is not, as a comment's blocks hold the comment's own.
 	insertReference(t, tx, "ask", partedAsk, "issue", "CORE-1")
-	execFixture(t, tx, "reply to an ask part", `
-		insert into comments (issue_key, author, body, ask_id, replies_to_block)
-		values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that part', $1::uuid, $2)
-	`, partedAsk, askPart)
+	for _, part := range []string{askPart, removedAskPart} {
+		execFixture(t, tx, "reply to ask part "+part, `
+			insert into comments (issue_key, author, body, ask_id, replies_to_block)
+			values ('CORE-1', '{"kind":"user","id":"alice"}', 'about that part', $1::uuid, $2)
+		`, partedAsk, part)
+	}
 
 	// refs: the mention arm. The reply comment holds no blocks, so each of its mentions is
 	// counted where it is written; the document's and the message's are each held by a block of
-	// theirs and counted there instead.
+	// theirs and counted there instead. It mentions a removed block of each item kind as well
+	// as a current one: that edge is the view's, counted under the block, and the item the
+	// block has left must not pick it up.
 	for _, target := range [][2]string{
 		{"issue", "CORE-1"},
 		{"artifact", notesRef},
@@ -272,8 +311,11 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		{"session", "session-backlink"},
 		{"block", notesBlock},
 		{"comment_block", commentBlock},
+		{"comment_block", removedCommentBlock},
 		{"message_block", messageBlock},
+		{"message_block", removedMessageBlock},
 		{"ask_block", askPart},
+		{"ask_block", removedAskPart},
 	} {
 		insertReference(t, tx, "comment", citingComment, target[0], target[1])
 	}
@@ -292,6 +334,8 @@ func newBacklinkFixture(t *testing.T) backlinkFixture {
 		heldOnce:     "CORE-2",
 		heldTwice:    "CORE-3",
 		removedBlock: "CORE-4",
+		askPart:      askPart,
+		commentBlock: commentBlock,
 	}
 }
 
@@ -444,11 +488,13 @@ func backlinkExclusionCases(toKind string) [][]string {
 // exclusion and under each exclusion the kind's arms carry, BacklinkCounts answers exactly what
 // the whole view answers over the same addresses (backlinkCountOracle).
 //
-// Two of the fixture's rows make the comparison able to fail rather than merely agree: one node
-// is pointed at through several arms, so a dropped arm shows as a lower count; and the issue
-// cited only from a block a revision removed is counted zero by both, so the asymmetry between
-// the view's position filter and the probe that suppresses the citing comment's own edge is
-// pinned, not reproduced by accident.
+// The fixture's rows make the comparison able to fail rather than merely agree: one node is
+// pointed at through several arms, so a dropped arm shows as a lower count; the issue cited
+// only from a block a revision removed is counted zero by both, so the asymmetry between the
+// view's position filter and the probe that suppresses the citing comment's own edge is pinned,
+// not reproduced by accident; and every edge at a removed block of an item is an edge the item
+// must not count, so each position filter the count carries is one the view disagrees with the
+// moment it goes.
 func TestBacklinkCountsReadArmByArmAgreeWithTheView(t *testing.T) {
 	fixture := newBacklinkFixture(t)
 	ctx := context.Background()
@@ -470,10 +516,18 @@ func TestBacklinkCountsReadArmByArmAgreeWithTheView(t *testing.T) {
 
 	for _, toKind := range nodeKinds {
 		ids := viewBacklinkTargets(t, pool, toKind)
-		if toKind == "issue" {
+		switch toKind {
+		case "issue":
 			// The removed block's issue is in no arm of the view, so the view's own list does
 			// not name it; it is asked for by name.
 			ids = append(ids, fixture.removedBlock)
+		case "comment_block":
+			// A reply names a comment's block and an ask's part in one column, so each kind is
+			// asked for over the other's address as well as its own: that is where an arm
+			// which lost the prefix test telling the two apart answers one and the view none.
+			ids = append(ids, fixture.askPart)
+		case "ask_block":
+			ids = append(ids, fixture.commentBlock)
 		}
 		for _, exclusions := range backlinkExclusionCases(toKind) {
 			counts, err := BacklinkCounts(ctx, pool, toKind, ids, exclusions)

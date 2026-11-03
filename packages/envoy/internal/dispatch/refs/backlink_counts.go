@@ -155,7 +155,11 @@ type backlinkArm struct {
 	// a predicate over it: a reply names an ask's part and a comment's block in one column, and
 	// the node id's prefix is what tells the two kinds apart. It is written over whichever
 	// expression carries the address in the arm the count builds, so the same test reaches the
-	// relation the arm is keyed on.
+	// relation the arm is keyed on. Written instead over the replies' own column, the prefix
+	// test reads as a near-certain filter on comments, which prices that table as the selective
+	// side of the arm over an ask's parts: the planner then reads comments_replies_to_block
+	// whole, with no index condition, under the custom and the generic plan alike
+	// (TestBacklinkCountStatementReadsEveryArmThroughAnIndex).
 	addressIs string
 	where     string
 	toID      string
@@ -282,7 +286,7 @@ func mentionBacklinkArms(target backlinkTarget, excludeKinds []string) []string 
 		return `select ` + counted + ` from ` + relation + join + `
 			where r.to_kind = '` + target.kind + `' and ` + keyed + rest + exclude
 	}
-	return []string{
+	arms := []string{
 		// refs_to (to_kind, to_id). heldByABlock belongs on this arm alone: it is gated on
 		// kind = 'mentions' and from_kind in artifact, comment, message, ask, and refs is the
 		// only arm of the view that can emit that pair, every other arm fixing from_kind as a
@@ -297,19 +301,16 @@ func mentionBacklinkArms(target backlinkTarget, excludeKinds []string) []string 
 		// rows the list shows. A pointer whose target is retyped out of its allowed types leaves
 		// the count the moment it leaves the list, with no rewrite of either.
 		arm(`block_refs r`, ` and (r.to_types is null or block_ref_listed(r.to_types, r.to_id))`),
-		// comment_block_refs_to (to_kind, to_id, (comment_id::text)), then the comment_blocks
-		// primary key for the join. The join keeps the view's position filter: the count copies
-		// the view's answer, it does not correct it.
-		arm(`comment_block_refs r join comment_blocks b on b.comment_id = r.comment_id and b.block_id = r.block_id`,
-			` and b.position is not null`),
-		// message_block_refs_to (to_kind, to_id, (message_id::text)), then the message_blocks
-		// primary key for the join, with the view's position filter.
-		arm(`message_block_refs r join message_blocks b on b.message_id = r.message_id and b.block_id = r.block_id`,
-			` and b.position is not null`),
-		// ask_block_refs_to (to_kind, to_id, (ask_id::text)), then the ask_blocks primary key for
-		// the join, with the view's position filter: a link a part of an ask holds is listed
-		// while that part is one of the ask's current parts.
-		arm(`ask_block_refs r join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id`,
-			` and b.position is not null`),
 	}
+	// One arm per item kind over the links its blocks hold: <kind>_block_refs_to
+	// (to_kind, to_id, (<item>::text)), then the blocks table's primary key for the join. The
+	// join keeps the view's position filter: a link a block holds is listed while that block is
+	// one of the item's current ones, and the count copies the view's answer rather than
+	// correcting it.
+	for _, item := range itemKinds {
+		tables, _ := item.tables()
+		arms = append(arms, arm(tables.refs+` r join `+tables.blocks+` b on b.`+tables.item+` = r.`+tables.item+` and b.block_id = r.block_id`,
+			` and b.position is not null`))
+	}
+	return arms
 }
