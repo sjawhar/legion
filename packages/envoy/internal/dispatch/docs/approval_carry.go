@@ -117,40 +117,64 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if err != nil {
 		return nil, err
 	}
-	var reason string
-	if review != nil {
-		reason = fmt.Sprintf(carryReason, review.Version)
-	} else {
-		restored, err := restoresApprovedText(ctx, tx, artifactID, newest.Version, rendered.markdown)
-		if err != nil || !restored {
-			return nil, err
-		}
-		review, reason = newest, fmt.Sprintf(restoreReason, newest.Version)
+	if review == nil {
+		return restoreApproval(ctx, tx, s.events, artifactID, version.Number, rendered.markdown, *newest, s.serverURL)
 	}
+	return writeCarriedReview(ctx, tx, s.events, artifactID, version.Number, *review, fmt.Sprintf(carryReason, review.Version), s.serverURL)
+}
 
-	var events []model.Event
+// CarryRestoredApproval is the restore alone, for the route that writes a document version itself
+// rather than through writeVersionTx - an upload that replaces a document (the api package's
+// storeArtifact) - once that version, number, is written with markdown and the open approval
+// request has moved to it (MoveApprovalAsk). The answer carry has nothing to read there: an
+// upload's markdown writes no answer, since the server takes a block's server-owned attributes
+// off an upload. It returns the events it appended, as carryApproval does.
+func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown, serverURL string) ([]model.Event, error) {
+	newest, err := NewestReview(ctx, tx, artifactID)
+	if err != nil || newest == nil || newest.State != "approved" {
+		return nil, err
+	}
+	return restoreApproval(ctx, tx, broker, artifactID, number, markdown, *newest, serverURL)
+}
+
+// restoreApproval carries newest, the document's newest review and an approval, to version number
+// of artifactID when that version's markdown is the text newest approved (restoresApprovedText),
+// and appends nothing otherwise.
+func restoreApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, newest model.ArtifactReview, serverURL string) ([]model.Event, error) {
+	restored, err := restoresApprovedText(ctx, tx, artifactID, newest.Version, markdown)
+	if err != nil || !restored {
+		return nil, err
+	}
+	return writeCarriedReview(ctx, tx, broker, artifactID, number, newest, fmt.Sprintf(restoreReason, newest.Version), serverURL)
+}
+
+// writeCarriedReview writes the carry of review to version number of artifactID with reason: the
+// open approval request's answer, Approve in the approver's name, when one is open, then the
+// approved review and its artifact.approved. It returns those events in that order.
+func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, review model.ArtifactReview, reason, serverURL string) ([]model.Event, error) {
+	var appended []model.Event
 	var askID *string
 	open, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
 	if open != nil {
-		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason, s.serverURL)
+		answered, err := answerApprovalAsk(ctx, tx, broker, open, review.Actor, reason, serverURL)
 		if err != nil {
 			return nil, err
 		}
-		events = append(events, answered)
+		appended = append(appended, answered)
 		askID = &open.ID
 	}
 	artifact, err := reviewedArtifact(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
-	_, event, err := WriteReview(ctx, tx, s.events, artifact, version.Number, "approved", review.Actor, &reason, askID)
+	_, event, err := WriteReview(ctx, tx, broker, artifact, number, "approved", review.Actor, &reason, askID)
 	if err != nil {
 		return nil, err
 	}
-	return append(events, event), nil
+	return append(appended, event), nil
 }
 
 // answerCarriedReview is the review the answer carry carries to version number of artifactID,

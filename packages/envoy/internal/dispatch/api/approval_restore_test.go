@@ -167,6 +167,27 @@ func TestANamedVersionThatChangesNothingKeepsTheApprovalCurrent(t *testing.T) {
 	requireReviewCarriedWith(t, handler, issue.PrimaryArtifactID, 2, 1, restoreSentence(1), nil)
 }
 
+// The upload route writes its version itself, outside the document service's version write, and
+// restores an approval as the edit route does: an agent that undoes its edit by uploading the
+// approved text again gets version 3 approved in alice's name, and the upload supersedes nothing.
+func TestAnUploadOfTheApprovedTextCarriesTheApproval(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	document := approveThenChange(t, handler, "Upload the approved text again", "", nil)
+
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+document.issueKey+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "spec.md", "content": versionMarkdown(t, handler, document.artifactID, 1),
+	})
+	advice := adviceFromResponse(t, uploaded.Code, uploaded.Body.String())
+	waitForArtifactVersion(t, handler, document.artifactID, 3)
+	if restored, approved := versionMarkdown(t, handler, document.artifactID, 3), versionMarkdown(t, handler, document.artifactID, 1); restored != approved {
+		t.Fatalf("version 3 = %q, want version 1's text %q", restored, approved)
+	}
+	requireReviewCarriedWith(t, handler, document.artifactID, 3, 1, restoreSentence(1), nil)
+	if advice.SupersededApproval != nil {
+		t.Fatalf("the upload's superseded_approval = %#v, want none: its version carries the approval", advice.SupersededApproval)
+	}
+}
+
 // (b) The undo misses by one character: version 3 is version 1 with its period an exclamation
 // mark, which is a change, so the approval stays stale, the undo supersedes nothing (the approval
 // was already stale) and a request for approval opens one.
