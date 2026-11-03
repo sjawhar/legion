@@ -64,6 +64,60 @@ the hand-back after its answer responds to that turn. A round with more arrivals
 plus one is flagged. `scripts/e2e/lib/design-gate-approval-requests.jq` reads the same arrivals
 for the stage 4b proof.
 
+## Display read census
+
+`display-read-census.ts` reads every stored text of a Dispatch deployment through its API and
+asks, text by text, whether Go's display read (`pmdoc.ReadForDisplay`) says what the browser's own
+engine says. It is the measurement INFRA-635 rests on, and the recipe is INFRA-172's
+(`docs/solutions/envoy/a-change-to-how-dispatch-reads-stored-markdown-censuses-every-stored-version-and-rewrites-the-hits-before-the-merge-INFRA-172.md`).
+
+```bash
+bun scripts/dispatch/display-read-census.ts --fetch-only   # hours: read production
+bun scripts/dispatch/display-read-census.ts --no-fetch      # minutes: class what was read
+bun scripts/dispatch/display-read-census.ts --no-fetch --json
+```
+
+It reads comments, the messages on issues, each ask's question, option labels and descriptions,
+answer text and resolution reason, each document's approval reason, each architecture component's
+prose, and every version of every document. Dispatch is resolved as for the ask census, with
+`sessionDispatchSettings`, so it reads with the session's own agent token.
+
+Three rules of the recipe are in the script and not negotiable: a version is read with
+`GET /api/v1/artifacts/{id}/versions/{n}`, never `/text`, which renders the live tree again; each
+project's issues come from one unpaged `GET /api/v1/issues?project=`, because offset paging
+repeats and skips issues while others write; and a network failure or a 5xx is retried. It sends
+**at most five requests a second**, eight in flight, so a pass over a deployment of some three
+thousand issues takes between one and a half and two hours.
+
+The corpus is written under `$TMPDIR` (`--work`, `--corpus`) and **is never committed**: it is
+production's prose. It doubles as the resume file. Each unit of work - one list, one version - is
+appended as one JSONL line as it lands, and a pass started again skips every unit already in it,
+so an outage an hour in costs the hour and not the pass. INFRA-172's first pass lost 689 requests
+to an outage and was discarded.
+
+Both readings come from the readers themselves, through the pmdoc differential's harnesses
+(`packages/envoy/internal/dispatch/pmdoc/gen/differential.ts` and that package's
+`TestDifferentialDump`): a document version is held to the editing engine in `DisplayVersion`, and
+every other stored text to the read-only engine in `DisplayLatest`, which is the pairing the
+differential's own cross-reader gates use. Trees are compared with their block ids ignored.
+
+Each text falls in one class, defined in the script's opening comment: **the two agree**, **format
+differs** (one visible text, two trees), **the browser lost text** (the browser's visible text is
+Go's with characters deleted), **Go loses text** (the other way round, which must never happen),
+**the text differs both ways**, **the browser cannot read it** (the engine threw) and **Go cannot
+read it**. A *group* is where the text is stored. The report gives every class, its split by
+group, every group's total, the requests the pass made and how long it took.
+
+`--check-no-stored-text FILE...` is the guard that keeps production's words out of the repository.
+It refuses a file that holds, run together with its whitespace collapsed, the first 64 characters
+of any paragraph of any text the census read, and names the text it came from; it exits 1 on a hit
+and 0 on none. It reads the corpus and nothing else, so it needs a pass to have been run.
+
+`__tests__/display-read-census.test.ts` holds the classing to
+`__fixtures__/display-read-census.json`: ten texts written for the purpose, eight of them with the
+trees this repository's own two readers made of them, and the two pairs no text produced written
+by hand, plus the stored texts and files the guard is tested on.
+
 ## Comment delivery
 
 `comment-delivery/report.ts` answers which comments people wrote in Dispatch reached no agent
