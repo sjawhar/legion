@@ -572,11 +572,12 @@ func (b editBatch) writes(candidates map[string]struct{}) []map[string]struct{} 
 // canonical markdown renders no anchor mark, so a batch that orphans a human's comment anchor
 // while leaving the words alone is a change here. Whether it becomes a version is the caller's:
 // with a summary the edit route names one through NamedVersion, which versions unconditionally,
-// so such a batch writes a version whose markdown equals the previous one's and stales an
-// approval pinned to it; without a summary SnapshotVersion compares renderings and writes
-// nothing. LEGION-260's follow-up makes the route version on the rendered markdown and keep
-// this verdict as its report to the agent. That same post-batch token is the verdict's Token,
-// the document precondition the caller's next edit passes.
+// so such a batch writes a version whose markdown equals the previous one's, which carries an
+// approval pinned to that one to it while its blocks are as their rows have them (carryApproval);
+// without a summary SnapshotVersion compares renderings and writes nothing. LEGION-260's
+// follow-up makes the route version on the rendered markdown and keep this verdict as its report
+// to the agent. That same post-batch token is the verdict's Token, the document precondition the
+// caller's next edit passes.
 func (b editBatch) outcome(applied int) (EditOutcome, pmdoc.ValidDocument, error) {
 	valid, err := pmdoc.ValidateDocument(b.tree, "EncodeTokenJSON")
 	if err != nil {

@@ -255,7 +255,8 @@ func (DispatchArtifact) isFact() {}
 
 // CarriedApprovalReasonPrefix opens the reason of a carried approval: the review Dispatch writes
 // in a person's name when their answer to a decision block was the whole change since the version
-// they approved (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason, whose
+// they approved, or when a later version's text is the text of the version they approved
+// (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason and restoreReason, whose
 // format is "Carried forward from the approval of version %d: ..."). The daemon cannot import that
 // package, so it holds the prefix before the version number as a literal of its own.
 const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"

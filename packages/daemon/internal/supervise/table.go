@@ -1191,8 +1191,23 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // said was pushed. The answer stands for the state of the branch when it was given, and a turn
 // after it can move the branch, so the worker is asked again and the round waits for the second
 // answer. The ask's own clock goes with it (UpdateTaskedAt), so the next post of the round asks
-// at once rather than at the re-task bound hours away. Only the turn of an ask of this round
-// keeps the answer (updatesRound): that is the turn the worker answers in.
+// at once rather than at the re-task bound hours away.
+//
+// Two turns keep the answer. One is the turn of an ask of this round (updatesRound): that is the
+// turn the worker answers in.
+//
+// The other is a turn the daemon sent nothing for, in a claim whose plugin cannot answer the
+// round (CannotAnswerUpdate). The update task tells such a worker to end its last message with a
+// WAITING line, and its plugin's phase-stall reminder answers that line with a turn of its own
+// when the wait is over (15 minutes by default), or at once when the line is missing. That
+// reminder carries no instruction of the daemon's, and the worker still holds the task's "Do not
+// start new work now". A plugin that can answer holds its reminder while its answer stands
+// (`awaiting-update` in pi-shared's phase-stall), so a turn the daemon sent nothing for in such a
+// claim is an Envoy notice, a background job's result or a person's steer, and takes the answer
+// back. In a claim that cannot answer, the daemon cannot tell those turns from the reminder, so
+// they keep the answer too. Nothing verifies the branch before the pod goes: the answer is the
+// only guard, so such a turn that commits work against the task the worker read, and does not push
+// it, loses that work with the pod.
 //
 // A claim relaunched into another pod than its round's own keeps its answer whatever turn starts
 // (Claim.LeftPodRound): the answer was given in the pod the round is about, and no turn of the
@@ -1209,6 +1224,11 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 		return
 	}
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
+		return
+	}
+	if !ownTask && CannotAnswerUpdate(m.claim) {
+		m.log.Info("supervise: a turn the daemon sent nothing for started after this claim answered its update round; its plugin has no ready_for_update op and reminds the worker on its own, so the answer stands",
+			"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract, "delivery", pendingID(m.claim.Pending))
 		return
 	}
 	m.log.Warn("supervise: a turn started after this claim answered its update round; the answer is taken back and the worker is asked again",
