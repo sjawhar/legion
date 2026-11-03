@@ -771,8 +771,9 @@ Two more bounds hold what is transient rather than resident, each a third of wha
 The collector runs at the runtime's own ratio of garbage to live heap:
 Dispatch reads and sets no `GOGC`, and the memory limit is what holds the pod.
 At that ratio the heap goal of a server whose budget is full is the limit itself, so the garbage waiting to be freed fills every byte the limit leaves and the memory the pod's kernel charges parks under it - that memory being what the runtime holds less what it has released, which is what the limit bounds.
-The worst case the two bounds allow charged the pod 3,620 MiB of its 4,096 over 405 s (`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`, 2026-11-01).
-The VmRSS a sandboxed run reads is higher - 3,749 MiB against the 3,237 MiB charged at that run's heaviest step - because gVisor keeps the pages the runtime released resident;
+The worst case the two bounds allow charged the pod 3,670 to 3,840 MiB of its 4,096 over ten runs of 344 to 372 s (`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`, 2026-11-03), and held 2,210 to 173,549,698 bytes past the Go memory limit, the collector's overshoot of a limit it steers to rather than stops at (`podGoMemoryLimitMargin`, 256 MiB).
+That overshoot is as old as the drive: the same step read 653,362 bytes past the limit the same day at the last commit before the merge with main's load that no longer replays a document's whole edit history, and 28,547,106 and 90,572,882 at the commit a run of 2026-11-01 was recorded at, which charged 3,237 MiB then and 3,684 to 3,776 MiB on this pod now.
+The VmRSS a sandboxed run reads is higher - 4,279 to 4,639 MiB at the heaviest step - because gVisor keeps the pages the runtime released resident;
 Dispatch's own pods are not sandboxed, and the drive reads what the pod's kernel charges (`peakResident`).
 The 4,302 and 4,424 MiB earlier runs recorded were that same VmRSS, not a pod's charge, and a collector held to a tighter ratio bought nothing against them:
 following the room budget's charge the drive charged 3,691 to 3,695 MiB in 539 and 547 s, and a ratio pinned at a seventh of the live heap at boot cost every server all the time - the drive whose eight rooms charge 464 MB took 2,072 s under it against 503 s at the runtime's own (`TestTheRoomBudgetDoesNotOverchargeTypingAndPasting`).

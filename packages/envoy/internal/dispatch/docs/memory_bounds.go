@@ -94,21 +94,23 @@ type MemoryBounds struct {
 	// budget's unused room, both heap bounds and this slack together - and the memory it holds
 	// parks under the limit. That memory is what a pod's kernel charges it: what the runtime
 	// holds less what it has released, which is the figure the limit bounds. Measured on
-	// 2026-11-03 over five runs of the real-process drive of the worst case the bounds allow
+	// 2026-11-03 over ten runs of the real-process drive of the worst case the bounds allow
 	// (cmd/dispatch, TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three
 	// steps: the budget filled, the cold reads' cache filled, the heaviest handoffs applying
-	// beside full copy bounds), it peaked by step at 2,724 to 2,878, 3,608 to 3,661 and 3,670 to
-	// 3,840 MiB of the pod's 4,096, 256 MiB under it at the most, each run taking 344 to 357 s
+	// beside full copy bounds), it peaked by step at 2,724 to 2,955, 3,608 to 3,661 and 3,670 to
+	// 3,840 MiB of the pod's 4,096, 256 MiB under it at the most, each run taking 344 to 372 s
 	// and the keystrokes a person typed through both heavy steps answered in a 99th percentile
-	// of 111 to 175 ms. What the limit itself bounds the heaviest step held by 2,210 to
-	// 173,549,698 bytes past it, and one of the five runs passed the 134,217,728 bytes of margin
-	// an overshoot of the limit is allowed (podGoMemoryLimitMargin), the run that charged 3,840
-	// MiB: the limit's own overshoot, not the pod's charge, is what that run broke. The run of
-	// 2026-11-01, before the merge with main's load that no longer replays a document's whole
-	// edit history, peaked at 2,856, 3,620 and 3,237 MiB, held 67,714 bytes past the limit and
-	// answered the keystrokes in a 99th percentile of 92 ms.
+	// of 141 to 208 ms. What the limit itself bounds the heaviest step held by 2,210 to
+	// 173,549,698 bytes past it, the collector's overshoot of a limit it steers to rather than
+	// stops at, which the drive allows a margin for (podGoMemoryLimitMargin). That overshoot is
+	// not the merge with main's load that no longer replays a document's whole edit history:
+	// measured the same day, the same step read 653,362 bytes past the limit at the last commit
+	// before that merge and 28,547,106 and 90,572,882 at the commit this comment once quoted a
+	// run of 2026-11-01 at, 2,856, 3,620 and 3,237 MiB, which that commit charges at 2,706 to
+	// 2,714, 3,621 to 3,624 and 3,684 to 3,776 MiB on this pod today. What one run of that step
+	// reads says little: the collector's share of two processors decides it.
 	//
-	// The VmRSS those runs read was 2,727 to 2,895, 3,610 to 3,663 and 4,333 to 4,639 MiB, each
+	// The VmRSS those runs read was 2,727 to 2,963, 3,610 to 3,663 and 4,279 to 4,639 MiB, each
 	// above the charge, and is not
 	// what a pod is charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every
 	// page the runtime has handed back unless the madvise(MADV_DONTNEED) that released it covered

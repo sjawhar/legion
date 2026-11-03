@@ -46,21 +46,37 @@ const (
 	// (requireUnderThePod). The limit is what the collector steers the heap goal to, not a wall:
 	// an allocation of tens of MiB is mapped whole before the cycle it triggers can sweep or
 	// scavenge anything back, so a step that allocates in large pieces reads past the limit by
-	// megabytes. Measured at the runtime's own ratio on 2026-10-29, over the drives that weigh a
-	// server against the pod and more than one run of each: the rooms typed and pasted into
-	// stayed 2.1 GiB under the limit and the step that fills the budget a gibibyte under it; the
-	// burst of fifty browsers read from 8,094 bytes under it to 57,442 over; the burst of
-	// struct-dense documents from 142,809,214 under to 1,832,882 over; and the heaviest applies
-	// beside full copy bounds, whose frames and copies run to tens of MiB each, 5,240,914,
-	// 15,501,378 and 34,453,570 over. 128 MiB is three and a half times the worst of those, and
-	// still a bound on what a pod is charged: a step within it holds 3,999,688,294 bytes of the
-	// pod's 4,294,967,296, leaving 281 MiB for memory outside the runtime, which these steps
-	// read at 25 to 41 MiB - their charged peak less their held peak - in every one but the
-	// heaviest applies, where that difference was 22 MiB the other way, the double subtraction
-	// this margin is here to bound. That undercount - a release of 2 MiB or more subtracted
-	// twice, once as a page gVisor dropped from VmRSS and once as released heap - runs to
-	// hundreds of MiB over a step (peakResident, memory_harness_test.go).
-	podGoMemoryLimitMargin = 128 << 20
+	// megabytes, and how far past depends on how much of the two processors the collector had
+	// while it did - which is why one run of a step says nothing about its worst.
+	//
+	// Measured at the runtime's own ratio on 2026-10-29, over the drives that weigh a server
+	// against the pod: the rooms typed and pasted into stayed 2.1 GiB under the limit and the
+	// step that fills the budget a gibibyte under it; the burst of fifty browsers read from
+	// 8,094 bytes under it to 57,442 over; the burst of struct-dense documents from 142,809,214
+	// under to 1,832,882 over; and the heaviest applies beside full copy bounds, whose frames and
+	// copies run to tens of MiB each, 5,240,914, 15,501,378 and 34,453,570 over. The 128 MiB this
+	// was then - three and a half times the worst of those - rested on three readings of that
+	// heaviest step, whose overshoot spreads far wider. Over ten runs of it at
+	// this branch's head on 2026-11-03, alone on this pod, it read 2,210, 137,298, 2,476,098,
+	// 2,615,362, 5,138,530, 14,796,882, 48,175,186, 63,137,858, 95,455,330 and 173,549,698 bytes
+	// past the limit. The same spread stands at the commits before it, so none of it is new: 653,362
+	// at 713d2fe8, the last commit before the merge with main's load that no longer replays a
+	// document's whole edit history, and 28,547,106 and 90,572,882 at c6ccc5bf, the commit whose
+	// 2026-11-01 figures this drive's comment quoted; a run at 713d2fe8 whose server sampled its
+	// own live heap, and so collected far more often, read the worst of all, 187,308,018.
+	//
+	// 256 MiB is 1.55 times the worst of the ten runs at head and 1.43 times the worst of every
+	// run measured, and still a bound on what a pod is charged: a step within it holds
+	// 4,133,906,022 bytes of the pod's 4,294,967,296, leaving 161,061,274 - 153 MiB - for memory
+	// outside the runtime, which these steps read at 25 to 41 MiB - their charged peak less their
+	// held peak - in every one but the heaviest applies, where that difference was 22 MiB the
+	// other way, the double subtraction this margin is here to bound. That undercount - a release
+	// of 2 MiB or more subtracted twice, once as a page gVisor dropped from VmRSS and once as
+	// released heap - runs to hundreds of MiB over a step (peakResident, memory_harness_test.go).
+	// What holds Dispatch inside its pod is not this reading but the charge a pod's kernel would
+	// make, which requireUnderThePod asserts against the pod itself and which no run of this drive
+	// has read above 3,840 MiB of the pod's 4,096.
+	podGoMemoryLimitMargin = 256 << 20
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
 	// roomBudgetBytes, bytesOfHeapAnElement, roomCopies,
@@ -2678,17 +2694,21 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // heap goal of a server whose budget is full is the limit itself, so the collector keeps every
 // byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
 // what the runtime holds less what it has released. Measured on 2026-11-03 under sjawhar/ygo
-// v1.54.1-sami.3 on this two-processor pod, over five runs of 344 to 357 s, the three steps
-// below charged 2,724 to 2,878, 3,608 to 3,661 and 3,670 to 3,840 MiB of the pod's 4,096, 256
+// v1.54.1-sami.3 on this two-processor pod, over ten runs of 344 to 372 s, the three steps
+// below charged 2,724 to 2,955, 3,608 to 3,661 and 3,670 to 3,840 MiB of the pod's 4,096, 256
 // MiB under it at their worst, and the keystrokes a person typed through the two heavy steps
-// were answered in 99th percentiles of 57 to 125 ms and 121 to 259 ms. Of what the Go limit
+// were answered in 99th percentiles of 57 to 125 ms and 121 to 300 ms. Of what the Go limit
 // bounds the heaviest step held 3,865,472,776 to 4,039,020,264 bytes, 2,210 to 173,549,698 past
 // the limit, which is the step that reads past it: an allocation of a frame or a copy of tens
-// of MiB is mapped before the cycle it triggers can hand anything back
-// (podGoMemoryLimitMargin), and in one of the five runs that overshoot passed the margin, which
-// the run of 2026-11-01 read at 67,714 bytes while charging 2,856, 3,620 and 3,237 MiB with the
-// keystrokes answered in 30 and 105 ms. VmRSS over the five runs read 2,727 to 2,895, 3,610 to
-// 3,663 and 4,333 to 4,639 MiB, each above what the pod would be
+// of MiB is mapped before the cycle it triggers can hand anything back, by however much the
+// collector was behind, which is what the margin bounds (podGoMemoryLimitMargin). That
+// overshoot is no younger than the drive: measured the same day, the same step read 653,362
+// bytes past the limit at the last commit before the merge with main's load that no longer
+// replays a document's whole edit history, and 28,547,106 and 90,572,882 at the commit whose
+// 2026-11-01 run this comment once quoted at 2,856, 3,620 and 3,237 MiB - figures that commit
+// does not read again on this pod, where it charges 2,706 to 2,714, 3,621 to 3,624 and 3,684 to
+// 3,776 MiB. VmRSS over the ten runs read 2,727 to 2,963, 3,610 to
+// 3,663 and 4,279 to 4,639 MiB, each above what the pod would be
 // charged: the difference
 // is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
 // charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
