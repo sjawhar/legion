@@ -289,7 +289,15 @@ func (r *outbox) armBackstops(ctx context.Context, issue record.Issue) error {
 // acts on a claim this path has taken over. The claim's own suspension source is re-stamped by
 // the machine (supervise's suspendedAgain), which is what takes it out of every released-claim
 // read; this drops what is left behind in the record.
+//
+// A runner with no tree store does nothing here. Every runner the daemon builds has one
+// (newOutbox), so this is the test that builds a runner by hand for a path of its own, as the
+// zero clock and the zero design gate are; such a runner has released no pod, so there is
+// nothing of a release to take over.
 func (r *outbox) takeOverRelease(ctx context.Context, issue string) {
+	if r.trees == nil {
+		return
+	}
 	if err := r.trees.ForgetPodWakesOf(ctx, r.project, issue); err != nil {
 		r.log.Warn("wake: could not forget the wakes of a pod another path took over", "issue", issue, "error", err)
 	}
@@ -297,9 +305,13 @@ func (r *outbox) takeOverRelease(ctx context.Context, issue string) {
 
 // dropReleasedWork takes a released pod's issue over and deletes the workspace bundle its release
 // saved: the issue is done, or its tree is closing, so nothing will restore that bundle and
-// nothing should. A linger and a park keep theirs, because their issue comes back.
+// nothing should. A linger and a park keep theirs, because their issue comes back. A runner with
+// no tree store does nothing, as takeOverRelease says.
 func (r *outbox) dropReleasedWork(ctx context.Context, issue string) {
 	r.takeOverRelease(ctx, issue)
+	if r.trees == nil {
+		return
+	}
 	if err := r.trees.DeleteWorkspaceBundle(ctx, issue); err != nil {
 		r.log.Warn("wake: could not delete the workspace bundle of a finished issue", "issue", issue, "error", err)
 	}
