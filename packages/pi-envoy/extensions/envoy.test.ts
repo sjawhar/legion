@@ -5848,9 +5848,9 @@ console.log(JSON.stringify(args));
       natsState.heldFlush = undefined;
       await started;
     } finally {
-      // The assertions above are the tester's, unchanged. What this adds is the end of the
-      // session: its background confirmation asks again every 10 ms, so a session left open here
-      // asks once more inside the next row and adds to the shared `natsState.flushes`.
+      // The session ends here because its background confirmation asks again every 10 ms: a
+      // session left open would ask once more inside the next row and add to the shared
+      // `natsState.flushes`.
       natsState.heldFlush = undefined;
       await stop?.();
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
@@ -18664,8 +18664,8 @@ describe("consumer delivery", () => {
       expect(natsState.controls.get(RELAY)?.active()).toBe(true);
       expect(session.registrations.at(-1)?.delivery?.consumer).toBe(true);
     } finally {
-      // Every row this change adds ends its session: a pump retry or a background confirmation
-      // left running would wake inside a later row and write to the shared mock.
+      // A pump retry or a background confirmation left running would wake inside a later row and
+      // write to the shared mock.
       await session.stop();
     }
   });
