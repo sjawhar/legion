@@ -63,13 +63,8 @@ const (
 // (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
 // every spelling of an artifact_id Postgres casts names.
 //
-// The document arm reads document_search (migration 20261101182447), one row per document
-// holding its latest version's vector under a GIN index, rather than the lateral over
-// artifact_versions it read before: that table's search column has no index and can have none
-// (0010 left it out, and its 5.2 GiB is above what the pre-deploy census lets a migration
-// touch), so the arm tested every document's latest version in turn. The rows are the same
-// ones - 20261101182454's trigger holds document_search at each document's latest version
-// with markdown - and the join to artifacts still decides the arm's project, kind and issue.
+// The document arm is a named piece of its own (searchDocumentKeywordLeg), since it is the one
+// arm this change rewrote.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -78,15 +73,7 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
          i.key = q.own_key as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
-  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
-         i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, v.created_at),
-         false, ` + rank("v.search") + `
-    from document_search v
-    join artifacts a on a.id = v.artifact_id
-    left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key, q
-   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
+` + searchDocumentKeywordLeg(rank) + `
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
          i.title, i.status, p.key, a.slug, a.name,
@@ -113,6 +100,34 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
          false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
+}
+
+// searchDocumentKeywordLeg is searchKeywordLegs' document arm, the one arm this change rewrote,
+// written apart from the four it leaves alone so that it can be ranked, read and timed on its
+// own: of the statements that union it, it is a fraction of a second of some ten, and what it
+// saves is under the run-to-run spread of the rest.
+//
+// It reads document_search (migration 20261101182447), one row per document holding its latest
+// version's vector under a GIN index, rather than the lateral over artifact_versions it read
+// before: that table's search column has no index and can have none (0010 left it out, and its
+// 5.2 GiB is above what the pre-deploy census lets a migration touch), so the arm tested every
+// document's latest version in turn. The rows are the same ones - 20261101182454's trigger holds
+// document_search at each document's latest version with markdown - and the join to artifacts
+// still decides the arm's project, kind and issue.
+//
+// The text carries no newline of its own at either end: searchKeywordLegs joins it to its
+// neighbours with the union the arms are separated by, and the measurement wraps it in a select
+// of its own.
+func searchDocumentKeywordLeg(rank func(searchColumn string) string) string {
+	return `  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, v.created_at),
+         false, ` + rank("v.search") + `
+    from document_search v
+    join artifacts a on a.id = v.artifact_id
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key, q
+   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)`
 }
 
 // searchKeywordLegsSQL is search's own keyword legs, each arm ranked by ts_rank_cd.

@@ -76,6 +76,10 @@ var (
 	// relatedKeywordLegs is search's keyword legs (searchKeywordLegs) ranked by the chosen
 	// lexemes' weights (relatedCoordinationRank).
 	relatedKeywordLegs = searchKeywordLegs(relatedCoordinationRank)
+	// relatedDocumentKeywordLeg is the document arm of those legs alone (searchDocumentKeywordLeg),
+	// the one arm this change rewrote, so that it can be timed apart from the two statements it
+	// is a fraction of a second of.
+	relatedDocumentKeywordLeg = searchDocumentKeywordLeg(relatedCoordinationRank)
 	// relatedKeywordQuery is the check's stage 1: search's keyword query (searchQueryBody) over the
 	// chosen lexemes, with relatedKeywordLegs. Parameters: searchQueryBody's $1-$8, then $9 the
 	// lexemes and $10 their idf.

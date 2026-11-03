@@ -17,7 +17,8 @@ import "fmt"
 // the equality tests report when it is not.
 
 // mainSearchKeywordLegs is main's searchKeywordLegs: the five-kind keyword union whose document
-// arm this change moves to document_search.
+// arm this change moves to document_search. That arm is a named piece of its own
+// (mainDocumentKeywordLeg), the side the measurement holds this change's arm against.
 func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -26,16 +27,7 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
          i.key = q.own_key as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
-  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
-         i.title, i.status, p.key, a.slug, a.name,
-         coalesce(i.updated_at, v.created_at),
-         false, ` + rank("v.search") + `
-    from artifacts a
-    left join issues i on i.key = a.issue_key
-    join projects p on p.key = a.project_key
-    join lateral (select v.search, v.created_at from artifact_versions v
-                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
-   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
+` + mainDocumentKeywordLeg(rank) + `
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
          i.title, i.status, p.key, a.slug, a.name,
@@ -62,6 +54,23 @@ func mainSearchKeywordLegs(rank func(searchColumn string) string) string {
          false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
+}
+
+// mainDocumentKeywordLeg is main's document arm alone, the before side of the one arm this
+// change rewrote: it tests `v.search @@ q.tsq` against each document's latest version through a
+// lateral over artifact_versions, which no index can answer. Like the arm that replaces it, the
+// text carries no newline of its own at either end.
+func mainDocumentKeywordLeg(rank func(searchColumn string) string) string {
+	return `  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, v.created_at),
+         false, ` + rank("v.search") + `
+    from artifacts a
+    left join issues i on i.key = a.issue_key
+    join projects p on p.key = a.project_key
+    join lateral (select v.search, v.created_at from artifact_versions v
+                  where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
+   where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)`
 }
 
 // mainSearchKeywordLegsSQL is main's searchKeywordLegsSQL, those legs ranked by ts_rank_cd.
@@ -272,11 +281,14 @@ func mainRelatedCoordinationRank(searchColumn string) string {
 
 // The four whole statements of R1 that search's own two bodies make, as main makes them.
 var (
-	mainSearchQuery         = mainSearchQOpener + mainSearchQueryBody(mainSearchKeywordLegsSQL)
-	mainSearchQueryMeaning  = mainSearchQOpener + mainSearchQueryMeaningBody(mainSearchKeywordLegsSQL)
-	mainRelatedKeywordLegs  = mainSearchKeywordLegs(mainRelatedCoordinationRank)
-	mainRelatedKeywordQuery = mainRelatedQOpener + mainRelatedTermWeights(9) + mainSearchQueryBody(mainRelatedKeywordLegs)
-	mainRelatedMeaningQuery = mainRelatedQOpener + mainRelatedTermWeights(12) + mainSearchQueryMeaningBody(mainRelatedKeywordLegs)
+	mainSearchQuery        = mainSearchQOpener + mainSearchQueryBody(mainSearchKeywordLegsSQL)
+	mainSearchQueryMeaning = mainSearchQOpener + mainSearchQueryMeaningBody(mainSearchKeywordLegsSQL)
+	mainRelatedKeywordLegs = mainSearchKeywordLegs(mainRelatedCoordinationRank)
+	// mainRelatedDocumentKeywordLeg is the document arm of those legs alone, the before side the
+	// measurement holds relatedDocumentKeywordLeg against.
+	mainRelatedDocumentKeywordLeg = mainDocumentKeywordLeg(mainRelatedCoordinationRank)
+	mainRelatedKeywordQuery       = mainRelatedQOpener + mainRelatedTermWeights(9) + mainSearchQueryBody(mainRelatedKeywordLegs)
+	mainRelatedMeaningQuery       = mainRelatedQOpener + mainRelatedTermWeights(12) + mainSearchQueryMeaningBody(mainRelatedKeywordLegs)
 )
 
 // mainRelatedProbeSQL is main's relatedProbeSQL, the fifth statement of R1.
