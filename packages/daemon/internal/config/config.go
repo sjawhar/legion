@@ -315,20 +315,35 @@ func LoadForValidation(path string, env func(string) string) (Config, error) {
 }
 
 func load(path string, env func(string) string, resolveAppKeys bool) (Config, error) {
-	if env == nil {
-		env = os.Getenv
+	document, err := readDocument(path)
+	if err != nil {
+		return Config{}, err
 	}
+	return loadDocument(document, path, env, resolveAppKeys)
+}
 
+// readDocument reads one configuration file and parses it, reading no key and resolving nothing.
+func readDocument(path string) (*yaml.Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
-		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	return &document, nil
+}
 
-	root, err := rootMapping(&document)
+// loadDocument is the rest of load with the file's document already in hand: the key read, the
+// resolution and the App private keys. path names the file a relative path key resolves against
+// and is never read here. Live re-resolves through it with its stored route overlay laid over the
+// document, so a route change meets exactly the refusals a file change meets.
+func loadDocument(document *yaml.Node, path string, env func(string) string, resolveAppKeys bool) (Config, error) {
+	if env == nil {
+		env = os.Getenv
+	}
+	root, err := rootMapping(document)
 	if err != nil {
 		return Config{}, err
 	}
