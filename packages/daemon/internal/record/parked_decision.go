@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -171,4 +172,50 @@ func (k KeptDecisions) validate() error {
 		return fmt.Errorf("a kept-decisions record names nothing")
 	}
 	return nil
+}
+
+// DecisionKind is what a person did that a parked-decision notice relays.
+type DecisionKind string
+
+const (
+	DecisionDesignApproved         DecisionKind = "design-approved"
+	DecisionDesignChangesRequested DecisionKind = "design-changes-requested"
+	DecisionCarriedGateOpened      DecisionKind = "carried-gate-opened"
+	DecisionAskAnswered            DecisionKind = "ask-answered"
+	DecisionAskResolved            DecisionKind = "ask-resolved"
+	DecisionAskReply               DecisionKind = "ask-reply"
+)
+
+// SpecDecision is the decision a notice of kind reports when kind is one of the three a person's
+// spec decision writes (workflow's gate.go), and whether it is. Each of the three names its own
+// DecisionKind: the notice kinds and the decisions are two vocabularies, and nothing but this
+// mapping ties them. The notice executor relays those three to the controller when nobody in the
+// tree will hear them; every other kind is the machinery's, which a stopped tree needs nobody to
+// hear.
+func SpecDecision(kind NoticeKind) (DecisionKind, bool) {
+	switch kind {
+	case "design-approved":
+		return DecisionDesignApproved, true
+	case "design-changes-requested":
+		return DecisionDesignChangesRequested, true
+	case "carried-gate-opened":
+		return DecisionCarriedGateOpened, true
+	default:
+		return "", false
+	}
+}
+
+func validDecisionKind(kind DecisionKind) bool {
+	switch kind {
+	case DecisionDesignApproved, DecisionDesignChangesRequested, DecisionCarriedGateOpened,
+		DecisionAskAnswered, DecisionAskResolved, DecisionAskReply:
+		return true
+	default:
+		return false
+	}
+}
+
+// PersonActor says whether actor, as Dispatch names an event's author (`<kind>:<id>`), is a person.
+func PersonActor(actor string) bool {
+	return strings.HasPrefix(actor, "user:") && len(actor) > len("user:")
 }

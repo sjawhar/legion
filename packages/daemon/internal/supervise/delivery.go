@@ -235,7 +235,10 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// leave the question a restart armed for that delivery standing (askFirst), and the next
 	// task would be confirmed by whatever turn is running and retired unsent. Nothing here
 	// sends, so the ask of a round this claim's process has left is still dropped before the
-	// connection carries anything to the worker that cannot answer it.
+	// connection carries anything to the worker that cannot answer it. The one drop that leaves
+	// elsewhere is a root architect's held task that names nothing any more (asksRoot's branch
+	// below, currentRootTask): that branch clears askFirst before anything else, so it leaves no
+	// question armed and asks none.
 	//
 	// holds is whether the delivery is still the claim's to send; the ask of a left round never
 	// is, and its issue's phase is not asked about, since the round's words are what it is.
@@ -386,7 +389,9 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 // (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
 // phase drop, and dropUpdateTask, which makes it of its own for the three drops a round that is
 // over makes through it (leaveRound, endPodUpdate, openPodUpdate's round switch) and for
-// sendPending's drop of a left round's ask. Left armed over nothing pending, the question would
+// sendPending's drop of a left round's ask. The one drop that does not run it is currentRootTask's
+// retirement of a root architect's held task that names nothing any more: sendPending's asksRoot
+// branch clears askFirst before it, without asking, so no question is left to answer. Left armed over nothing pending, the question would
 // make the claim's next task the running turn's — confirmed by a turn of another cause, never
 // prompted, and retired unsent by that turn's end — and the worker would never receive that
 // task at all.
