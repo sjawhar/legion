@@ -696,7 +696,7 @@ func (s *server) fillRelatedItems(
 			candidates = append(candidates, result)
 		}
 	}
-	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates); err != nil {
+	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates, false); err != nil {
 		// attachAskStates sets each row's state before it reads resolved asks' answers, so a
 		// failure partway would leave a resolved ask that was answered showing no answer.
 		slog.Warn("dispatch: related items carry no ask state", "error", err)

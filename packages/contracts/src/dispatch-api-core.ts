@@ -18,6 +18,10 @@ export type DisplayTree = {
   readonly [key: string]: unknown;
 };
 
+/** `DisplayTree` for a schema that must hold one: a ProseMirror node, read as whatever its own
+ *  node type names, so nothing the server's schema grows has to be re-declared here. */
+export const DisplayTreeSchema: z.ZodType<DisplayTree> = z.looseObject({ type: z.string() });
+
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
 

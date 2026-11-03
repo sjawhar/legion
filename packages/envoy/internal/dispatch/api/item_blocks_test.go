@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -752,7 +753,7 @@ func TestAPinnedCommentBlockReadsItsRevision(t *testing.T) {
 		t.Helper()
 		read := readGraph(t, handler, url.Values{"to": {ref}})
 		want := model.BlockPin{Version: 1, Ref: blockRef + "@v1", Text: text, State: state, RemovedVersion: removedVersion}
-		if read.Node.Pin == nil || *read.Node.Pin != want {
+		if read.Node.Pin == nil || !reflect.DeepEqual(*read.Node.Pin, want) {
 			t.Fatalf("%s: the pin reads %#v, want %#v", step, read.Node.Pin, want)
 		}
 		if read.Node.Text != current {

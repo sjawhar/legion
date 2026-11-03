@@ -1,6 +1,7 @@
 import type { BlockWidget, TextDecoration } from "@legion/proof-editor";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
+import type { DisplayTree } from "../../api/types";
 import { loadedEngine } from "../refs/markdown-engine";
 import { changedWords, pairBlocks } from "./change-set";
 
@@ -58,9 +59,12 @@ function blockTexts(doc: ProseMirrorNode): string[] {
  * Nothing is marked for an absent or equal baseline, or for one the engine refuses: a reader who
  * cannot be told what changed is shown the document itself rather than a guess.
  */
-export function changeMarksAgainst(baselineMarkdown: string, doc: ProseMirrorNode): ChangeMarks {
-  if (baselineMarkdown === "") return noMarks();
-  const baseline = loadedEngine()?.parse(baselineMarkdown);
+export function changeMarksAgainst(
+  baselineTree: DisplayTree | undefined,
+  doc: ProseMirrorNode
+): ChangeMarks {
+  if (baselineTree === undefined) return noMarks();
+  const baseline = loadedEngine()?.draw(baselineTree);
   if (baseline === undefined) return noMarks();
 
   const before = blockTexts(baseline);

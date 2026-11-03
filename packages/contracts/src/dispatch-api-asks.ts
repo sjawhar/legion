@@ -4,6 +4,7 @@ import {
   AnchorSchema,
   anchorFields,
   anchorPositionFields,
+  type DisplayTree,
   InboundBySchema,
   InboundWriterSchema,
 } from "./dispatch-api-core";
@@ -36,6 +37,14 @@ export const AskOptionSchema = z.strictObject(askOptionFields).readonly();
 
 export type AskOption = z.output<typeof AskOptionSchema>;
 
+/** One answer choice as the web app reads it: the option with the display tree of each of its
+ *  texts. The option itself is a message-bus payload type and gains no field; a tree rides on
+ *  this reading of it, which every route that answers the dashboard serves. */
+export type AskOptionWithTrees = AskOption & {
+  readonly label_tree?: DisplayTree;
+  readonly description_tree?: DisplayTree;
+};
+
 export const askAnswerFields = {
   /** The part the ask's current answer is stored as, read as an option's `id` is and never
    *  written by a caller; a superseded answer, which no part of the ask holds, carries none. */
@@ -50,6 +59,11 @@ export const AskAnswerSchema = z.strictObject(askAnswerFields).readonly();
 
 export type AskAnswer = z.output<typeof AskAnswerSchema>;
 
+/** A human's answer as the web app reads it, with the tree of the text they wrote with it. */
+export type AskAnswerWithTrees = AskAnswer & {
+  readonly text_tree?: DisplayTree;
+};
+
 export const askResolutionFields = {
   /** `withdrawn` is written by the server alone, when the ask's issue is closed; no caller can
    *  resolve an ask with it, and reopening the issue opens the ask again. */
@@ -63,6 +77,11 @@ export const AskResolutionSchema = z.strictObject(askResolutionFields).readonly(
 
 export type AskResolution = z.output<typeof AskResolutionSchema>;
 
+/** Why an ask no longer needs an answer, as the web app reads it, with the tree of that reason. */
+export type AskResolutionWithTrees = AskResolution & {
+  readonly reason_tree?: DisplayTree;
+};
+
 export const askEditPreviousFields = {
   question: z.string(),
   options: z.array(AskOptionSchema),
@@ -74,12 +93,24 @@ export const AskEditPreviousSchema = z.strictObject(askEditPreviousFields).reado
 
 export type AskEditPrevious = z.output<typeof AskEditPreviousSchema>;
 
+/** The content an ask had before an edit, as the web app reads it: the question's tree and the
+ *  trees of the options that edit replaced. */
+export type AskEditPreviousWithTrees = Omit<AskEditPrevious, "options"> & {
+  readonly question_tree?: DisplayTree;
+  readonly options: AskOptionWithTrees[];
+};
+
 /** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
 export const AskEditSchema = z
   .strictObject({ previous: AskEditPreviousSchema, edited_by: ActorSchema, at: z.string() })
   .readonly();
 
 export type AskEdit = z.output<typeof AskEditSchema>;
+
+/** One recorded rewording as the web app reads it, the content it replaced carrying its trees. */
+export type AskEditWithTrees = Omit<AskEdit, "previous"> & {
+  readonly previous: AskEditPreviousWithTrees;
+};
 
 export const askAnchorArtifactFields = {
   project: z.string(),
@@ -200,6 +231,16 @@ export const AskSchema = z.strictObject(askFields).readonly();
 
 export type Ask = z.output<typeof AskSchema>;
 
+/** An ask as the web app reads it: the ask, the tree of its question, and the trees carried by
+ *  each option, by its answer's text and by its resolution's reason. Every tree is absent unless
+ *  the request sent `Dispatch-Trees: 1`, so this reading is an `Ask` wherever one is wanted. */
+export type AskWithTrees = Omit<Ask, "answer" | "options" | "resolution"> & {
+  readonly question_tree?: DisplayTree;
+  readonly options: AskOptionWithTrees[];
+  readonly answer: AskAnswerWithTrees | null;
+  readonly resolution?: AskResolutionWithTrees;
+};
+
 /** Whom besides the followers a person's answer and replies on an ask reach, as every ask read
  *  carries it: the single-ask read (`AskRead`) and each list row's thread (`AskThread`).
  *
@@ -221,15 +262,16 @@ export interface AskReach extends IssueRouteReach {
   readonly route: string | null;
 }
 
-/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an `Ask` plus the one field a list
- *  surface cannot compute for itself: `last_reply`, the sort key for ordering a page by its
- *  newest reply. It carries no thread: the list is unpaged, and the readers that render the ask
- *  alone - a document's decision blocks and the review margin - would pay for every reply body,
- *  follower and answer on the issue to draw none of them. */
-export interface IssueAskRow extends Ask {
+/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an ask as the web app reads it
+ *  (`AskWithTrees`) plus the one field a list surface cannot compute for itself: `last_reply`,
+ *  the sort key for ordering a page by its newest reply. It carries no thread: the list is
+ *  unpaged, and the readers that render the ask alone - a document's decision blocks and the
+ *  review margin - would pay for every reply body, follower and answer on the issue to draw
+ *  none of them. */
+export type IssueAskRow = AskWithTrees & {
   /** The newest reply in this ask's thread, or null when nobody has replied. */
   readonly last_reply: AskLastReply | null;
-}
+};
 
 /** What `PUT /api/v1/me/asks/{id}/snooze` answers: the stored moment the row returns. */
 export interface AskSnooze {

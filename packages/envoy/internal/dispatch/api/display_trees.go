@@ -318,3 +318,29 @@ func attachApprovalTrees(trees bool, artifacts []model.Artifact) {
 		}
 	}
 }
+
+// attachNodeTrees fills the tree of a graph node's own text and of the text a pinned block
+// reference recorded, for a caller that asked for them: a reference's title is read from the
+// tree of the block it names, as an ask's and a comment's titles are read from theirs.
+func attachNodeTrees(node *model.GraphNode, trees bool) {
+	if !trees {
+		return
+	}
+	node.TextTree = displayTree(node.Text)
+	if node.Pin != nil {
+		node.Pin.TextTree = displayTree(node.Pin.Text)
+	}
+}
+
+// newSearchAskAnswer is a search hit's answer with the tree of the text given with it, nil for a
+// hit whose ask nobody answered.
+func newSearchAskAnswer(answer *model.AskAnswer, trees bool) *model.SearchAskAnswer {
+	if answer == nil {
+		return nil
+	}
+	read := &model.SearchAskAnswer{AskAnswer: *answer}
+	if trees {
+		read.TextTree = displayTreeOf(answer.Text)
+	}
+	return read
+}

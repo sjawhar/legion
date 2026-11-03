@@ -6,6 +6,7 @@ import {
 } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
+import type { DisplayTree } from "../../api/types";
 import { markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
 import { type PaintMarkdown, type SliceYield, useRenderedMarkdown } from "./useRenderedMarkdown";
@@ -290,21 +291,29 @@ function* paintBlockInSlices(
  * parsed off the page's own thread, so it holds its own text, marked `data-markdown-pending`,
  * until the parse worker answers (`markdown-engine.ts`), and the `block` variant then fills the
  * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
- * never reach the page in one task. A preview that must clamp its rendered line is
- * `MarkdownPreview`, which parses with the same engine.
+ * never reach the page in one task. A stored text waits for neither: its `tree` is drawn in the
+ * commit that mounts it, however long it is, and a long one is still filled in a piece at a
+ * time. A preview that must clamp its rendered line is `MarkdownPreview`, which draws the same
+ * trees with the same engine.
  */
 export function MarkdownBody({
   markdown,
   onRendered,
   softBreaks = "space",
+  tree,
   variant = "block",
 }: {
   markdown: string;
   onRendered?: () => void;
   /** What a single newline inside a paragraph becomes: `"space"` for a document (hard-wrapped
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
-   *  as a model's streamed turn (`SoftBreaks`). */
+   *  as a model's streamed turn (`SoftBreaks`). Read only for a text with no `tree`: a stored
+   *  text was read by the server under the document's own policy. */
   softBreaks?: SoftBreaks;
+  /** The reading Go made of this stored text, which the body draws rather than parsing the
+   *  markdown again. Absent only for the three texts Dispatch does not store: a live agent
+   *  turn, a GitHub body in a link preview, and a write the server has not stored yet. */
+  tree?: DisplayTree;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
@@ -314,6 +323,7 @@ export function MarkdownBody({
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
+    tree,
     inline ? paintInline : paintBlock,
     {
       pictures: variant,

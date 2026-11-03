@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { type Actor, ActorSchema, InboundActorSchema } from "./dispatch-api-core";
+import { type Actor, ActorSchema, type DisplayTree, InboundActorSchema } from "./dispatch-api-core";
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "./dispatch-api-limits";
 import {
   InboundReplyBlockSchema,
   ReplyBlockSchema,
+  type ReplyBlockWithTrees,
   referenceChangesFields,
   threadLoginsFields,
 } from "./dispatch-api-refs";
@@ -91,6 +92,13 @@ export const MessageSchema = z.strictObject(messageFields).readonly();
 
 export type Message = z.output<typeof MessageSchema>;
 
+/** A message as the web app reads it, shaped exactly as a comment is: the tree of its body, and
+ *  the block it answers carrying the tree of that block's excerpt. */
+export type MessageWithTrees = Omit<Message, "reply_block"> & {
+  readonly body_tree?: DisplayTree;
+  readonly reply_block?: ReplyBlockWithTrees | null;
+};
+
 /** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
  *  when the route posted nothing and handed back one the conversation already holds (the
  *  answered attempt's stored reply, or a follow-up whose text the session already posted). A
@@ -100,8 +108,8 @@ export interface MessageReplyResult extends Message {
 }
 
 export interface MessageRead {
-  readonly message: Message;
-  readonly replies: Message[];
+  readonly message: MessageWithTrees;
+  readonly replies: MessageWithTrees[];
   /** `GET /api/v1/agents/{session_id}/messages` only: whether this conversation holds a reply
    *  the caller has not read. The server's own verdict, from the definition `unread_replies`
    *  counts; a client never derives it from timestamps. Absent means no. */
@@ -119,6 +127,8 @@ export interface Broadcast {
   readonly id: string;
   readonly author: Actor;
   readonly body: string;
+  /** The display tree of `body`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly body_tree?: DisplayTree;
   readonly delivery: MessageDeliveryMode;
   readonly created_at: string;
 }
@@ -134,8 +144,8 @@ export interface BroadcastSummary extends Broadcast {
  *  the message; delivery runs behind the create response and settles it. */
 export interface BroadcastRecipient {
   readonly session_id: string;
-  readonly message: Message;
-  readonly replies: Message[];
+  readonly message: MessageWithTrees;
+  readonly replies: MessageWithTrees[];
 }
 
 export interface BroadcastRead extends Broadcast {

@@ -1,17 +1,18 @@
 import type {
   Ask,
-  AskAnswer,
-  AskEdit,
+  AskAnswerWithTrees,
+  AskEditWithTrees,
   AskFollower,
   AskKind,
   AskLastReply,
   AskReach,
+  AskWithTrees,
   InboxDocument,
   IssueAskRow,
   OpenAskOwner,
 } from "./dispatch-api-asks";
-import type { Comment } from "./dispatch-api-comments";
-import type { Actor, AskUrgency } from "./dispatch-api-core";
+import type { CommentWithTrees } from "./dispatch-api-comments";
+import type { Actor, AskUrgency, DisplayTree } from "./dispatch-api-core";
 import type { ArtifactApproval } from "./dispatch-api-documents";
 import type { Issue, IssuePriority } from "./dispatch-api-issues";
 import type { AskTurn, SessionAnswerRelation } from "./dispatch-api-limits";
@@ -25,18 +26,18 @@ import type { AskTurn, SessionAnswerRelation } from "./dispatch-api-limits";
 /** An ask's thread as a list row carries it: everything a card needs before its first targeted
  *  thread refresh. */
 export interface AskThread extends AskReach {
-  readonly replies: Comment[];
+  readonly replies: CommentWithTrees[];
   /** Every rewording of the question, oldest first; empty when never edited. */
-  readonly edits: AskEdit[];
+  readonly edits: AskEditWithTrees[];
   /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
    *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
-  readonly answers: AskAnswer[];
+  readonly answers: AskAnswerWithTrees[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
 }
 
 /** An open ask as returned by the human Inbox. */
-export interface InboxRow extends Ask {
+export interface InboxRow extends AskWithTrees {
   /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
   readonly priority: IssuePriority | null;
   /** When the viewer's own snooze on this row ends, or null when they have not snoozed it.
@@ -56,12 +57,12 @@ export interface IssueAskThreadRow extends IssueAskRow {
 }
 
 export interface AskRead extends AskReach {
-  readonly ask: Ask;
-  readonly replies: Comment[];
+  readonly ask: AskWithTrees;
+  readonly replies: CommentWithTrees[];
   /** Every rewording of the question, oldest first; empty when never edited. */
-  readonly edits: AskEdit[];
+  readonly edits: AskEditWithTrees[];
   /** Every answer, oldest first; a restored document block does not repeat its answer here. */
-  readonly answers: AskAnswer[];
+  readonly answers: AskAnswerWithTrees[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
 }
@@ -71,8 +72,8 @@ export interface AskFollowersRead {
 }
 
 export interface CommentRead {
-  readonly comment: Comment;
-  readonly replies: Comment[];
+  readonly comment: CommentWithTrees;
+  readonly replies: CommentWithTrees[];
 }
 
 /** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
@@ -124,14 +125,21 @@ export interface MyAnswerRow {
   /** Relative Dispatch deep link to the ask itself, as on `OpenAsk.ref`. */
   readonly ref: string;
   readonly question: string;
+  /** The display tree of `question`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly question_tree?: DisplayTree;
   readonly ask_kind: AskKind;
   readonly ask_state: Ask["state"];
   readonly edited_at: string | null;
   readonly owner: OpenAskOwner;
-  readonly answer?: AskAnswer;
+  readonly answer?: AskAnswerWithTrees;
   /** True when an answer row's answer is still the ask's current answer. */
   readonly current: boolean;
-  readonly reply?: { readonly id: string; readonly body: string };
+  readonly reply?: {
+    readonly id: string;
+    readonly body: string;
+    /** The display tree of `body`, absent unless the request sent `Dispatch-Trees: 1`. */
+    readonly body_tree?: DisplayTree;
+  };
 }
 
 export interface MyAnswersResponse {
@@ -150,6 +158,8 @@ export interface MyReplyReply {
   readonly author: Actor;
   /** The reply's or the answer's first non-empty line, at most 160 characters. */
   readonly first_line: string;
+  /** The display tree of `first_line`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly first_line_tree?: DisplayTree;
   readonly created_at: string;
 }
 
@@ -166,6 +176,8 @@ export interface MyReplyRow {
   readonly document?: InboxDocument;
   /** The ask's question, or the root's first line, at most 160 characters. */
   readonly subject: string;
+  /** The display tree of `subject`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly subject_tree?: DisplayTree;
   readonly reply: MyReplyReply;
 }
 

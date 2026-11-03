@@ -299,7 +299,7 @@ function ApprovalBody({
   });
 
   const artifact = artifactQuery.data;
-  const changeBaseline = isText(baselineQuery.data) ? baselineQuery.data.markdown : undefined;
+  const changeBaseline = isText(baselineQuery.data) ? baselineQuery.data.markdown_tree : undefined;
   const latestVersion =
     artifact === undefined ? undefined : versionsNewestFirst(artifact.versions)[0]?.number;
   // A document the column cannot read, and a request on a document that holds no version to

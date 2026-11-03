@@ -1,5 +1,11 @@
 import type { Ask, AskOption } from "./dispatch-api-asks";
-import type { Actor, AnchorInput, AskUrgency, ExternalLink } from "./dispatch-api-core";
+import type {
+  Actor,
+  AnchorInput,
+  AskUrgency,
+  DisplayTree,
+  ExternalLink,
+} from "./dispatch-api-core";
 import type {
   Artifact,
   EditOp,
@@ -298,6 +304,9 @@ export interface IssueRead {
 
 export interface ArtifactText {
   readonly markdown: string;
+  /** The display tree of `markdown`, read as the document stands now; absent unless the request
+   *  sent `Dispatch-Trees: 1`. */
+  readonly markdown_tree?: DisplayTree;
   readonly version: number | null;
   /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
   readonly token?: string;
@@ -316,6 +325,9 @@ export interface ArtifactRebuildReport {
 
 export interface ArtifactVersionText extends Version {
   readonly markdown: string;
+  /** The display tree of `markdown`, read in the version mode, which keeps the attributes the
+   *  server wrote into that version's text; absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly markdown_tree?: DisplayTree;
 }
 
 export interface ArtifactVersionBlob {

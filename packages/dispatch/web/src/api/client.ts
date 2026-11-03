@@ -30,6 +30,7 @@ import type {
   Ask,
   AskRead,
   AskSnooze,
+  AskWithTrees,
   AuthenticatedUser,
   BlockSchema,
   BroadcastCreated,
@@ -38,6 +39,7 @@ import type {
   Comment,
   CommentDelivery,
   CommentRead,
+  CommentWithTrees,
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
@@ -714,7 +716,11 @@ export class DispatchApiClient {
     // Every read and write of the page funnels through here, so this one line asks Dispatch for
     // the display tree of every stored text it answers with (`Dispatch-Trees`); no other client
     // sends it, and no other client's bytes change.
-    const sent = { credentials: "same-origin", ...init, headers: [...new Headers(init.headers), ["Dispatch-Trees", "1"]] } satisfies RequestInit;
+    const sent = {
+      credentials: "same-origin",
+      ...init,
+      headers: [...new Headers(init.headers), ["Dispatch-Trees", "1"]],
+    } satisfies RequestInit;
     const progress = (part?: UploadProgress) => {
       arrived?.();
       if (part !== undefined) uploaded?.(part.loaded, part.total);
@@ -1085,8 +1091,8 @@ export class DispatchApiClient {
     );
   }
 
-  listComments(key: string, artifact?: string): Promise<Comment[]> {
-    return this.json<Comment[]>(
+  listComments(key: string, artifact?: string): Promise<CommentWithTrees[]> {
+    return this.json<CommentWithTrees[]>(
       pathWithQuery(`/api/v1/issues/${pathSegment(key)}/comments`, { artifact })
     );
   }
@@ -1355,16 +1361,21 @@ export class DispatchApiClient {
     return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input, bounds);
   }
 
-  listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
-    return this.json<Ask[]>(pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state }));
+  listArtifactAsks(
+    id: string,
+    state: "all" | "open" | "answered" = "all"
+  ): Promise<AskWithTrees[]> {
+    return this.json<AskWithTrees[]>(
+      pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state })
+    );
   }
 
   createArtifactAsk(id: string, input: CreateAskInput, bounds: WriteBounds): Promise<Ask> {
     return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input, bounds);
   }
 
-  listArtifactComments(id: string): Promise<Comment[]> {
-    return this.json<Comment[]>(`/api/v1/artifacts/${pathSegment(id)}/comments`);
+  listArtifactComments(id: string): Promise<CommentWithTrees[]> {
+    return this.json<CommentWithTrees[]>(`/api/v1/artifacts/${pathSegment(id)}/comments`);
   }
 
   createArtifactComment(

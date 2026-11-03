@@ -9,6 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import type { DisplayTree } from "../../api/types";
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
@@ -314,9 +315,12 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
 
 /**
  * What every Markdown-bearing element does once mounted, in the layout phase of the commit
- * (`renderWithEngine`, which says why that phase): the source is parsed and handed to
- * `paint`, or, without an engine or a parse, written into the element as literal text with
- * `isFallback` set. A dispatch:// reference stays literal text to Markdown (it isn't a scheme GFM
+ * (`renderWithEngine`, which says why that phase): `tree`, the reading Go made of a stored
+ * text, is drawn and handed to `paint`; a text Dispatch does not store, which carries no tree,
+ * has `markdown` parsed here instead and handed to `paint` the same way; and without an engine,
+ * a tree the schema refuses or a parse the engine refuses, `markdown` is written into the
+ * element as literal text with `isFallback` set. A dispatch:// reference stays literal text to
+ * Markdown (it isn't a scheme GFM
  * autolinks), so bare refs then get wrapped into real links; a same-origin dashboard URL is
  * already a real link by then (GFM autolinked it, or the author wrote it as Markdown link
  * syntax). Either way, every reference anchor gets its href rewritten to the SPA route and its
@@ -338,9 +342,11 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * module-level function or memoises one on what it reads. The options object itself is not one,
  * so a caller builds it inline on every render.
  *
- * A body longer than `markdownWorkerThreshold` is parsed off the page's own thread
- * (`markdown-engine.ts`), so it lands a frame or more after the commit that rendered it. Until
- * it does, `isPending` is set and the element holds the body's own literal text - selectable,
+ * A body with no tree of its own and longer than `markdownWorkerThreshold` is parsed off the
+ * page's own thread (`markdown-engine.ts`), so it lands a frame or more after the commit that
+ * rendered it. A stored text never does, however long it is: its tree is drawn in the commit
+ * that mounted it. Until a parse lands, `isPending` is set and the element holds the body's own
+ * literal text - selectable,
  * under nothing - unless it already holds a paint of an earlier source, which it keeps instead,
  * so a streaming turn never flips back to its source between frames. Every paint, the pending
  * one included, recomputes the ask hosts, the reference anchors and the picture anchors in the
@@ -391,6 +397,7 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
   markdown: string,
+  tree: DisplayTree | undefined,
   paint: PaintMarkdown,
   {
     pictures = "block",
@@ -454,6 +461,7 @@ export function useRenderedMarkdown(
     const owed = (): boolean => render !== renders.current;
     const cancelRender = renderWithEngine(
       markdown,
+      tree,
       softBreaks,
       ({ engine, openMermaidFence, parsed, pending }) => {
         // Nothing of an answer reaches an element that has gone, or one a newer frame has
@@ -603,7 +611,7 @@ export function useRenderedMarkdown(
       { keepAPostedParse: true }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks]);
+  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks, tree]);
 
   return {
     isFallback,

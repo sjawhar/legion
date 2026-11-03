@@ -23,10 +23,10 @@ import {
 import type {
   Agent,
   InboxRow,
-  Message,
   MessageDelivery,
   MessageDeliveryMode,
   MessageRead,
+  MessageWithTrees,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
@@ -221,7 +221,7 @@ function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTar
   };
 }
 
-function agentReplyTo(agent: Agent, read: MessageRead, node: Message): AgentReply {
+function agentReplyTo(agent: Agent, read: MessageRead, node: MessageWithTrees): AgentReply {
   return {
     issueKey: read.message.issue_key,
     target: {
@@ -255,7 +255,7 @@ function AgentExchangeReply({
   liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
-  reply: Message;
+  reply: MessageWithTrees;
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -281,7 +281,7 @@ function AgentExchangeReply({
       author={reply.author}
       body={
         <div className={textPrimaryOnCanvas}>
-          <MarkdownBody markdown={reply.body} />
+          <MarkdownBody markdown={reply.body} tree={reply.body_tree} />
         </div>
       }
       delivery={
@@ -357,7 +357,7 @@ function AgentTargetedMessage({
             <Timestamp at={read.message.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
-            <MarkdownBody markdown={read.message.body} />
+            <MarkdownBody markdown={read.message.body} tree={read.message.body_tree} />
           </div>
         </>
       }

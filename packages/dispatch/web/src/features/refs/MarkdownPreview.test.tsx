@@ -5,17 +5,35 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ComponentProps, ReactNode } from "react";
 
 import { api } from "../../api/client";
-import type { IssueReferenceSummary } from "../../api/types";
+import type { DisplayTree, IssueReferenceSummary } from "../../api/types";
+import fixtures from "./__fixtures__/display-trees.json";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 /**
  * `MarkdownPreview` on its own: the inputs a real surface hands it that the one-fixture surface
- * test (`markdown-surfaces.test.tsx`) never does. Highlights are what the server's `ts_headline`
- * returns for the query each case names (Postgres, the search route's own headline options), run
- * through `snippetSegments` the way `SearchPalette` does: the marked runs become `highlight`, the
- * rest of the text the `markdown`.
+ * test (`markdown-surfaces.test.tsx`) never does.
+ *
+ * The highlight rows below are a deliberate behaviour change of this task, not tests bent to
+ * pass. They used to hand the preview the matched phrases and assert that the browser found
+ * those words in its own rendered text; the server now reads the hit's snippet and marks the
+ * runs it matched in the tree it sends (`pmdoc.DisplaySnippetJSON`), and the preview draws
+ * those marks. So each row hands it the snippet tree Go made - from the fixture `pmdoc`'s
+ * `TestWebDisplayFixture` writes and CI checks - and asserts the same thing of the result:
+ * which words are marked, and that no syntax and no `dispatch://` is left in what a reader
+ * sees.
  */
+
+/** One marked snippet of the display-tree fixture, by name. */
+function stored(name: string): { markdown: string; snippet: DisplayTree } {
+  const found = (fixtures as { name: string; markdown: string; snippet?: DisplayTree }[]).find(
+    (fixture) => fixture.name === name
+  );
+  if (found?.snippet === undefined) {
+    throw new Error(`no marked snippet named ${name} in the display-tree fixture`);
+  }
+  return { markdown: found.markdown, snippet: found.snippet };
+}
 
 /** CORE-1's summary read, which a reference to it shows. */
 const issue: IssueReferenceSummary = {
@@ -58,10 +76,12 @@ afterEach(cleanup);
 
 test("a hit inside bold or code text is marked inside the formatting, with no syntax left", async () => {
   // q="bold word" and q=code: `**<mark>Bold</mark>** <mark>word</mark>, see `<mark>code</mark>``.
+  const hit = stored("marks-inside-formatting");
   const { preview, view } = renderPreview({
-    highlight: ["Bold", "word", "code"],
+    highlightClassName: "hit",
     lines: 2,
-    markdown: "**Bold** word, see `code` here",
+    markdown: hit.markdown,
+    tree: hit.snippet,
   });
   try {
     await waitFor(() => expect(preview().querySelector("strong")).not.toBeNull());
@@ -77,12 +97,14 @@ test("a hit inside bold or code text is marked inside the formatting, with no sy
 
 test("a hit inside a dispatch:// reference keeps its highlight on the reference's resolved title", async () => {
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
-  // q=CORE-1: `Report on dispatch://<mark>CORE</mark><mark>-1</mark> today` - two lexemes, both
-  // inside the reference the preview replaces with the issue's title.
+  // q=CORE-1: `Tracked as <mark>dispatch://CORE-1</mark> since Monday` - the match is inside
+  // the reference the preview replaces with the issue's title.
+  const bare = stored("a-marked-reference");
   const { preview, rerender, view } = renderPreview({
-    highlight: ["CORE", "-1", "today"],
+    highlightClassName: "hit",
     lines: 2,
-    markdown: "Report on dispatch://CORE-1 today",
+    markdown: bare.markdown,
+    tree: bare.snippet,
   });
   try {
     await waitFor(() => expect(preview().textContent).toContain("Design decision"));
@@ -92,7 +114,6 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     expect(reference.closest("mark") !== null || reference.querySelector("mark") !== null).toBe(
       true
     );
-    expect(marks(preview())).toContain("today");
     for (const mark of preview().querySelectorAll("mark")) {
       expect(mark.textContent?.trim()).not.toBe("");
     }
@@ -100,7 +121,13 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
 
     // q=design on a hand-written link to the same target: the hit is in the words its author
     // gave the link, which the resolved title replaces.
-    rerender({ highlight: ["design"], lines: 2, markdown: "See [the design](dispatch://CORE-1)." });
+    const linkHit = stored("a-marked-link-to-a-reference");
+    rerender({
+      highlightClassName: "hit",
+      lines: 2,
+      markdown: linkHit.markdown,
+      tree: linkHit.snippet,
+    });
     await waitFor(() =>
       expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe("Design decision")
     );
@@ -114,28 +141,19 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
 });
 
 test("a hit marks the word the server matched, not the same letters inside other words", async () => {
-  // q=port: `Report the <mark>port</mark> number to the support team before we export`.
-  const { preview, rerender, view } = renderPreview({
-    highlight: ["port"],
+  // q=port: `Report the <mark>port</mark> number to the support team before we export`. The
+  // server marks whole lexemes, and the preview draws the marks of the tree and adds none of
+  // its own, so `support` and `export` stay plain.
+  const hit = stored("a-mark-on-one-word-alone");
+  const { preview, view } = renderPreview({
+    highlightClassName: "hit",
     lines: 2,
-    markdown: "Report the port number to the support team before we export",
+    markdown: hit.markdown,
+    tree: hit.snippet,
   });
   try {
     await waitFor(() => expect(preview().textContent).toContain("export"));
     expect(marks(preview())).toEqual(["port"]);
-
-    // q=deploy stems: `redeploy after the <mark>deployment</mark>; <mark>deploy</mark>`.
-    rerender({
-      highlight: ["deployment", "deploy"],
-      lines: 2,
-      markdown: "redeploy after the deployment; deploy",
-    });
-    await waitFor(() => expect(marks(preview())).toEqual(["deployment", "deploy"]));
-
-    // q=CORE-1 on plain text: `Tracked as <mark>CORE</mark><mark>-1</mark> since Monday`. A
-    // hit that starts at a non-word character still marks where it stands.
-    rerender({ highlight: ["CORE", "-1"], lines: 2, markdown: "Tracked as CORE-1 since Monday" });
-    await waitFor(() => expect(marks(preview())).toEqual(["CORE", "-1"]));
   } finally {
     view.unmount();
   }
@@ -280,13 +298,13 @@ test("a long body is parsed whole in the worker, so formatting past any visible 
   }
 });
 
-test("a body the engine cannot parse shows its literal text, led and highlighted, and never as HTML", async () => {
-  // Proof's schema has no node for raw HTML, so the parse throws. A comment holding
-  // `<script>alert(1)</script> astrolabe <mark>x</mark>`, found by q=astrolabe, comes back escaped
-  // with one server mark, which `snippetSegments` decodes into exactly this source and one hit.
+test("a body the engine cannot parse shows its literal text, led, and never as HTML", async () => {
+  // Proof's schema has no node for raw HTML, so the parse throws. This is a text Dispatch does
+  // not store - the only kind the browser still parses - so it carries no tree and no mark:
+  // the marks a search hit shows now ride in the snippet's own tree, and a body with no tree
+  // has none. That is the deliberate change; what this row holds still is the fallback itself.
   const source = "<script>alert(1)</script> astrolabe <mark>x</mark>";
   const { preview, rerender, view } = renderPreview({
-    highlight: ["astrolabe"],
     lead: "Replying to Planner — ",
     lines: 2,
     markdown: source,
@@ -295,31 +313,36 @@ test("a body the engine cannot parse shows its literal text, led and highlighted
     await waitFor(() => expect(preview().getAttribute("data-markdown-fallback")).toBe("true"));
     expect(preview().textContent).toBe(`Replying to Planner — ${source}`);
     expect(preview().querySelector("script")).toBeNull();
-    // The author's own `<mark>` is text; only the server's hit is a mark.
-    expect(marks(preview())).toEqual(["astrolabe"]);
+    // The author's own `<mark>` is text, never an element.
+    expect(marks(preview())).toEqual([]);
 
     // Edited into a body that parses, it renders formatted and stops being the fallback.
-    rerender({ highlight: ["astrolabe"], lines: 2, markdown: "**fixed** astrolabe" });
+    rerender({ lines: 2, markdown: "**fixed** astrolabe" });
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("fixed"));
     expect(preview().getAttribute("data-markdown-fallback")).toBeNull();
     expect(preview().textContent).toBe("fixed astrolabe");
-    expect(marks(preview())).toEqual(["astrolabe"]);
   } finally {
     view.unmount();
   }
 });
 
 test("the hover text is the whole text as plain words, never its source, and a preview not asked for one has none", async () => {
-  const source = "**Stop** the deploy\n\n1. one\n2. two";
+  const body = (fixtures as { name: string; markdown: string; latest: DisplayTree }[]).find(
+    (fixture) => fixture.name === "a-two-block-title"
+  );
+  if (body === undefined) {
+    throw new Error("no stored text named a-two-block-title in the display-tree fixture");
+  }
   const { preview, rerender, view } = renderPreview({
     fullTitle: true,
     lines: 1,
-    markdown: source,
+    markdown: body.markdown,
+    tree: body.latest,
   });
   try {
     await waitFor(() => expect(preview().querySelector("strong")?.textContent).toBe("Stop"));
     await waitFor(() => expect(preview().getAttribute("title")).toBe("Stop the deploy one two"));
-    rerender({ lines: 1, markdown: source });
+    rerender({ lines: 1, markdown: body.markdown, tree: body.latest });
     await waitFor(() => expect(preview().hasAttribute("title")).toBe(false));
   } finally {
     view.unmount();

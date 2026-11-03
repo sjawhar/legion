@@ -30,7 +30,8 @@
     "includes": [
       "**",
       "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json",
-      "!packages/envoy-client/src/__tests__/fixtures/command-surface.json"
+      "!packages/envoy-client/src/__tests__/fixtures/command-surface.json",
+      "!packages/dispatch/web/src/features/refs/__fixtures__/display-trees.json"
     ]
   },
   "linter": {

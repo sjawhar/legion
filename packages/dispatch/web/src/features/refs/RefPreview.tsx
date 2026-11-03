@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 
 import { primarySpec } from "../../api/issue-cache";
 import { issueQuery } from "../../api/queries";
+import type { DisplayTree } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { LabelPill, StatusPill } from "../../components/Pill";
 import {
@@ -23,6 +24,7 @@ import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-pre
 import {
   artifactTextQuery,
   blockText,
+  blockTextTree,
   prefetchReference,
   useBlockDocument,
   useReferenceData,
@@ -334,9 +336,14 @@ function Heading({ children }: { children: ReactNode }): ReactNode {
 }
 
 /** The card's body: three rendered lines of what the target says, formatted, then cut. */
-function Body({ markdown }: { markdown: string }): ReactNode {
+function Body({ markdown, tree }: { markdown: string; tree: DisplayTree | undefined }): ReactNode {
   return (
-    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={3} markdown={markdown} />
+    <MarkdownPreview
+      className={`mt-1 ${textSecondaryOnSurface}`}
+      lines={3}
+      markdown={markdown}
+      tree={tree}
+    />
   );
 }
 
@@ -355,6 +362,10 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   }
   const specMarkdown =
     specText.data !== undefined && "markdown" in specText.data ? specText.data.markdown : undefined;
+  const specTree =
+    specText.data !== undefined && "markdown_tree" in specText.data
+      ? specText.data.markdown_tree
+      : undefined;
   return (
     <>
       <Heading>
@@ -383,7 +394,7 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
         )}
       </span>
       {specMarkdown === undefined || specMarkdown.trim() === "" ? null : (
-        <Body markdown={specMarkdown} />
+        <Body markdown={specMarkdown} tree={specTree} />
       )}
     </>
   );
@@ -405,7 +416,7 @@ function documentOwner(route: DispatchReferenceRoute): ReactNode {
 }
 
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { artifact, markdown } = useReferenceData(route, { text: true });
+  const { artifact, markdown, markdownTree } = useReferenceData(route, { text: true });
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
@@ -420,7 +431,9 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
       {latest === null ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
-      {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
+      {markdown === undefined || markdown.trim() === "" ? null : (
+        <Body markdown={markdown} tree={markdownTree} />
+      )}
     </>
   );
 }
@@ -452,6 +465,7 @@ function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { node } = block;
   const pin = node.pin;
   const text = blockText(node);
+  const textTree = blockTextTree(node);
   const author = item === undefined ? undefined : node.made_by?.[0];
   const unit = item === undefined ? "version" : "revision";
   return (
@@ -480,7 +494,7 @@ function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
           </span>
         </span>
       )}
-      {text === undefined || text.trim() === "" ? null : <Body markdown={text} />}
+      {text === undefined || text.trim() === "" ? null : <Body markdown={text} tree={textTree} />}
     </>
   );
 }
@@ -494,7 +508,7 @@ function AskPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   return (
     <>
       <Heading>
-        <MarkdownPreview lines={2} markdown={ask.ask.question} />
+        <MarkdownPreview lines={2} markdown={ask.ask.question} tree={ask.ask.question_tree} />
       </Heading>
       <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
         {ask.ask.state}
@@ -514,7 +528,7 @@ function CommentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode
       <Heading>
         <AgentName actor={comment.comment.author} kind="static" />
       </Heading>
-      <Body markdown={comment.comment.body} />
+      <Body markdown={comment.comment.body} tree={comment.comment.body_tree} />
     </>
   );
 }
@@ -529,7 +543,7 @@ function MessagePreview({ route }: { route: DispatchReferenceRoute }): ReactNode
       <Heading>
         <AgentName actor={message.message.author} kind="static" />
       </Heading>
-      <Body markdown={message.message.body} />
+      <Body markdown={message.message.body} tree={message.message.body_tree} />
     </>
   );
 }

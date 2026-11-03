@@ -18,6 +18,7 @@ import type {
   ArtifactVersionContent,
   AskRead,
   CommentRead,
+  DisplayTree,
   GraphReferences,
   IssueReferenceSummary,
   IssueReferenceSummaryDocument,
@@ -65,6 +66,9 @@ export interface ReferenceTarget {
   /** What the target says, as its author wrote it (Markdown): a message's body, a document's
    *  text. `undefined` while loading or for a target with nothing to say. */
   readonly description: string | undefined;
+  /** The reading Go made of `description`, which a card draws (`MarkdownPreview`); absent for a
+   *  description Dispatch does not store, a GitHub body among them. */
+  readonly descriptionTree: DisplayTree | undefined;
   /** The bytes route of the picture a reference to an image artifact names - the version it pins,
    *  else the latest - for a thumbnail beside the title; undefined for anything else. */
   readonly picture: string | undefined;
@@ -201,6 +205,8 @@ export interface ReferenceData {
   readonly issue: IssueReferenceSummary | undefined;
   readonly artifact: ReferenceArtifact | undefined;
   readonly markdown: string | undefined;
+  /** The reading Go made of `markdown`, which a card draws. */
+  readonly markdownTree: DisplayTree | undefined;
   readonly ask: AskRead | undefined;
   readonly comment: CommentRead | undefined;
   readonly message: MessageRead | undefined;
@@ -383,6 +389,8 @@ export function useReferenceData(
     issue: issue.data,
     artifact,
     markdown: text.data !== undefined && "markdown" in text.data ? text.data.markdown : undefined,
+    markdownTree:
+      text.data !== undefined && "markdown_tree" in text.data ? text.data.markdown_tree : undefined,
     ask: ask.data,
     comment: comment.data,
     message: messageQueryResult.data,
@@ -438,6 +446,12 @@ export function blockText(node: GraphReferences["node"]): string | undefined {
   return node.pin === undefined ? node.text : node.pin.text;
 }
 
+/** The reading Go made of the text `blockText` answers, which a reference's title and card draw
+ *  rather than parsing the block's markdown again. */
+export function blockTextTree(node: GraphReferences["node"]): DisplayTree | undefined {
+  return node.pin === undefined ? node.text_tree : node.pin.text_tree;
+}
+
 /**
  * Every query behind a resolved reference title, shared by the Unfurl card and the inline
  * `RefLink` markdown/document rendering so both draw from one fetch path. An ask or comment
@@ -460,24 +474,26 @@ export function useReferenceTarget(
   route: DispatchReferenceRoute | undefined,
   options: ReferenceReadOptions
 ): ReferenceTarget {
-  const { artifact, ask, block, comment, issue, markdown, message } = useReferenceData(
-    route,
-    options
-  );
+  const { artifact, ask, block, comment, issue, markdown, markdownTree, message } =
+    useReferenceData(route, options);
   const kind = route === undefined ? undefined : referenceTargetKind(route);
   let authored: string | undefined;
+  let authoredTree: DisplayTree | undefined;
   switch (kind) {
     case "ask":
       authored = ask?.ask.question;
+      authoredTree = ask?.ask.question_tree;
       break;
     case "comment":
       authored = comment?.comment.body;
+      authoredTree = comment?.comment.body_tree;
       break;
     case "block":
       authored = block === undefined ? undefined : blockText(block.node);
+      authoredTree = block === undefined ? undefined : blockTextTree(block.node);
       break;
   }
-  const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
+  const headline = useMarkdownHeadline(authoredTree, TITLE_HEADLINE_MAX);
 
   if (kind === "message") {
     return {
@@ -486,6 +502,7 @@ export function useReferenceTarget(
           ? undefined
           : `${message.message.author.kind} ${message.message.author.id}`,
       description: message?.message.body,
+      descriptionTree: message?.message.body_tree,
       picture: undefined,
     };
   }
@@ -493,6 +510,7 @@ export function useReferenceTarget(
     return {
       title: headline?.text,
       description: headline?.cut === true ? authored : undefined,
+      descriptionTree: headline?.cut === true ? authoredTree : undefined,
       picture: undefined,
     };
   }
@@ -501,6 +519,7 @@ export function useReferenceTarget(
   return {
     title: artifact?.name ?? issue?.title,
     description: text ?? (artifact === undefined ? issue?.status : undefined),
+    descriptionTree: text === undefined ? undefined : markdownTree,
     picture: named === undefined ? undefined : picturePath(named, artifact),
   };
 }

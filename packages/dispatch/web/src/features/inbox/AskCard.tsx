@@ -9,7 +9,14 @@ import {
 } from "react";
 
 import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
-import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import type {
+  AnswerAskInput,
+  Ask,
+  AskRead,
+  AskWithTrees,
+  Comment,
+  CreateCommentInput,
+} from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
@@ -76,7 +83,7 @@ const createReply = (
 
 export interface AskCardProps {
   artifactSlug?: string;
-  ask: Ask;
+  ask: AskWithTrees;
   /** The project document that owns an ask whose read lacks `document` (only Inbox rows carry
    *  it), so the card can still name the ask's `dispatch://` reference. */
   owner?: { project: string; slug: string };
@@ -567,7 +574,7 @@ export function AskCard({
         ) : null}
         {inBlock ? null : (
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
+            <MarkdownBody markdown={displayedAsk.question} tree={displayedAsk.question_tree} />
           </div>
         )}
         {/* A request to approve again names the approval it follows, under the question (the

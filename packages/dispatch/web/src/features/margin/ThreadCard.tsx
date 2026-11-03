@@ -193,13 +193,15 @@ function CommentBody({
         </blockquote>
       )}
       {orphanNotice}
-      {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
+      {suggestion === null ? (
+        <MarkdownBody markdown={comment.body} tree={comment.body_tree} />
+      ) : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
-              <MarkdownBody markdown={comment.body} />
+              <MarkdownBody markdown={comment.body} tree={comment.body_tree} />
             </div>
           )}
         </div>
@@ -502,6 +504,7 @@ export function ThreadCard({
                       lines={1}
                       links="live"
                       markdown={root.body}
+                      tree={root.body_tree}
                     />
                   )}
                 </>
@@ -514,7 +517,12 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <MarkdownPreview lines={2} links="live" markdown={root.body} />
+                  <MarkdownPreview
+                    lines={2}
+                    links="live"
+                    markdown={root.body}
+                    tree={root.body_tree}
+                  />
                   {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
                 </>
               )}

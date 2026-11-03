@@ -5,9 +5,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { Window as HappyDOMWindow } from "happy-dom";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-
+import { displayTree, snippetTree } from "../../__tests__/display-trees";
 import { api } from "../../api/client";
 import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
@@ -43,13 +44,27 @@ const results: SearchResult[] = [
   },
 ];
 
-/** The server's answer when these hits are every match: one page holding the whole list. */
+/** The server's answer when these hits are every match: one page holding the whole list, each
+ *  hit carrying the reading the server made of its snippet and of an ask's answer text, which
+ *  is what the palette draws (`snippet_tree`, `answer.text_tree`). */
 function searchAnswer(hits: SearchResult[]): SearchResponse & SearchResultsPage {
+  const read = hits.map((hit) => ({
+    ...hit,
+    ...(hit.ask?.state === "answered" && hit.ask.answer.text !== null
+      ? {
+          ask: {
+            ...hit.ask,
+            answer: { ...hit.ask.answer, text_tree: displayTree(hit.ask.answer.text) },
+          },
+        }
+      : {}),
+    snippet_tree: snippetTree(hit.snippet),
+  }));
   return {
     limit: 20,
     offset: 0,
     reachable: hits.length,
-    results: hits,
+    results: read,
     took_ms: 1,
     total: hits.length,
   };
@@ -233,6 +248,7 @@ test("an ask hit says where it stands and shows its latest answer", async () => 
 // The answer's three-line clamp is CSS only: whatever text reaches the option is its accessible
 // name, so a long answer is cut to its start before it renders.
 test("an ask hit shows only the start of a long answer, cut at a word with an ellipsis", async () => {
+  await warmMarkdownRenderer();
   const text = `Keep **both** frames. ${"The meridian ring stays level. ".repeat(80)}zenithward`;
   const search = spyOn(api, "search").mockResolvedValue(
     searchAnswer([
@@ -257,15 +273,17 @@ test("an ask hit shows only the start of a long answer, cut at a word with an el
     const option = screen.getByRole("option");
     await waitFor(() => expect(option.querySelector("strong")?.textContent).toBe("both"));
 
-    // 280 characters (ANSWER_PREVIEW_CHARS) end inside the ninth sentence's second word, so the
-    // cut falls after its first, with an ellipsis, and the shown answer stays within the bound.
+    // The cut is on the tree now, not on the markdown, so the 280 characters
+    // (ANSWER_PREVIEW_CHARS) are the words a reader sees rather than the source: the four
+    // characters of `**both**`'s markers are no longer spent, and the cut lands two words
+    // further in. A deliberate change of this task; the bound it is held to is the same one.
     const shown = option.textContent ?? "";
     const shownAnswer = shown.slice(shown.indexOf("Keep both frames."));
     expect(ANSWER_PREVIEW_CHARS).toBe(280);
     expect(text.length).toBeGreaterThan(2000);
     expect(shown).not.toContain("zenithward");
     expect(shownAnswer).toBe(
-      `Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The…`
+      `Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The meridian…`
     );
     expect(shownAnswer.length).toBeLessThanOrEqual(ANSWER_PREVIEW_CHARS + 1);
   } finally {

@@ -2557,6 +2557,12 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
+      # The fixture the web app's view tests draw (pmdoc/web_fixtures_test.go): a corpus text
+      # whose display reading changed and a fixture nobody regenerated fails here rather than
+      # leaving a view's test asserting against a stale tree.
+      - name: Check the web app's display-tree fixture is up to date
+        run: go test -count=1 -run TestWebDisplayFixture ./internal/dispatch/pmdoc/ -args --check
+        working-directory: packages/envoy
       # The server's version and the pgvector version it offers, read from the service itself, so
       # the run shows which Postgres the tests below ran on.
       - name: Postgres service version

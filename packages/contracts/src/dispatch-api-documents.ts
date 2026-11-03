@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { type Actor, ActorSchema, type DocEditOp, InboundWriterSchema } from "./dispatch-api-core";
+import {
+  type Actor,
+  ActorSchema,
+  type DisplayTree,
+  DisplayTreeSchema,
+  type DocEditOp,
+  InboundWriterSchema,
+} from "./dispatch-api-core";
 import { ASK_TURNS } from "./dispatch-api-limits";
 import { referenceChangesFields } from "./dispatch-api-refs";
 
@@ -48,6 +55,8 @@ export interface ArtifactReview {
   readonly state: ArtifactReviewState;
   readonly actor: Actor;
   readonly reason: string | null;
+  /** The display tree of `reason`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly reason_tree?: DisplayTree;
   readonly ask_id: string | null;
   readonly created_at: string;
 }
@@ -73,6 +82,8 @@ export const ArtifactApprovalSchema = z
      *  `artifact.version`. */
     seq: z.number().int().optional(),
     reason: z.string().nullable().optional(),
+    /** The display tree of `reason`, absent unless the request sent `Dispatch-Trees: 1`. */
+    reason_tree: DisplayTreeSchema.optional(),
     ask_id: z.string().nullable().optional(),
     requested_by: ActorSchema.optional(),
     /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a

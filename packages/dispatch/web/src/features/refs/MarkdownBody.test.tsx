@@ -5,6 +5,7 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { displayTree } from "../../__tests__/display-trees";
 import { api } from "../../api/client";
 import type {
   AskRead,
@@ -799,6 +800,7 @@ test("a clock time such as 16:25Z renders as Markdown, not as the literal-text f
 });
 
 test("a bare dispatch ask reference renders an inline link to the ask route with the resolved question", async () => {
+  await warmMarkdownRenderer();
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -806,6 +808,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
       kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
+      question_tree: displayTree("Ship it?"),
       options: [],
       multiple: false,
       urgency: "med",
@@ -846,6 +849,7 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
 });
 
 test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
+  await warmMarkdownRenderer();
   // The pinned link's path names the spec's slug, which the issue's summary carries: no link to
   // a block reads the full issue.
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
@@ -864,6 +868,7 @@ test("a block reference reads as the headline of its text: the pinned version's,
     project: "CORE",
     ref: "dispatch://CORE-1/spec#b-p1",
     text: "Ship it on **Monday**.",
+    text_tree: displayTree("Ship it on **Monday**."),
   };
   const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
     Promise.resolve(
@@ -872,7 +877,13 @@ test("a block reference reads as the headline of its text: the pinned version's,
             edges: [],
             node: {
               ...node,
-              pin: { ref: reference, state: "changed", text: "Ship it on Friday.", version: 2 },
+              pin: {
+                ref: reference,
+                state: "changed",
+                text: "Ship it on Friday.",
+                text_tree: displayTree("Ship it on Friday."),
+                version: 2,
+              },
             },
           }
         : { edges: [], node }
@@ -930,6 +941,7 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
 });
 
 test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
+  await warmMarkdownRenderer();
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -937,6 +949,7 @@ test("two references in one body each resolve their own inline link and title, r
       kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
+      question_tree: displayTree("Ship it?"),
       options: [],
       multiple: false,
       urgency: "med",
@@ -1014,6 +1027,7 @@ test("the inline variant drops a later paragraph's code span instead of leaking 
 });
 
 test("a hand-authored Markdown link to a dispatch:// target resolves through data-dispatch-href", async () => {
+  await warmMarkdownRenderer();
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -1021,6 +1035,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
       kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Ship it?",
+      question_tree: displayTree("Ship it?"),
       options: [],
       multiple: false,
       urgency: "med",

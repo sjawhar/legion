@@ -353,9 +353,19 @@ type SearchIssue struct {
 // document settlement retracted while it was answered, and nil when nobody answered.
 // Answer.Selected is an empty list, never null, when the answer chose no option.
 type SearchAsk struct {
-	State      string         `json:"state"` // "open" | "answered" | "resolved"
-	Answer     *AskAnswer     `json:"answer,omitempty"`
-	Resolution *AskResolution `json:"resolution,omitempty"`
+	State      string           `json:"state"` // "open" | "answered" | "resolved"
+	Answer     *SearchAskAnswer `json:"answer,omitempty"`
+	Resolution *AskResolution   `json:"resolution,omitempty"`
+}
+
+// SearchAskAnswer is the answer a search hit's ask carries, with the tree of the text given with
+// it. It is the hit's own reading of an AskAnswer rather than a field on AskAnswer itself: the
+// answer is an event payload's shape, and no payload gains a tree field.
+type SearchAskAnswer struct {
+	AskAnswer
+	// TextTree is the ProseMirror tree Text is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	TextTree json.RawMessage `json:"text_tree,omitempty"`
 }
 
 // SearchResult is one ranked Dispatch search hit.
@@ -1793,7 +1803,10 @@ type GraphNode struct {
 	Parent         *NodeParent `json:"parent"`
 	ParentVersion  *int        `json:"parent_version"`
 	Text           string      `json:"text,omitempty"`
-	Pin            *BlockPin   `json:"pin,omitempty"`
+	// TextTree is the ProseMirror tree Text is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`: a reference's title is read from it, as an ask's and a comment's are.
+	TextTree json.RawMessage `json:"text_tree,omitempty"`
+	Pin      *BlockPin       `json:"pin,omitempty"`
 }
 
 // NodeParent names the node a graph node belongs to: its kind and its node id (an artifact's
@@ -1810,11 +1823,14 @@ type NodeParent struct {
 // is "unchanged" when its current text equals Text, "changed" when it differs, and "removed"
 // when no current version holds the block; RemovedVersion is then the version that deleted it.
 type BlockPin struct {
-	Version        int    `json:"version"`
-	Ref            string `json:"ref"`
-	Text           string `json:"text"`
-	State          string `json:"state"`
-	RemovedVersion int    `json:"removed_version,omitempty"`
+	Version int    `json:"version"`
+	Ref     string `json:"ref"`
+	Text    string `json:"text"`
+	// TextTree is the ProseMirror tree Text is shown as, present only for a caller that sent
+	// `Dispatch-Trees: 1`.
+	TextTree       json.RawMessage `json:"text_tree,omitempty"`
+	State          string          `json:"state"`
+	RemovedVersion int             `json:"removed_version,omitempty"`
 }
 
 // GraphExcerpt is the text shown for an edge: the block containing a document mention (with its

@@ -37,7 +37,6 @@ import {
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
-import { searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildProjectPath, type DispatchReferenceRoute, nodeRouteFromHref } from "../refs/routes";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
@@ -191,17 +190,15 @@ function ResultOption({
   onSelect: () => void;
   result: SearchResult;
 }): ReactNode {
-  // The server marks the matched words in the snippet's source text. The snippet renders as
-  // Markdown (the text someone wrote, with its bold and code and references), which cannot
-  // carry those marks through the parse, so the preview puts them back on the rendered text.
-  // `ts_headline` returns a body whole when it fits its 24-word window, and cuts a longer one
-  // to that window around the match; a cut can open a mark at either end, and the delimiter it
-  // left goes before the parse (`balanceCutMarkdown`, which leaves a run CommonMark reads as
-  // literal alone). The hits are matched by their words, so the display text can change.
-  const segments = snippetSegments(result.snippet);
-  const source = segments.map((segment) => segment.text).join("");
-  const snippet = searchSnippetMarkdown(source);
-  const hits = segments.flatMap((segment) => (segment.mark ? [segment.text] : []));
+  // The server reads the hit's snippet for display and marks the words that matched in the
+  // tree it sends (`snippet_tree`): `ts_headline` returns a body whole when it fits its
+  // 24-word window and cuts a longer one to that window around the match, and the server
+  // balances that cut before it reads it, so nothing here parses or marks anything. The
+  // sentinels the server leaves in `snippet` itself come out for the literal text a preview
+  // falls back to where no tree reached it.
+  const source = snippetSegments(result.snippet)
+    .map((segment) => segment.text)
+    .join("");
 
   return (
     <PaletteOption
@@ -225,10 +222,10 @@ function ResultOption({
       </div>
       <MarkdownPreview
         className={`mt-1 text-sm ${muted ? textMutedOnSelectedCard : textPrimaryOnSurface}`}
-        highlight={hits}
         highlightClassName={`rounded px-0.5 ${searchHitBg} ${searchHitText}`}
         lines={2}
-        markdown={snippet}
+        markdown={source}
+        tree={result.snippet_tree}
       />
       {result.ask === undefined ? null : <AskHitStatus ask={result.ask} muted={muted} />}
     </PaletteOption>

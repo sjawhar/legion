@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { DisplayTree } from "./dispatch-api-core";
 
 /**
  * The shapes several payload families share: what a write moved in the reference graph, whose
@@ -85,6 +86,12 @@ export const replyBlockFields = {
 export const ReplyBlockSchema = z.strictObject(replyBlockFields).readonly();
 
 export type ReplyBlock = z.output<typeof ReplyBlockSchema>;
+
+/** The block a reply answers, as the web app reads it: with the display tree of the excerpt it
+ *  stored. */
+export type ReplyBlockWithTrees = ReplyBlock & {
+  readonly text_tree?: DisplayTree;
+};
 
 /** The block a reply answers, as a comment or message event payload carries it (`ReplyBlock`).
  *  An event recorded before the field, or by a Dispatch older than it, carries none. A bus frame

@@ -156,7 +156,7 @@ function BroadcastRecipientRow({
             <Timestamp at={reply.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
-            <MarkdownBody markdown={reply.body} />
+            <MarkdownBody markdown={reply.body} tree={reply.body_tree} />
           </div>
         </div>
       ))}
@@ -207,7 +207,7 @@ export function BroadcastPage(): ReactNode {
           </span>
         </p>
         <div className={`mt-2 ${textPrimaryOnCanvas}`}>
-          <MarkdownBody markdown={sent.body} />
+          <MarkdownBody markdown={sent.body} tree={sent.body_tree} />
         </div>
         {excluded.length === 0 ? null : (
           <p className={`mt-2 text-sm ${dangerText}`}>

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
+import type { DisplayTree } from "../../api/types";
 import {
   borderDefault,
   cardHoverBorder,
@@ -24,16 +25,22 @@ interface GitHubIssue {
   title?: string;
 }
 
-/** The card's body: two rendered lines of what the target says, formatted, then cut. */
-function Body({ markdown }: { markdown: string }): ReactNode {
+/** The card's body: two rendered lines of what the target says, formatted, then cut. A GitHub
+ *  body is a text Dispatch does not store, so it carries no tree and is parsed here. */
+function Body({ markdown, tree }: { markdown: string; tree?: DisplayTree }): ReactNode {
   return (
-    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={2} markdown={markdown} />
+    <MarkdownPreview
+      className={`mt-1 ${textSecondaryOnSurface}`}
+      lines={2}
+      markdown={markdown}
+      tree={tree}
+    />
   );
 }
 
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
   const route = parseDispatchReference(reference.reference);
-  const { title, description } = useReferenceTarget(route, { text: true });
+  const { title, description, descriptionTree } = useReferenceTarget(route, { text: true });
   const path = useReferencePath(route);
 
   return (
@@ -42,7 +49,7 @@ function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactN
       href={path ?? reference.href}
     >
       <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
-      {description === undefined ? null : <Body markdown={description} />}
+      {description === undefined ? null : <Body markdown={description} tree={descriptionTree} />}
     </a>
   );
 }

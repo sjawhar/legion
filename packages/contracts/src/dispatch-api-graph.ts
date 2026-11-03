@@ -1,5 +1,5 @@
 import type { IssueAskRow } from "./dispatch-api-asks";
-import type { Actor } from "./dispatch-api-core";
+import type { Actor, DisplayTree } from "./dispatch-api-core";
 import type { Artifact } from "./dispatch-api-documents";
 
 /**
@@ -110,6 +110,8 @@ export interface GraphNode {
   readonly parent?: GraphNodeParent | null;
   readonly parent_version?: number | null;
   readonly text?: string;
+  /** The display tree of `text`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly text_tree?: DisplayTree;
   readonly pin?: BlockPin;
 }
 
@@ -131,6 +133,8 @@ export interface BlockPin {
   readonly version: number;
   readonly ref: string;
   readonly text: string;
+  /** The display tree of `text`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly text_tree?: DisplayTree;
   readonly state: "unchanged" | "changed" | "removed";
   readonly removed_version?: number;
 }

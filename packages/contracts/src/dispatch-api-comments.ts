@@ -5,6 +5,7 @@ import {
   AnchorSchema,
   anchorFields,
   anchorPositionFields,
+  type DisplayTree,
   InboundActorSchema,
 } from "./dispatch-api-core";
 import type { GraphNode } from "./dispatch-api-graph";
@@ -12,6 +13,7 @@ import { ASK_TURNS, type AskTurn, DELIVERY_CAPABILITIES } from "./dispatch-api-l
 import {
   InboundReplyBlockSchema,
   ReplyBlockSchema,
+  type ReplyBlockWithTrees,
   referenceChangesFields,
   threadLoginsFields,
 } from "./dispatch-api-refs";
@@ -102,6 +104,13 @@ export const commentFields = {
 export const CommentSchema = z.strictObject(commentFields).readonly();
 
 export type Comment = z.output<typeof CommentSchema>;
+
+/** A comment as the web app reads it: the comment, the tree of its body, and the block it
+ *  answers carrying the tree of that block's excerpt. */
+export type CommentWithTrees = Omit<Comment, "reply_block"> & {
+  readonly body_tree?: DisplayTree;
+  readonly reply_block?: ReplyBlockWithTrees | null;
+};
 
 /** What `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` answer: the
  *  comment or message as a graph node, the comment's revision (absent for a message, which is

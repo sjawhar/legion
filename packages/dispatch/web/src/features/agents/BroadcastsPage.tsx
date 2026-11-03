@@ -89,6 +89,7 @@ export function BroadcastsPage(): ReactNode {
                   fullTitle
                   lines={1}
                   markdown={sent.body}
+                  tree={sent.body_tree}
                 />
               </Link>
             </li>

@@ -1,4 +1,5 @@
-import type { AskAnswer, AskResolution } from "./dispatch-api-asks";
+import type { AskAnswerWithTrees, AskResolution } from "./dispatch-api-asks";
+import type { DisplayTree } from "./dispatch-api-core";
 import type { SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE } from "./dispatch-api-limits";
 
 /**
@@ -32,8 +33,12 @@ export type SearchOwner =
  *  answer a person gave before it was closed (rows document settlement retracted while answered). */
 export type SearchAsk =
   | { readonly state: "open" }
-  | { readonly state: "answered"; readonly answer: AskAnswer }
-  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
+  | { readonly state: "answered"; readonly answer: AskAnswerWithTrees }
+  | {
+      readonly state: "resolved";
+      readonly resolution: AskResolution;
+      readonly answer?: AskAnswerWithTrees;
+    };
 
 export interface SearchResult {
   readonly kind: SearchResultKind;
@@ -53,6 +58,10 @@ export interface SearchResult {
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
+  /** The display tree of `snippet`, with the words the search matched carrying a
+   *  `searchHighlight` mark: the server balances the cut, reads it and marks it
+   *  (`pmdoc.DisplaySnippetJSON`). Absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly snippet_tree?: DisplayTree;
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;

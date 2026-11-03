@@ -8,9 +8,9 @@ import type {
   Agent,
   Artifact,
   Comment,
-  Message,
   MessageDelivery,
   MessageDeliveryMode,
+  MessageWithTrees,
   UserState,
 } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -157,7 +157,7 @@ function threadDelivery(root: MessageConversation): ReplyTarget["thread"] | unde
 
 /** What the composer quotes when the reader replies to `message`. */
 function replyTargetFor(
-  message: Message,
+  message: MessageWithTrees,
   root: MessageConversation,
   issueKey: string
 ): ReplyTarget {
@@ -193,7 +193,7 @@ function ConversationReply({
   /** The Replies page's read mark, on the thread's newest reply. */
   markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
-  reply: Message;
+  reply: MessageWithTrees;
   replyDisabled: boolean;
   root: MessageConversation;
 }): ReactNode {
@@ -217,7 +217,7 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={reply.author}
-      body={<MarkdownBody markdown={reply.body} />}
+      body={<MarkdownBody markdown={reply.body} tree={reply.body_tree} />}
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -243,6 +243,7 @@ function ConversationReply({
         author: parent?.author,
         block: reply.reply_block,
         excerpt: parent?.body ?? "",
+        excerptTree: parent?.body_tree,
         to:
           reply.in_reply_to === null
             ? undefined
@@ -346,7 +347,7 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} tree={item.root.body_tree} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -839,7 +840,7 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} tree={item.root.body_tree} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}

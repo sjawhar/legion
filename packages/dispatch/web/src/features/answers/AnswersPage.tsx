@@ -70,6 +70,7 @@ function AnswerRow({
         fullTitle
         lines={2}
         markdown={row.question}
+        tree={row.question_tree}
       />
       {row.kind === "answer" && row.answer !== undefined ? (
         <div className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
@@ -84,7 +85,7 @@ function AnswerRow({
           )}
           {row.answer.text === null || row.answer.text === "" ? null : (
             <div className="mt-1">
-              <MarkdownBody markdown={row.answer.text} />
+              <MarkdownBody markdown={row.answer.text} tree={row.answer.text_tree} />
             </div>
           )}
         </div>
@@ -92,7 +93,7 @@ function AnswerRow({
       {row.kind === "reply" && row.reply !== undefined ? (
         <p className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
           <span className={`font-medium ${textMutedOnCanvas}`}>Replied:</span>{" "}
-          <MarkdownBody markdown={row.reply.body} variant="inline" />
+          <MarkdownBody markdown={row.reply.body} tree={row.reply.body_tree} variant="inline" />
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">

@@ -5,10 +5,11 @@ import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { AskRead, IssueReferenceSummary } from "../../api/types";
+import type { AskRead, DisplayTree, IssueReferenceSummary } from "../../api/types";
+import fixtures from "./__fixtures__/display-trees.json";
 import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
-import { useMarkdownHeadline } from "./markdown-engine";
+import { loadedEngine, useMarkdownHeadline, warmMarkdownRenderer } from "./markdown-engine";
 import { Unfurl } from "./Unfurl";
 
 /** CORE-1's summary read, which a reference to it shows. */
@@ -20,6 +21,32 @@ const issue: IssueReferenceSummary = {
   title: "Design decision",
 };
 
+/** One reading of the display-tree fixture, by name: the trees these rows draw are Go's own,
+ *  from the file `pmdoc`'s `TestWebDisplayFixture` writes and CI checks. */
+function tree(name: string): DisplayTree {
+  const found = (fixtures as { name: string; latest: DisplayTree }[]).find(
+    (fixture) => fixture.name === name
+  );
+  if (found === undefined) {
+    throw new Error(`no stored text named ${name} in the display-tree fixture`);
+  }
+  return found.latest;
+}
+
+/** One marked snippet of the same fixture. */
+function stored(name: string): { markdown: string; snippet: DisplayTree } {
+  const found = (fixtures as { name: string; markdown: string; snippet?: DisplayTree }[]).find(
+    (fixture) => fixture.name === name
+  );
+  if (found?.snippet === undefined) {
+    throw new Error(`no marked snippet named ${name} in the display-tree fixture`);
+  }
+  return { markdown: found.markdown, snippet: found.snippet };
+}
+
+/** An ask read as the server answers one, the question carrying the reading Go made of it: the
+ *  card's title is the tree's plain words now, and the page's own engine reads a question into
+ *  the same document. `warmMarkdownRenderer` must have resolved before this is called. */
 function askRead(question: string): AskRead {
   return {
     ask: {
@@ -28,6 +55,7 @@ function askRead(question: string): AskRead {
       kind: "question",
       author: { id: "alice", kind: "user" },
       question,
+      question_tree: loadedEngine()?.parse(question)?.toJSON() as DisplayTree,
       options: [],
       multiple: false,
       urgency: "med",
@@ -167,17 +195,21 @@ test("a preview inside a link holds no link of its own, and a click on its refer
   }
 });
 
-test("search hits mark whole words in any case, and a reference the server matched is marked whole", async () => {
+test("search hits mark the runs the server matched, and a reference it matched is marked whole", async () => {
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
-  // What the server's ts_headline marks for `port CORE-1` over this body: `port` as a word (not
-  // the `port` in `Report`, `support` or `export`), and the reference's two lexemes.
+  // What the server's ts_headline marked for `port CORE-1` over this body, read and marked by
+  // the server itself (`pmdoc.DisplaySnippetJSON`, the fixture `TestWebDisplayFixture` writes):
+  // `port` as a word - not the `port` in `Report`, `support` or `export` - and the reference.
+  // It used to be the browser that found those words in its own rendered text; that pass is
+  // gone, and this row draws the marks the tree carries instead. A deliberate change.
+  const hit = stored("a-marked-word-and-reference");
   const view = render(
     <Providers>
       <MarkdownPreview
-        highlight={["PORT", "CORE", "-1", "", "  "]}
         highlightClassName="hit"
         lines={2}
-        markdown="Report the port to support before we export dispatch://CORE-1"
+        markdown={hit.markdown}
+        tree={hit.snippet}
       />
     </Providers>
   );
@@ -195,23 +227,8 @@ test("search hits mark whole words in any case, and a reference the server match
   }
 });
 
-test("a hit after a character whose lower case is longer is marked on the right words", async () => {
-  // `İ` lower-cases to two code units, so an index found in the lower-cased text lands one
-  // character late in the source.
-  const view = render(<MarkdownPreview highlight={["port"]} lines={1} markdown="İstanbul port" />);
-  try {
-    const element = preview(view.container);
-    await waitFor(() => expect(element.textContent).toBe("İstanbul port"));
-    expect(Array.from(element.querySelectorAll("mark"), (mark) => mark.textContent)).toEqual([
-      "port",
-    ]);
-  } finally {
-    view.unmount();
-  }
-});
-
-function Headline({ markdown, max }: { markdown: string; max: number }): ReactNode {
-  const headline = useMarkdownHeadline(markdown, max);
+function Headline({ max, tree }: { max: number; tree: DisplayTree }): ReactNode {
+  const headline = useMarkdownHeadline(tree, max);
   return headline === undefined ? null : (
     <output data-cut={String(headline.cut)}>{headline.text}</output>
   );
@@ -220,12 +237,9 @@ function Headline({ markdown, max }: { markdown: string; max: number }): ReactNo
 test("a headline writes a reference as its short form, keeps one in code as written, and never cuts a character in half", async () => {
   const view = render(
     <>
-      <Headline
-        markdown="Blocked on **dispatch://CORE-2/ask/a1**, see `dispatch://CORE-3`"
-        max={60}
-      />
-      <Headline markdown={`a${"😀".repeat(60)}`} max={60} />
-      <Headline markdown="Use Array<string> here" max={60} />
+      <Headline max={60} tree={tree("a-headline-with-references")} />
+      <Headline max={60} tree={tree("a-headline-of-emoji")} />
+      <Headline max={60} tree={tree("a-tag-shaped-run")} />
     </>
   );
   try {
@@ -248,6 +262,7 @@ test("a headline writes a reference as its short form, keeps one in code as writ
 });
 
 test("an ask's unfurl card shows its question once, even when the question ends in an ellipsis", async () => {
+  await warmMarkdownRenderer();
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead("Should we wait for **CORE-2**…"));
   const view = render(
     <Providers>
@@ -293,6 +308,7 @@ test("an ask's unfurl card never borrows its issue's status, and reads no issue,
 });
 
 test("a long ask's unfurl card shows the whole question under its cut title, formatted", async () => {
+  await warmMarkdownRenderer();
   const question = `**Which** of these ${"options ".repeat(10)}ships first?`;
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead(question));
   const view = render(

@@ -2,6 +2,7 @@ import { beforeAll, expect, test } from "bun:test";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import * as Y from "yjs";
 
+import type { DisplayTree } from "../../api/types";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import {
   ADDED_WORDS_CLASS,
@@ -21,6 +22,15 @@ function render(markdown: string): ProseMirrorNode {
   return doc;
 }
 
+/** The reading the server would send of `markdown`: `changeMarksAgainst` draws a tree now, not
+ *  a source, and the page's own engine reads a text into the same document Go's version-mode
+ *  read does (what the pmdoc differential holds equal). `undefined` for a text no reading
+ *  answers, which is what the rows about an absent or refused baseline hand it. */
+function baselineTree(markdown: string): DisplayTree | undefined {
+  const doc = markdown === "" ? undefined : loadedEngine()?.parse(markdown);
+  return doc === undefined ? undefined : (doc.toJSON() as DisplayTree);
+}
+
 // The marks are computed from the shared engine in the task that asks for them, as the page's
 // shell has warmed it by the time a document version is on the screen.
 beforeAll(async () => {
@@ -32,7 +42,7 @@ test("a word changed inside a paragraph marks that paragraph, the added words an
   const doc = render("# Plan\n\nThe plan ships behind a canary today.\n\nThe end.\n");
   const text = "The plan ships behind a canary today.";
 
-  expect(changeMarksAgainst(baseline, doc)).toEqual({
+  expect(changeMarksAgainst(baselineTree(baseline), doc)).toEqual({
     text: [
       { blockIndex: 1, className: CHANGED_BLOCK_CLASS },
       {
@@ -60,7 +70,7 @@ test("a changed pair too far apart to diff is drawn as the whole block, struck t
   const after = Array.from({ length: 600 }, (_, index) => `after${index}`).join(" ");
   const doc = render(`# Plan\n\n${after}\n`);
 
-  expect(changeMarksAgainst(`# Plan\n\n${before}\n`, doc)).toEqual({
+  expect(changeMarksAgainst(baselineTree(`# Plan\n\n${before}\n`), doc)).toEqual({
     text: [
       { blockIndex: 1, className: CHANGED_BLOCK_CLASS },
       { blockIndex: 1, className: ADDED_WORDS_CLASS, range: { from: 0, to: after.length } },
@@ -74,7 +84,7 @@ test("a paragraph that only lost words draws them where they stood", () => {
   const doc = render("# Plan\n\nThe plan ships today.\n");
   const text = "The plan ships today.";
 
-  expect(changeMarksAgainst(baseline, doc)).toEqual({
+  expect(changeMarksAgainst(baselineTree(baseline), doc)).toEqual({
     text: [{ blockIndex: 1, className: CHANGED_BLOCK_CLASS }],
     widgets: [
       {
@@ -105,7 +115,7 @@ test("a paragraph replaced by a rule draws the words it lost in the editor", asy
 
   try {
     handle.setMarkdown("# Plan\n\n---\n");
-    const marks = changeMarksAgainst(baseline, handle.view.state.doc);
+    const marks = changeMarksAgainst(baselineTree(baseline), handle.view.state.doc);
     expect(marks).toEqual({
       text: [{ blockIndex: 1, className: CHANGED_BLOCK_CLASS }],
       widgets: [{ blockIndex: 1, className: REMOVED_WORDS_CLASS, offset: 0, text: lost }],
@@ -130,7 +140,7 @@ test("a block removed since the baseline becomes a widget between the two blocks
   const baseline = "# Plan\n\nThe middle block.\n\nThe end.\n";
   const doc = render("# Plan\n\nThe end.\n");
 
-  expect(changeMarksAgainst(baseline, doc)).toEqual({
+  expect(changeMarksAgainst(baselineTree(baseline), doc)).toEqual({
     text: [],
     widgets: [{ blockIndex: 1, className: REMOVED_BLOCK_CLASS, text: "The middle block." }],
   });
@@ -140,7 +150,7 @@ test("a block removed from the end of the baseline becomes a widget at the end o
   const baseline = "# Plan\n\nThe end.\n";
   const doc = render("# Plan\n");
 
-  expect(changeMarksAgainst(baseline, doc)).toEqual({
+  expect(changeMarksAgainst(baselineTree(baseline), doc)).toEqual({
     text: [],
     widgets: [{ blockIndex: 1, className: REMOVED_BLOCK_CLASS, text: "The end." }],
   });
@@ -149,11 +159,16 @@ test("a block removed from the end of the baseline becomes a widget at the end o
 test("a baseline equal to the rendered document marks nothing", () => {
   const markdown = "# Plan\n\nThe plan ships behind a canary today.\n";
 
-  expect(changeMarksAgainst(markdown, render(markdown))).toEqual({ text: [], widgets: [] });
+  expect(changeMarksAgainst(baselineTree(markdown), render(markdown))).toEqual({
+    text: [],
+    widgets: [],
+  });
 });
 
 test("an absent baseline marks nothing", () => {
-  expect(changeMarksAgainst("", render("# Plan\n\nA first approval request.\n"))).toEqual({
+  expect(
+    changeMarksAgainst(baselineTree(""), render("# Plan\n\nA first approval request.\n"))
+  ).toEqual({
     text: [],
     widgets: [],
   });
@@ -164,7 +179,7 @@ test("a baseline the engine refuses marks nothing", () => {
   // nothing for it (`markdown-engine.ts`).
   const refused = 'see <span data-dispatch="bogus">this</span> now';
 
-  expect(changeMarksAgainst(refused, render("# Plan\n\nThe only block.\n"))).toEqual({
+  expect(changeMarksAgainst(baselineTree(refused), render("# Plan\n\nThe only block.\n"))).toEqual({
     text: [],
     widgets: [],
   });

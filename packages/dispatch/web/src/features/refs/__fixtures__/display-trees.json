@@ -1,0 +1,2363 @@
+[
+  {
+    "name": "formatted-body",
+    "markdown": "# Deploy\n\nStop the **deploy** and run `make check` first.\n\n- one item\n- two\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "blockId": "b-000001",
+            "id": "",
+            "level": 1
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Deploy"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the "
+            },
+            {
+              "type": "text",
+              "text": "deploy",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and run "
+            },
+            {
+              "type": "text",
+              "text": "make check",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000003",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one item"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000006",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "blockId": "b-000001",
+            "id": "",
+            "level": 1
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Deploy"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the "
+            },
+            {
+              "type": "text",
+              "text": "deploy",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and run "
+            },
+            {
+              "type": "text",
+              "text": "make check",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000003",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one item"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000006",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "one-paragraph",
+    "markdown": "Stop the deploy and report back.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the deploy and report back."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the deploy and report back."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-reference",
+    "markdown": "Tracked as dispatch://CORE-1 since Monday.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Tracked as dispatch://CORE-1 since Monday."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Tracked as dispatch://CORE-1 since Monday."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-link",
+    "markdown": "Read [the design](https://example.com/design) first.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Read "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/design",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Read "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/design",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-picture",
+    "markdown": "![shot.png](dispatch://CORE-1/artifact/shot-png@v1)\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "alt": "shot.png",
+                "src": "dispatch://CORE-1/artifact/shot-png@v1",
+                "title": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "alt": "shot.png",
+                "src": "dispatch://CORE-1/artifact/shot-png@v1",
+                "title": null
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-mermaid-block",
+    "markdown": "Before.\n\n```mermaid\ngraph TD\n  A --\u003e B\n```\n\nAfter.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Before."
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "blockId": "b-000002",
+            "language": "mermaid"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "graph TD\n  A --\u003e B"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Before."
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "blockId": "b-000002",
+            "language": "mermaid"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "graph TD\n  A --\u003e B"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-task-list",
+    "markdown": "- [x] done\n- [ ] open\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000001",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000002",
+                "checked": true,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "done"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": false,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "open"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000001",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000002",
+                "checked": true,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "done"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": false,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "open"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-long-answer",
+    "markdown": "The deploy is held until the migration lands, and the migration is waiting on a review nobody has started. I will pick the review up this afternoon and report back once the migration is in and the deploy has run to the end.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The deploy is held until the migration lands, and the migration is waiting on a review nobody has started. I will pick the review up this afternoon and report back once the migration is in and the deploy has run to the end."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The deploy is held until the migration lands, and the migration is waiting on a review nobody has started. I will pick the review up this afternoon and report back once the migration is in and the deploy has run to the end."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "an-answered-decision",
+    "markdown": ":::ask{#q2 urgency=\"blocking\" multiple=\"false\" state=\"resolved\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[\u0026#x22;REST\u0026#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: matches the platform\n:::\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "blockId": "q2",
+            "multiple": false,
+            "state": "open",
+            "urgency": "blocking"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which transport should we expose?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "blockId": "b-000002",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "blockId": "b-000003",
+                    "checked": null,
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: matches the platform"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "answer": "Ship REST first.",
+            "answered_at": "2026-09-12T13:20:00Z",
+            "answered_by": "alice",
+            "blockId": "q2",
+            "multiple": false,
+            "selected": [
+              "REST"
+            ],
+            "state": "resolved",
+            "urgency": "blocking"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which transport should we expose?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "blockId": "b-000002",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "blockId": "b-000003",
+                    "checked": null,
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: matches the platform"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-marked-snippet",
+    "markdown": "Stop the deploy and watch the port it listens on.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the deploy and watch the port it listens on."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the deploy and watch the port it listens on."
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop the "
+            },
+            {
+              "type": "text",
+              "text": "deploy",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and watch the "
+            },
+            {
+              "type": "text",
+              "text": "port",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " it listens on."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-marked-link",
+    "markdown": "Read [the design](https://example.com/d) first.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Read "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/d",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Read "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/d",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Read "
+            },
+            {
+              "type": "text",
+              "text": "the ",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/d",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/d",
+                    "title": null
+                  }
+                },
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " first."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-marked-reference",
+    "markdown": "Tracked as dispatch://CORE-1 since Monday.\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Tracked as dispatch://CORE-1 since Monday."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Tracked as dispatch://CORE-1 since Monday."
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Tracked as "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-1",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " since Monday."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-marked-link-to-a-reference",
+    "markdown": "See [the design](dispatch://CORE-1).\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "dispatch://CORE-1",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See "
+            },
+            {
+              "type": "text",
+              "text": "the design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "dispatch://CORE-1",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See "
+            },
+            {
+              "type": "text",
+              "text": "the ",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "dispatch://CORE-1",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "design",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "dispatch://CORE-1",
+                    "title": null
+                  }
+                },
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "marks-inside-formatting",
+    "markdown": "**Bold** word, see `code` here\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " word, see "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here"
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " word, see "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here"
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                },
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " "
+            },
+            {
+              "type": "text",
+              "text": "word",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", see "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                },
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " here"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-mark-on-one-word-alone",
+    "markdown": "Report the port number to the support team before we export\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the port number to the support team before we export"
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the port number to the support team before we export"
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the "
+            },
+            {
+              "type": "text",
+              "text": "port",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " number to the support team before we export"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-marked-word-and-reference",
+    "markdown": "Report the port to support before we export dispatch://CORE-1\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the port to support before we export dispatch://CORE-1"
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the port to support before we export dispatch://CORE-1"
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Report the "
+            },
+            {
+              "type": "text",
+              "text": "port",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " to support before we export "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-1",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-headline-with-references",
+    "markdown": "Blocked on **dispatch://CORE-2/ask/a1**, see `dispatch://CORE-3`\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Blocked on "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-2/ask/a1",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", see "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-3",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Blocked on "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-2/ask/a1",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ", see "
+            },
+            {
+              "type": "text",
+              "text": "dispatch://CORE-3",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-headline-of-emoji",
+    "markdown": "a😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-tag-shaped-run",
+    "markdown": "Use Array\u003cstring\u003e here\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Use Array"
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "\u003cstring\u003e"
+              }
+            },
+            {
+              "type": "text",
+              "text": " here"
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Use Array"
+            },
+            {
+              "type": "html",
+              "attrs": {
+                "value": "\u003cstring\u003e"
+              }
+            },
+            {
+              "type": "text",
+              "text": " here"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a-two-block-title",
+    "markdown": "**Stop** the deploy\n\n1. one\n2. two\n",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " the deploy"
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "blockId": "b-000002",
+            "order": 1,
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000003",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000005",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Stop",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " the deploy"
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "blockId": "b-000002",
+            "order": 1,
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000003",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000005",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "surfaces-fixture-marked",
+    "markdown": "## Heading\n\n**Bold** then `code` and a [link](https://example.com/docs) to dispatch://CORE-1.\n\n- first\n- second",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "blockId": "b-000001",
+            "id": "",
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Heading"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " then "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and a "
+            },
+            {
+              "type": "text",
+              "text": "link",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/docs",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " to dispatch://CORE-1."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000003",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "first"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000006",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "blockId": "b-000001",
+            "id": "",
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Heading"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " then "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and a "
+            },
+            {
+              "type": "text",
+              "text": "link",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/docs",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " to dispatch://CORE-1."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000003",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "first"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000006",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "blockId": "b-000001",
+            "id": "",
+            "level": 2
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Heading"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Bold",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                },
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " then "
+            },
+            {
+              "type": "text",
+              "text": "code",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " and a "
+            },
+            {
+              "type": "text",
+              "text": "link",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.com/docs",
+                    "title": null
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": " to dispatch://CORE-1."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "blockId": "b-000003",
+            "spread": false
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000004",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "first"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "blockId": "b-000006",
+                "checked": null,
+                "label": "•",
+                "listType": "bullet",
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "second",
+                      "marks": [
+                        {
+                          "type": "searchHighlight"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "surfaces-picture-marked",
+    "markdown": "The broken layout: ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)",
+    "latest": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The broken layout: "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "alt": "shot.png",
+                "src": "dispatch://CORE-1/artifact/shot-png@v1",
+                "title": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "version": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The broken layout: "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "alt": "shot.png",
+                "src": "dispatch://CORE-1/artifact/shot-png@v1",
+                "title": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "snippet": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "The broken "
+            },
+            {
+              "type": "text",
+              "text": "layout",
+              "marks": [
+                {
+                  "type": "searchHighlight"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": ": "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "alt": "shot.png",
+                "src": "dispatch://CORE-1/artifact/shot-png@v1",
+                "title": null
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

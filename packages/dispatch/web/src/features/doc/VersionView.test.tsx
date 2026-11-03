@@ -5,6 +5,7 @@ import { render, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import type { DisplayTree } from "../../api/types";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { changeMarksAgainst } from "./change-marks";
 import type { CreateEditor, EditorHandle } from "./editor";
@@ -23,7 +24,7 @@ function renderVersionView({
   highlight,
   markdown,
 }: {
-  changeBaseline?: string;
+  changeBaseline?: DisplayTree;
   createEditor?: (inner: CreateEditor) => CreateEditor;
   highlight: { by: string; id: string; quote: string } | undefined;
   markdown: string;
@@ -191,6 +192,13 @@ function renderedDocument(markdown: string): ProseMirrorNode {
   return doc;
 }
 
+/** The reading the server would send of a past version's text: the view marks against a tree
+ *  now, and the page's own engine reads that text into the same document the version-mode read
+ *  does. */
+function baselineTree(markdown: string): DisplayTree {
+  return renderedDocument(markdown).toJSON() as DisplayTree;
+}
+
 /** Records what the host draws over the rendered document, and gives the handle the document the
  *  editor would hold for `markdown`. */
 function recordMarks(
@@ -214,7 +222,7 @@ test("VersionView draws the marks its baseline computes over the version it rend
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n\nThe old note.\n\nThe end.\n";
   const drawn: ChangeDecorations[] = [];
   const { view } = renderVersionView({
-    changeBaseline: baseline,
+    changeBaseline: baselineTree(baseline),
     createEditor: recordMarks(markdown, drawn),
     highlight: undefined,
     markdown,
@@ -222,7 +230,7 @@ test("VersionView draws the marks its baseline computes over the version it rend
 
   try {
     await waitFor(() => expect(drawn).toHaveLength(1));
-    const marks = changeMarksAgainst(baseline, renderedDocument(markdown));
+    const marks = changeMarksAgainst(baselineTree(baseline), renderedDocument(markdown));
     // The baseline changed one paragraph and lost another, so there is something to draw.
     expect(marks.text.length).toBeGreaterThan(0);
     expect(marks.widgets.length).toBeGreaterThan(0);

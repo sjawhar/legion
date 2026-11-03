@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { ActorSchema, type ExternalLink, ExternalLinkSchema } from "./dispatch-api-core";
+import {
+  ActorSchema,
+  type DisplayTree,
+  type ExternalLink,
+  ExternalLinkSchema,
+} from "./dispatch-api-core";
 import type { Artifact } from "./dispatch-api-documents";
 import { referenceChangesFields } from "./dispatch-api-refs";
 import { ISSUE_COMPONENTS_MODES, type ISSUE_ROUTE_STATUSES } from "./dispatch-tools";
@@ -306,6 +311,8 @@ export interface ArchitectureTreeComponent {
   readonly paths: string[];
   readonly external: boolean;
   readonly prose: string;
+  /** The display tree of `prose`, absent unless the request sent `Dispatch-Trees: 1`. */
+  readonly prose_tree?: DisplayTree;
   readonly done: number;
   readonly total: number;
   readonly own_done: number;

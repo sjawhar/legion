@@ -4,7 +4,7 @@ import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask, BlockSchema, DisplayTree } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
@@ -24,10 +24,12 @@ export interface VersionViewProps {
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
   blockSchema: BlockSchema | undefined;
-  /** The markdown of the version this one is marked against - the last approved one - with which
-   *  the view draws what changed since it: the words each changed block gained, and each block
-   *  removed since then where it stood. Without it nothing is marked. */
-  changeBaseline?: string;
+  /** The reading Go made, in its version mode, of the version this one is marked against - the
+   *  last approved one - with which the view draws what changed since it: the words each changed
+   *  block gained, and each block removed since then where it stood. The version mode keeps the
+   *  attributes the server wrote into that text, since a decision answered in a version is part
+   *  of what that version said. Without it nothing is marked. */
+  changeBaseline?: DisplayTree;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   /** The project document shown, for block asks with no issue to be referenced under. */

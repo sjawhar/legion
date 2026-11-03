@@ -4,8 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { displayTree } from "../../__tests__/display-trees";
 import { api } from "../../api/client";
 import type { AskRead, CommentRead, IssueReferenceSummary } from "../../api/types";
+import { warmMarkdownRenderer } from "./markdown-engine";
 import { isBareReferenceBody, Unfurl } from "./Unfurl";
 
 test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
@@ -169,6 +171,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
 });
 
 test("Unfurl unfurls a dispatch ask reference with the question, reading no issue", async () => {
+  await warmMarkdownRenderer();
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -176,6 +179,9 @@ test("Unfurl unfurls a dispatch ask reference with the question, reading no issu
       kind: "question",
       author: { id: "alice", kind: "user" },
       question: "Should we ship this on Friday or wait for the review to land first?",
+      question_tree: displayTree(
+        "Should we ship this on Friday or wait for the review to land first?"
+      ),
       options: [],
       multiple: false,
       urgency: "med",
@@ -222,12 +228,14 @@ test("Unfurl unfurls a dispatch ask reference with the question, reading no issu
 });
 
 test("Unfurl unfurls a dispatch comment reference with its own words, reading no issue", async () => {
+  await warmMarkdownRenderer();
   const commentRead: CommentRead = {
     comment: {
       id: "comment-1",
       issue_key: "CORE-1",
       author: { id: "alice", kind: "user" },
       body: "**Looks** good overall.\nOne nit below.",
+      body_tree: displayTree("**Looks** good overall.\nOne nit below."),
       anchor: null,
       reply_to: null,
       ask_id: null,
