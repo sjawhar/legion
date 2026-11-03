@@ -674,6 +674,11 @@ export default function envoyExtension(pi: PiApi): void {
   // a queue cannot answer a throw with a deadline.
   const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? MIN_PASS_DEADLINE_MS;
   const subscriptions = new Map<string, Subscription>();
+  // The confirmation in flight for each subject whose SUB this process has written but the server
+  // has not answered for yet (`subscribe`), so a second open of that subject waits for it rather
+  // than answering "already open" over a subject the first open may yet close. Each entry is
+  // dropped by the open that made it, whichever way it settles.
+  const confirming = new Map<string, Promise<unknown>>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
@@ -1788,26 +1793,52 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  // The round trip that makes a subject this session subscribed to live rather than merely asked
-  // for: `subscribe()` only writes SUB into the connection's out buffer, and core NATS drops a
-  // publish no subscription matches yet, so without it the caller can register this session's
-  // interest — or claim a role, or tell a peer it is listening — while the server still has
-  // nothing to route to. The window is the whole gap between the write and the next flush, and it
-  // is the one `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's
-  // channel flushes before every registration for the same reason.
-  const confirmSubscribed = (connection: NatsConnection, what: string): Promise<void> =>
-    within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
+  // The round trip that makes a subject this session asked for live rather than merely written:
+  // `subscribe()` only writes SUB into the connection's out buffer, and core NATS drops a publish
+  // no subscription matches yet, so without it the caller can register this session's interest —
+  // or claim a role, or tell a peer it is listening — while the server still has nothing to route
+  // to. The window is the whole gap between the write and the next flush, and it is the one
+  // `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's channel
+  // flushes before every registration for the same reason.
+  //
+  // A round trip that is rejected or unanswered is transient, and is waited out rather than
+  // failed: nats.js rejects every pending flush when the connection drops (`resetOutbound`,
+  // `nats/lib/nats-base-client/protocol.js`) and a reconnecting connection answers nothing until
+  // it is back, while on every connect it sends every live subscription again
+  // (`sendSubscriptions`, before `flushPending`), so an open subject needs no reopen — only a
+  // confirmation that the server has it. Before this file took a round trip at all, an open made
+  // during a blip simply succeeded and its notices arrived once NATS was back; this must not take
+  // that away, since a `subscribeNotice` that throws ends a controller's claim and nothing
+  // reopens a notice subject. What it may do instead is delay the registration that follows it.
+  // It gives up only on a connection that is closed for good, or a session that is shutting down:
+  // either way this connection carries nothing more, and the caller dials again.
+  const confirmSubscribed = async (connection: NatsConnection, what: string): Promise<void> => {
+    for (;;) {
+      try {
+        await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
+        return;
+      } catch (error) {
+        if (shuttingDown || connection.isClosed()) throw error;
+        await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_DELAY_MS));
+      }
+    }
+  };
 
   // Opens every subject of `topic` not already open, and returns once the server has every one of
-  // them; answers whether this call opened or newly confirmed any, which is when its caller has
-  // something to tell the listener. A queued task subscribes through its handle, which hands in
-  // its own `connect`: a connection its task outran refuses there, before the first subject opens,
-  // so nothing a newer pass has since settled is reopened behind its back.
+  // them; answers whether this call opened any, which is when its caller has something to tell the
+  // listener. A queued task subscribes through its handle, which hands in its own `connect`: a
+  // connection its task outran refuses there, before the first subject opens, so nothing a newer
+  // pass has since settled is reopened behind its back.
   const subscribe = async (
     topic: string,
     connect: () => Promise<NatsConnection> = ensureConnection
   ): Promise<boolean> => {
     const subjects = expandSubscriptionTopics([topic]);
+    // An open of a subject another call has written the SUB for but not yet confirmed waits for
+    // that confirmation rather than answering "already open" over a subject that call may yet
+    // close. Settled either way: this call then reads `subscriptions` as it stands.
+    const inFlight = subjects.flatMap((subject) => confirming.get(subject) ?? []);
+    if (inFlight.length > 0) await Promise.allSettled(inFlight);
     const fresh = subjects.filter((candidate) => !subscriptions.has(candidate));
     if (fresh.length === 0) return false;
     const activeConnection = await connect();
@@ -1817,22 +1848,40 @@ export default function envoyExtension(pi: PiApi): void {
     // map. So a subject this call opened and could not confirm is closed before the throw, or a
     // role-bound notice subject outlives its role: registered as a plain interest at the next
     // registration and never closed by `endRole`, it would keep taking a replaced holder's wakes.
-    // nats.js rejects every pending flush when the connection drops (resetOutbound), so a
-    // reconnect during a claim is all it takes, and the caller opens the topic again.
-    const opened: string[] = [];
+    // Only a connection closed for good reaches it, since the confirmation waits out everything
+    // else, and only this call's own subscriptions are closed: a newer open may already own the
+    // map entry.
+    const opened: [string, Subscription][] = [];
+    const closeOpened = () => {
+      for (const [subject, subscription] of opened) {
+        if (subscriptions.get(subject) === subscription) closeIntentionally(subject);
+      }
+    };
     try {
       for (const subject of fresh) {
         const subscription = activeConnection.subscribe(subject);
         // A fresh subscription supersedes any earlier deliberate close of this topic.
         intentionallyClosed.delete(subject);
         subscriptions.set(subject, subscription);
-        opened.push(subject);
+        opened.push([subject, subscription]);
         void pump(subject, subscription);
       }
-      await confirmSubscribed(activeConnection, `the subscription to ${topic}`);
     } catch (error) {
-      for (const subject of opened) closeIntentionally(subject);
+      closeOpened();
       throw error;
+    }
+    const settled = confirmSubscribed(activeConnection, `the subscription to ${topic}`);
+    const confirmation = settled.catch(() => undefined);
+    for (const [subject] of opened) confirming.set(subject, confirmation);
+    try {
+      await settled;
+    } catch (error) {
+      closeOpened();
+      throw error;
+    } finally {
+      for (const [subject] of opened) {
+        if (confirming.get(subject) === confirmation) confirming.delete(subject);
+      }
     }
     return true;
   };
@@ -2065,10 +2114,11 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpRelay(owner, subscription);
     // The relay's own registration names this session's delivery subject the moment this returns,
     // and the listener publishes to it at once, so a SUB still in the out buffer costs the first
-    // frames. A round trip that fails leaves nothing open: `retryRelay` bails while
-    // `owner.subscription` is set, so a relay left open and unregistered would stay that way until
-    // the iterator ended, and the caller - the reconcile pass, or `retryRelay` itself - reopens it
-    // only because this throws with the subject gone.
+    // frames. The confirmation waits out a disconnect, so only a connection closed for good gets
+    // past it, and then this subject goes with it: `retryRelay` bails while `owner.subscription`
+    // is set, and `pumpRelay` starts no retry of its own for a subscription whose owner no longer
+    // names it, so the caller - the reconcile pass, or `retryRelay` behind a later pump end -
+    // opens the relay again only because this throws with the field cleared.
     try {
       await confirmSubscribed(connected, `the relay subscription for ${owner.sessionID}`);
     } catch (error) {
@@ -2338,11 +2388,11 @@ export default function envoyExtension(pi: PiApi): void {
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
     // A viewer's first ping is published as soon as the registration names this session, and one
-    // sent before the server took this SUB would be dropped, leaving the viewer to retry. A round
-    // trip that fails leaves nothing open: this function returns at once while
-    // `agentStreamControl` is set for the session, so a control subject left open and
-    // unregistered would never be opened again, and the reconcile pass reopens it only because
-    // this throws with the subject gone.
+    // sent before the server took this SUB would be dropped, leaving the viewer to retry. The
+    // confirmation waits out a disconnect, so only a connection closed for good gets past it, and
+    // then this subject goes with it: this function returns at once while `agentStreamControl`
+    // names the session, so clearing the field is what lets the next pass - or
+    // `pumpAgentStreamControl`'s own end path, one resubscribe delay later - open it again.
     try {
       await confirmSubscribed(connected, `the agent stream control subscription for ${session}`);
     } catch (error) {
@@ -3896,8 +3946,17 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.subscribe: {
           const added: string[] = [];
           const already: string[] = [];
+          // A topic whose open fails leaves the topics before it open and confirmed, so the
+          // listener is told about those before the failure is reported: a registration skipped
+          // here is a subject this session holds that nothing routes to.
+          let openFailure: unknown;
           for (const topic of topicsFor(parameters)) {
-            ((await subscribe(topic)) ? added : already).push(topic);
+            try {
+              ((await subscribe(topic)) ? added : already).push(topic);
+            } catch (error) {
+              openFailure = error;
+              break;
+            }
           }
           let warnings: readonly string[] | undefined;
           let registrationError: string | undefined;
@@ -3912,6 +3971,7 @@ export default function envoyExtension(pi: PiApi): void {
             await replayFollowedChanged();
             triggerReplay();
           }
+          if (openFailure !== undefined) throw openFailure;
           const subscribed = `Subscribed: ${added.join(", ") || "(none new)"}`;
           return toolSuccess(
             warnings === undefined || warnings.length === 0
