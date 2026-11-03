@@ -1930,6 +1930,32 @@ function askIDInputProblem(asks: readonly Pick<Ask, "id" | "question">[], scope:
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
 }
 
+/** The line a reply on an approval request a newer version moved prints: no reply hands such a
+ *  request back (the server's approvalMoved), only `request-approval` at the current version does.
+ *  Undefined when the ask is anything else or its read fails, so the reply reports as before. */
+async function movedApprovalLine(
+  client: DispatchClient,
+  askID: string
+): Promise<string | undefined> {
+  const ask = (await client.getAsk(askID).catch(() => undefined))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined) return undefined;
+  if (approval.requested_version >= approval.version) return undefined;
+  const owner =
+    ask.issue_key === null
+      ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}`
+      : ask.approval_artifact?.primary === true
+        ? `--issue ${ask.issue_key}`
+        : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return (
+    `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` +
+    `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` +
+    "No reply hands a moved approval request back. Once the human has agreed to every point in " +
+    `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` +
+    `'<what changed since version ${approval.requested_version}>'`
+  );
+}
+
 async function invalidReplyToAskProblem(
   client: DispatchClient,
   owner: Owner,
@@ -4347,9 +4373,16 @@ export async function executeDispatchTool(
           comment.ask_waiting_on === undefined
             ? ""
             : `; ask now waiting on ${comment.ask_waiting_on}`;
+        // A reply meant for the human that leaves the ask with the agent landed on an approval
+        // request a newer version moved: say why, and name the call that hands it back.
+        const moved =
+          requestedTurn !== "agent" && comment.ask_waiting_on === "agent"
+            ? await movedApprovalLine(client, replyToAsk)
+            : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...(moved === undefined ? [] : [moved]),
             ...adviceLines,
           ].join("\n"),
           details: {

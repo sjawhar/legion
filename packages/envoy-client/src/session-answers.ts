@@ -111,6 +111,27 @@ function withinWindow(items: readonly SessionAnswer[], now: number): SessionAnsw
   return items.filter((item) => Date.parse(item.at) >= start);
 }
 
+/**
+ * What the people wrote in each of `items`, one string per item: its kind, id, author and times,
+ * the options chosen and the words. `readSessionAnswers` gives it for the items its list shows, so
+ * a host comparing two reads' sets tells a new item shown, or an answer or comment a person
+ * changed, from a list that only lost items or changed what the session or Dispatch says around
+ * them (an issue's title, an ask's question, a cached list's header).
+ */
+export function sessionAnswersWords(items: readonly SessionAnswer[]): string[] {
+  return items.map((item) =>
+    JSON.stringify([
+      item.kind,
+      item.id,
+      item.author.id,
+      item.at,
+      item.edited_at ?? null,
+      item.selected ?? null,
+      item.text,
+    ])
+  );
+}
+
 /** `SESSION_ANSWERS_MAX_CHARS` as the left-out line prints it. */
 const MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
 
@@ -153,12 +174,22 @@ export function renderSessionAnswers(
   items: readonly SessionAnswer[],
   options: RenderSessionAnswersOptions
 ): string | undefined {
-  const shown = withinWindow(items, Number(options.now));
+  return renderShown(items, options)?.text;
+}
+
+/** `renderSessionAnswers`'s text, and the items it shows. */
+function renderShown(
+  items: readonly SessionAnswer[],
+  options: RenderSessionAnswersOptions
+): { readonly text: string; readonly shown: readonly SessionAnswer[] } | undefined {
+  const inWindow = withinWindow(items, Number(options.now));
   // A list the server cut short with max_chars left out only items older than every one it sent,
   // so once any item it sent has left the window, every one it left out has too.
   const unsent =
-    shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
-  const count = shown.length + unsent;
+    inWindow.length === items.length
+      ? Math.max(0, (options.total ?? items.length) - items.length)
+      : 0;
+  const count = inWindow.length + unsent;
   if (count === 0) return undefined;
   const header =
     options.cached === undefined
@@ -167,7 +198,7 @@ export function renderSessionAnswers(
   const namesCommand = options.withoutCommand !== true;
   const blocks: string[] = [];
   let length = header.length;
-  for (const item of shown) {
+  for (const item of inWindow) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed =
@@ -177,9 +208,12 @@ export function renderSessionAnswers(
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...(leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)])].join(
-    "\n\n"
-  );
+  const text = [
+    header,
+    ...blocks,
+    ...(leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]),
+  ].join("\n\n");
+  return { text, shown: inWindow.slice(0, blocks.length) };
 }
 
 /** What `dispatch answers` prints: every item of the 72 hours before `now`, newest first, in the
@@ -336,6 +370,8 @@ export interface SessionAnswersRead {
   readonly source: "fresh" | "cache" | "failure" | "unavailable" | "off";
   /** When the list shown was read (`fresh` and `cache`). */
   readonly readAt?: string;
+  /** `sessionAnswersWords` of the list shown (`fresh` and `cache`): what the people wrote in it. */
+  readonly words?: readonly string[];
   /** Why the read gave no list (`cache`, `failure`, `unavailable`), or the notice that turns
    *  Dispatch off. */
   readonly reason?: string;
@@ -410,22 +446,28 @@ export async function readSessionAnswers(
     reason: string,
     noRoute = false
   ): SessionAnswersRead => {
-    const text =
+    const rendered =
       cache === undefined
         ? undefined
-        : renderSessionAnswers(cache.items, {
+        : renderShown(cache.items, {
             now: now(),
             total: cache.total,
             cached: { readAt: cache.read_at, reason },
             withoutCommand: noRoute,
           });
-    if (cache === undefined || text === undefined) {
+    if (cache === undefined || rendered === undefined) {
       if (noRoute) return { text: undefined, source: "unavailable", reason };
       // A cache that renders nothing is no list to show: the failure line keeps a read that failed
       // from looking like no person wrote.
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text: rendered.text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(rendered.shown),
+      reason,
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -520,13 +562,12 @@ export async function readSessionAnswers(
   }
   if ("noRoute" in outcome) return noRoute();
   if ("failure" in outcome) return carry(current.cache, outcome.failure);
+  const rendered = renderShown(outcome.cache.items, { now: now(), total: outcome.cache.total });
   return {
-    text: renderSessionAnswers(outcome.cache.items, {
-      now: now(),
-      total: outcome.cache.total,
-    }),
+    text: rendered?.text,
     source: "fresh",
     readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(rendered?.shown ?? []),
   };
 }
 

@@ -10046,28 +10046,110 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
-  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+  test("a reply on a moved approval request says why it still waits on the agent and how to hand it back", async () => {
     const askID = "01234567-0000-4000-8000-000000000045";
+    const requests: Array<{ method: string; pathname: string }> = [];
+    const approvalAsk = (artifact: { primary: boolean; issue: string | null }) => ({
+      ask: {
+        id: askID,
+        issue_key: artifact.issue,
+        kind: "approval",
+        question: "Approve spec.md at version 36?",
+        state: "open",
+        waiting_on: "agent",
+        approval: {
+          artifact_id: "artifact-7",
+          name: "spec.md",
+          version: 37,
+          requested_version: 36,
+        },
+        approval_artifact: {
+          project: "DSP",
+          slug: "spec",
+          name: "spec.md",
+          primary: artifact.primary,
+        },
+      },
+      replies: [],
+      edits: [],
+      answers: [],
+      followers: [],
+    });
+    const run = async (artifact: { primary: boolean; issue: string | null }) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) => {
+          const target = new URL(String(url));
+          requests.push({ method: init?.method ?? "GET", pathname: target.pathname });
+          if (target.pathname === `/api/v1/asks/${askID}`) return response(approvalAsk(artifact));
+          return response({
+            id: "comment-3",
+            issue_key: "DSP-42",
+            ask_id: askID,
+            turn: "human",
+            ask_waiting_on: "agent",
+          });
+        }) as unknown as typeof fetch,
+        subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
+      });
+
+    const result = await run({ primary: true, issue: "DSP-42" });
+    expect(result.text).toBe(
+      [
+        `Replied on ask ${askID} (comment comment-3; ask now waiting on agent). ` +
+          "You follow this ask: its answer and replies reach you directly.",
+        "The reply did not hand the ask to the human: it is the approval request for spec.md at " +
+          "version 36, and spec.md is now version 37. No reply hands a moved approval request " +
+          "back. Once the human has agreed to every point in version 37, run: " +
+          "dispatch request-approval --issue DSP-42 --summary '<what changed since version 36>'",
+      ].join("\n")
+    );
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(requests).toEqual([
+      { method: "POST", pathname: "/api/v1/issues/DSP-42/comments" },
+      { method: "GET", pathname: `/api/v1/asks/${askID}` },
+    ]);
+
+    expect((await run({ primary: false, issue: "DSP-42" })).text).toContain(
+      "run: dispatch request-approval --issue DSP-42 --artifact artifact-7 --summary"
+    );
+    expect((await run({ primary: false, issue: null })).text).toContain(
+      "run: dispatch request-approval --project DSP --artifact artifact-7 --summary"
+    );
+  });
+
+  test("a progress note on an approval request reads no ask", async () => {
+    const askID = "01234567-0000-4000-8000-000000000046";
+    const requests: string[] = [];
     const result = await executeDispatchTool({
       tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      args: { issue: "DSP-42", body: "Revising.", reply_to_ask: askID, turn: "agent" },
       cwd: "/workspace",
       host: "omp",
       config,
       env: {},
       exec: repoExec("owner/repo"),
-      fetchImpl: (async () =>
-        response({
-          id: "comment-3",
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        requests.push(new URL(String(url)).pathname);
+        return response({
+          id: "comment-4",
           issue_key: "DSP-42",
           ask_id: askID,
-          turn: "human",
+          turn: "agent",
           ask_waiting_on: "agent",
-        })) as unknown as typeof fetch,
+        });
+      }) as unknown as typeof fetch,
+      subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
     });
 
-    expect(result.text).toContain("ask now waiting on agent");
-    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(result.text).not.toContain("request-approval");
+    expect(requests).toEqual(["/api/v1/issues/DSP-42/comments"]);
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {

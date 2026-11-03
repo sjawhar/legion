@@ -22,7 +22,7 @@ Part | Content
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | Your own choices
 
-The checks live in the issue's `verification.md`, one `:::check` block each: `serves` (the requirements), `surface` (`browser`, `cli`, `api`), `run`, `when` (`before_merge`, `after_merge`, `default_branch`) and `negative_control`. `dispatch result` records what one saw; `dispatch results` prints each with its latest result.
+The checks live in the issue's `verification.md`, one `:::check` block each: `serves` (the requirements), `surface` (`browser`, `cli`, `api`), `run`, `when` (`before_merge`, `after_merge`, `default_branch`), `negative_control`. `dispatch result` records what one saw; `dispatch results` prints each with its latest.
 
 Another agent builds the work from the spec and checks it from those blocks. A small change gets a few sentences per part. Split a large design into children.
 

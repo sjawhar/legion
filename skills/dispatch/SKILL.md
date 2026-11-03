@@ -25,12 +25,12 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 ```
 
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
-- An open ask is the request; never repeat it in each message.
+- An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
-- Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
+- Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note needing nothing. An approval request a newer version moved needs `request-approval` again.
 - When an answer's option and text disagree, the text wins.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
-- An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
+- An ask reaches the issue's assignee; if none, name who answers.
 
 ## Choosing what to work on
 
@@ -47,14 +47,13 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. `dispatch resolve-ask` it the turn anything makes it needless: another answer, a later write, work dropped.
-- Retract an ask a new one replaces.
+- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless: another answer, a later write, dropped work, a replacement. If a person said keep it open, say why in its thread; they close it.
 
 ## Structure over stream
 
 - One issue per deliverable, its content the issue's document.
 - A message replies to a person or tells them what they must know now.
-- Text a person must read to decide belongs in the spec. An artifact is a real file. A spec's requirements, a plan's tasks and a Verification document's checks are typed blocks; a pointer (`serves`, `needs`) names a block of this issue or one above it.
+- Text a person must read to decide belongs in the spec. An artifact is a real file. A spec's requirements, a plan's tasks and a Verification document's checks are typed blocks; a pointer (`serves`, `needs`) names a block of this issue or an ancestor.
 
 ## Architecture components
 
