@@ -1,0 +1,5 @@
+kind: Changed
+body: An upload renders the document it changes once rather than twice, and a text read of a document a room holds serves the markdown the version already stored rather than rendering it again. A markdown version now stores the head it names, the transaction id of the head update row, the document token of the tree and the renderer version of the build that wrote it, and a read serves the stored text only while all four still describe the document. A document no room holds reads as it did, because the fold of its history is where an unloadable history is found.
+time: 2026-11-04T00:02:46.65788097Z
+custom:
+    Issue: pr2712

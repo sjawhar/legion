@@ -1,0 +1,5 @@
+kind: Added
+body: 'A caller that sends `Dispatch-Trees: 1` is answered with the ProseMirror tree of every stored text the answer carries, beside the markdown and under the text own name with `_tree`, so a reader draws Dispatch own reading of a text instead of parsing the markdown again with a reader of its own. Each tree is `pmdoc.ReadForDisplay` reading, which never refuses and follows the rules the dashboard read-only engine follows, encoded once and kept by the SHA-256 of its text and its mode. Every field is omitted without the header, so an agent client bytes are what they were, and every answer now carries `Vary: Dispatch-Trees`. An event trees ride beside its payload, in the envelope own `trees` map keyed by the text path, so no event payload gains a field, and every `/ws/live` event frame carries them.'
+time: 2026-11-04T00:02:15.513067996Z
+custom:
+    Issue: pr2712
