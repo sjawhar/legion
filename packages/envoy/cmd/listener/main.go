@@ -1034,8 +1034,10 @@ func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
 // a session again for a message the pod before it delivered, and prompts at once one that a former
 // lease holder (lease.FormerHolder) only attempted, so its settle hold delivers it in stream order.
 // A former holder that released the lease is alive and finishing the push it had in hand, so its
-// attempt is deferred until it has had leaseFormerSettle to record or give up that push, and only
-// a holder taken over by force is taken over at once. Another pod's young attempt is otherwise
+// attempt is deferred until it has had leaseFormerSettle to record, give up or mark in doubt that
+// push, and only a holder taken over by force is taken over at once. An attempt a former holder
+// marked in doubt is taken over at once as well: nobody will settle it, and the repeat it allows
+// carries the same event id. Another pod's young attempt is otherwise
 // deferred until it is requestLimit and ledgerTakeoverMargin old. A listener with no lease (its
 // NATS user lacks the grant for the bucket) is the machine's one deliverer and keeps the ledger
 // in process (dedupe.Memory), which a restart forgets.

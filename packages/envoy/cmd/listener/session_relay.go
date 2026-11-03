@@ -89,13 +89,24 @@ const (
 	// push the session's port may already have taken must not be left as an attempt record no one
 	// settles. Inside it the relay writes the push's delivered record, or gives the attempt up
 	// when the port refused it, so the pod that takes the lease over reads an answer rather than
-	// a record it would have to guess at. 3 s is a round trip to a port that is answering and
-	// the ledger write after it, with room for a loaded box, and it sits inside both take-over
-	// bounds: the stopping pod's own hand-back runs longer than this (inflightGrace alone is
-	// 3 s), so no graceful stop waits on it, and the pod taking over holds such an attempt for
-	// leaseFormerSettle, which is longer, so this record is there before the successor would
-	// push the message again.
-	relaySettleGrace = 3 * time.Second
+	// a record it would have to guess at; a push the grace cuts with the port's answer still out
+	// is marked in doubt (markPushInDoubt), which is an answer too - nobody will settle it.
+	//
+	// 750 ms is a round trip to a port that is answering and the ledger write after it, with
+	// room for a loaded box, and the grace is a cost as well as a cover: the message of a push
+	// nothing answers waits it out on the successor. Measured over a full two-pod suite run
+	// (2,394 pushes a port answered): 0.79 ms at the median, 3.4 ms at the 99th percentile,
+	// 102 ms at the slowest - the only push over half a second was one a row holds at the port
+	// on purpose. The term end itself costs more than the answer does: in the row that cuts a
+	// pod's receive connection with a push in flight
+	// (TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccessor) the port
+	// answered 120, 134 and 149 ms after the stopping pod logged its release over three runs, so
+	// this is five times the gap that row needs covered and seven times the slowest push
+	// measured. It sits inside both take-over bounds: the stopping pod's own hand-back runs
+	// longer than this (inflightGrace alone is 3 s), so no graceful stop waits on it, and the
+	// pod taking over holds such an attempt for leaseFormerSettle, which is longer, so the
+	// record - delivered, cleared or in doubt - is there before the successor pushes again.
+	relaySettleGrace = 750 * time.Millisecond
 	// relayHeldRecheck is how often the relay judges a message it holds again: one another path is
 	// already pushing (holdWhilePushedElsewhere), which it neither pushes nor acks until that push
 	// lands or the attempt record naming it is gone.
@@ -910,9 +921,10 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 // anything more at once, but a push the session's port may already have taken is left to finish,
 // so the pod taking the lease over reads the ledger's answer for it rather than an attempt
 // nobody will ever settle. A push that ends unlanded inside the grace gives its attempt up
-// (releaseStoppedPush); one still in flight when the grace runs out leaves it standing, since
-// only the port's answer would say whether the session took the message, and the successor waits
-// that attempt out (lease.FormerHolder).
+// (releaseStoppedPush); one the grace cuts with the port's answer still out is marked in doubt
+// (markPushInDoubt), since only that answer would say whether the session took the message and
+// none is coming: the successor pushes the message again as soon as it reads the mark, which is
+// the one repeat this path allows, under the same event id.
 func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string, msg bus.SessionMessage) bool {
 	var item contracts.Envelope
 	if err := decodeStoredEnvelope(msg.Data, &item); err != nil {
@@ -940,6 +952,13 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 			}
 			if ctx.Err() != nil && settle.Err() == nil {
 				m.releaseStoppedPush(sessionID, item, claim, err)
+				return false, err
+			}
+			if settle.Err() != nil {
+				// The settle grace ran out with the push still at the port: nothing says whether
+				// the session took the message, so the attempt is marked in doubt rather than
+				// left standing for the successor to wait out (markPushInDoubt).
+				m.markPushInDoubt(sessionID, item, claim, err)
 				return false, err
 			}
 			_ = msg.InProgress()
@@ -993,6 +1012,30 @@ func (m *sessionRelays) releaseStoppedPush(sessionID string, item contracts.Enve
 	m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay gave up a push its stop ended unlanded", sessionID, item.Topic, item.EventID, "retrying",
 		slog.String("dedupe_key", item.DedupeKey), slog.String("error", err.Error()))
 }
+
+// markPushInDoubt marks the ledger attempt of a push the settle grace cut in doubt: the port had
+// the push and answered neither way, so whether the session took the message is unknown and no
+// answer for it is coming. The record says so (dedupe.Ledger.InDoubt), so the pod that takes the
+// lease over pushes the message again as soon as it reads the record rather than waiting the
+// attempt out, and the session takes at most one repeat of it, under the same event id
+// (cmd/listener/README.md, "State the pods share"). The message stays unacked, so that pod's
+// relay pulls it again.
+//
+// One line names the session, the event and the dedupe key, so an operator reading a session
+// that was prompted twice finds the push the doubt came from.
+func (m *sessionRelays) markPushInDoubt(sessionID string, item contracts.Envelope, claim dedupe.Attempt, err error) {
+	if markErr := m.cfg.ledger.InDoubt(claim); markErr != nil {
+		m.cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "in_doubt"), slog.String("session_id", sessionID),
+			slog.String("event_id", item.EventID), slog.Bool("retry", false), slog.String("error", markErr.Error()))
+	}
+	m.cfg.logger.DeliveryLog(slog.LevelWarn, relayPushInDoubtLine, sessionID, item.Topic, item.EventID, "retrying",
+		slog.String("dedupe_key", item.DedupeKey), slog.String("error", err.Error()))
+}
+
+// relayPushInDoubtLine is the line markPushInDoubt logs for the one push a term's end can leave
+// unanswered; the row TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId
+// reads it.
+const relayPushInDoubtLine = "session relay left a push in doubt: its settle bound ended with the port's answer still out"
 
 // ledgerEpisode logs one path's trouble with the delivery ledger once per episode rather than
 // once per try: a relay that asks the ledger again every relayHeldRecheck for as long as it fails

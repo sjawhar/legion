@@ -1002,16 +1002,21 @@ func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccesso
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
 
-// A push the active pod's relay has at the session's port past the stopping relay's settle bound
-// (relaySettleGrace, 3 s) is still pushed once in all. The relay's push is held, unanswered, when
-// the pod's receive connection alone is cut; the pod releases the lease and its relays stop, and
-// the port goes on holding the push past the 3 s the stopping relay settles it for, then takes it
-// (204) 6 s after the take-over, beyond the 4 s the pod taking over defers the released holder's
-// attempt (leaseFormerSettle). The session must take the message exactly once. At bcdf6369 the
-// settle bound cancels the push with nothing recorded and the attempt standing, the pod taking over
-// pushes the message once its deferral ends, and the port then takes the held push too: twice
-// (INFRA-557 tester's round 28, the architect's edge (2)).
-func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsTakenOnce(t *testing.T) {
+// A push the active pod's relay still has at the session's port when the stopping relay's settle
+// bound ends reaches the session at most twice, under its own event id, and no other message
+// repeats. The relay's push is held, unanswered, when the pod's receive connection alone is cut;
+// the pod releases the lease and its relays stop, and the port goes on holding the push past the
+// grace the stopping relay settles it for (relaySettleGrace), then takes it (204) well past the
+// deferral the pod taking over holds the released holder's attempt for (leaseFormerSettle).
+// Only the port's answer says whether the session took that push, and it comes after the bound,
+// so no pod can know: the stopping relay marks the attempt in doubt (markPushInDoubt) and the
+// successor pushes the message again, which is the one repeat the root's at-least-once contract
+// allows for a push whose answer had not come back when its pod lost the receive term
+// (cmd/listener/README.md, "State the pods share"). What the row refuses is a second repeat of
+// it, a repeat of any other message, an event id no message carried, and a pod that leaves the
+// cut push unrecorded. At bcdf6369 the settle bound cancelled the push with nothing recorded and
+// the attempt standing (INFRA-557 tester's round 28, the architect's edge (2)).
+func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
@@ -1043,6 +1048,13 @@ func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsTakenOnce(t *t
 	after := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
 	time.Sleep(mpQuiet)
-	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOnce(t, []mpMessage{warm, after})
+	if took := serving.counts()[m.event]; took > 2 {
+		t.Fatalf("%s to %s prompted %d times, want once, or twice as the push whose answer the settle bound cut off", m.event, sessionID, took)
+	}
+	serving.requireKnown(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
+	if mpLineWith(a.Output.String(), `"msg":"`+relayPushInDoubtLine+`"`, m.event) == "" {
+		t.Fatalf("%s logged no in-doubt line naming %s, so the push its settle bound cut was left unrecorded", a.instance, m.event)
+	}
 }

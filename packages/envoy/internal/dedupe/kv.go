@@ -22,10 +22,17 @@ const (
 
 // kvRecord is a ledger record's value. at is informational: every age is read from the entry's
 // KV timestamp, the server's clock, which every pod shares.
+//
+// in_doubt marks an attempted record whose delivery was cut off before its outcome was known,
+// and which nobody will settle (KV.InDoubt). The state stays "attempted" and the boot stays the
+// writer's, so a build that does not read the field sees what it always saw - an unresolved
+// attempt of another boot, which it takes over at the takeover age - and only a build that reads
+// it takes the record over at once.
 type kvRecord struct {
-	State string `json:"state"`
-	Boot  string `json:"boot"`
-	At    int64  `json:"at"`
+	State   string `json:"state"`
+	Boot    string `json:"boot"`
+	At      int64  `json:"at"`
+	InDoubt bool   `json:"in_doubt,omitempty"`
 }
 
 // kvAttemptRaces bounds the rounds of one Attempt that another process's write to the same key
@@ -150,15 +157,22 @@ func (l *KV) value(state string) []byte {
 	return value
 }
 
+// inDoubtValue is an attempted record of this boot marked in doubt (kvRecord.InDoubt).
+func (l *KV) inDoubtValue() []byte {
+	value, _ := json.Marshal(kvRecord{State: stateAttempted, Boot: l.cfg.Boot, At: l.cfg.Now().UnixMilli(), InDoubt: true})
+	return value
+}
+
 // Attempt writes an attempted record for the pair with Create. When the key holds a record it
-// reads it: delivered within DeliveredAge is Delivered; attempted by this boot is InFlight while
-// this process holds the attempt that wrote it (unsettled and younger than TakeoverAfter, or kept
-// and younger than AttemptedAge), and taken over otherwise; attempted by a boot GoneBoot reports
-// gone is taken over at once when that boot can settle nothing more, and Deferred for as long as
-// GoneBoot says it is still settling; attempted by another boot (or a record this build cannot
-// read) younger than TakeoverAfter is Deferred until it reaches that age; anything older is taken
-// over with Update at its revision, which is Proceed. Two Attempts of this process for one pair
-// run one after the other.
+// reads it: delivered within DeliveredAge is Delivered; attempted and marked in doubt (InDoubt)
+// is taken over at once, whichever boot wrote it, since nobody will settle it; attempted by this
+// boot is InFlight while this process holds the attempt that wrote it (unsettled and younger
+// than TakeoverAfter, or kept and younger than AttemptedAge), and taken over otherwise;
+// attempted by a boot GoneBoot reports gone is taken over at once when that boot can settle
+// nothing more, and Deferred for as long as GoneBoot says it is still settling; attempted by
+// another boot (or a record this build cannot read) younger than TakeoverAfter is Deferred until
+// it reaches that age; anything older is taken over with Update at its revision, which is
+// Proceed. Two Attempts of this process for one pair run one after the other.
 func (l *KV) Attempt(dedupeKey, sessionID string) (Attempt, error) {
 	pair := Key{DedupeKey: dedupeKey, SessionID: sessionID}
 	writing := l.claim(pair)
@@ -208,6 +222,12 @@ func (l *KV) judge(pair Key, entry nats.KeyValueEntry) (verdict Verdict, retryIn
 	switch {
 	case record.State == stateDelivered:
 		return Delivered, 0, deliveredStops(age, l.cfg.DeliveredAge)
+	case record.State == stateAttempted && record.InDoubt:
+		// The delivery this record stands for was cut off before its outcome was known, and
+		// nobody will settle it (InDoubt): waiting it out would only delay the message, so it is
+		// taken over at once, by the writer's own process as by any other. The message it stands
+		// for is the one repeat the contract allows, under its own event id.
+		return Proceed, 0, false
 	case record.State == stateAttempted && record.Boot == l.cfg.Boot:
 		return InFlight, 0, l.holds(pair, entry.Revision())
 	}
@@ -314,6 +334,25 @@ func (l *KV) Clear(attempt Attempt) error {
 		return nil
 	}
 	return fmt.Errorf("clear delivery attempt %s: %w", attempt.key, err)
+}
+
+// InDoubt gives the attempt up in this process and marks the pair's record in doubt at the
+// revision attempt wrote: the delivery it stands for was cut off before its outcome was known,
+// so neither Record nor Clear can be written for it and nobody else will settle it either. The
+// record stays an attempted one of this boot with in_doubt set (kvRecord), so a build that does
+// not read the field still reads an unresolved attempt and takes it over at the takeover age,
+// and one that does takes it over at once (judge). An update the bucket refuses at that revision
+// leaves what another process has written since (a take-over, a delivery) as it stands.
+func (l *KV) InDoubt(attempt Attempt) error {
+	if attempt.Verdict != Proceed {
+		return nil
+	}
+	l.forget(attempt)
+	_, err := l.kv.Update(attempt.key, l.inDoubtValue(), attempt.revision)
+	if err == nil || errors.Is(err, nats.ErrKeyExists) {
+		return nil
+	}
+	return fmt.Errorf("mark delivery attempt in doubt %s: %w", attempt.key, err)
 }
 
 // Keep holds attempt in this process until it is AttemptedAge old: its record stands, and Attempt

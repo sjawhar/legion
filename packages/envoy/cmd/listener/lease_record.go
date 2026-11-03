@@ -85,9 +85,10 @@ type leaseFields struct {
 // formerBoot is one entry of a lease record's former_boots: a boot that held the lease, the
 // server time it stopped, and whether the record it stopped on was released rather than taken
 // over expired. A released holder is alive: its relays are finishing the pushes they had in hand
-// and writing or giving up their ledger attempts (relaySettleGrace), so the ledger defers those
-// attempts for leaseFormerSettle rather than taking them over at once, while a holder that was
-// killed or lost its node writes nothing more and is taken over at once.
+// and writing, giving up or marking in doubt their ledger attempts (relaySettleGrace), so the
+// ledger defers those attempts for leaseFormerSettle rather than taking them over at once, while
+// a holder that was killed or lost its node writes nothing more and is taken over at once. An
+// attempt a former holder marked in doubt is taken over at once too: that mark is its answer.
 type formerBoot struct {
 	Boot     string    `json:"boot"`
 	Stopped  time.Time `json:"stopped"`

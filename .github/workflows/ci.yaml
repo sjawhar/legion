@@ -2643,6 +2643,15 @@ jobs:
           go test -timeout 20m ./internal/dispatch/api
           go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
         working-directory: packages/envoy
+      # The kill allowance guard (cmd/listener/kill_allowance_test.go) runs in the step above with
+      # the rest of the untagged tests, which print one `ok .../cmd/listener` and no test name.
+      # This step runs it again by name under -v, out of the package binary the step above has
+      # already built, so a CI log lists the guard that holds the SIGKILL rows' check to refusing
+      # a repeat of a message the killed pod never pushed. The rows it guards are the
+      # listener-multiprocess job's; the guard itself is untagged and belongs to this one.
+      - name: Name the kill-check guard in the log
+        run: go test -count=1 -v -run '^TestTheKillCheck' ./cmd/listener
+        working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.15.1
       # and on the image the hub runs, is the one thing an in-process server cannot reproduce: it

@@ -415,6 +415,54 @@ func TestKV_ClearLetsTheNextAttemptProceed(t *testing.T) {
 	mustAttempt(t, a, "publish.abc", "ses_target", Delivered)
 }
 
+// An attempt marked in doubt is taken over at once: by another boot, however long GoneBoot says
+// its writer is still settling, and by its writer itself. The delivery it stands for was cut off
+// before its outcome was known, so no record of it is coming and waiting it out would only hold
+// the message back. The record stays an attempted one, so a build that does not read the mark
+// reads what it always read.
+func TestKV_AnInDoubtAttemptIsTakenOverAtOnceByEveryBoot(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	a := newTestKV(kv, "boot-a", clock)
+	b := NewKV(kv, KVConfig{Durable: testDurable, Boot: "boot-b", TakeoverAfter: testTakeoverAfter, Now: clock.Now,
+		GoneBoot: func(boot string) (bool, time.Duration) { return boot == "boot-a", 4 * time.Second }})
+
+	cut := mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
+	mustAttempt(t, b, "publish.abc", "ses_target", Deferred)
+	if err := a.InDoubt(cut); err != nil {
+		t.Fatalf("InDoubt: %v", err)
+	}
+	key := a.Key("publish.abc", "ses_target")
+	if record := readRecord(t, kv, key); record.State != stateAttempted || record.Boot != "boot-a" || !record.InDoubt {
+		t.Fatalf("record after InDoubt = %+v, want boot-a's attempted record marked in doubt", record)
+	}
+	taken := mustAttempt(t, b, "publish.abc", "ses_target", Proceed)
+	if record := readRecord(t, kv, key); record.State != stateAttempted || record.Boot != "boot-b" || record.InDoubt {
+		t.Fatalf("record after the take-over = %+v, want a plain attempted record of boot-b", record)
+	}
+	mustAttempt(t, b, "publish.abc", "ses_target", InFlight)
+
+	// A mark written at a revision another boot has replaced leaves that boot's record, as a
+	// clear of a replaced attempt does.
+	if err := a.InDoubt(cut); err != nil {
+		t.Fatalf("InDoubt of the replaced attempt: %v", err)
+	}
+	if record := readRecord(t, kv, key); record.Boot != "boot-b" || record.InDoubt {
+		t.Fatalf("the replaced attempt's mark changed boot-b's record: %+v", record)
+	}
+	if err := b.Record(taken); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	mustAttempt(t, a, "publish.abc", "ses_target", Delivered)
+
+	// The boot that marked its own attempt in doubt no longer holds the pair either.
+	own := mustAttempt(t, a, "publish.def", "ses_target", Proceed)
+	if err := a.InDoubt(own); err != nil {
+		t.Fatalf("InDoubt of this boot's own attempt: %v", err)
+	}
+	mustAttempt(t, a, "publish.def", "ses_target", Proceed)
+}
+
 // Every age is the KV timestamp's, the server's clock every pod shares, never the time a writer
 // put in the value: a record whose value claims to be an hour old still holds when the bucket wrote
 // it just now.

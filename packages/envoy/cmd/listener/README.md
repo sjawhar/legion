@@ -347,17 +347,22 @@ standby answering `/v1`, answers as the active pod would:
   lease before the current holder (the lease record's `former_boots`) is taken over without that
   wait, so the settle hold delivers that message in stream order: at once for a holder taken over
   by force (killed, its node lost, its record left to expire), which writes nothing more, and
-  only after 4 s (`leaseFormerSettle`) for one that released the record, which is alive. A
-  release is a soft hand-over, and a repeat is not allowed over one: the relay of the pod letting
-  go has 3 s (`relaySettleGrace`) past the end of its term to finish the push it had at a
-  session's port and write that push's delivered record, or to give its attempt up when the port
-  refused it, and the pod taking over reads that answer rather than pushing a message the session
-  may already have taken. Only a push whose port answered neither way inside the grace is left
-  for the successor to wait out.
+  only after 1 s (`leaseFormerSettle`) for one that released the record, which is alive. A
+  release is a soft hand-over, and a repeat over one is allowed only where no pod can know the
+  outcome: the relay of the pod letting go has 750 ms (`relaySettleGrace`) past the end of its
+  term to finish the push it had at a session's port and write that push's delivered record, or
+  to give its attempt up when the port refused it, and the pod taking over reads that answer
+  rather than pushing a message the session may already have taken. A push whose port answered
+  neither way inside that grace is marked in doubt (`in_doubt` on the attempted record, logged as
+  `session relay left a push in doubt`): the answer that would say whether the session took it is
+  not coming, so the successor pushes the message again as soon as it reads the mark, which is
+  one repeat under the same event id. A record a build that does not read the mark finds is the
+  unresolved attempt it always was.
   An attempt by a pod that still holds or renews a lease, or by a live pod's role or
   live lane, less than 35 s old (the 30 s prompt limit and 5 s) is retried later on the durable
   lane; an older one is taken over, since its writer died. A repeat with the same event id is
-  possible after a hard take-over. A ledger that cannot be read NAKs the durable message for a
+  possible after a hard take-over, and after a push whose answer had not come back when its pod
+  lost the receive term. A ledger that cannot be read NAKs the durable message for a
   retry; the role and live lanes then deliver without it and log `delivery ledger unavailable`.
   The relay of a session's consumer defers likewise and pushes nothing until the ledger answers,
   whichever order its own connection and the ledger's reconnect in, and it waits for the pair's

@@ -356,12 +356,16 @@ SCHEMA_SCRIPT = (
     "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
     """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
 )
-# Neither listener run's `-run` is a flag the simple form reduces, and neither moves a closure:
-# the whole cmd/listener package compiles under its tag, whichever tests the run selects.
+# No listener run's `-run` is a flag the simple form reduces, and none moves a closure: the whole
+# cmd/listener package compiles under its tag, whichever tests the run selects. The last of them
+# runs the untagged kill-check guard by name, so a CI log lists it (its step's comment in
+# ci.yaml); the tests it selects are envoy-go's own unit step's too.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
 LISTENER_MP_STEP = "Two-process and two-build tests of the listener"
 LISTENER_MP_SCRIPT = "go test -tags multiprocess -count=1 -timeout 20m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener"
+KILL_CHECK_STEP = "Name the kill-check guard in the log"
+KILL_CHECK_SCRIPT = "go test -count=1 -v -run '^TestTheKillCheck' ./cmd/listener"
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -626,6 +630,11 @@ GATES = [
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
             (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
+        # The untagged kill-check guard by name, out of the package the unit step above already
+        # compiles and tests.
+        pinned_step("envoy-go", KILL_CHECK_STEP, ENVOY, KILL_CHECK_SCRIPT, [
+            (ENVOY, ["./cmd/listener"], "go test -run '^TestTheKillCheck' ./cmd/listener", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
         pinned_step("envoy-go", PACK_STEP, ENVOY, PACK_SCRIPT, [

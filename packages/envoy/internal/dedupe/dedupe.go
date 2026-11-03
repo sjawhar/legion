@@ -109,6 +109,12 @@ type Ledger interface {
 	// has since taken over or recorded is left as it is. A clear the ledger cannot write still
 	// gives the attempt up in this process: its next Attempt for the pair proceeds.
 	Clear(attempt Attempt) error
+	// InDoubt settles a Proceed attempt whose delivery was cut off before its outcome was known:
+	// the message may be at the session and may not, and no answer is coming, so neither Record
+	// nor Clear is true of it. The next Attempt for the pair proceeds, here and on every other
+	// process, since nobody will settle this one; the repeat it allows carries the same event
+	// id. An attempt another process has since taken over or recorded is left as it is.
+	InDoubt(attempt Attempt) error
 	// Keep settles a Proceed attempt whose record is to stand: a prompt whose outcome this
 	// process does not know, or a pair the delivery disposed of for good. Attempt answers InFlight
 	// for the pair until the attempt is AttemptedAge old.

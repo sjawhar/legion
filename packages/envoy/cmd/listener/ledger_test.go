@@ -150,11 +150,12 @@ func (unavailableLedger) Attempt(string, string) (dedupe.Attempt, error) {
 	return dedupe.Attempt{}, errLedgerDown
 }
 
-// Record and Clear of an attempt that holds nothing touch no bucket, as dedupe.KV's do; Keep
-// touches no bucket at all.
-func (unavailableLedger) Record(attempt dedupe.Attempt) error { return heldOnly(attempt) }
-func (unavailableLedger) Clear(attempt dedupe.Attempt) error  { return heldOnly(attempt) }
-func (unavailableLedger) Keep(dedupe.Attempt)                 {}
+// Record, Clear and InDoubt of an attempt that holds nothing touch no bucket, as dedupe.KV's do;
+// Keep touches no bucket at all.
+func (unavailableLedger) Record(attempt dedupe.Attempt) error  { return heldOnly(attempt) }
+func (unavailableLedger) Clear(attempt dedupe.Attempt) error   { return heldOnly(attempt) }
+func (unavailableLedger) InDoubt(attempt dedupe.Attempt) error { return heldOnly(attempt) }
+func (unavailableLedger) Keep(dedupe.Attempt)                  {}
 
 func heldOnly(attempt dedupe.Attempt) error {
 	if attempt.Verdict != dedupe.Proceed {

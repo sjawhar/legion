@@ -119,6 +119,25 @@ func TestMemory_ClearLetsTheNextAttemptProceedAndKeepsADelivery(t *testing.T) {
 	mustAttempt(t, m, "key-1", "ses-A", Delivered)
 }
 
+// An attempt whose delivery was cut off before its outcome was known holds the pair no longer:
+// the next delivery of it proceeds, which in one process is all the mark can say.
+func TestMemory_InDoubtLetsTheNextAttemptProceedAndKeepsADelivery(t *testing.T) {
+	m := newTestMemory(newTestClock())
+	cut := mustAttempt(t, m, "key-1", "ses-A", Proceed)
+	if err := m.InDoubt(cut); err != nil {
+		t.Fatalf("InDoubt: %v", err)
+	}
+	retry := mustAttempt(t, m, "key-1", "ses-A", Proceed)
+
+	if err := m.Record(retry); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := m.InDoubt(retry); err != nil {
+		t.Fatalf("InDoubt after Record: %v", err)
+	}
+	mustAttempt(t, m, "key-1", "ses-A", Delivered)
+}
+
 func TestMemory_SettlingAnAttemptThatHoldsNothingChangesNothing(t *testing.T) {
 	m := newTestMemory(newTestClock())
 	if err := m.Record(Attempt{}); err != nil {

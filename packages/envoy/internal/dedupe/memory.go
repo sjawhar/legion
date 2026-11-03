@@ -76,6 +76,14 @@ func (m *Memory) Clear(attempt Attempt) error {
 	return nil
 }
 
+// InDoubt drops the attempt's pair as Clear does, unless it has since been recorded delivered.
+// No other process reads these records, so the one thing the mark could say here - that the next
+// delivery of the pair proceeds rather than waiting an answer out - is what dropping the record
+// says, and the repeat it allows carries the same event id.
+func (m *Memory) InDoubt(attempt Attempt) error {
+	return m.Clear(attempt)
+}
+
 // Keep holds the attempt's pair until the attempt is AttemptedAge old, unless it has since been
 // recorded delivered or dropped.
 func (m *Memory) Keep(attempt Attempt) {
