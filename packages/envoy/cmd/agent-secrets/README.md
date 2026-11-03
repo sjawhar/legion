@@ -78,29 +78,44 @@ quickstart, the guides and the generated CLI reference.
 
 Each `legion-envoy-v*` release of this repository ships the client. The release tag names the Envoy
 package, not `agent-secrets`, and the repository's newest release can be another package's, so
-look the tag up rather than reading `releases/latest`. These commands need `curl`, `tar` and
-`sha256sum` (on Ubuntu: `apt-get install -y curl ca-certificates`), and install into
-`~/.local/bin`:
+look the tag up rather than reading `releases/latest`. These commands need `curl`, `tar`, `sort`
+and `sha256sum` (on Ubuntu: `apt-get install -y curl ca-certificates`), and install into
+`~/.local/bin`. They run in a subshell with `set -eu`, so a failed download or checksum stops
+them before anything is installed:
 
 ```sh
-tag=$(curl -fsSL 'https://api.github.com/repos/sjawhar/legion/releases?per_page=100' \
-  | grep -o '"tag_name": *"legion-envoy-v[^"]*"' | head -n 1 | cut -d '"' -f 4)
-asset=agent-secrets-amd64.tar.gz   # or agent-secrets-arm64.tar.gz; on macOS agent-secrets-darwin-arm64.tar.gz
-base=https://github.com/sjawhar/legion/releases/download/$tag
-curl -fsSLO "$base/$asset"
-curl -fsSLO "$base/SHA256SUMS"
-grep " $asset\$" SHA256SUMS | sha256sum -c -
-tar -xzf "$asset"
-mkdir -p ~/.local/bin
-install -m 0755 agent-secrets/bin/* ~/.local/bin/
+(
+  set -eu
+  asset=agent-secrets-amd64.tar.gz  # Linux arm64: agent-secrets-arm64.tar.gz; macOS: agent-secrets-darwin-arm64.tar.gz or agent-secrets-darwin-amd64.tar.gz
+  tag=legion-envoy-$(curl -fsSL 'https://github.com/sjawhar/legion.git/info/refs?service=git-upload-pack' \
+    | grep -aoE 'refs/tags/legion-envoy-v[0-9]+\.[0-9]+\.[0-9]+([^-0-9]|$)' | grep -aoE 'v[0-9.]+[0-9]' | sort -uV | tail -n 1)
+  test "$tag" != legion-envoy-
+  echo "installing $tag"
+  base=https://github.com/sjawhar/legion/releases/download/$tag
+  curl -fsSLO "$base/$asset"
+  curl -fsSLO "$base/SHA256SUMS"
+  grep " $asset\$" SHA256SUMS > "$asset.sha256"
+  if command -v sha256sum >/dev/null; then sha256sum -c "$asset.sha256"; else shasum -a 256 -c "$asset.sha256"; fi
+  tar -xzf "$asset"
+  mkdir -p ~/.local/bin
+  install -m 0755 agent-secrets/bin/* ~/.local/bin/
+)
+export PATH="$HOME/.local/bin:$PATH"
 agent-secrets --version
 ```
 
-`sha256sum -c` must print `<asset>: OK`; stop if it does not. On macOS use `shasum -a 256 -c -`.
-The Linux archives hold `agent-secrets` and `agent-secrets-helper`; the macOS archives hold
-`agent-secrets` alone. `agent-secrets --version` prints the release tag, such as
-`agent-secrets legion-envoy-v28.1.1`. To also check who built the archive, run
-`gh attestation verify "$asset" --repo sjawhar/legion`.
+`sha256sum -c` (`shasum` on macOS) prints `<asset>: OK`; any other result stops the subshell.
+If `~/.local/bin` is not already on your `PATH`, add the `export PATH=...` line to your shell
+profile. The Linux archives hold `agent-secrets` and `agent-secrets-helper`; the macOS archives
+hold `agent-secrets` alone. `agent-secrets --version` prints the release tag, such as
+`agent-secrets legion-envoy-v28.1.1`. To also check that this repository's release workflow on
+`main` built the archive, run, with the GitHub CLI signed in:
+
+```sh
+gh attestation verify agent-secrets-amd64.tar.gz --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+```
 
 ## Give a new machine access
 
@@ -114,8 +129,12 @@ export AGENT_SECRETS_URL=<broker URL>
 mkdir -p ~/.config/agent-secrets
 echo '<you@example.com>' > ~/.config/agent-secrets/operator
 agent-secrets-helper install --url "$AGENT_SECRETS_URL"
+loginctl enable-linger "$USER"
 agent-secrets machine login
 ```
+
+`loginctl enable-linger` keeps your `systemd --user` services, the helper among them, running
+after you log out; without it, the helper stops when your last login session ends.
 
 `agent-secrets machine login` prints a confirmation code and waits. Open Dispatch's machine-login
 page (`/credentials/machine`; set `AGENT_SECRETS_APPROVE_URL` to Dispatch's address and the
@@ -138,9 +157,15 @@ guide covers each step in full.
 
 ## Common commands
 
-Each grant is for one session, and lasts until that session ends or for `--ttl`. An agent-tier
-secret its session's owner holds is granted at once; a human-tier one waits for its approver on the
-broker's approval page, which their Dispatch Inbox links to.
+Each grant is for one session, and lasts until that session ends or for `--ttl`. What happens to a
+request depends on the secret's `owner` and `tier` tags. Your own `tier=agent` secret is granted at
+once to a session on a machine you logged in, and goes to you for approval from any other session.
+Your own `tier=human` secret always goes to you for approval. A `shared` agent-tier secret is
+granted at once; a `shared` human-tier one waits for anyone who signs in to the broker. A
+service's secret goes only to that service's pods and VMs. Approvals happen on the broker's
+approval page, which the approver's Dispatch Inbox links to. The docs site's
+[Concepts](https://sjawhar.github.io/legion/broker/concepts/#owner-and-tier) page has the full
+table.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh  # get a secret and run a command with it
@@ -161,8 +186,17 @@ agent-secrets-helper sessions         # the sessions this machine's helper holds
 ```
 
 Owners manage the secrets themselves under their own cloud sign-in, with no helper:
-`agent-secrets secret list`, `secret show NAME`, `secret create NAME --owner me --tier agent`,
-`secret set NAME`, `secret retag NAME`, `secret delete NAME` and `secret restore NAME`.
+
+```sh
+agent-secrets secret list
+agent-secrets secret show NAME
+agent-secrets secret create NAME --owner me --tier agent   # reads the value at a hidden prompt or from stdin
+agent-secrets secret set NAME
+agent-secrets secret retag NAME --tier human
+agent-secrets secret delete NAME
+agent-secrets secret restore NAME
+```
+
 `agent-secrets --help` and `agent-secrets-helper --help` list every form and environment variable.
 
 ## Build
