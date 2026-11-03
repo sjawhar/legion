@@ -1,16 +1,24 @@
-import { expect, test } from "bun:test";
-import type { ChangeDecorations } from "@legion/proof-editor";
+import { beforeAll, expect, test } from "bun:test";
+import type { ChangeDecorations, DocumentJSON } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
-import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { fakeDocumentRuntime, markedText } from "../../__tests__/document-runtime";
 import type { DisplayTree } from "../../api/types";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
 import { changeMarksAgainst } from "./change-marks";
 import type { CreateEditor, EditorHandle } from "./editor";
+import { embedHighlight } from "./highlight";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
+
+// Every row seeds the version the way the server answers for it: its markdown and the reading
+// Go made of that text. The page's own engine reads it into the same document, so the engine is
+// loaded before the first row builds a tree.
+beforeAll(async () => {
+  await warmMarkdownRenderer();
+});
 
 function createQueryClient(): QueryClient {
   return new QueryClient({
@@ -23,11 +31,15 @@ function renderVersionView({
   createEditor,
   highlight,
   markdown,
+  markdownTree,
 }: {
   changeBaseline?: DisplayTree;
   createEditor?: (inner: CreateEditor) => CreateEditor;
   highlight: { by: string; id: string; quote: string } | undefined;
   markdown: string;
+  /** The server's reading of `markdown`, when a row needs the one it built itself; the page's
+   *  own reading of that text otherwise. */
+  markdownTree?: DisplayTree;
 }) {
   const runtime = fakeDocumentRuntime();
   if (createEditor !== undefined) {
@@ -42,6 +54,7 @@ function renderVersionView({
     authors: [{ id: "alice", kind: "user" }],
     created_at: "2026-09-09T00:00:00Z",
     markdown,
+    markdown_tree: markdownTree ?? treeOf(markdown),
     named: false,
     number: 1,
     summary: null,
@@ -112,12 +125,11 @@ test("VersionView renders the version read-only with the highlighted quote focus
     expect(
       within(view.container).getByRole("region", { name: "Document version 1" })
     ).toBeDefined();
-    expect(editors[0]).toMatchObject({
-      focused: ["comment-1"],
-      markdown:
-        'Read the <span data-proof="comment" data-id="comment-1" data-by="user:alice">current</span> specification',
-      readOnly: true,
-    });
+    expect(editors[0]).toMatchObject({ focused: ["comment-1"], readOnly: true });
+    // The editor was handed the server's tree with the quote marked in it, not markdown.
+    expect(editors[0]?.markdown).toBeUndefined();
+    expect(editors[0]?.root.textContent).toBe("Read the current specification");
+    expect(markedText(editors[0]?.documentJSON, "proofComment")).toEqual(["current"]);
     expect(editors[0]?.options.awareness).toBeNull();
   } finally {
     view.unmount();
@@ -126,15 +138,17 @@ test("VersionView renders the version read-only with the highlighted quote focus
 
 test("VersionView renders a typed callout with the fetched block schema", async () => {
   const markdown = ':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n';
+  const markdownTree = treeOf(markdown);
   const { blockSchema, editors, view } = renderVersionView({
     highlight: undefined,
     markdown,
+    markdownTree,
   });
 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.options.blockSchema).toBe(blockSchema);
-    expect(editors[0]?.markdown).toBe(markdown);
+    expect(editors[0]?.documentJSON).toEqual(markdownTree as DocumentJSON);
   } finally {
     view.unmount();
   }
@@ -148,7 +162,7 @@ test("VersionView reports an ambiguous or missing quote as changed text", async 
 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.markdown).toBe("o o");
+    expect(markedText(editors[0]?.documentJSON, "proofComment")).toEqual([]);
     const status = await within(view.container).findByRole("status");
     expect(status.textContent).toBe(
       "Text changed. The selected range no longer exists in this document."
@@ -158,12 +172,12 @@ test("VersionView reports an ambiguous or missing quote as changed text", async 
   }
 });
 
-test("VersionView shows the parser's error instead of an empty document when a version cannot be rendered", async () => {
+test("VersionView shows what refused the version instead of an empty document", async () => {
   const { editors, view } = renderVersionView({
     createEditor: (inner) => async (root, options) => {
       const handle = await inner(root, options);
-      handle.setMarkdown = () => {
-        throw new Error("this version cannot be parsed");
+      handle.setDocumentJSON = () => {
+        throw new Error("this version cannot be drawn");
       };
       return handle;
     },
@@ -174,7 +188,7 @@ test("VersionView shows the parser's error instead of an empty document when a v
   try {
     await waitFor(() =>
       expect(within(view.container).getByRole("alert").textContent).toBe(
-        "This version could not be rendered: this version cannot be parsed"
+        "This version could not be rendered: this version cannot be drawn"
       )
     );
     expect(editors[0]?.destroyed).toBe(true);
@@ -192,45 +206,45 @@ function renderedDocument(markdown: string): ProseMirrorNode {
   return doc;
 }
 
-/** The reading the server would send of a past version's text: the view marks against a tree
- *  now, and the page's own engine reads that text into the same document the version-mode read
- *  does. */
-function baselineTree(markdown: string): DisplayTree {
+/** The reading the server sends of a stored text: Go's own, which the page's own engine reads
+ *  that text into node for node - the document the version page draws, and the baseline it
+ *  marks against. */
+function treeOf(markdown: string): DisplayTree {
   return renderedDocument(markdown).toJSON() as DisplayTree;
 }
 
-/** Records what the host draws over the rendered document, and gives the handle the document the
- *  editor would hold for `markdown`. */
+/** Records what the host draws over the rendered document, and gives the handle `doc`, the
+ *  document the editor would hold: the fake runtime's view holds a plain state object with none
+ *  of its own, and the component reads `view.state.doc` to compute the marks. The document is
+ *  built by the caller, before the editor is asked for anything, so a row counting what the
+ *  page parses counts no parse of the test's own. */
 function recordMarks(
-  markdown: string,
+  doc: ProseMirrorNode,
   drawn: ChangeDecorations[]
 ): (inner: CreateEditor) => CreateEditor {
   return (inner) => async (root, options) => {
     const handle: EditorHandle = await inner(root, options);
-    // The fake runtime's view holds a plain state object with no document of its own, and the
-    // component reads `view.state.doc` to compute the marks.
     const state = handle.view.state as unknown as { doc: ProseMirrorNode };
-    state.doc = renderedDocument(markdown);
+    state.doc = doc;
     handle.setChangeDecorations = (decorations) => drawn.push(decorations);
     return handle;
   };
 }
 
 test("VersionView draws the marks its baseline computes over the version it renders", async () => {
-  await warmMarkdownRenderer();
   const markdown = "# Plan\n\nThe plan ships behind a canary today.\n\nThe end.\n";
   const baseline = "# Plan\n\nThe plan ships behind a flag today.\n\nThe old note.\n\nThe end.\n";
   const drawn: ChangeDecorations[] = [];
   const { view } = renderVersionView({
-    changeBaseline: baselineTree(baseline),
-    createEditor: recordMarks(markdown, drawn),
+    changeBaseline: treeOf(baseline),
+    createEditor: recordMarks(renderedDocument(markdown), drawn),
     highlight: undefined,
     markdown,
   });
 
   try {
     await waitFor(() => expect(drawn).toHaveLength(1));
-    const marks = changeMarksAgainst(baselineTree(baseline), renderedDocument(markdown));
+    const marks = changeMarksAgainst(treeOf(baseline), renderedDocument(markdown));
     // The baseline changed one paragraph and lost another, so there is something to draw.
     expect(marks.text.length).toBeGreaterThan(0);
     expect(marks.widgets.length).toBeGreaterThan(0);
@@ -241,21 +255,79 @@ test("VersionView draws the marks its baseline computes over the version it rend
 });
 
 test("VersionView draws nothing when it is given no baseline", async () => {
-  await warmMarkdownRenderer();
   const markdown = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const markdownTree = treeOf(markdown);
   const drawn: ChangeDecorations[] = [];
   const { editors, view } = renderVersionView({
-    createEditor: recordMarks(markdown, drawn),
+    createEditor: recordMarks(renderedDocument(markdown), drawn),
     highlight: undefined,
     markdown,
+    markdownTree,
   });
 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
     await Bun.sleep(20);
-    expect(editors[0]?.markdown).toBe(markdown);
+    expect(editors[0]?.documentJSON).toEqual(markdownTree as DocumentJSON);
     expect(drawn).toEqual([]);
   } finally {
+    view.unmount();
+  }
+});
+
+// What the browser spec counts on each page it opens (`e2e/parse-counting.ts`): the two entries
+// a reading page can parse markdown through. One is the shared read-only engine's `parse`, which
+// every display surface reads with; the other is the editor handle's `setMarkdown`, its markdown
+// import, which builds a `ParserState` of its own. This row counts the same two around the
+// render of a past version, with its quote highlighted and its change marks drawn - everything
+// the page does with the version's text - and both must stay at zero: the version is drawn from
+// the tree the server sent.
+test("VersionView draws the version's tree and parses nothing, on either engine", async () => {
+  const engine = loadedEngine();
+  if (engine === undefined) throw new Error("the row needs the shared engine loaded");
+  const markdown = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const baseline = "# Plan\n\nThe plan ships behind a flag today.\n";
+  // Everything the test itself reads is read before the counting starts.
+  const markdownTree = treeOf(markdown);
+  const changeBaseline = treeOf(baseline);
+  const rendered = renderedDocument(markdown);
+  const drawn: ChangeDecorations[] = [];
+  const parses: string[] = [];
+  const counted = engine as { parse: typeof engine.parse };
+  const enginesParse = counted.parse;
+  counted.parse = (...args) => {
+    parses.push("display");
+    return enginesParse.apply(engine, args);
+  };
+
+  const { editors, view } = renderVersionView({
+    changeBaseline,
+    createEditor: (inner) => async (root, options) => {
+      const handle = await recordMarks(rendered, drawn)(inner)(root, options);
+      handle.setMarkdown = () => {
+        parses.push("editor");
+      };
+      return handle;
+    },
+    highlight: { by: "user:alice", id: "comment-1", quote: "canary" },
+    markdown,
+    markdownTree,
+  });
+
+  try {
+    await waitFor(() => expect(drawn).toHaveLength(1));
+    expect(parses).toEqual([]);
+    expect(editors[0]?.documentJSON).toEqual(
+      embedHighlight(markdownTree as DocumentJSON, {
+        by: "user:alice",
+        id: "comment-1",
+        quote: "canary",
+      }) as DocumentJSON
+    );
+    expect(markedText(editors[0]?.documentJSON, "proofComment")).toEqual(["canary"]);
+    expect(editors[0]?.focused).toEqual(["comment-1"]);
+  } finally {
+    counted.parse = enginesParse;
     view.unmount();
   }
 });

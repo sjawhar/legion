@@ -10,10 +10,10 @@
  * collaborative store (y-prosemirror) drops such a mark on the next round trip. Without this, one
  * document draws one way in the editor and another way in a comment or a past version.
  *
- * Every parse seam applies it (`src/lib-headless.ts`'s `parseMarkdown`, and `src/lib.ts`'s shared
- * `parserCtx` and `setMarkdown`), beside `withBlockIds` rather than inside it: `withBlockIds`
- * returns its input unchanged when no block was missing an id, so a tree this walk had changed
- * would be dropped there.
+ * Every import seam applies it (`src/lib-headless.ts`'s `parseMarkdown`, and `src/lib.ts`'s
+ * shared `parserCtx`, `setMarkdown` and `setDocumentJSON`), beside `withBlockIds` rather than
+ * inside it: `withBlockIds` returns its input unchanged when no block was missing an id, so a
+ * tree this walk had changed would be dropped there.
  *
  * The walk builds its result with `node.mark` and `node.copy`, and never through
  * `Node.fromJSON` or `doc.check()`: both validate attributes, and the commonmark preset's own

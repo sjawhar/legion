@@ -1,7 +1,9 @@
+import type { DocumentJSON } from "@legion/proof-editor";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Doc } from "yjs";
 
+import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema, DisplayTree } from "../../api/types";
@@ -58,10 +60,13 @@ export function VersionView({
   });
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
-  const markdown =
-    versionQuery.data !== undefined && "markdown" in versionQuery.data
-      ? versionQuery.data.markdown
-      : undefined;
+  // The server's reading of this version's text, in its version mode: what the editor draws,
+  // with no parse of its own. `DisplayTree` is the same JSON `DocumentJSON` describes - one
+  // ProseMirror node - typed openly because a response carries whatever the server's schema
+  // wrote.
+  const tree = (isText(versionQuery.data) ? versionQuery.data.markdown_tree : undefined) as
+    | DocumentJSON
+    | undefined;
 
   // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it
   // builds that object afresh on every render. So the editor effect below keys on what the
@@ -83,12 +88,7 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (
-      parent === null ||
-      markdown === undefined ||
-      user === undefined ||
-      blockSchema === undefined
-    ) {
+    if (parent === null || tree === undefined || user === undefined || blockSchema === undefined) {
       return;
     }
 
@@ -120,9 +120,8 @@ export function VersionView({
       installTypedBlocks(editor.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
         watchPicturePath(queryClient, route, onPicture)
       );
-      const embedded =
-        highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
-      editor.setMarkdown(embedded ?? markdown);
+      const embedded = highlighted === undefined ? undefined : embedHighlight(tree, highlighted);
+      editor.setDocumentJSON(embedded ?? tree);
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);
@@ -131,7 +130,7 @@ export function VersionView({
         disposeRefocus = refocusAfterDiagrams(() => editor.focusMark(highlighted.id));
       }
       if (changeBaseline === undefined) return;
-      // The baseline is parsed by the shared headless engine, which the shell warms after the
+      // The baseline is drawn by the shared headless engine, which the shell warms after the
       // first paint: awaiting that load marks a version opened straight by its own URL too,
       // rather than racing the warm-up and marking nothing.
       await warmMarkdownRenderer().catch(() => undefined);
@@ -139,8 +138,8 @@ export function VersionView({
       editor.setChangeDecorations(changeMarksAgainst(changeBaseline, editor.view.state.doc));
     };
     mount().catch((error: unknown) => {
-      // A version the parser refuses must say so; an empty read-only editor looks like an
-      // empty document.
+      // A version the editor cannot build the server's tree into must say so; an empty
+      // read-only editor looks like an empty document.
       handle?.destroy();
       handle = undefined;
       if (mounted) {
@@ -154,20 +153,12 @@ export function VersionView({
       handle?.destroy();
       ydoc?.destroy();
     };
-  }, [
-    blockSchema,
-    changeBaseline,
-    createEditor,
-    highlighted,
-    markdown,
-    queryClient,
-    userQuery.data,
-  ]);
+  }, [blockSchema, changeBaseline, createEditor, highlighted, queryClient, tree, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;
   }
-  if (versionQuery.isError || markdown === undefined) {
+  if (versionQuery.isError || tree === undefined) {
     return <p>Could not load this document version.</p>;
   }
 

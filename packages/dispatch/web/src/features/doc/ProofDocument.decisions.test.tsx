@@ -248,6 +248,11 @@ test("a closed issue's current document shows a withdrawn block's record from it
     authors: [{ id: "alice", kind: "user" }],
     created_at: "2026-09-09T00:00:00Z",
     markdown: "The saved version",
+    // The reading the server sends of that text: what the version view draws (`VersionView`).
+    markdown_tree: {
+      content: [{ content: [{ text: "The saved version", type: "text" }], type: "paragraph" }],
+      type: "doc",
+    },
     named: false,
     number: 1,
     summary: null,

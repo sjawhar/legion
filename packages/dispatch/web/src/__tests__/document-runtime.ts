@@ -1,4 +1,4 @@
-import type { BlockMark } from "@legion/proof-editor";
+import type { BlockMark, DocumentJSON } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
@@ -24,6 +24,9 @@ export interface FakeEditor {
   /** How many times the host asked to comment on the selection. */
   commented: number;
   destroyed: boolean;
+  /** The document the host drew with `setDocumentJSON`: the tree its server read, which the
+   *  fake holds as it came rather than parsing anything. */
+  documentJSON: DocumentJSON | undefined;
   focused: string[];
   markdown: string | undefined;
   focusedBlocks: string[];
@@ -73,6 +76,24 @@ const blockSchema = {
   version: 1,
 };
 
+/** The words of a document as JSON, its top-level blocks a line each: what the fake editor puts
+ *  into its root for a document the host drew, as `setMarkdown` puts the markdown it was
+ *  handed. */
+function textOf(tree: DocumentJSON): string {
+  if (tree.text !== undefined) return tree.text;
+  return (tree.content ?? []).map(textOf).join(tree.type === "doc" ? "\n" : "");
+}
+
+/** The text of every run of `tree` carrying a mark of `type`, in document order: what a mark a
+ *  host put into the document it drew reads over. */
+export function markedText(tree: DocumentJSON | undefined, type: string): string[] {
+  if (tree === undefined) return [];
+  if (tree.marks?.some((mark) => mark.type === type) === true && tree.text !== undefined) {
+    return [tree.text];
+  }
+  return (tree.content ?? []).flatMap((child) => markedText(child, type));
+}
+
 export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
   const connections: FakeConnection[] = [];
@@ -104,6 +125,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       blockMarks: [],
       commented: 0,
       destroyed: false,
+      documentJSON: undefined,
       focused: [],
       focusedBlocks: [],
       markdown: undefined,
@@ -152,6 +174,10 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         editor.blockMarks.push([...marks]);
       },
       setActiveMarks() {},
+      setDocumentJSON(tree: DocumentJSON) {
+        editor.documentJSON = tree;
+        root.textContent = textOf(tree);
+      },
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
         root.textContent = markdown;
