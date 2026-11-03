@@ -99,7 +99,7 @@ type Tokens interface {
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
 	// requests and metadata read. A pane holds one for every owner of the project but its issue's.
 	// An App on token_command gets what its command's read-only release holds instead: the secrets
-	// broker's is contents and metadata read, without pull requests.
+	// broker's is the same three permissions.
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
@@ -204,8 +204,8 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 
 // ReadToken is Token for a token narrowed to readPermissions, cached under a key of its own, so an
 // owner's write and read tokens never stand in for each other. In token mode it is the command's
-// read-only release (TokenCommandReadOnly), which for the secrets broker holds contents and
-// metadata read and no pull requests read.
+// read-only release (TokenCommandReadOnly), which for the secrets broker holds contents,
+// metadata and pull requests read, as readPermissions does.
 func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }

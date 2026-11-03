@@ -181,7 +181,7 @@ func TestGitHubAppMintSendsTheNarrowingAsTheAccessTokensBody(t *testing.T) {
 			minted:    []string{"1"},
 			body: map[string]any{
 				"repositories": []any{"proofs", "widgets"},
-				"permissions":  map[string]any{"contents": "read", "metadata": "read"},
+				"permissions":  map[string]any{"contents": "read", "metadata": "read", "pull_requests": "read"},
 			},
 		},
 		{
@@ -196,7 +196,7 @@ func TestGitHubAppMintSendsTheNarrowingAsTheAccessTokensBody(t *testing.T) {
 			narrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true},
 			owners:    []string{"ada"},
 			minted:    []string{"2"},
-			body:      map[string]any{"permissions": map[string]any{"contents": "read", "metadata": "read"}},
+			body:      map[string]any{"permissions": map[string]any{"contents": "read", "metadata": "read", "pull_requests": "read"}},
 		},
 		{
 			name:      "the owner alone",
@@ -402,7 +402,7 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 		{"write contents", readOnly, func(a map[string]any) { a["permissions"] = map[string]string{"contents": "write", "metadata": "read"} }, "more than read access"},
 		{"another permission", readOnly, func(a map[string]any) {
 			a["permissions"] = map[string]string{"administration": "write", "contents": "read", "metadata": "read"}
-		}, "a permission past contents and metadata"},
+		}, "a permission past contents, metadata and pull requests"},
 		{"no permissions named", readOnly, func(a map[string]any) { delete(a, "permissions") }, "names no permissions"},
 		{"every repository", proofs, func(a map[string]any) { a["repository_selection"] = "all"; delete(a, "repositories") }, "repository selection"},
 		{"another repository", proofs, func(a map[string]any) {
