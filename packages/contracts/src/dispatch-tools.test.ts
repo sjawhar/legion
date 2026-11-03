@@ -306,6 +306,13 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    expect(specFor("dispatch_project").description).toContain(
+      "When a person asks for a project, make the key from its name and create it; ask the person only when " +
+        "dispatch projects shows that the key is in use."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 

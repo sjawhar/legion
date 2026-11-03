@@ -1509,6 +1509,8 @@ export const dispatchToolSpecs = [
     example: { key: "CORE", name: "Core" },
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
+      "When a person asks for a project, make the key from its name and create it; ask the person only when " +
+      "dispatch projects shows that the key is in use. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
       "with dispatch projects. A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
