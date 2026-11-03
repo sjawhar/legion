@@ -16,7 +16,11 @@
 -- A mark written before this column names no wake, and its zero makes every recorded wake of that
 -- pod read as newer, which would cancel a release for a wake that is long over. The table holds
 -- one row per release in flight and is empty between releases, so the marks are cleared rather
--- than guessed at: each of their rows then finishes without acting, and the next idle tick decides
--- the pod again.
+-- than guessed at: each of their rows then finishes without acting. A mark whose pod still stands
+-- and whose role stops had not yet run is decided again by the next idle tick. A mark whose stops
+-- had run is not: its claims stay `released` in a pod that stands, with no backstop armed and no
+-- live claim for the idle rule to read (workflow.IdleHoldNoPod), so a wake of one of those roles
+-- is what brings the pod back. This reaches only a database that ran an earlier commit of this
+-- branch, since no release of a deployed daemon is in flight at this migration.
 delete from issue_releases;
 alter table issue_releases add column wake_row bigint not null default 0;
