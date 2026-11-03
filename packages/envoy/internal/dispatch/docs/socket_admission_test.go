@@ -15,6 +15,8 @@ import (
 
 	gws "github.com/gorilla/websocket"
 
+	"github.com/reearth/ygo/persistence"
+
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -469,4 +471,182 @@ func TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503(t *testing.T
 			t.Errorf("of %d sockets opened at once on one document with a connection cap of %d, %d were admitted and the rest answered %v: a socket a cap turns away is answered 503, never another status", burst, connectionCap, len(admitted), refusals)
 		}
 	})
+}
+
+// ygo fires a room's OnUnloadDocument only after it has taken the room out of its map and waited
+// for the room's persistence to drain (provider/websocket: CloseRoom, handleDisconnect, the idle
+// sweep), so the room can load afresh - a browser reconnecting, every browser at once after a
+// forced close - before the room it replaced reports its unload. That late unload is of the old
+// room, not of the one resident now: a cold socket whose read began while the room was out of
+// ygo's map, and whose offer lands after both the new load and the old room's unload, still finds
+// the room loaded here and keeps nothing of its read, neither the history nor its hold on the
+// document's head-tracker entry, for as long as it stays open.
+func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoaded(t *testing.T) {
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	artifactID := createDocuments(t, database, 1)[0]
+	admitSocket(t, server.URL, artifactID, "the socket that loads the first room").Close()
+
+	// The first room's unload waits here, where ygo has already taken the room out of its map.
+	unloading := make(chan struct{})
+	unloadGo := make(chan struct{})
+	var unloadOnce, unloadGoOnce sync.Once
+	letUnload := func() { unloadGoOnce.Do(func() { close(unloadGo) }) }
+	t.Cleanup(letUnload)
+	unload := service.srv.OnUnloadDocument
+	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
+		if room == artifactID {
+			unloadOnce.Do(func() { close(unloading); <-unloadGo })
+		}
+		unload(ctx, room)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
+	select {
+	case <-unloading:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first room never reached its unload, so nothing here is tested")
+	}
+
+	// A cold socket reads and renders the document while the room is out of ygo's map, and holds
+	// there, before its offer.
+	rendered := make(chan struct{})
+	release := make(chan struct{})
+	var held atomic.Bool
+	var releaseOnce sync.Once
+	letOffer := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letOffer)
+	service.admissionRendered = func(room string) {
+		if room != artifactID || held.Swap(true) {
+			return
+		}
+		close(rendered)
+		<-release
+	}
+	type opened struct {
+		connection *gws.Conn
+		err        error
+	}
+	cold := make(chan opened, 1)
+	go func() {
+		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
+		if err != nil && response != nil {
+			err = fmt.Errorf("%s: %w", response.Status, err)
+		}
+		cold <- opened{connection, err}
+	}()
+	select {
+	case <-rendered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the held cold socket never rendered the document, so nothing here is tested")
+	}
+
+	// Another socket loads the room afresh, then the first room's unload is let go.
+	admitSocket(t, server.URL, artifactID, "the socket that loads the second room")
+	letUnload()
+	if err := <-closed; err != nil {
+		t.Fatalf("close the first room: %v", err)
+	}
+	// The first room's unload took back its own hold, so what is left is the resident room's.
+	holds := headHolds(service, artifactID)
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("the second room is not resident after the first room's unload")
+	}
+
+	letOffer()
+	socket := <-cold
+	if socket.err != nil {
+		t.Fatalf("the held cold socket was refused (%v), want it admitted to the resident room", socket.err)
+	}
+	t.Cleanup(func() { _ = socket.connection.Close() })
+	_ = socket.connection.SetReadDeadline(time.Now().Add(roomWait(t)))
+	if _, message, err := socket.connection.ReadMessage(); err != nil {
+		t.Fatalf("the held socket's first frame = %q (%v), want the room's sync", message, err)
+	}
+	if _, kept := service.preloads.Load(artifactID); kept {
+		t.Error("a preload is held for a room loaded here while its socket stays open, want none: no load of this room will ever read it")
+	}
+	if got := headHolds(service, artifactID); got != holds {
+		t.Errorf("the head tracker holds the document %d times while the held socket is open, want the %d the resident room holds", got, holds)
+	}
+}
+
+// A cold socket that offers its read while the room's load is running - after the load has looked
+// for a preload (LoadDoc) and before it records the room as loaded here (onLoadDocument) - offers
+// to a load that will never read it. The load takes that offer out as it records itself, so the
+// socket keeps neither the history nor its hold on the document's head-tracker entry while it
+// stays open.
+func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	artifactID := createDocuments(t, database, 1)[0]
+	// The first render of the room is the load's own (it read the store, so it renders the room
+	// itself, onLoadDocument): it waits here, past LoadDoc and before the load records the room.
+	loadRendering := make(chan struct{})
+	loadGo := make(chan struct{})
+	var calls atomic.Int64
+	var loadGoOnce sync.Once
+	letLoad := func() { loadGoOnce.Do(func() { close(loadGo) }) }
+	t.Cleanup(letLoad)
+	service.admissionRendered = func(room string) {
+		if room == artifactID && calls.Add(1) == 1 {
+			close(loadRendering)
+			<-loadGo
+		}
+	}
+	offered := make(chan struct{})
+	var offeredOnce sync.Once
+	service.afterSocketPreload = func(room string, _ *persistence.LoadResult) {
+		if room == artifactID {
+			offeredOnce.Do(func() { close(offered) })
+		}
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
+	select {
+	case <-loadRendering:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room's load never rendered the room, so nothing here is tested")
+	}
+
+	type opened struct {
+		connection *gws.Conn
+		err        error
+	}
+	cold := make(chan opened, 1)
+	go func() {
+		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
+		if err != nil && response != nil {
+			err = fmt.Errorf("%s: %w", response.Status, err)
+		}
+		cold <- opened{connection, err}
+	}()
+	select {
+	case <-offered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the cold socket never offered its read while the room loaded, so nothing here is tested")
+	}
+	if _, stored := service.preloads.Load(artifactID); !stored {
+		t.Log("the cold socket's offer was not stored while the room loaded; the checks below still hold for it")
+	}
+
+	letLoad()
+	if err := <-loaded; err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	socket := <-cold
+	if socket.err != nil {
+		t.Fatalf("the cold socket was refused (%v), want it admitted to the resident room", socket.err)
+	}
+	t.Cleanup(func() { _ = socket.connection.Close() })
+	_ = socket.connection.SetReadDeadline(time.Now().Add(roomWait(t)))
+	if _, message, err := socket.connection.ReadMessage(); err != nil {
+		t.Fatalf("the cold socket's first frame = %q (%v), want the room's sync", message, err)
+	}
+	if _, kept := service.preloads.Load(artifactID); kept {
+		t.Error("a preload offered while the room loaded is still held after that load, want none: no load of this room will ever read it")
+	}
+	if got := headHolds(service, artifactID); got != 1 {
+		t.Errorf("the head tracker holds the document %d times while the cold socket is open, want the 1 the resident room holds", got)
+	}
 }
