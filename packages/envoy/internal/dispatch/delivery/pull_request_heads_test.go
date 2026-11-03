@@ -424,7 +424,9 @@ func TestAForkPullRequestEnvelopeMakesNoResultCurrent(t *testing.T) {
 // An attribution the read-through cannot make from a title, body or branch is not deleted by
 // it. The read-through reads the commit messages, the fifth source, exactly as the event path
 // does, so a merged row attributed by them — which the reconcile never revisits — keeps its
-// issue when another result's read-through lists it again.
+// issue when another result's read-through lists it again. #32 is the same row when that read
+// fails with something other than a rate limit: an incomplete read attributes nobody, and
+// nobody is not an answer it may write over the issue the row holds.
 func TestAReadThroughKeepsAnAttributionOnlyTheCommitMessagesName(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
@@ -432,28 +434,41 @@ func TestAReadThroughKeepsAnAttributionOnlyTheCommitMessagesName(t *testing.T) {
 
 	merged := time.Date(2026, 2, 5, 0, 0, 0, 0, time.UTC)
 	issue := "HEAD-6"
-	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
-		Repo: "acme/widgets", Number: 31, HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		HeadRef: "topic", BaseRef: "main", State: "merged", IssueKey: &issue,
-		AttributionSource: string(sourceCommitMessage), EventAt: &merged, CheckedAt: &merged,
-	}); err != nil {
-		t.Fatalf("store the merged head attributed by its commit messages: %v", err)
+	for _, number := range []int{31, 32} {
+		if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+			Repo: "acme/widgets", Number: number, HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			HeadRef: "topic", BaseRef: "main", State: "merged", IssueKey: &issue,
+			AttributionSource: string(sourceCommitMessage), AttributionComplete: true,
+			EventAt: &merged, CheckedAt: &merged,
+		}); err != nil {
+			t.Fatalf("store the merged head of #%d attributed by its commit messages: %v", number, err)
+		}
 	}
 
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
-		mustEncode(t, w, []any{map[string]any{
-			"number": 31, "title": "Tidy the walk", "body": "", "html_url": "https://github.com/acme/widgets/pull/31",
-			"state": "closed", "merged_at": "2026-02-05T00:00:00Z", "updated_at": "2026-02-05T00:00:00Z",
-			"head": map[string]any{
-				"ref": "topic", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-				"repo": map[string]any{"full_name": "acme/widgets"},
-			},
-			"base": map[string]any{"ref": "main"},
-		}})
+		pull := func(number int) map[string]any {
+			return map[string]any{
+				"number": number, "title": "Tidy the walk", "body": "",
+				"html_url": fmt.Sprintf("https://github.com/acme/widgets/pull/%d", number),
+				"state":    "closed", "merged_at": "2026-02-05T00:00:00Z", "updated_at": "2026-02-05T00:00:00Z",
+				"head": map[string]any{
+					"ref": "topic", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"repo": map[string]any{"full_name": "acme/widgets"},
+				},
+				"base": map[string]any{"ref": "main"},
+			}
+		}
+		mustEncode(t, w, []any{pull(31), pull(32)})
 	})
 	fake.handle("GET /repos/acme/widgets/pulls/31/commits", func(w http.ResponseWriter, _ *http.Request) {
 		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "HEAD-6: tidy the walk"}}})
+	})
+	// #32's commit messages are refused, which is no rate limit: the read-through writes the row
+	// incomplete, so it stamps nothing and deletes nothing.
+	fake.handle("GET /repos/acme/widgets/pulls/32/commits", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
 	})
 	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", time.Now()); err != nil {
@@ -466,6 +481,13 @@ func TestAReadThroughKeepsAnAttributionOnlyTheCommitMessagesName(t *testing.T) {
 	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-6", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	if err != nil || !attributed {
 		t.Fatalf("HeadAttributedTo(HEAD-6) = %v, %v; want true: the merged head still answers for the issue", attributed, err)
+	}
+	unread := readHead(t, ctx, pool, "acme/widgets", 32)
+	if unread.IssueKey == nil || *unread.IssueKey != "HEAD-6" || unread.AttributionSource != string(sourceCommitMessage) {
+		t.Fatalf("#32 = %+v, want HEAD-6 kept: a read that could not page the commit messages attributes nobody and deletes nobody", unread)
+	}
+	if unread.CheckedAt == nil || !unread.CheckedAt.Equal(merged) {
+		t.Fatalf("#32's checked_at = %v, want the stamp it had: this read-through was no complete read of it", unread.CheckedAt)
 	}
 }
 
@@ -675,5 +697,78 @@ func TestReconcileAttributesAMergedHeadTheEnvelopeLeftUnattributed(t *testing.T)
 	}
 	if len(again) != 0 {
 		t.Fatalf("a third pass would read %+v, want nothing", again)
+	}
+}
+
+// The other side of that merged arm: an envelope naming no head repository is an incomplete
+// read, so it attributes nobody but writes over nobody's issue either. The listener ships from
+// its own release workflow, so until it is redeployed every envelope it publishes is such a
+// one — and the merge of a pull request an earlier `opened` envelope attributed and stamped
+// would otherwise land as "attributed to nobody, read already": out of the merged arm, which
+// takes only rows no read has reached, and `older` for good at the issue's own merged head.
+func TestAMergeEnvelopeNamingNoHeadRepositoryKeepsTheStoredAttribution(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	issue := seedHeadIssue(t, ctx, pool, 8)
+
+	const openHead = "1010101010101010101010101010101010101010"
+	const mergedHead = "1212121212121212121212121212121212121212"
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/{number}/commits", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("#%s's commit messages were paged; its title attributes it, and an envelope naming no head repository attributes nobody whatever they say", r.PathValue("number"))
+		mustEncode(t, w, []any{})
+	})
+	intake := newIntake(nil, pool, nil, fake.newTestClient(), nil, nil)
+	envelope := func(action, merged, headSHA, updatedAt string, fields map[string]string) map[string]string {
+		payload := map[string]string{
+			"kind": "pr", "action": action, "merged": merged, "repo": "acme/widgets", "number": "71",
+			"title": "HEAD-8 the work", "body": "", "head_ref": "legion/HEAD-8", "head_sha": headSHA,
+			"base_ref": "main", "url": "https://github.com/acme/widgets/pull/71", "updated_at": updatedAt,
+		}
+		for key, value := range fields {
+			payload[key] = value
+		}
+		return payload
+	}
+
+	// The `opened` envelope of a listener that carries head_repo: a complete read, which
+	// attributes the row from its title and stamps it.
+	if _, err := intake.recordPullRequestHead(ctx, envelope("opened", "false", openHead,
+		"2026-02-07T00:00:00Z", map[string]string{"head_repo": "acme/widgets"}), 71); err != nil {
+		t.Fatalf("record the opened head: %v", err)
+	}
+	opened := readHead(t, ctx, pool, "acme/widgets", 71)
+	if opened.IssueKey == nil || *opened.IssueKey != issue || opened.AttributionSource != "title_body" {
+		t.Fatalf("#71 = %+v, want %s from its title", opened, issue)
+	}
+	if opened.CheckedAt == nil {
+		t.Fatalf("#71's checked_at = %v, want it stamped: the envelope was a complete read", opened.CheckedAt)
+	}
+
+	// The merge, from the same listener before its redeploy: no head_repo, so an incomplete read.
+	if _, err := intake.recordPullRequestHead(ctx, envelope("closed", "true", mergedHead,
+		"2026-02-08T00:00:00Z", nil), 71); err != nil {
+		t.Fatalf("record the merged head of an envelope naming no head repository: %v", err)
+	}
+	settled := readHead(t, ctx, pool, "acme/widgets", 71)
+	if settled.State != "merged" || settled.HeadSHA != mergedHead {
+		t.Fatalf("#71 after the merge = %+v, want the merged head the envelope reported", settled)
+	}
+	if settled.IssueKey == nil || *settled.IssueKey != issue || settled.AttributionSource != "title_body" {
+		t.Fatalf("#71 after the merge = %+v, want %s still: an incomplete write deletes no attribution", settled, issue)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, issue, mergedHead)
+	if err != nil || !attributed {
+		t.Fatalf("HeadAttributedTo(%s) at the merged head = %v, %v; want true: a result there is current, not older", issue, attributed, err)
+	}
+
+	// And the reconcile is no safety net to lean on here: the row is stamped and attributed, so
+	// the merged arm never takes it.
+	batch, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, time.Now())
+	if err != nil {
+		t.Fatalf("list the stale heads: %v", err)
+	}
+	if len(batch) != 0 {
+		t.Fatalf("the stale batch = %+v, want nothing: the merged row is attributed and stamped already", batch)
 	}
 }
