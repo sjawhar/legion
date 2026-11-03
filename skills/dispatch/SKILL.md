@@ -53,7 +53,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 - One issue per deliverable, its content the issue's document.
 - A message replies to a person or tells them what they must know now.
-- Text a person must read to decide belongs in the spec. An artifact is a real file. A spec's requirements, a plan's tasks and a Verification document's checks are typed blocks; a pointer (`serves`, `needs`) names a block of this issue or an ancestor.
+- Text a person must read to decide belongs in the spec. An artifact is a real file.
 
 ## Architecture components
 
@@ -66,6 +66,7 @@ Link each item you name:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
+dispatch://KEY/spec#b-<block>[@vN]
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/ask/<id>#b-<part>[@vN]
