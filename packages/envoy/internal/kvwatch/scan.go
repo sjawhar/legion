@@ -69,6 +69,26 @@ func ScanExistingKeys(kv bus.KeyValue, keys, what string, idle time.Duration, lo
 	if err != nil {
 		return KeyScan{}, err
 	}
+	return drainScan(watcher, what, idle, log, visitLive)
+}
+
+// ScanFilteredKeys is ScanExistingKeys over several key patterns at once, for a caller reading a
+// window of a bucket keyed by time (the webhook redelivery index): one watcher carries every
+// pattern, so the window costs one consumer rather than one per pattern, and the scan is complete
+// only once that watcher has delivered every existing key of all of them.
+func ScanFilteredKeys(kv bus.KeyValue, keys []string, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error, opts ...jetstream.WatchOpt) (KeyScan, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher, err := kv.WatchFilteredKeys(ctx, keys, opts...)
+	if err != nil {
+		return KeyScan{}, err
+	}
+	return drainScan(watcher, what, idle, log, visitLive)
+}
+
+// drainScan reads watcher to the end of its existing keys, the one place the three endings above
+// are told apart, and is what both scans are.
+func drainScan(watcher jetstream.KeyWatcher, what string, idle time.Duration, log *slog.Logger, visitLive func(Entry) error) (KeyScan, error) {
 	done := func() {
 		if err := watcher.Stop(); err != nil {
 			log.Warn("could not stop the "+what+" watch of the bucket", slog.String("error", err.Error()))

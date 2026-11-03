@@ -1,0 +1,458 @@
+package redeliver
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/kvwatch"
+)
+
+// The sweep's index is one entry per open delivery, keyed by the minute that delivery next needs a
+// sweep, so a sweep reads what is due rather than everything the bucket remembers: the bucket
+// keeps 72 hours of records, every delivery acted on in three days, and a sweep that read them all
+// would pay for all of them every two minutes.
+//
+// A JetStream KV selects by subject filter and by nothing else: dots separate a key's tokens, `*`
+// stands for one of them and `>` for one or more, and there is no filter on a value, no range scan
+// and no secondary index (internal/bus/kv.go). So the due time has to be in the key, which is
+// `pending.<YYYYMMDD>.<HH>.<MM>.<GUID>`, UTC and zero-padded, with an empty value: the record it
+// names is read by its own key, and a window of minutes is a handful of filters (pendingFilters).
+//
+// Dispatch's NATS grant already covers these keys. It names the bucket's keys and its consumers
+// whole -- `$KV.envoy_webhook_redelivery.>` and
+// `$JS.API.CONSUMER.CREATE.KV_envoy_webhook_redelivery.>` (infra/core/permissions.go) -- so a new
+// key prefix and a consumer over several filter subjects need nothing added to it. An entry lives
+// in the same bucket as the records, under its 72-hour TTL, its file storage and its
+// ENVOY_NATS_REPLICAS copies (OpenState), so an entry a sweeper died before deleting expires with
+// them.
+const pendingPrefix = "pending."
+
+// pendingLayout is the time in an entry's key, in the tokens a filter selects by: the day, then the
+// hour, then the minute. pendingDayLayout and pendingHourLayout are its leading tokens, which are
+// what a filter over a whole day or a whole hour selects by (pendingFilters).
+const (
+	pendingLayout     = "20060102.15.04"
+	pendingDayLayout  = "20060102"
+	pendingHourLayout = "20060102.15"
+)
+
+// pendingKey is the index entry for guid, due at at.
+func pendingKey(at time.Time, guid string) string {
+	return pendingPrefix + at.UTC().Format(pendingLayout) + "." + guid
+}
+
+// parsePendingKey reads an entry key back. ok is false for anything that is not one: a key under
+// another prefix, or one whose time is not the shape pendingKey writes. A GUID holding a dot of its
+// own comes back whole, since the key's first three tokens are the time and the rest is the GUID.
+func parsePendingKey(key string) (at time.Time, guid string, ok bool) {
+	rest, found := strings.CutPrefix(key, pendingPrefix)
+	if !found {
+		return time.Time{}, "", false
+	}
+	tokens := strings.SplitN(rest, ".", 4)
+	if len(tokens) != 4 || tokens[3] == "" {
+		return time.Time{}, "", false
+	}
+	at, err := time.ParseInLocation(pendingLayout, strings.Join(tokens[:3], "."), time.UTC)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	return at, tokens[3], true
+}
+
+// attention is the next moment a record needs a sweep: the end of the claim it is held by, so a
+// claim is looked at once it can be void and not before, and otherwise the time its next request is
+// due. A record with no next request -- one a build without this index wrote, or one whose request
+// was never made -- carries the zero time, which is before every moment its callers floor it to, so
+// such a record is due at the write that reads this (pendingFor).
+func attention(r record) time.Time {
+	if r.InFlight {
+		return r.claimEndsAt()
+	}
+	return r.NextAttemptAt
+}
+
+// pendingFor is the index entry a record must have once it is written at now: none at all once the
+// record is closed, since nothing asks for a delivered or expired delivery again, and otherwise the
+// minute it next needs a sweep, never earlier than the write itself.
+//
+// That floor on the key is what makes a sweep's own floor safe (Sweep): an entry is never keyed
+// before the moment it was written, so an entry waiting to be acted on can fall behind the cursor
+// of the sweep that wrote it by less than the minute it was truncated to.
+func pendingFor(r record, guid string, now time.Time) string {
+	if r.closed() {
+		return ""
+	}
+	at := attention(r)
+	if at.Before(now) {
+		at = now
+	}
+	return pendingKey(at, guid)
+}
+
+// maxPendingFilters is the most filters a window of retention or less decomposes into, which is
+// what holds the cost of one index read whatever a sweep's cursor says. From a floor at HH:MM,
+// 60-MM minutes reach the next hour, 23-HH hours reach the next day, two whole days follow, then HH
+// hours and MM+1 minutes reach a ceiling three days on: (60-MM) + (23-HH) + 2 + HH + (MM+1) = 86,
+// whatever HH and MM are, since the two terms that hold them cancel. A wider window would cost
+// more, which is why Sweep clamps its floor to now-retention.
+const maxPendingFilters = 60 + 23 + 2 + 1
+
+// pendingFilters decomposes the minutes from floor to ceiling, both included, into the
+// pairwise-disjoint subject filters a watch of that window reads: whole days, whole hours and
+// single minutes, taken greedily from the floor, largest first. They have to be disjoint because
+// the server refuses a consumer whose filter subjects overlap; it caps how many there are nowhere.
+// A floor past the ceiling -- a cursor from a clock ahead of this one -- is read as the ceiling's
+// own minute, so a window is never empty.
+func pendingFilters(floor, ceiling time.Time) []string {
+	from, to := minute(floor), minute(ceiling)
+	if from.After(to) {
+		from = to
+	}
+	filters := make([]string, 0, maxPendingFilters)
+	// end is the window's exclusive end: a whole day or hour belongs to it only if it reaches no
+	// further than the minute after the ceiling.
+	end := to.Add(time.Minute)
+	for !from.After(to) {
+		switch {
+		case from.Hour() == 0 && from.Minute() == 0 && !from.Add(24*time.Hour).After(end):
+			filters = append(filters, pendingPrefix+from.Format(pendingDayLayout)+".>")
+			from = from.Add(24 * time.Hour)
+		case from.Minute() == 0 && !from.Add(time.Hour).After(end):
+			filters = append(filters, pendingPrefix+from.Format(pendingHourLayout)+".>")
+			from = from.Add(time.Hour)
+		default:
+			filters = append(filters, pendingPrefix+from.Format(pendingLayout)+".>")
+			from = from.Add(time.Minute)
+		}
+	}
+	return filters
+}
+
+// minute is at as an entry's key reads it: UTC, and the minute it falls in.
+func minute(at time.Time) time.Time { return at.UTC().Truncate(time.Minute) }
+
+// strayMargin is how far before now an entry's key must fall for a sweep to delete it as a stray
+// (openDue): cursorOverlap and the minute a key is truncated to. An entry written at w is keyed
+// at or after minute(w) (pendingFor), so a key before now-cursorOverlap says only that w is
+// before now-cursorOverlap plus a minute, and a key before now-strayMargin is what says w is
+// before now-cursorOverlap. What the margin leaves is every entry keyed at or after
+// now-strayMargin, whatever minute it falls in: a stray among them is left where it is, for a
+// later sweep whose own now puts that key behind the margin.
+const strayMargin = cursorOverlap + time.Minute
+
+// openDue returns the open deliveries the index says need a sweep in the window from floor to now,
+// newest first, and how many entries its watch delivered. One the listing returned is left to the
+// listing, which has its attempts, and an entry a record disowns is deleted as it is read: a
+// sweeper that died between its index write and its record write, or between a record write and
+// the delete of the entry before it, leaves one stray entry, and the sweep that reads it repairs
+// it. A record disowns an entry by being closed, by being gone, or by naming an entry of its own;
+// a record that names no entry at all disowns none. That last is a record whose writer did not
+// keep the field -- a build without this index, which an ordinary rolling deploy and a rollback
+// both leave records of -- so its entry is adopted rather than deleted, its delivery is decided
+// like any other due one, and the write that decides it gives the record an entry of its own again
+// (decide).
+//
+// A stray is deleted only once its key is older than strayMargin before now. An entry is written
+// before the record that names it, so an entry keyed in that margin may be one another sweeper is
+// about to name -- a sweep given a window of its own writes records a running sweep reads between
+// the two writes -- and deleting it would leave that record naming a key that is gone. A stray
+// keyed inside the margin is left to a later sweep. A dry run repairs nothing, since it writes
+// nothing at all: it leaves the delivery out of what it returns, the record naming no entry of
+// its own, and leaves the entry itself to the next sweep that acts.
+//
+// A floor is safe because of what a complete sweep leaves behind. After one that started at T,
+// every entry still in the bucket names a record whose attention time is at or after T: every entry
+// that sweep selected was either acted on, which moved the entry forward, or left in place with an
+// entry already at or after T. The floor is taken down to its own minute because an entry is keyed
+// by the minute: one due at 10:00:30 is keyed 10:00, and a sweep that started at 10:00:10 and found
+// it not yet due must still be able to select it afterwards.
+//
+// The completeness check matters more here than anywhere else in the sweep. The jetstream watcher
+// ends a watch two ways and only one is a complete read (kvwatch.ScanFilteredKeys); a sweep that
+// read some of its due entries and called itself complete would advance its cursor past the rest,
+// and nothing would ever bring those deliveries back. That is the one way this design could lose
+// a delivery.
+func (s *Sweeper) openDue(listed map[string][]githubapp.Delivery, floor, now time.Time, dryRun bool) ([]openRecord, int, error) {
+	// An entry's value is empty and its record is read by its own key, so the watch asks for no
+	// value, and the keys are taken first: a Get for each inside the watch's loop would hold the
+	// watch open for as long as the records take to read.
+	var keys []string
+	scan, err := kvwatch.ScanFilteredKeys(s.state, pendingFilters(floor, now), "webhook redelivery index", kvwatch.ScanIdleTimeout, s.Logger, func(entry kvwatch.Entry) error {
+		keys = append(keys, entry.Key)
+		return nil
+	}, jetstream.MetaOnly(), jetstream.IgnoreDeletes())
+	if err != nil {
+		return nil, 0, fmt.Errorf("list the due redelivery index entries: %w", err)
+	}
+	var open []openRecord
+	seen := map[string]bool{}
+	// A stray keyed before this was written more than cursorOverlap ago and is no sweeper's to
+	// name now.
+	repairable := now.Add(-strayMargin)
+	for _, key := range keys {
+		at, guid, ok := parsePendingKey(key)
+		if !ok {
+			continue
+		}
+		current, revision, err := s.readRecord(guid)
+		if err != nil {
+			return nil, scan.Puts, err
+		}
+		if revision == 0 || !current.open() || (current.Pending != "" && current.Pending != key) {
+			if !dryRun && at.Before(repairable) {
+				s.dropPending(key)
+			}
+			continue
+		}
+		// The filters are disjoint, so every key reaches this loop once, and of two keys naming
+		// one GUID at most one is the Pending its record names -- but a record that names none is
+		// adopted by each key that names it, so two entries can reach here for one delivery. The
+		// map is what holds that delivery to the one decision it is owed. The write that decides
+		// it takes none of these entries over: the record it read names none, so writeRecord
+		// arrives with no previous entry to delete and every entry read here stays. One of them
+		// still inside a later sweep's window is a stray that sweep deletes, and one that has
+		// fallen behind the floor stays until the bucket's TTL takes it.
+		if seen[guid] {
+			continue
+		}
+		seen[guid] = true
+		if _, listedNow := listed[guid]; listedNow {
+			continue
+		}
+		open = append(open, openRecord{guid: guid, record: current, revision: revision})
+	}
+	sortOpenRecords(open)
+	return open, scan.Puts, nil
+}
+
+// indexKey marks the bucket as one whose open records all have an index entry, and holds the
+// moment the back-fill that wrote it worked from (backfillIndex). A sweep that finds that moment
+// no further behind than Lookback reads only the window its index names; one that finds it
+// further behind, or finds no marker at all, reads every record the bucket holds once more. So
+// the whole-bucket read is one an hour at most for as long as the back-fills land. Two things
+// keep every sweep reading the whole bucket, and they end differently: a back-fill that left a
+// record unindexed writes no marker, which lasts until a back-fill lands; and a cursor carrying
+// no `indexed` mark says a build without the index has swept, which lasts until a sweep of this
+// build runs to its end and writes its own cursor (Sweep), whatever the marker says.
+const indexKey = "index"
+
+// indexMarker is what the marker holds: the moment the back-fill that wrote it worked from, which
+// is the now its sweep started at. That moment is at or before the scan the back-fill read the
+// records with, so the marker never claims the bucket was covered past the moment it really was,
+// and the next back-fill falls due no later than it is owed. A value that does not decode as a
+// marker -- the empty value this build wrote before the marker carried a time at all, which
+// json.Unmarshal refuses -- is read as stale, exactly as a moment older than Lookback is.
+type indexMarker struct {
+	At time.Time `json:"at"`
+}
+
+// backfillIndex gives an index entry, and the Pending that names it, to every open record that has
+// none, marks the bucket indexed, and answers whether it finished: a record it could not index
+// leaves the bucket unmarked and the sweep incomplete (Sweep), so the next sweep reads every
+// record again and repairs what this one left. A build that writes entries meets a bucket an older
+// one filled with records that have none at all, and an index read would never return them.
+//
+// A record counts as indexed only when its write landed. A write the bucket refused wrote no entry
+// a record names, and one that lost its compare-and-set may have lost it to a build that writes no
+// entry at all, so neither marks the bucket. A record a live claim holds is indexed by its entry
+// alone and never by a record write, which would take the claimant's revision from it
+// (indexClaimEnd); an entry the bucket refuses there leaves the bucket unmarked as any other
+// refusal does.
+//
+// The marker is what holds this off between back-fills, and the moment it holds is what brings it
+// back: a sweep back-fills once that moment is further behind than Lookback. That is what reaches
+// a record a build without the Pending field created at its first claim, with no entry and no
+// Pending, which is listed only while its failed attempt is inside Lookback and read by nothing
+// after that. Reading every record once a Lookback finds such a record whatever that build did,
+// including the build whose sweeps are all cut short -- a SIGTERM in the pace wait, the cap of 300
+// requests, a rate limit -- and so writes no cursor of its own at all.
+//
+// olderBuild is the other way past the marker: a sweep that reads a cursor without the mark this
+// build always writes (cursorRecord) knows a build that writes no entry has swept since, and
+// back-fills at once rather than within the hour. The records that build rewrote rather than
+// created keep the entry that names them, which openDue adopts rather than deletes (decide). A
+// dry run writes neither the entries nor the marker.
+func (s *Sweeper) backfillIndex(listed map[string][]githubapp.Delivery, now time.Time, dryRun, olderBuild bool) (bool, error) {
+	if dryRun {
+		return true, nil
+	}
+	if !olderBuild {
+		fresh, err := s.indexFresh(now)
+		if err != nil {
+			return false, err
+		}
+		if fresh {
+			return true, nil
+		}
+	}
+	open, err := s.scanOpenRecords(listed)
+	if err != nil {
+		return false, err
+	}
+	indexed := true
+	for _, stored := range open {
+		if stored.record.Pending != "" {
+			continue
+		}
+		if stored.record.InFlight && now.Before(stored.record.claimEndsAt()) {
+			// A live claim is owed its entry and no record write, which would take the
+			// claimant's revision from it (indexClaimEnd). This test reads the sweep's own start,
+			// which is at or before the later reading decide's check takes, so a claim decide
+			// treats as live is live here too: judged on a clock that read later than decide's,
+			// this branch could rewrite a record decide still leaves to its claimant.
+			if err := s.indexClaimEnd(stored.guid, stored.record, now); err != nil {
+				s.Logger.Warn("webhook redelivery claim not back-filled into the index; the next sweep reads every record again",
+					"guid", stored.guid, "error", err)
+				indexed = false
+			}
+			continue
+		}
+		next := stored.record
+		// A write that failed is logged by writeRecord itself, and one that lost its
+		// compare-and-set carries no error at all: what both leave is a record this sweep did
+		// not index, which is what the bucket must not be marked over.
+		if _, written, err := s.writeRecord(stored.guid, &next, stored.revision, now); !written {
+			s.Logger.Warn("webhook redelivery record not back-filled into the index; the next sweep reads every record again",
+				"guid", stored.guid, "error", err)
+			indexed = false
+		}
+	}
+	if !indexed {
+		return false, nil
+	}
+	marker, err := json.Marshal(indexMarker{At: now})
+	if err == nil {
+		_, err = s.state.Put(indexKey, marker)
+	}
+	if err != nil {
+		s.Logger.Warn("webhook redelivery index not marked back-filled; the next sweep reads every record again", "error", err)
+	}
+	return true, nil
+}
+
+// indexFresh reports whether a back-fill has covered the bucket recently enough for this sweep to
+// read its index alone: the marker is there, and the moment it holds is no further behind now than
+// Lookback (backfillIndex). A value that does not decode as a marker -- the empty value this
+// build wrote before the marker carried one -- says nothing about when its back-fill ran, so it
+// is read as a marker to replace rather than as an error.
+func (s *Sweeper) indexFresh(now time.Time) (bool, error) {
+	entry, err := s.state.Get(indexKey)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the redelivery index marker: %w", err)
+	}
+	var marker indexMarker
+	if err := json.Unmarshal(entry.Value(), &marker); err != nil {
+		return false, nil
+	}
+	return !marker.At.Before(now.Add(-Lookback)), nil
+}
+
+// indexClaimEnd gives a record held by a live claim the index entry its claim's end is owed, when
+// the record names none, and writes no record at all. Both of the sweep's reads of the bucket
+// meet such a record -- the index read, whose record decide settles, and the back-fill's scan of
+// every record there is -- and each tests the claim against its own clock before calling, so the
+// rule the entry follows lives here and the liveness check stays where the caller reads the
+// record.
+//
+// A record write here would take the claimant's revision from it. The claimant writes GitHub's
+// answer over the revision it claimed at, and a write that moves that revision first refuses the
+// answer: the attempts, refusals and next request GitHub's answer earned are lost, and unless
+// GitHub recorded an OK attempt the delivery is asked for a second time once the claim ends. The
+// entry costs the claimant nothing, since entries are written with Put and no record names this
+// one yet.
+//
+// The entry is what keeps the delivery: a claim an older build wrote leaves the record naming
+// none, so the entry the sweep read the delivery by is the only one it has, and this sweep's
+// cursor passes that entry the moment it finishes. openDue adopts the entry written here once the
+// claim is void, and the write that decides the delivery then gives the record an entry of its own
+// (decide).
+func (s *Sweeper) indexClaimEnd(guid string, current record, now time.Time) error {
+	if current.Pending != "" {
+		return nil
+	}
+	return s.putPending(guid, pendingFor(current, guid, now))
+}
+
+// errNotWritten is a write of a delivery's state the bucket refused, its index entry or its
+// record. Neither carries the delivery on, so the sweep that met one is incomplete and the
+// delivery is decided again by the sweep after it (Sweep). That is what tells it from a record
+// write that lost its compare-and-set, which another sweeper's own write did carry on.
+var errNotWritten = errors.New("webhook redelivery state not written")
+
+// writeRecord writes next over revision and keeps the delivery's index entry with it, which is why
+// every record write but undoClaim's comes through here: the order lives in one place. The entry
+// the record named before this write is the Pending next arrives with, and next.Pending is left as
+// the entry this one wrote.
+//
+// The order is the new entry, then the record, then the entry the record named before it. Entries
+// are written with Put and Delete and never Create or Update, so two sweepers writing one entry is
+// nothing to settle, and the first Create against a delivery is still its claim.
+//
+//   - An entry that cannot be written stops the write there and returns errNotWritten. The
+//     record is left as it was, the sweep is marked incomplete, its cursor stays where it was and
+//     the delivery is decided again by the sweep after it. That is what keeps a lost index write
+//     from turning into a lost delivery.
+//   - A record the bucket refuses is errNotWritten as well, and leaves the sweep incomplete for
+//     the same reason: an incomplete sweep holds its cursor where it was, so the delivery is
+//     decided again by the sweep after it, whatever entry the record is left naming. The entry
+//     this write put there first is a stray the sweep that reads it deletes.
+//   - A record write that loses its compare-and-set is written false and no error: another sweeper
+//     decided the delivery first, and the entry this one wrote is that same stray (openDue).
+//   - A delete that fails is logged and no more: what it leaves is that same stray.
+func (s *Sweeper) writeRecord(guid string, next *record, revision uint64, now time.Time) (uint64, bool, error) {
+	previous := next.Pending
+	want := pendingFor(*next, guid, now)
+	next.Pending = want
+	if want != "" && want != previous {
+		if err := s.putPending(guid, want); err != nil {
+			return 0, false, err
+		}
+	}
+	written, ok, err := s.putRecord(guid, *next, revision)
+	if err != nil {
+		s.Logger.Error("webhook redelivery record not written; the delivery is decided again by the next sweep",
+			"guid", guid, "error", err)
+		return 0, false, fmt.Errorf("%w: record of %s: %w", errNotWritten, guid, err)
+	}
+	if !ok {
+		return 0, false, nil
+	}
+	if previous != "" && previous != want {
+		s.dropPending(previous)
+	}
+	return written, true, nil
+}
+
+// putPending writes an index entry, and answers errNotWritten when the bucket refuses it:
+// nothing carries that delivery on, so the sweep that met the refusal is incomplete, its cursor
+// stays where it was and the delivery is decided again by the sweep after it. Every entry a sweep
+// writes goes through here, the one the record that names it is written with (writeRecord) and
+// the one a live claim over a record naming no entry is owed, which the index read and the
+// back-fill's scan both write (indexClaimEnd), so a refusal reads the same whichever wrote it.
+func (s *Sweeper) putPending(guid, key string) error {
+	if _, err := s.state.Put(key, nil); err != nil {
+		s.Logger.Error("webhook redelivery index entry not written; the delivery is decided again by the next sweep",
+			"guid", guid, "key", key, "error", err)
+		return fmt.Errorf("%w: index entry of %s: %w", errNotWritten, guid, err)
+	}
+	return nil
+}
+
+// dropPending deletes an index entry no record names any more: the record it named is closed, gone,
+// or indexed elsewhere, so nothing is owed a sweep by it. A delete that fails leaves an entry a
+// later sweep reads once more and repairs then, so it is logged and not raised.
+func (s *Sweeper) dropPending(key string) {
+	if err := s.state.Delete(key); err != nil {
+		s.Logger.Warn("webhook redelivery index entry not deleted", "key", key, "error", err)
+	}
+}

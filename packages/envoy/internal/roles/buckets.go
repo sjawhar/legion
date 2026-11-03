@@ -98,8 +98,9 @@ func within[T any](ctx context.Context, what string, read func() (T, error)) (T,
 }
 
 // RoleClaim reads role's claim from the role bucket within ctx, decoded as store.Registry decodes
-// one (store.DecodeRoleClaim): a zero claim without an error when there is no role bucket and
-// when the bucket holds no claim for the role.
+// one and stamped with the entry's revision as store.Registry stamps the claims it reads: a zero
+// claim without an error when there is no role bucket and when the bucket holds no claim for the
+// role.
 func (b *Buckets) RoleClaim(ctx context.Context, role string) (store.RoleClaim, error) {
 	return within(ctx, "read role "+role+"'s claim", func() (store.RoleClaim, error) {
 		kv, err := b.bucket(bus.RoleClaimBucket)
@@ -116,7 +117,12 @@ func (b *Buckets) RoleClaim(ctx context.Context, role string) (store.RoleClaim, 
 		if err != nil {
 			return store.RoleClaim{}, err
 		}
-		return store.DecodeRoleClaim(entry.Value())
+		claim, err := store.DecodeRoleClaim(entry.Value())
+		if err != nil {
+			return store.RoleClaim{}, err
+		}
+		claim.Revision = entry.Revision()
+		return claim, nil
 	})
 }
 

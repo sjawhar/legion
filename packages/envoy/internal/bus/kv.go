@@ -223,6 +223,20 @@ func (kv KeyValue) WatchKeys(ctx context.Context, keys string, opts ...jetstream
 	return watcher, invalidKey(keys, err)
 }
 
+// WatchFilteredKeys is WatchKeys over several key patterns at once, the watch a caller that reads
+// a window of a time-keyed bucket needs (the webhook redelivery index): one watcher, one
+// consumer, and the subjects of every pattern on it. Each pattern is checked as WatchKeys checks
+// its own, since each becomes a filter subject of the same create request.
+func (kv KeyValue) WatchFilteredKeys(ctx context.Context, keys []string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	for _, key := range keys {
+		if err := kv.check(key, watchOverhead(kv.Bucket())); err != nil {
+			return nil, err
+		}
+	}
+	watcher, err := kv.watch.WatchFiltered(ctx, keys, opts...)
+	return watcher, invalidKey(keys, err)
+}
+
 // The subjects nats.go builds from a key of bucket, each as the bytes it puts around the key. A put
 // or a delete publishes to `$KV.<bucket>.<key>`; a get is a direct get,
 // `$JS.API.DIRECT.GET.KV_<bucket>.$KV.<bucket>.<key>`; a watch or a history creates a watcher on the

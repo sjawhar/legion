@@ -61,18 +61,23 @@ func TestBucketsReadAClaimAsTheRegistryWroteIt(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("claim the role: %v", err)
 	}
-	if claim, err := holders.RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "ses_holder" {
-		t.Fatalf("the claim is %+v, %v; want ses_holder's", claim, err)
-	}
 	kv, err := js.KeyValue(bus.RoleClaimBucket)
 	if err != nil {
 		t.Fatalf("open the role bucket: %v", err)
 	}
-	if _, err := kv.Put("legacy", []byte("ses_legacy")); err != nil {
+	stored, err := kv.Get("reviewer")
+	if err != nil {
+		t.Fatalf("read the stored claim: %v", err)
+	}
+	if claim, err := holders.RoleClaim(context.Background(), "reviewer"); err != nil || claim.HolderSessionID != "ses_holder" || claim.Revision != stored.Revision() {
+		t.Fatalf("the claim is %+v, %v; want ses_holder's at revision %d", claim, err, stored.Revision())
+	}
+	legacy, err := kv.Put("legacy", []byte("ses_legacy"))
+	if err != nil {
 		t.Fatalf("store a bare claim: %v", err)
 	}
-	if claim, err := holders.RoleClaim(context.Background(), "legacy"); err != nil || claim.HolderSessionID != "ses_legacy" {
-		t.Fatalf("the bare claim is %+v, %v; want ses_legacy's", claim, err)
+	if claim, err := holders.RoleClaim(context.Background(), "legacy"); err != nil || claim.HolderSessionID != "ses_legacy" || claim.Revision != legacy {
+		t.Fatalf("the bare claim is %+v, %v; want ses_legacy's at revision %d", claim, err, legacy)
 	}
 	if claim, err := holders.RoleClaim(context.Background(), "unclaimed"); err != nil || claim.HolderSessionID != "" {
 		t.Fatalf("the unclaimed role's claim is %+v, %v; want none", claim, err)
