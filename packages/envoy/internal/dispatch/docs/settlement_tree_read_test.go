@@ -79,7 +79,7 @@ func TestTheSettlementTreeReadOfARoomOutsideTheSchemaRefusesItAsTheReadPointDoes
 	}
 	log := live.OpenUpdateLog()
 	defer log.Close()
-	replica := service.keepReplica(live, log)
+	replica := service.keepReplica(live, log, nil)
 	// The log records its base as of just before this commit, so the replica starts from the
 	// room and takes the crafted element: the tree read walks a replica, not a copy of the room.
 	// The fragment is taken before the transaction, which holds the document's lock.

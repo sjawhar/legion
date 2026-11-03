@@ -185,7 +185,7 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 	}
 	log := live.OpenUpdateLog()
 	defer log.Close()
-	replica := service.keepReplica(live, log)
+	replica := service.keepReplica(live, log, nil)
 	// A commit of its own gives the replica the room's state to follow: the fork of a replica
 	// holding none is a decode of the room's own copy and not a clone.
 	typeIntoLastParagraph(t, live, "first ")

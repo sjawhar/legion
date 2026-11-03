@@ -229,16 +229,23 @@ type liveWriteOrigin struct {
 }
 
 // publishedRendering is one operation's rendering of the fork it left, kept for the room's update
-// observer (renderedReplica.changedBy): markdown, and askBlocks, the ids of the ask blocks that
-// tree holds, walked only when the operation changed the rendered markdown, since only then does
-// the observer record them. The embedded forkReadMark is the room replica's epoch and foreign
-// count as the operation's own fork read found them; the rendering is the replica's after the
-// update only while the replica still stands at both (renderedReplica says why). Its warm says
-// the operation forked warm: the zero value, a cold operation's, vouches for nothing, since a
-// cold fork was read from the store and no replica's state went into it.
+// observer (renderedReplica.changedBy): rendered, the markdown and the pmdoc.Layout the same
+// render recorded of it (replicaRendering), which the replica takes whole when it takes it, nil
+// for a cold operation and for a margin write, which record none (applyMargin); and askBlocks,
+// the ids of the ask blocks the operation's rendered tree held, walked only when the operation
+// changed the rendered markdown, since only then does the observer record them. askBlocks is
+// never nil for an operation that changed the content (askBlockIDs), so a nil askBlocks is what
+// tells changedBy the operation saw no content change: the observer then takes no rendering from
+// it and measures the update itself (renderedReplica.updateChangesMarkdown), unless the replica's
+// markdown already equals the rendered one.
+// The embedded forkReadMark is the room replica's epoch and foreign count as the operation's own
+// fork read found them; the rendering is the replica's after the update only while the replica
+// still stands at both (renderedReplica says why). Its warm says the operation forked warm: the
+// zero value, a cold operation's, vouches for nothing, since a cold fork was read from the store
+// and no replica's state went into it.
 type publishedRendering struct {
 	forkReadMark
-	markdown  string
+	rendered  *replicaRendering
 	askBlocks map[string]struct{}
 }
 

@@ -50,8 +50,9 @@ whose target resolved outside `$LEGION_WORKSPACE` and `/tmp`; that check was rem
 
 1. **No command in bash, eval, or a script file may delete, move, truncate, or recursively change
    anything outside `$LEGION_WORKSPACE` and a `/tmp` directory the same script created by literal
-   name.** Deleting `.legion/` inside the workspace at the reviewer's direction is the one
-   intended removal, and it is done by path inside the workspace.
+   name.** A removal a role is directed to make inside the workspace is done by path inside the
+   workspace. (The worked example, deleting `.legion/` at the reviewer's direction, went with the
+   handoff commit in sjawhar/legion#2354.)
 2. **Never pass a variable to `rm`.** `rm -rf "$anything"` is one edit away from `rm -rf
    /home/<user>`. If a script must clean up, name the literal path it created, or leave the
    scratch in place and say where it is (the operator sweeps `/tmp`).
