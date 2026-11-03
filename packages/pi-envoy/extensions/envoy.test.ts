@@ -22,13 +22,18 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
-import { askgateState } from "@legion/envoy-client/askgate-marker";
+import {
+  askgateState,
+  MARKER_MAX_AGE_MS,
+  STORE_BEAT_MS,
+} from "@legion/envoy-client/askgate-marker";
 import { RelayHeader } from "@legion/envoy-client/consumer-delivery";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { forgetKeyedLayerMemory } from "@legion/envoy-client/dispatch-http";
@@ -4177,6 +4182,37 @@ console.log(JSON.stringify(args));
       expect(recordOf("ses_askgate_next")).toBeNull();
       expect(existsSync(store)).toBe(false);
       expect(notifications).toEqual([]);
+    }, 30_000);
+    // A process of another pid namespace that shares the state directory (the host, seen from an
+    // agent box, or the other way round) cannot look this one up by its pid: it counts the record
+    // live, and its prune keeps the store, only while the store keeps changing. So the instance
+    // touches its store every STORE_BEAT_MS while it keeps a record, makes it again when such a
+    // process removed it, and stops at shutdown.
+    test("while it keeps a record, the instance touches its store every beat and makes it again when it is gone", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-beat");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      jest.useFakeTimers();
+      try {
+        await fixture.handlers.get("session_start")?.({}, context);
+        const store = recordOf("ses_askgate")?.[0]?.store ?? "";
+        const idle = new Date(Date.now() - MARKER_MAX_AGE_MS - 60_000);
+        utimesSync(store, idle, idle);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(Date.now() - statSync(store).mtimeMs).toBeLessThan(STORE_BEAT_MS);
+        rmSync(store, { recursive: true });
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(statSync(join(store, "markers")).isDirectory()).toBe(true);
+        expect(askgateState(sessionDirectory(process.env, "ses_askgate")).kind).toBe("on");
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(existsSync(store)).toBe(false);
+        jest.advanceTimersByTime(STORE_BEAT_MS);
+        expect(existsSync(store)).toBe(false);
+      } finally {
+        jest.useRealTimers();
+      }
     }, 30_000);
     // The independent review at 6fd926853, item 1: every session start, switch, branch and host
     // move rebinds a session, and the rebind wrote this process's owner file from OMP_ASKGATE

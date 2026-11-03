@@ -11,6 +11,7 @@ import {
   askgateState,
   consumeMarker,
   openStore,
+  pidNamespace,
   processStart,
   setRecordMode,
   writeAskgateRecord,
@@ -235,7 +236,12 @@ function bind(opts: BindOptions = {}): BoundGate {
   // The session directory the gate records its mode into (one real process keeps a record per
   // session it binds). A test may share a store and a session across binds to drive the switch case.
   const sessionDir = opts.sessionDir ?? fs.mkdtempSync(path.join(SUITE_TMP, "session-"));
-  const self: AskgateOwner = { pid: process.pid, start: processStart(process.pid), store };
+  const self: AskgateOwner = {
+    pid: process.pid,
+    start: processStart(process.pid),
+    ns: pidNamespace(),
+    store,
+  };
   try {
     openStore(store);
     // The bind, as envoy.ts does it: the mode from OMP_ASKGATE, which an arm does not change here.
@@ -5698,7 +5704,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     // The session chose block (gateEnv), so the CLI refuses a write that spends no marker.
     writeAskgateRecord(
       sessionDirectory(env, env.DISPATCH_SESSION_ID),
-      { pid: process.pid, start: processStart(process.pid), store },
+      { pid: process.pid, start: processStart(process.pid), ns: pidNamespace(), store },
       "block"
     );
     const sent: Array<{ path: string; body: unknown }> = [];
