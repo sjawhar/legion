@@ -747,10 +747,11 @@ two transactions' observers run concurrently in either order, and the later upda
 The log records the room's state as of just before its first transaction since the load, which the replica starts from, so a room that is only read holds no replica;
 a replica that cannot apply an update starts again from a fresh base at the room's next commit (`UpdateLog.Reset`), and counts the updates it could not place as content changes.
 Each logged entry's `Parked` bytes, what its commit kept but could not integrate yet, are applied after its `Update`, so the replica holds what the room holds.
-A commit that only parked - a peer's update that waits for an edit the room has not received - is logged with an empty `Update` and no `OnUpdate`, so no persistence call takes a class for it: none is queued, and its parked bytes are stored on their own instead, from the peer's own update hook (`onPeerUpdate`, `storeParked`), before ygo answers the peer or lets Shutdown finish, so the edit survives a restart before its predecessor arrives.
+A peer's update can park bytes - structs or deletions that wait for an edit the room has not received - and ygo logs them in `Parked`, beside an `Update` that carries only what the commit integrated, the bytes `OnUpdate` hands the room's persistence; a commit that only parked has an empty `Update` and no `OnUpdate`, so no persistence call takes a class for it and none is queued.
+Either way the parked bytes are stored on their own, from the peer's own update hook (`onPeerUpdate`, `storeParked`), before ygo answers the peer or lets Shutdown finish, so the edit survives a restart before its predecessor arrives.
 They are stored outside the replica's lock and never from an `OnUpdate` observer, which can run under a settlement's document lock that the store takes.
 A load parks them again and integrates them once the predecessor comes, whose commit stores them a second time, which a load applies to no effect; the room's pending queue (`MaxPendingItems`) bounds them.
-`envoy-dispatch stored-order` reads such a row as a `pending` mismatch, since the update it waits for is stored after it.
+`envoy-dispatch stored-order` accepts such a row once a later row carries what it parked again, which is how it tells it from a row stored ahead of one it depends on (`judgeParkedWindows`), and counts one still parked at the end as `awaiting`, not as a mismatch.
 A repair's update is applied and rendered like any other, so the update after it is measured against the room it left, but its class is recorded by its own observer.
 The test hooks around the observer (`beforeObserveUpdate`, `afterCreditUpdate`) hold an observer, not an update:
 another transaction's observer classifies a held one's update if it reaches the log first.

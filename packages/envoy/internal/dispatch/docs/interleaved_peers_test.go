@@ -225,6 +225,11 @@ func TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog(t *testing.T) {
 	if got := restarted.GetText("t").ToString(); got != "base later" {
 		t.Fatalf("the restart then predecessor holds %q, want the parked successor too", got)
 	}
+	// The stored-order check reads the stored parked edit as one awaiting its predecessor, not as
+	// a row stored out of order: nothing the store holds disagrees with what the room accepted.
+	if report := assertStoredOrder(t, service, artifactID); report.UpdatesAwaitingPredecessor != 1 {
+		t.Fatalf("stored-order report before the predecessor = %+v, want one update awaiting its predecessor", report)
+	}
 
 	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		applyErr = crdt.ApplyUpdateV1(doc, base, "peer")
@@ -253,6 +258,11 @@ func TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog(t *testing.T) {
 	if pending := reloaded.PendingStats(); pending.Items != 0 {
 		t.Fatalf("the stored history still parks %+v once the predecessor is stored", pending)
 	}
+	// The predecessor's commit carries the parked edit again, so the check finds the history
+	// replays: no row out of order and nothing left awaiting.
+	if report := assertStoredOrder(t, service, artifactID); report.UpdatesAwaitingPredecessor != 0 {
+		t.Fatalf("stored-order report once the predecessor is stored = %+v, want nothing awaiting", report)
+	}
 
 	replayed := replica.hold()
 	if replayed == nil {
@@ -266,6 +276,73 @@ func TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog(t *testing.T) {
 	if got, want := crdt.EncodeStateAsUpdateV1(replayed, nil), crdt.EncodeStateAsUpdateV1(live, nil); !bytes.Equal(got, want) {
 		t.Fatal("the replica rebuilt from the log does not hold the live room's state")
 	}
+}
+
+// A peer's update can change the room and park at once: one client's structs integrate, another's
+// wait for an edit the room lacks. ygo hands OnUpdate, and so the room's persistence, only what the
+// commit integrated, and logs what it parked in LoggedUpdate.Parked. Dispatch stores those parked
+// bytes too, as it stores a commit that only parked, so a restart before the predecessor arrives
+// keeps both clients' edits.
+func TestAPeerUpdateThatChangesTheRoomAndParksKeepsBothAcrossARestart(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the seeded document's room: %v", err)
+	}
+
+	now := crdt.New(crdt.WithClientID(7))
+	nowText := now.GetText("a")
+	now.Transact(func(txn *crdt.Transaction) { nowText.Insert(txn, 0, "now", nil) })
+	integrates := crdt.EncodeStateAsUpdateV1(now, nil)
+	other := crdt.New(crdt.WithClientID(8))
+	otherText := other.GetText("b")
+	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "base", nil) })
+	predecessor := crdt.EncodeStateAsUpdateV1(other, nil)
+	atBase := other.StateVector()
+	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 4, " later", nil) })
+	waits := crdt.EncodeStateAsUpdateV1(other, atBase)
+	mixed, err := crdt.MergeUpdatesV1(integrates, waits)
+	if err != nil {
+		t.Fatalf("merge the two clients' updates: %v", err)
+	}
+
+	stored := storedUpdateCount(t, service.store, artifactID)
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+	peer := connectPeer(t, server.URL, artifactID, "alice")
+	if err := peer.Write(ygsync.EncodeUpdate(mixed)); err != nil {
+		t.Fatalf("send an update that changes the room and parks: %v", err)
+	}
+	waitFor(t, 10*time.Second, "both parts of the peer's update to be stored", func() bool {
+		return storedUpdateCount(t, service.store, artifactID) >= stored+2
+	})
+	if pending := service.srv.GetDoc(artifactID).PendingStats(); pending.Items == 0 {
+		t.Fatalf("the room parked nothing of the update: %+v", pending)
+	}
+	waitFor(t, 10*time.Second, "the room to count no persistence update", func() bool {
+		return !service.hasPendingUpdates(artifactID) && !service.hasDurableAppend(artifactID)
+	})
+
+	loaded, err := service.persistence.Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load the history before the predecessor arrives: %v", err)
+	}
+	restarted := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(restarted, loaded.Update, nil); err != nil {
+		t.Fatalf("open the stored history after a restart: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(restarted, predecessor, nil); err != nil {
+		t.Fatalf("send the predecessor after the restart: %v", err)
+	}
+	if got := restarted.GetText("a").ToString(); got != "now" {
+		t.Fatalf("the restarted room's integrated edit = %q, want %q", got, "now")
+	}
+	if got := restarted.GetText("b").ToString(); got != "base later" {
+		t.Fatalf("the restart then predecessor holds %q, want the parked edit too", got)
+	}
+	assertStoredOrder(t, service, artifactID)
 }
 
 // typeParagraph is one keystroke's transaction that types text into a new first paragraph.

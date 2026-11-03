@@ -690,12 +690,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 
 // onPeerUpdate drains a room's log after ygo applies a peer's update, and stores what the update
 // parked. An update that changed the document already ran its OnUpdate observers, which drained it
-// there. One that only parked bytes - it waits for an edit the room has not received - has no
-// OnUpdate, so this is the one place its bytes are made durable, before ygo answers the peer and
-// before ygo's Shutdown, which waits for this hook, can let the process exit. The hook runs on the
-// peer's read loop, which holds no lock of the service's, so it can wait for the document's lock
-// the store takes; an OnUpdate observer cannot, since it runs on the goroutine that committed,
-// which can be a settlement holding that lock.
+// there, but handed the room's persistence only what it integrated; one that only parked bytes - it
+// waits for an edit the room has not received - has no OnUpdate at all. Either way this is the one
+// place the parked bytes are made durable (classifyDrained, storeParked), before ygo answers the
+// peer and before ygo's Shutdown, which waits for this hook, can let the process exit. The hook
+// runs on the peer's read loop, which holds no lock of the service's, so it can wait for the
+// document's lock the store takes; an OnUpdate observer cannot, since it runs on the goroutine that
+// committed, which can be a settlement holding that lock.
 func (s *Service) onPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
 	if err := apply(); err != nil {
 		return err
@@ -760,24 +761,26 @@ func (s *Service) storeParked(room string) {
 // which runs holding the replica's lock. It reports whether a settlement follows the update, which
 // is every update but a repair's, and whether it changed the content.
 //
-// A commit that parked something and changed nothing is logged with an empty update
-// (emptyUpdateV1) and its bytes in Parked, and ygo calls no OnUpdate for it, so no persistence
-// call will ever take a class for it: none is queued. Its parked bytes are queued on the room's
-// record instead, for storeParked to store outside the replica's lock - a drain runs under a
-// settlement's document lock too (readPoint), and the store takes that lock. A published live
-// write that parked is already durable, stored by the transaction that wrote it, so only another
-// origin's bytes are queued.
+// A commit can park bytes - structs or deletions that wait for an edit the room has not received -
+// and ygo logs them in Parked, beside an Update that carries only what the commit integrated, the
+// bytes OnUpdate hands the room's persistence. So the room's persistence never stores parked bytes,
+// and they are queued on the room's record for storeParked to store on their own, outside the
+// replica's lock - a drain runs under a settlement's document lock too (readPoint), and the store
+// takes that lock. A published live write that parked is already durable, stored by the
+// transaction that wrote it, so only another origin's bytes are queued. A commit that only parked
+// is logged with an empty update (emptyUpdateV1), and ygo calls no OnUpdate for it, so no
+// persistence call will ever take a class for it: none is queued.
 //
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
 // update and must not be recorded as holding the version it is stored at.
 func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed bool) {
+	if _, published := logged.Origin.(*liveWriteOrigin); len(logged.Parked) > 0 && !published {
+		state := s.lockState(room)
+		state.parked = append(state.parked, parkedBytes{update: logged.Parked, cursor: &instance.cursor})
+		s.unlockState(room, state)
+	}
 	if len(logged.Parked) > 0 && bytes.Equal(logged.Update, emptyUpdateV1) {
-		if _, published := logged.Origin.(*liveWriteOrigin); !published {
-			state := s.lockState(room)
-			state.parked = append(state.parked, parkedBytes{update: logged.Parked, cursor: &instance.cursor})
-			s.unlockState(room, state)
-		}
 		return false, false
 	}
 	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor}
