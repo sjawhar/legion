@@ -68,7 +68,7 @@ At your next edit, rewrite a spec outside the outline whole, in one version. Mov
 ## Approval
 
 - Request approval once, when each ask block is answered or waived, each claim is checked, and this version is unapproved. Unbuilt acceptance checks never delay it.
-- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once. Put other fixes in the plan or a comment.
+- After approval, version only changes to scope, acceptance, cost, risk or a person's decision, together. Put other fixes in the plan or a comment. An exact undo restores approval.
 
 ## The plan
 
