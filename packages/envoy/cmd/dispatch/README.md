@@ -97,14 +97,24 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_FILE_STORE_BUCKET`
 
   Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres.
-  The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
-  without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
-  The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+  The value chooses the store (`files.Open`), and the server and `backfill-files` both open it there, so they never read one value as two stores:
+
+  - `gs://<bucket>` is a Google Cloud Storage bucket, reached through the JSON API with Application Default Credentials (on GKE, the pod's Workload Identity principal; elsewhere `GOOGLE_APPLICATION_CREDENTIALS` or a gcloud login).
+    The principal needs `storage.objects.create` and `storage.objects.get` on the bucket and nothing more (`roles/storage.objectCreator` and `roles/storage.objectViewer`):
+    an upload reads the key's metadata first and writes nothing when the bucket already holds it, then writes in one request with `ifGenerationMatch=0`, carrying the body's CRC32C and MD5, which GCS checks, so no object is ever overwritten and none is deleted;
+    a write that loses that precondition to a concurrent writer of the same key is an object already held.
+    A value after `gs://` that is not a Cloud Storage bucket name (a path after the bucket among them) refuses the boot.
+  - Any other value is an S3 bucket's name.
+    The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
+    without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
+    The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+
+  An image whose Dispatch does not know `gs://` reads the value as an S3 bucket's name and fails every call, so a deployment sets a `gs://` value only on an image that carries it.
   An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version.
   The version route serves a row still holding bytes from the row and any other from the bucket:
   it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes;
   a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole.
-  `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`;
+  `/healthz` reports `files`: null when unset, else whether the bucket answered within two seconds (S3: a `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, whose absence is a healthy answer, so `storage.objects.get` alone serves it, while a bucket that does not exist or a refused grant fails it);
   it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down.
   `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below).
 
@@ -313,7 +323,7 @@ a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket;
 the files uploaded before it stay in their rows until `backfill-files` moves them, oldest first, one row at a time:
-it writes the object under the row's hash (a write S3 verifies against that hash, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
+it writes the object under the row's hash (a write the bucket verifies, S3 against that hash and Cloud Storage against its CRC32C and MD5, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
 A row it cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
 the run exits 1 when any row failed, and can be run again at any time, since each row is done or untouched and the server serves a row until its bytes are cleared.
 Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the
@@ -334,7 +344,7 @@ envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 
 envoy-dispatch backfill-files --restore       # the rollback: write every moved row's bytes back from the bucket
 ```
 
-It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket` before touching a row, and reads nothing else of the server's configuration.
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, which it opens as the server does (`gs://<bucket>` or an S3 bucket's name, with the same credentials and grant), refuses a bucket whose health probe fails (the one `/healthz` runs) before touching a row, and reads nothing else of the server's configuration.
 Clearing a row's bytes leaves dead tuples behind:
 the table shrinks on disk only after `VACUUM FULL` or `pg_repack`, while the nightly dump shrinks at once; measure the dump, or vacuum first.
 
@@ -2063,7 +2073,7 @@ Each item below names a path with its method and identity, then its purpose.
   Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`):
   `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus;
   the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds;
-  `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
+  `files`, whether the file store's bucket answers its two-second probe (S3: `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, which a missing object answers healthy) where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
   `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured).
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
   The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;

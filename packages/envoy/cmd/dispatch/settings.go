@@ -42,7 +42,7 @@ var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files`, `rebuild-refs` and `stored-order` read it too. A `pool_max_conns` parameter is refused."},
 	{Name: "DISPATCH_FILE_STORE_BUCKET", Required: "no",
-		Description: "S3 bucket uploaded files (images, attachments) are stored in, keyed by their SHA-256; the AWS SDK finds its region and credentials itself (`AWS_*`, the shared config files, the task role). `backfill-files` reads it too. Unset, every upload's bytes stay in Postgres, as before the bucket existed."},
+		Description: "Bucket uploaded files (images, attachments) are stored in, keyed by their SHA-256. `gs://<bucket>` is a Google Cloud Storage bucket, reached with Application Default Credentials (on GKE the pod's Workload Identity principal), which needs `storage.objects.create` and `storage.objects.get` on it and nothing more; any other value is an S3 bucket's name, and the AWS SDK finds its region and credentials itself (`AWS_*`, the shared config files, the task role). `backfill-files` reads it too and opens the same store. Unset, every upload's bytes stay in Postgres, as before the bucket existed."},
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
 		Description: "Shared bearer token an agent may authenticate with: one value, or several separated by whitespace while it rotates, the first the current one, all accepted. Personal tokens minted in Settings are the usual agent credential."},
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
