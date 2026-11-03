@@ -5016,8 +5016,9 @@ The whole exchange runs in one transaction, because the claim on the session nam
 Beside the session name, the exchange reads one parameter of the broker's own: `launcher_credential` (`oauthwire.FormLauncherCredential`), whether this trade wants the launcher credential its identity holds minted or moved onto the key it proved.
 An absent parameter asks, so `agent-secrets`, `agent-secrets-helper` and a person's sign-in — which exist to hold that credential and could enrol nothing without it — keep it by sending nothing, as does any client written before the parameter;
 `false` is the one value that declines, and any other spelling is `invalid_request` rather than a guess (`oauth.launcherCredentialAsked`).
-A trade that declines is minted none, is answered no `credential_id` and no `credential_expires_at`, and its access token is whatever it would have been;
-a person's sign-in that declined would still be recorded, since the row is what a revoke ends.
+A trade that declines is minted none, is answered no `credential_id` and no `credential_expires_at`, and its access token is whatever it would have been.
+A person's sign-in may not decline at all: a sign-in holds its credential — `agent-secrets login` reads the `credential_id` and refuses an answer without one, and the sessions the sign-in enrols read that person's secrets under it — so a person's trade sending `false` is `invalid_request` naming it (`oauth.personDeclinesNothing`), nothing is recorded for it, and the box trades again without the parameter.
+`legion controller start`'s one check that the controller's machine can hold a Dispatch credential declines (`brokerclient.Config.NoLauncherCredential`): it enrols no session, reads no secret, and its key dies with the call.
 Every TypeScript client declines (`packages/broker-client`, `brokerTokenClient`): none of them reads `credential_id`, and each makes a key per process and per session, so a trade that asked would put a `launcher_credentials` row and a `launcher_credential.token_login` audit row on the operator's machine-logins list for every `dispatch` call, every Claude Code hook run, every `envoy-send` and every session of a long-lived process, and nothing removes those rows.
 
 A person's sign-in on a machine is a row of `person_signins` (migration 0025, `internal/broker/store/person_signin.go`): the person, the RFC 7638 thumbprint of the box key `agent-secrets login` made and keeps with Google's refresh token, the machine's Google account, and the times it was made, last used and revoked, under a unique index on the person and the thumbprint that counts a revoked row too.
@@ -5113,6 +5114,8 @@ A machine's test is the account alone, because where it runs and which machine o
 A revoke on Dispatch's machine-login page ends it as any service's login (anyone signed in, through `record.MayDecide`;
 `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the service's next login inserts a new credential, which enrolls the pods it launches next;
 the daemon never enrolls a pod the revoke ended again.
+A machine's revoke ends no key: the upsert's conflict target counts live rows alone, so the box's next trade — within the hour, since its credential lives only as long as the identity token — inserts a new live credential under the same subject, bound to the same key, which `agent-secrets-helper` keeps across restarts (`helper.LoadOrMakeIdentityKey`, `~/.config/agent-secrets/identity-key.pem`), and a copy of that file signs launcher proofs again under the new credential's id.
+Cutting such a box off is three steps in one order — remove the key file, restart the helper so its next trade holds a credential of a subject of its own, then revoke the old login — which the operate page and `guides/revoke-a-session.md` give in full; the other order is undone at the next trade.
 A service login a person approved through a code before token logins keeps authenticating through its record's chain until it expires;
 a pending one can only be denied (`ErrServiceLogsInWithToken`, `400 SERVICE_LOGS_IN_WITH_TOKEN`, the same sentinel a device-code login naming a service is refused with).
 

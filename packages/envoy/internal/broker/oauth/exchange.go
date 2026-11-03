@@ -405,10 +405,12 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 // could enroll nothing. The person subject type records the sign-in its box key belongs to here
 // (personSignIn), for the same reason again: a revoke that commits first refuses the trade, and
 // one that commits after it ends the token the trade minted, and then takes the credential that
-// sign-in holds (personCredential). Either credential is minted only for a trade that asked for
-// one (launcherCredentialAsked): a caller that wants a Dispatch access token and nothing else
-// leaves no launcher login behind for an operator to read through. Beside those, and for every
-// type, the registration a pod's session name needs is read before the library builds anything
+// sign-in holds (personCredential). The machine's credential is minted only for a trade that
+// asked for one (launcherCredentialAsked): a caller that wants a Dispatch access token and
+// nothing else leaves no launcher login behind for an operator to read through. A person's
+// trade may not decline at all (personDeclinesNothing): a sign-in holds its credential. Beside
+// those, and for every type, the registration a pod's session name needs is read before the
+// library builds anything
 // (registeredPodSession). The claim on the session name is made
 // for every type once the library has built the answer, because that is when the issued token's
 // expiry is set, and the claim must not end before the token it is made for.
@@ -464,18 +466,23 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if request.GetRequestForm().Get(FormSubjectTokenType) == oauthwire.SubjectTokenTypePerson {
+		// A sign-in holds its credential: the person's trade is the one trade that may not
+		// decline (personDeclinesNothing), so every token it mints names the credential its
+		// revoke ends.
+		if !asked {
+			p.writeError(ctx, w, request, personDeclinesNothing())
+			return
+		}
 		// The sign-in first, so a box key the person has revoked is refused before anything is
 		// minted for it, and then the credential that sign-in holds, in this same transaction.
 		if err := p.personSignIn(txCtx, session); err != nil {
 			p.writeError(ctx, w, request, err)
 			return
 		}
-		if asked {
-			credentialID, credential, err = p.personCredential(txCtx, r, session)
-			if err != nil {
-				p.writeError(ctx, w, request, err)
-				return
-			}
+		credentialID, credential, err = p.personCredential(txCtx, r, session)
+		if err != nil {
+			p.writeError(ctx, w, request, err)
+			return
 		}
 	}
 	if err := p.registeredPodSession(txCtx, session); err != nil {
@@ -719,6 +726,24 @@ func launcherCredentialAsked(form url.Values) (bool, error) {
 	}
 }
 
+// personDeclinesNothing refuses a person's trade that sent launcher_credential=false.
+//
+// A person's sign-in exists to hold a launcher credential: `agent-secrets login` reads the
+// credential id out of the answer and refuses one without it, and the sessions that sign-in
+// enrols read the person's own secrets under it. A trade that declined would leave a sign-in
+// holding none, which is a sign-in that does nothing and an answer its only caller refuses, so
+// the parameter is refused here rather than ignored: a caller that sends it has misread what a
+// person's trade is for, and reading it as "true" instead would be the kind of guess
+// launcherCredentialAsked refuses to make for a misspelling.
+//
+// It is invalid_request and not invalid_grant because the subject token is sound and it is the
+// request's own parameter that cannot be honoured. A machine's trade declines freely: that one
+// wants a Dispatch access token and nothing else, and leaves no launcher login behind.
+func personDeclinesNothing() error {
+	return oauth2.ErrInvalidRequest.WithHintf("A sign-in holds its credential, so a person's trade cannot send %s=%s. Trade without the parameter, as `agent-secrets login` does.",
+		oauthwire.FormLauncherCredential, oauthwire.FormLauncherCredentialDeclined)
+}
+
 // machineCredential creates or re-uses the launcher credential the machine presenting a Google
 // identity token holds (ExchangeConfig.MachineCredentials), in the exchange's own transaction,
 // and writes its id onto the session so the stored token names it. It answers the id and what it
@@ -791,7 +816,12 @@ func (p *Provider) machineCredential(ctx context.Context, r *http.Request, sessi
 //
 // It runs in the transaction the token is written in, for the reason the machine's credential
 // does: a revoke that commits first refuses this trade, and one that commits after it ends the
-// token this trade minted, so no token outlives the sign-in it was minted under.
+// token this trade minted, so no token outlives the sign-in it was minted under. The revoke
+// reaches that token through the row written here and not through the credential: it ends every
+// live access token whose stored session names this person and this box key
+// (store.RevokePersonSignInTx), and the credential the sign-in holds with them
+// (enroll.Service.RevokePersonSignIn). A person's trade may not decline that credential
+// (personDeclinesNothing), so the two always end together.
 //
 // Both refusals are invalid_grant rather than a server error, and name the sign-in command: the
 // subject token is sound and it is the broker's own record that refuses, which the person fixes

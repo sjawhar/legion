@@ -58,13 +58,20 @@ func controllerCheckSession() string { return "legion-controller-start-" + uuid.
 // It trades under a session name of this start's own (controllerCheckSession) and never under
 // AGENT_SECRETS_SESSION, because that is what the session does: Oh My Pi mints the controller's
 // session id when the session starts, so nothing here can name it, and the client trades under
-// the session it acts as (brokerclient.TradeSession). A name of this start's own is refused by
+// the session it acts as. A name of this start's own is refused by
 // exactly the entries that refuse the session's — one that fixes a session answers
 // ErrSessionMismatch to both, and one whose pods write under registered names answers both that
 // no registration names them — and taken by the one entry that takes the session's, which fixes
 // none and registers nothing. Trading under the operator's variable instead would pass for an
 // entry that fixes that very name and launch a controller every Dispatch write of which is
 // refused.
+//
+// The trade declines the launcher credential this machine's identity holds
+// (brokerclient.Config.NoLauncherCredential): this check enrols no session and reads no secret,
+// and its key dies with the call, so a credential minted for it would be a launcher_credentials
+// row and a token_login audit row on the operator's machine-logins list for every start, each
+// keyed by a thumbprint nothing holds afterwards. The controller's own session trades for
+// itself, and that trade asks for what it needs.
 func controllerDispatchBroker(ctx context.Context, stderr io.Writer) error {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil {
@@ -83,10 +90,10 @@ func controllerDispatchBroker(ctx context.Context, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("make the key the controller's trade is proved with: %w", err)
 	}
-	session := controllerCheckSession()
+	// A name of this start's own, new each time: nothing here can name the controller session's.
 	client, err := brokerclient.New(brokerclient.Config{
-		BrokerURL: broker, Key: key, Subject: identity, Session: brokerclient.TradeSession(os.Getenv, session),
-		HTTP: brokerclient.HTTPClient(),
+		BrokerURL: broker, Key: key, Subject: identity, Session: controllerCheckSession(),
+		NoLauncherCredential: true, HTTP: brokerclient.HTTPClient(),
 	})
 	if err != nil {
 		return err

@@ -295,7 +295,9 @@ enrolled under the old one stop renewing when it lapses, and a box enrolled with
 `agent-secrets enroll --helper` is enrolled again by running that command again.
 
 Only a trade that asks for a credential holds one, and a trade asks unless it says otherwise, so
-`agent-secrets`, the helper and a person's sign-in hold theirs by doing nothing. The clients that
+`agent-secrets` and the helper hold theirs by doing nothing. A person's sign-in cannot do
+otherwise: a sign-in holds its credential, so a trade of a person's that declined one is refused
+`400 invalid_request`. The clients that
 want a Dispatch token and read no secret — the `dispatch` command, the Oh My Pi and Claude Code
 plugins, `envoy-send` — decline it, since each of them makes a key per process and per session
 and a machine-logins list with a row per command run is a list nobody can read. So the machines
@@ -321,6 +323,27 @@ the machine out of its fleet and wait out the hour, as [a copied machine
 token](#a-copied-machine-token) says. To stop a fleet trading, remove its entries and redeploy the
 broker: each machine's credential stops authenticating at its next call, its next trade is
 refused, and its sessions stop renewing.
+
+A revoke alone does not cut off a machine whose key may have been copied. The credential is
+keyed by the machine and the key it proved, and `agent-secrets-helper` keeps that key at
+`~/.config/agent-secrets/identity-key.pem` across restarts, so the box's next trade — within the
+hour, since the credential lives only as long as the identity token it was minted from — mints a
+new live credential bound to that same key, and whoever holds a copy of the file signs launcher
+proofs under the new credential's id. Three steps, in this order, end that:
+
+1. remove `~/.config/agent-secrets/identity-key.pem` on the machine;
+2. restart the helper (`systemctl --user restart agent-secrets-helper.service`, or
+   `agent-secrets-helper install --restart-with-sessions`, which also ends the grants of the
+   sessions registered with it), so it makes a new key and its next trade holds a credential of a
+   subject of its own;
+3. then revoke the old login on the machine-login page, by the credential id the old key held,
+   which ends it and every session it enrolled.
+
+In the other order the revoke is undone: the helper still holds the key, and its next trade
+inserts a live credential on it again, since a revoked row is no longer the one a trade of that
+subject moves. None of this reaches the machine's Google identity token, which is what the trade
+itself proves: a box you believe is compromised comes out of its fleet, as [a copied machine
+token](#a-copied-machine-token) says.
 
 Whoever can get an identity token for the fleet's account logs in as its machines. Google Cloud IAM
 is that boundary: who may run a workload as the account (`iam.serviceAccounts.actAs` on it), and

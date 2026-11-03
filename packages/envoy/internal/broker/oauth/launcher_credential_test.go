@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
+	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
 // machineForm is a machine's own trade of its Google identity token for a Dispatch access token:
@@ -91,11 +92,13 @@ func TestTheHelpersTradeStillGetsItsLauncherCredential(t *testing.T) {
 	}
 }
 
-// TestASignInThatDeclinesItsCredentialIsStillRecorded: the parameter is read for every trade, so
-// a person's sign-in that declines is recorded — the revoke it can be ended by needs the row —
-// and holds no launcher credential. `agent-secrets login` never declines: it reads the
-// credential id and refuses an answer without one.
-func TestASignInThatDeclinesItsCredentialIsStillRecorded(t *testing.T) {
+// TestASignInThatDeclinesItsCredentialIsRefused: a sign-in holds its credential, so a person's
+// trade is the one trade that may not decline it. `agent-secrets login`, its only caller, reads
+// the credential id and refuses an answer without one, and the sessions that sign-in enrols read
+// the person's own secrets under it; a sign-in holding none would do nothing. Nothing is
+// recorded for the refused trade, so the box signs in again rather than carrying a half-made
+// sign-in.
+func TestASignInThatDeclinesItsCredentialIsRefused(t *testing.T) {
 	f := newSignInFixture(t)
 	key := newKey(t)
 	before := f.count(t, "launcher_credentials")
@@ -106,17 +109,89 @@ func TestASignInThatDeclinesItsCredentialIsStillRecorded(t *testing.T) {
 		"ada-box-1")
 	form.Set(oauthwire.FormLauncherCredential, oauthwire.FormLauncherCredentialDeclined)
 	status, body := f.exchange(t, form, key)
-	accessTokenOf(t, status, body)
 
-	if _, carried := body[oauthwire.ExtraCredentialID]; carried {
-		t.Errorf("the answer %v names a credential, and this sign-in declined one", body)
+	if status != http.StatusBadRequest || body["error"] != "invalid_request" || body["access_token"] != nil {
+		t.Fatalf("the sign-in = %d %v, want 400 invalid_request and no access token", status, body)
+	}
+	if description, _ := body["error_description"].(string); !strings.Contains(description, "A sign-in holds its credential") {
+		t.Errorf("the refusal reads %q, which does not say that a sign-in holds its credential", description)
 	}
 	if after := f.count(t, "launcher_credentials"); after != before {
-		t.Errorf("the sign-in left %d launcher credentials, want the %d it started with", after, before)
+		t.Errorf("the refused sign-in left %d launcher credentials, want the %d it started with", after, before)
 	}
-	if got := f.signIns(); len(got) != 1 || got[0].Person != person || got[0].Thumbprint != thumbprint(t, key) {
-		t.Errorf("the exchange recorded %+v, want this person's sign-in on this box key: a sign-in nothing records could never be revoked", got)
+	if got := f.signIns(); len(got) != 0 {
+		t.Errorf("the exchange recorded %+v, and a refused trade records no sign-in", got)
 	}
+}
+
+// TestRevokingASignInEndsTheTokenItsTradeMinted is the invariant the refusal above keeps whole:
+// no token of a person's outlives the sign-in it was minted under. The revoke ends every live
+// access token whose stored session names that person and that box key
+// (store.RevokePersonSignInTx) — the sign-in row here is the real table's, since this suite's
+// own recorder stands in for it only while the trade runs — and the credential the sign-in
+// holds ends with it (enroll.Service.RevokePersonSignIn, whose half this test does not run).
+func TestRevokingASignInEndsTheTokenItsTradeMinted(t *testing.T) {
+	f := newSignInFixture(t)
+	key := newKey(t)
+	ctx := context.Background()
+
+	form := signInForm(
+		f.personToken(t, person, deviceAudience, true, signInDomain),
+		f.machineToken(t, signInMachine, machineAudience, true),
+		"ada-box-1")
+	token := f.exchanged(t, form, key)
+	if answer, err := f.provider.Introspect(ctx, token); err != nil || !answer.Active {
+		t.Fatalf("Introspect before the revoke = %+v, %v; want a live token", answer, err)
+	}
+
+	signIn := recordSignIn(t, f, person, thumbprint(t, key), signInMachine)
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	revoked, ended, err := store.RevokePersonSignInTx(ctx, tx, signIn, person)
+	if err != nil {
+		t.Fatalf("RevokePersonSignInTx: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if revoked != thumbprint(t, key) || ended != 1 {
+		t.Errorf("the revoke ended %d token(s) of key %q, want the one token this box key traded for", ended, revoked)
+	}
+
+	answer, err := f.provider.Introspect(ctx, token)
+	if err != nil {
+		t.Fatalf("Introspect: %v", err)
+	}
+	if answer.Active {
+		t.Errorf("the token introspects active after the sign-in was revoked, and no token outlives the sign-in it was minted under")
+	}
+}
+
+// recordSignIn writes the person_signins row the trade's own recorder stood in for and answers
+// its id, which the revoke route takes.
+func recordSignIn(t *testing.T, f *signInFixture, person, thumbprint, machine string) string {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := store.RecordPersonSignIn(ctx, tx, person, thumbprint, machine); err != nil {
+		t.Fatalf("RecordPersonSignIn: %v", err)
+	}
+	var id string
+	if err := tx.QueryRow(ctx, `select id::text from person_signins where person = lower($1) and thumbprint = $2`,
+		person, thumbprint).Scan(&id); err != nil {
+		t.Fatalf("read the sign-in's id: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return id
 }
 
 // TestALauncherCredentialValueTheBrokerCannotReadIsRefused: the parameter takes one of two

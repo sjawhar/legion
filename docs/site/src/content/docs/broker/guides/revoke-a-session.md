@@ -193,6 +193,39 @@ without secrets until the daemon replaces it. To keep a daemon from logging in a
 account from the broker's `BROKER_SERVICE_LOGINS` and redeploy the broker
 ([Operate](/legion/broker/operate/#what-to-run)).
 
+### A machine that logs in with its own identity
+
+A box of a listed fleet needs no human to log in again: its helper trades the Google identity the
+machine already holds, and that trade mints the login. Its credential is keyed by the machine and
+the key the trade proved, and `agent-secrets-helper` keeps that key at
+`~/.config/agent-secrets/identity-key.pem` so a restart moves the one credential the machine
+already holds rather than leaving a second behind. The two together mean a revoke alone does not
+cut such a box off: within the hour the helper trades again, the broker inserts a **new live
+credential bound to that same key** — a revoked row is no longer the one a trade of that subject
+moves — and anyone who copied that key file signs launcher proofs again under the new credential's
+id, enrolling sessions that read what the fleet's service may read.
+
+To cut off a machine whose key may have been copied, in this order:
+
+1. **Remove the key.** Delete `~/.config/agent-secrets/identity-key.pem` on the machine.
+
+2. **Restart the helper**, with `systemctl --user restart agent-secrets-helper.service` or
+   `agent-secrets-helper install --restart-with-sessions`. It makes a new key, and its next trade
+   holds a credential under a subject of its own, so the copied key is the old login's and
+   nothing else's. A restart ends the grants of the sessions registered with it, which is why
+   `install` refuses one without that flag.
+
+3. **Revoke the old login** on the machine-login page, by the credential id the old key held —
+   the row whose **Credential** id is not the one the new trade issued. That ends it and every
+   session it enrolled, as above.
+
+In the other order the revoke is undone within the hour, because step 1 has not happened yet and
+the helper trades the key it still holds. None of it reaches the machine's own Google identity
+token, which is what the trade proves in the first place: a box you believe is compromised comes
+out of its fleet (`BROKER_VM_SERVICES`, then redeploy the broker), after which its credential
+stops authenticating at its next call and no trade of it is answered
+([Operate](/legion/broker/operate/#a-copied-machine-token)).
+
 From your own shell on a logged-in machine, `agent-secrets machine list` lists your own machines'
 logins, row for row as the machine-login page lists them, and `agent-secrets machine revoke` ends
 one, under that machine's login. A service's login is not listed there, and `machine revoke` of

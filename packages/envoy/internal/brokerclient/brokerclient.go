@@ -170,9 +170,13 @@ type Config struct {
 	// (oauthwire.FormLauncherCredential), for a caller that wants a Dispatch access token and
 	// nothing else: a trade that asks writes a launcher_credentials row and a token_login
 	// audit row, both of which an operator reads through, and nothing removes either. The zero
-	// value asks, because every caller of this package that trades a machine's or a person's
-	// Google identity — `agent-secrets`, `agent-secrets-helper`, a sign-in — goes on to enrol a
-	// session under the credential and could do nothing without it.
+	// value asks, because every caller of this package that goes on to enrol a session or read
+	// a secret — `agent-secrets`, `agent-secrets-helper`, a sign-in — could do nothing without
+	// the credential. The callers that set it enrol nothing: `legion controller start`'s one
+	// check that the controller's machine can hold a Dispatch credential at all
+	// (controller_dispatch_token.go), whose key dies with the call. A person's trade may not
+	// set it at all: a sign-in holds its credential, and the broker refuses one that declines
+	// (invalid_request, oauth.personDeclinesNothing).
 	NoLauncherCredential bool
 	// HTTP is the client every call goes through; nil is http.DefaultClient. The DPoP proof is
 	// signed by a transport this client wraps around it, so a caller passing its own client

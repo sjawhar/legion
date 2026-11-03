@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,12 +20,13 @@ const controllerBrokerToken = "broker-access-token-9f3a"
 
 // stubBroker is the secrets broker's token endpoint and nothing else: it answers every trade
 // with controllerBrokerToken, or, when refusal is set, with that OAuth refusal and a 400. It
-// keeps the session name each trade asked under.
+// keeps the form each trade posted, which is where the session name and the launcher-credential
+// parameter are read from.
 type stubBroker struct {
 	url    string
 	trades atomic.Int64
 	mu     sync.Mutex
-	asked  []string
+	forms  []url.Values
 }
 
 // newStubBroker serves POST /v1/oauth/token, answering refusal's words when it is not empty.
@@ -41,12 +43,13 @@ func newStubBrokerFixingASession(t *testing.T, refusal, fixed string) *stubBroke
 	broker := &stubBroker{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		broker.trades.Add(1)
-		session := ""
+		form := url.Values{}
 		if err := r.ParseForm(); err == nil {
-			session = r.PostForm.Get("session")
+			form = r.PostForm
 		}
+		session := form.Get("session")
 		broker.mu.Lock()
-		broker.asked = append(broker.asked, session)
+		broker.forms = append(broker.forms, form)
 		broker.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		said := refusal
@@ -72,7 +75,23 @@ func newStubBrokerFixingASession(t *testing.T, refusal, fixed string) *stubBroke
 func (b *stubBroker) tradedSessions() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return append([]string(nil), b.asked...)
+	asked := make([]string, 0, len(b.forms))
+	for _, form := range b.forms {
+		asked = append(asked, form.Get("session"))
+	}
+	return asked
+}
+
+// tradedLauncherCredential is what each trade said about the launcher credential its identity
+// holds, in order: "false" declines it, and "" is a trade that asked by sending nothing.
+func (b *stubBroker) tradedLauncherCredential() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	asked := make([]string, 0, len(b.forms))
+	for _, form := range b.forms {
+		asked = append(asked, form.Get("launcher_credential"))
+	}
+	return asked
 }
 
 // provesAnIdentity has the operator's machine prove a Kubernetes identity of its own at broker,
@@ -173,6 +192,13 @@ func TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer(t *testing.T) {
 	asked := broker.tradedSessions()
 	if len(asked) != 1 || !strings.HasPrefix(asked[0], "legion-controller-start-") || asked[0] == "legion-demo-controller" {
 		t.Errorf("the check traded under %q, want one name of its own beginning legion-controller-start-", asked)
+	}
+	// And it declines the launcher credential its identity holds: this check enrols no session
+	// and reads no secret, and its key dies with the call, so a credential minted for it would
+	// put a machine login and a token_login audit row on the operator's list at every start,
+	// keyed by a thumbprint nothing holds afterwards.
+	if declined := broker.tradedLauncherCredential(); len(declined) != 1 || declined[0] != "false" {
+		t.Errorf("the check's trade sent launcher_credential %q, want one trade sending \"false\"", declined)
 	}
 }
 
