@@ -487,7 +487,10 @@ package api
 // the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
 // when there is none — on the state's claims (`api.ClaimView`) and on the operator's
 // (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
-// before 46 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// before 46 refuses a state carrying either, so `GET /legion/v1/state`, which authenticates
+// nobody, serves a caller from a pod whose claims record a contract below 46 the claim views
+// without them (api's stateFor): the round serves that worker until its pod is replaced, and
+// every reader from 46 on takes both as optional. `legion.yaml` gains `pod_update_retask_hours` and
 // `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
 // before 46 has no op to signal with, so its worker answers by ending the turn the task started
 // (supervise.PodUpdateContract names this number), and a daemon before 46 answers that op's post

@@ -247,8 +247,9 @@ type UpdateStalled struct {
 }
 
 // UpdateWaiting is one claim an update round is blocked on: its token, the role it holds, the
-// state it is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the
-// operator), and Answered for a claim that has already answered this round.
+// state it is in (supervise.ClaimState — an operator-suspended claim waits for the operator; a
+// pod round lists no `failed` claim, since it does not wait for one), and Answered for a claim
+// that has already answered this round.
 //
 // The contract the claim's plugin records is not here. A plugin with no ready_for_update op
 // answers by ending the turn its update task started (supervise's askForUpdate and turnEnded),

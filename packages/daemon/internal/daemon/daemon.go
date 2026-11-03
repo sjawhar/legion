@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -1569,6 +1570,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		},
 		StateTransactions:  st,
 		ConsumerLag:        consumerLag,
+		CallerPod:          callerPodOf(s.runtime),
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,
@@ -1877,6 +1879,15 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
 	if keeper, ok := rt.(*sandbox.Runtime); ok {
 		return keeper.RepositoryCaches
+	}
+	return nil
+}
+
+// callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
+// pods, and nil under any other (api's Options.CallerPod).
+func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
+	if pods, ok := rt.(*sandbox.Runtime); ok {
+		return pods.PodAt
 	}
 	return nil
 }
