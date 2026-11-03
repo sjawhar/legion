@@ -22,6 +22,7 @@ import (
 // because the consumer is gone either way (kvwatch.Watcher.End, LEGION-278). Every ERROR line
 // fails the test.
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
+	t.Parallel()
 	server, uri := testnats.Start(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")
 	listener.waitHealthy(t)

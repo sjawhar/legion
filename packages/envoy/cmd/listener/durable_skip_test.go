@@ -19,6 +19,7 @@ import (
 // A followed subject, and the agent subject of a session nobody has, are decoded as before. Every
 // message here is undecodable, so a decode shows as the handler's decode failure.
 func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("unexpected prompt_async request")
 	}))

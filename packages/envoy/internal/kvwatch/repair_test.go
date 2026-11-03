@@ -142,6 +142,7 @@ func waitForStopWarns(t *testing.T, records func() []map[string]any, want int) {
 // so even firing it afterwards writes no ERROR. Without that, every reconnect and every
 // self-health rebuild left an ERROR an operator had to learn to ignore (INFRA-182).
 func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	into := newSeen()
@@ -176,6 +177,7 @@ func TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn(t *testing.T) {
 // armed and makes the one report when its minute passes, and a second failed Rewatch adds no
 // second ERROR.
 func TestAWatcherWhoseBucketIsGoneReportsOnlyWhenItsWaitPasses(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
@@ -220,6 +222,7 @@ func TestAWatcherWhoseBucketIsGoneReportsOnlyWhenItsWaitPasses(t *testing.T) {
 // minute the watcher waits for a repair has passed, and not before: an ERROR at the stop itself
 // could not tell this apart from a stop a rebuild repairs a moment later (INFRA-182).
 func TestAWatcherNothingRepairsLogsWhenItsMinutePasses(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
@@ -256,6 +259,7 @@ func TestAWatcherNothingRepairsLogsWhenItsMinutePasses(t *testing.T) {
 // the second stop's report: an ERROR saying no repair came within a minute of a stop moments
 // old, and the second wait, finding the stop reported, then said nothing when its minute passed.
 func TestAWaitARepairClearedReportsNotTheNextStop(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	arm := &armed{}
@@ -300,6 +304,7 @@ func TestAWaitARepairClearedReportsNotTheNextStop(t *testing.T) {
 // shutdown test greps its whole output for ERROR across ten runs
 // (cmd/listener/shutdown_test.go), so an arm left by an ordered stop would fail it.
 func TestAWatcherStoppedOnPurposeLogsNeither(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	arm := &armed{}

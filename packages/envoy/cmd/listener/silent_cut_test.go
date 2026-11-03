@@ -39,6 +39,7 @@ func disconnectedUnderName(output, name string) bool {
 // cut within seconds whether or not those two call sites carry the option, and would prove
 // nothing.
 func TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds(t *testing.T) {
+	t.Parallel()
 	server, uri := testnats.Start(t)
 	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and it opens
 	// before the listener reports itself healthy, so waitHealthy means both clients have connected.

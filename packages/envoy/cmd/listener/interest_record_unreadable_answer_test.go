@@ -23,6 +23,7 @@ import (
 // beside the readable one with its topics, and the registry logs the unreadable record at WARN,
 // once per read, naming the session.
 func TestAnUnreadableInterestRecordIsAnsweredAsUnreadable(t *testing.T) {
+	t.Parallel()
 	const (
 		readable   = "ses_interest_answer_readable"
 		unreadable = "ses_interest_answer_unreadable"

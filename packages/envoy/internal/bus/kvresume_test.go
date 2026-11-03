@@ -59,6 +59,7 @@ func awaitClosed(t *testing.T, watcher natsgo.KeyWatcher) {
 // its key, value, revision and operation as the legacy API names them (a delete marker as
 // KeyValueDelete, a purge marker as KeyValuePurge), then the nil marker, then later writes.
 func TestAResumedWatchDeliversFromItsRevisionWithLegacyOperations(t *testing.T) {
+	t.Parallel()
 	conn, kv := resumeBucket(t)
 	if _, err := kv.Put("kept", []byte("k")); err != nil {
 		t.Fatalf("put kept: %v", err)
@@ -147,6 +148,7 @@ func TestAResumedWatchDeliversFromItsRevisionWithLegacyOperations(t *testing.T) 
 // so a reader that finds Updates closed reads why there, as kvwatch does. A watch that never ended
 // would leave a cache frozen with nothing reporting it.
 func TestAResumedWatchEndsWithAnErrorWhenItsConnectionCloses(t *testing.T) {
+	t.Parallel()
 	conn, kv := resumeBucket(t)
 	if _, err := kv.Put("key", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -179,6 +181,7 @@ func TestAResumedWatchEndsWithAnErrorWhenItsConnectionCloses(t *testing.T) {
 
 // A resumed watch stopped on purpose ends with no error: the end is its caller's.
 func TestAStoppedResumedWatchEndsWithNoError(t *testing.T) {
+	t.Parallel()
 	conn, kv := resumeBucket(t)
 	if _, err := kv.Put("key", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -202,6 +205,7 @@ func TestAStoppedResumedWatchEndsWithNoError(t *testing.T) {
 // Revision 0 is no revision: nats.go would read it as no resume at all and replay the bucket in
 // full, so WatchAllFrom refuses it rather than do what the caller did not ask for.
 func TestAResumeFromRevisionZeroIsRefused(t *testing.T) {
+	t.Parallel()
 	conn, kv := resumeBucket(t)
 	if watcher, err := kv.WatchAllFrom(conn, 0); err == nil {
 		_ = watcher.Stop()

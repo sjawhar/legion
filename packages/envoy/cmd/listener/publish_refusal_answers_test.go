@@ -44,6 +44,7 @@ func (kv supersedingRoleDeleteKV) Delete(key string, opts ...nats.DeleteOpt) err
 // Delete always loses, which is the same answer store.ReleaseExpiredRoleClaim reads from the
 // server when a real race is lost (internal/store/kv.go), reached without the timing.
 func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testing.T) {
+	t.Parallel()
 	const (
 		role   = "reviewer"
 		holder = "ses_superseded_holder"
@@ -104,6 +105,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 // answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
 // did not answer nor the 500 it gives an undecodable claim would be true of it.
 func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
+	t.Parallel()
 	const (
 		role   = "reviewer"
 		holder = "ses_superseded_holder"
@@ -184,6 +186,7 @@ func (kv stalledRoleKV) Delete(key string, opts ...nats.DeleteOpt) error {
 // resolution waited the call out. A lookup's same two cases are
 // TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering's.
 func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *testing.T) {
+	t.Parallel()
 	const (
 		role   = "reviewer"
 		holder = "ses_unanswered_holder"
@@ -271,6 +274,7 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 // publish route already answers the same stalled store this way, in the test above. The bus is
 // connected throughout, so nothing but the stalled role-bucket call can end the lookup.
 func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *testing.T) {
+	t.Parallel()
 	const (
 		role   = "reviewer"
 		holder = "ses_lookup_unanswered_holder"
@@ -339,6 +343,7 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 // the error is built exactly as confirmPublished builds it and classified by the code the handlers
 // call, so what is pinned is the answer, not the detection.
 func TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable(t *testing.T) {
+	t.Parallel()
 	subject := contracts.RoleTopicPrefix + "reviewer"
 	// As internal/bus/confirm.go's confirmPublished names it: ErrPublishDenied around the subject
 	// and the connection's last error, which is nats.go's permissions violation.

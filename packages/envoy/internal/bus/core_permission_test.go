@@ -1,5 +1,9 @@
 package bus_test
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv (grantedClient, jetStreamGrantedClient),
+// which panics the process beside t.Parallel, so none of them is parallel, nor is any test of
+// another file that calls those helpers (dispatch://INFRA-1075).
+
 import (
 	"errors"
 	"os"

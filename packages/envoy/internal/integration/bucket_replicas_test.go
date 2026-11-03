@@ -19,6 +19,7 @@ import (
 // and role claims (store.Open), sessions (session.OpenSessionRegistry), CI state (cistore.Open) and
 // webhook redelivery (redeliver.OpenState).
 func TestEveryBucketIsCreatedAtThreeCopiesOnAThreeCopyDeployment(t *testing.T) {
+	t.Parallel()
 	const replicas = 3
 	cluster := testnats.StartCluster(t, 3)
 	conn := testnats.Connect(t, cluster.URL())

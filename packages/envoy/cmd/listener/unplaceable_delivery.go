@@ -15,12 +15,24 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 )
 
-// unplaceableRetryDelay is the delay an agent delivery this listener could not place asks for
-// before the stream redelivers it. It is short enough that a window's worth of them is a dozen
-// attempts rather than two - at the 30 s finalize(true) takes, a minute is one retry - and long
-// enough that a session whose record is still propagating, or whose server is still binding its
-// serve port, has time to finish between two of them.
-const unplaceableRetryDelay = 5 * time.Second
+// defaultUnplaceableRetryDelay is the delay an agent delivery this listener could not place asks
+// for before the stream redelivers it, the one main.go uses. It is short enough that a window's
+// worth of them is a dozen attempts rather than two - at the 30 s finalize(true) takes, a minute
+// is one retry - and long enough that a session whose record is still propagating, or whose
+// server is still binding its serve port, has time to finish between two of them. A test sets a
+// shorter one on its configuration (listenerDeliveryHandlerConfig.unplaceableRetryDelay), so a
+// run that must see the redelivery waits milliseconds for it.
+const defaultUnplaceableRetryDelay = 5 * time.Second
+
+// retryDelay is the NAK delay a deferral of an unplaceable agent delivery asks for: the
+// configuration's own, or defaultUnplaceableRetryDelay when it carries none, which is what
+// main.go and every caller that does not set it ask for.
+func (cfg listenerDeliveryHandlerConfig) retryDelay() time.Duration {
+	if cfg.unplaceableRetryDelay > 0 {
+		return cfg.unplaceableRetryDelay
+	}
+	return defaultUnplaceableRetryDelay
+}
 
 // unplaceableMaxDeliveries is the hard stop on those retries beside the window's own count of
 // deferrals, two short of the durable's own MaxDeliver (consumerMaxDeliver, durable.go: 20, so
@@ -43,18 +55,18 @@ const unplaceableMaxDeliveries = consumerMaxDeliver - 2
 const unplaceableDeferralCap = consumerMaxAckPending / 4
 
 // defaultUnplaceableRetryWindow is the window main.go uses when ENVOY_UNPLACEABLE_RETRY_WINDOW
-// is unset or unreadable: a minute of retries, which at unplaceableRetryDelay is 12 deferrals
-// and so 13 deliveries, 15 with the margin above and so inside consumerMaxDeliver, and well
-// inside the attempt cache's TTL (attemptCacheTTL, main.go), the entry whose clearing keeps each
-// redelivery from being swallowed as an attempt-dedupe skip.
+// is unset or unreadable: a minute of retries, which at defaultUnplaceableRetryDelay is 12
+// deferrals and so 13 deliveries, 15 with the margin above and so inside consumerMaxDeliver, and
+// well inside the attempt cache's TTL (attemptCacheTTL, main.go), the entry whose clearing keeps
+// each redelivery from being swallowed as an attempt-dedupe skip.
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both.
 const defaultUnplaceableRetryWindow = 60 * time.Second
 
 // unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
 // that took it, the longest a deferred message can legitimately stay pending before a delivery of
 // it reaches this listener's handler again and gives the slot back. It is the sum of three waits:
-//   - unplaceableRetryDelay (5 s), the NAK delay the deferral asks for: the stream redelivers no
-//     sooner;
+//   - the retry delay (defaultUnplaceableRetryDelay, 5 s), the NAK delay the deferral asks for:
+//     the stream redelivers no sooner;
 //   - consumerAckWait (durable.go, 60 s): finalizeAfter's NAK is fire-and-forget, and one lost on
 //     the wire leaves the message pending until the AckWait of the delivery that was deferred
 //     runs out, which began before the slot was taken, so it ends inside this term;
@@ -66,7 +78,7 @@ const defaultUnplaceableRetryWindow = 60 * time.Second
 // stream dropped or purged it, or its redelivery reached another subscriber - and take reclaims
 // it. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins that it exceeds the first two
 // terms, so a message that is still legitimately pending never has its slot reclaimed early.
-const unplaceableDeferralExpiry = unplaceableRetryDelay + consumerAckWait + consumerAckWait
+const unplaceableDeferralExpiry = defaultUnplaceableRetryDelay + consumerAckWait + consumerAckWait
 
 // unplaceableDeferrals is the set of agent deliveries this listener holds deferred right now,
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
@@ -189,15 +201,15 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	// stream stored it: a backlog replayed into a listener whose caches are still cold -
 	// after a restart, during a rolling deploy - is minutes old when it is first delivered,
 	// and that is the very case this retry exists for, which a store-timestamp clock gives
-	// up on at once. Each deferral costs unplaceableRetryDelay, so the window buys
-	// window/unplaceableRetryDelay of them, and md.NumDelivered counts them: the first
+	// up on at once. Each deferral costs the configuration's retry delay, so the window buys
+	// window/delay of them, and md.NumDelivered counts them: the first
 	// delivery is 1, and the attempt after the last deferral the window paid for is given
 	// up. It is a bound, not a promise of that much wall-clock time - a delivery this
 	// handler never asked for, one whose AckWait expired because the handler holding it
 	// died, counts too.
 	var windowDeferrals uint64
 	if cfg.unplaceableRetryWindow > 0 {
-		windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
+		windowDeferrals = uint64(cfg.unplaceableRetryWindow / cfg.retryDelay())
 	}
 	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
 	// undelivered result that carries it is another listener's session to place, however often
@@ -240,7 +252,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			clearAttempt: true,
 		})
 		cfg.messagesNAKed.Inc()
-		message.finalizeAfter(unplaceableRetryDelay)
+		message.finalizeAfter(cfg.retryDelay())
 		return
 	}
 	// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,

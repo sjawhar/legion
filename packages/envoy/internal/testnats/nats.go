@@ -185,15 +185,17 @@ func (s *accountServer) url(t testing.TB) string {
 	s.handedOut++
 	account := s.handedOut
 	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host)
-	// Wait for the account to answer, after the start or the reload that declared it.
-	Connect(t, uri).Close()
+	// Wait for the account to answer, after the start or the reload that declared it. The
+	// connection is kept for the cleanup's delete rather than closed and dialled again: a
+	// second Connect is another dial, handshake and JetStream round trip per test.
+	conn := Connect(t, uri)
 	name := t.Name()
 	s.holders[name] = uri
 	t.Cleanup(func() {
 		s.mu.Lock()
 		delete(s.holders, name)
 		s.mu.Unlock()
-		deleteStreams(t, uri)
+		deleteStreams(t, conn)
 	})
 	return uri
 }
@@ -210,14 +212,23 @@ func accountsConfig(n int) string {
 	return config.String()
 }
 
-// deleteStreams deletes every stream in the account uri names, as its test ends.
-func deleteStreams(t testing.TB, uri string) {
+// deleteStreams deletes every stream in the account conn is connected to, as its test ends, and
+// closes conn. An account whose test created no stream is left alone: the account's own report
+// says so in one round trip, where listing and deleting would take more.
+func deleteStreams(t testing.TB, conn *natsgo.Conn) {
 	t.Helper()
-	conn := Connect(t, uri)
 	defer conn.Close()
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Errorf("open JetStream to delete the test's streams: %v", err)
+		return
+	}
+	info, err := js.AccountInfo()
+	if err != nil {
+		t.Errorf("read the test account to delete its streams: %v", err)
+		return
+	}
+	if info.Streams == 0 {
 		return
 	}
 	var streams []string
@@ -980,7 +991,7 @@ func awaitAuth(t testing.TB, uri string, admit bool) {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
 	var err error
-	for time.Now().Before(deadline) {
+	for wait := (backoff{}); time.Now().Before(deadline); wait.next() {
 		var conn *natsgo.Conn
 		conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
 		switch {
@@ -996,7 +1007,6 @@ func awaitAuth(t testing.TB, uri string, admit bool) {
 			}
 			t.Fatalf("NATS at %s refused a client with no credential: it has no no_auth_user", uri)
 		}
-		time.Sleep(retryInterval)
 	}
 	if admit {
 		t.Fatalf("NATS at %s did not admit a client with no credential within %s: %v", uri, connectTimeout, err)
@@ -1028,7 +1038,28 @@ const (
 	connectTimeout = 30 * time.Second
 	retryInterval  = 100 * time.Millisecond
 	dialTimeout    = time.Second
+	// retryFirst is the first wait between two tries of a readiness check here, and
+	// retryInterval the longest. A server, an account or JetStream that is not ready at the
+	// first try is usually ready a few milliseconds later, and a fixed retryInterval spends the
+	// whole 100 ms waiting for it: every test of a package that asks for an account pays that
+	// twice, once for the account's own readiness and once for the cleanup's connection. The
+	// wait doubles from retryFirst to retryInterval, so a check that needs longer still costs
+	// one try per interval.
+	retryFirst = 2 * time.Millisecond
 )
+
+// backoff is the wait between two tries of a readiness check: retryFirst, doubling to
+// retryInterval.
+type backoff struct{ wait time.Duration }
+
+// next waits, then lengthens the next wait.
+func (b *backoff) next() {
+	if b.wait == 0 {
+		b.wait = retryFirst
+	}
+	time.Sleep(b.wait)
+	b.wait = min(2*b.wait, retryInterval)
+}
 
 // Connect waits for a test NATS server to accept a real connection and JetStream to answer an
 // operation before returning it. The relay accepts a connection before the server behind it has
@@ -1040,12 +1071,11 @@ func Connect(t testing.TB, uri string) *natsgo.Conn {
 	deadline := time.Now().Add(connectTimeout)
 	var conn *natsgo.Conn
 	var err error
-	for time.Now().Before(deadline) {
+	for wait := (backoff{}); time.Now().Before(deadline); wait.next() {
 		conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
 		if err == nil {
 			break
 		}
-		time.Sleep(retryInterval)
 	}
 	if conn == nil {
 		t.Fatalf("failed to connect to NATS within %s: %v", connectTimeout, err)
@@ -1068,11 +1098,10 @@ func waitForJetStream(t testing.TB, check func() error) {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
 	var err error
-	for time.Now().Before(deadline) {
+	for wait := (backoff{}); time.Now().Before(deadline); wait.next() {
 		if err = check(); err == nil {
 			return
 		}
-		time.Sleep(retryInterval)
 	}
 	t.Fatalf("JetStream was not ready within %s: %v", connectTimeout, err)
 }

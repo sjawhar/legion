@@ -22,6 +22,7 @@ import (
 // handler with dedupe and attempt caches of its own, as another listener of the machine's queue
 // group, or this one after a restart, would deliver it again.
 func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testing.T) {
+	t.Parallel()
 	chosen := func(name string) contracts.Envelope {
 		item := listenerTestEnvelope("", "shared-key")
 		item.SourceEventID = "src-" + name

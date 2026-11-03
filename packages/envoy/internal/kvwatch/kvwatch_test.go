@@ -101,6 +101,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 
 // The cache is ready once the first watcher has delivered every existing key, and not before.
 func TestTheCacheIsReadyAfterTheFirstScan(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	if _, err := kv.Put("before-start", []byte("1")); err != nil {
@@ -132,6 +133,7 @@ func TestTheCacheIsReadyAfterTheFirstScan(t *testing.T) {
 // A first start that fails releases readiness and records its error, so a caller waiting for the
 // cache sees an empty cache that /healthz reports rather than a hang.
 func TestAFailedFirstStartIsReadyAndRecordsItsError(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	conn.Close()
@@ -151,6 +153,7 @@ func TestAFailedFirstStartIsReadyAndRecordsItsError(t *testing.T) {
 // A first start that fails after a Rewatch has armed a live watcher records nothing: the error is
 // the first start's, not the current watcher's, and recording it would mark a live cache dead.
 func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	firstConn, first := bucket(t, uri)
 	liveConn, _ := bucket(t, uri)
@@ -185,6 +188,7 @@ func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T
 // ERROR is written. The listener declares a hub that stopped answering lost within seconds, so
 // every such cut runs its caches through that replacement path.
 func TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch(t *testing.T) {
+	t.Parallel()
 	const failed = "test cache watch failed"
 	const replaced = "test cache first watch failed after a rewatch replaced it; the replacement feeds the cache"
 
@@ -260,6 +264,7 @@ func atError(records []map[string]any) []string {
 // watcher: the cache is ready only once the current watcher has delivered every existing key, so a
 // caller waiting for it never reads a partial cache as complete.
 func TestAFirstStartFailingDuringARewatchScanWaitsForThatScan(t *testing.T) {
+	t.Parallel()
 	_, uri := testnats.Start(t)
 	firstConn, first := bucket(t, uri)
 	liveConn, live := bucket(t, uri)
@@ -309,6 +314,7 @@ func TestAFirstStartFailingDuringARewatchScanWaitsForThatScan(t *testing.T) {
 // A watcher that ends on its own - its connection closed - leaves the cache frozen, and Err says so
 // until a Rewatch replaces it.
 func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	into := newSeen()
@@ -338,6 +344,7 @@ func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {
 // A watcher Rewatch replaced ends without recording anything: only the current watcher's end is
 // the cache's.
 func TestAReplacedWatcherEndingRecordsNothing(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	firstConn, first := bucket(t, uri)
 	secondConn, _ := bucket(t, uri)
@@ -358,6 +365,7 @@ func TestAReplacedWatcherEndingRecordsNothing(t *testing.T) {
 // revisions would drop the new bucket's entries and keep keys it no longer holds. A Rewatch onto
 // the recreated bucket resets the cache before the new watcher fills it.
 func TestARewatchOntoARecreatedBucketResetsTheCache(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	if _, err := kv.Put("ghost", []byte("1")); err != nil {
@@ -393,6 +401,7 @@ func TestARewatchOntoARecreatedBucketResetsTheCache(t *testing.T) {
 // so the cache stays frozen behind a live watcher. Check, the store's health probe, reports it as
 // the watcher's terminal error, and the Rewatch the listener then runs resets the cache.
 func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	if _, err := kv.Put("ghost", []byte("1")); err != nil {
@@ -437,6 +446,7 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 // After Stop, the current watcher's end records nothing and a later Rewatch arms nothing, so a
 // reconnect hook still running at shutdown neither reports an error nor starts a watcher.
 func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	into := newSeen()
@@ -618,6 +628,7 @@ func (w *slowStopWatcher) Stop() error {
 // The new bucket's key stays in the cache, after exactly one reset: B's watcher never delivers it
 // again, and Err stays nil, so nothing would repair a reset that ran after B's scan.
 func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	if _, err := kv.Put("ghost", []byte("1")); err != nil {
@@ -688,6 +699,7 @@ func (k *heldWatchKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, erro
 // old stream and armed its watcher there; installing it would reset the cache the newer watcher
 // filled and feed it the old bucket's keys. It is discarded, and the newer watcher stays current.
 func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
+	t.Parallel()
 	_, uri := testnats.Start(t)
 	conn, first := bucket(t, uri)
 	if _, err := first.Put("ghost", []byte("1")); err != nil {
@@ -747,6 +759,7 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 // bucket holding more keys than that, stopped with nothing reading it, keeps its delivery goroutine
 // parked for the life of the process.
 func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
+	t.Parallel()
 	_, uri := testnats.Start(t)
 	conn, first := bucket(t, uri)
 	for i := range 400 {
@@ -880,6 +893,7 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 // apply against a live, healthy watcher; otherwise every Rewatch would discard itself and the
 // cache would keep the deleted bucket's keys.
 func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.T) {
+	t.Parallel()
 	_, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)

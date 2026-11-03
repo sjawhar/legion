@@ -23,6 +23,7 @@ import (
 // fails with ErrNotStored and ErrStreamFull, no ErrRefused; after a purge it is stored, at a
 // sequence of its own, without the id.
 func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
+	t.Parallel()
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))
@@ -146,6 +147,7 @@ func TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStream
 // answer then wraps ErrNotStored and ErrWindowDeadline, and the stream holds nothing of it. The
 // same envelope through a window whose deadline is still ahead is stored, without its id.
 func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) {
+	t.Parallel()
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))

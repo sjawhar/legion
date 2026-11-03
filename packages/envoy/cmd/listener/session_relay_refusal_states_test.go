@@ -34,6 +34,7 @@ import (
 // again when the session is back -- two reports of one refusal, the exception dedupe that branch
 // gives up to leave the relay nothing to hold.
 func TestARefusedMessageNeverHoldsTheRelayWhateverTheEntrySaid(t *testing.T) {
+	t.Parallel()
 	const (
 		relayedPort = 4096
 		corePort    = 4097

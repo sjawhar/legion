@@ -22,6 +22,7 @@ const (
 )
 
 func TestAPIAuth(t *testing.T) {
+	t.Parallel()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -219,6 +220,7 @@ func TestAPIAuth(t *testing.T) {
 }
 
 func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
+	t.Parallel()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -331,6 +333,7 @@ func assertRejectionLog(t *testing.T, logged, wantReason, authorize string) {
 }
 
 func TestValidateListenerAPIAuth(t *testing.T) {
+	t.Parallel()
 	issuer := oidctest.New(t)
 	verifier, err := oidc.New(context.Background(), issuer.URL(), listenerTestAudience)
 	if err != nil {
@@ -394,6 +397,7 @@ func TestValidateListenerAPIAuth(t *testing.T) {
 }
 
 func TestResolveListenerOIDCConfig(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		env          map[string]string
@@ -449,6 +453,7 @@ func TestResolveListenerOIDCConfig(t *testing.T) {
 }
 
 func TestDescribeListenerAPIAuth(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		token  string
@@ -487,6 +492,7 @@ func TestDescribeListenerAPIAuth(t *testing.T) {
 }
 
 func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) {
+	t.Parallel()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})

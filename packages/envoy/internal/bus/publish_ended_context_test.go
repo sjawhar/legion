@@ -30,6 +30,7 @@ import (
 // cancel with the deadline still ahead; publishConfirmed's check of the context before it publishes
 // sees both. The control is the same call with a live context, which must publish and be received.
 func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		topic string
@@ -128,6 +129,7 @@ func TestAPublishWithAnEndedContextSendsNothing(t *testing.T) {
 // pinned because a deployed filter may match it.
 // The control is the same call with a deadline ahead, which publishes, flushes and confirms.
 func TestAPublishConfirmedWithASpentDeadlinePublishesNothing(t *testing.T) {
+	t.Parallel()
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)

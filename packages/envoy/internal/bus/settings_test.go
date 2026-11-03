@@ -11,6 +11,7 @@ import (
 // ENVOY_NATS_REPLICAS is the deployment's replica count, 1 when unset or blank and otherwise a
 // whole number from 1 to bus.MaxReplicas.
 func TestParseNATSReplicasReadsACountFrom1ToMaxReplicas(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		raw  string
 		want int
@@ -35,6 +36,7 @@ func TestParseNATSReplicasReadsACountFrom1ToMaxReplicas(t *testing.T) {
 
 // ENVOY_STREAM_MAX_BYTES is the stream's byte limit, 0 (none set) when unset or blank.
 func TestParseStreamMaxBytesReadsAPositiveByteCount(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		raw  string
 		want int64
@@ -57,6 +59,7 @@ func TestParseStreamMaxBytesReadsAPositiveByteCount(t *testing.T) {
 // A replica count outside 1 to MaxReplicas or a byte limit that is not a positive number is
 // refused, naming the variable and the value.
 func TestTheSettingsParsersRefuseACountOutside1To5AndAByteLimitThatIsNotPositive(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, value string }{
 		{bus.ReplicasEnvVar, "0"},
 		{bus.ReplicasEnvVar, "-1"},

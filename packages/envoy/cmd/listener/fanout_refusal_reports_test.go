@@ -39,6 +39,7 @@ import (
 // nothing is left for the relay of a session that registers again to hold a later copy under
 // (TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay).
 func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// entry is the recipient's session entry, nil for a recipient that has none.
@@ -161,6 +162,7 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 // messages behind it -- until it expired (attemptCacheTTL) once the session is on a serving port
 // (INFRA-594).
 func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing.T) {
+	t.Parallel()
 	const corePort = 4097
 	for _, tc := range []struct {
 		name string
@@ -254,6 +256,7 @@ func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing
 // and records neither an attempt nor a dedupe key for it -- records the relay of the same session
 // on a serving port would hold its copy under, or ack it by (INFRA-594).
 func TestThePortlessRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
+	t.Parallel()
 	const corePort = 4097
 	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
 	// paths by construction rather than by timing.

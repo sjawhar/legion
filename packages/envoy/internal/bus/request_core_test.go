@@ -17,6 +17,7 @@ import (
 // no receipt inside the window is the one case RequestCoreTo reports as
 // ErrReceiptTimeout; the listener maps that, and only that, to receipt_timeout.
 func TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout(t *testing.T) {
+	t.Parallel()
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -48,6 +49,7 @@ func TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout(t *testing.T) {
 // A receipt that does arrive is a nil error, so the sentinel is not simply
 // "the window elapsed".
 func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
+	t.Parallel()
 	_, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -91,6 +93,7 @@ func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
 // message and recipient, while the recipient's core subscription still gets every attempt and each
 // attempt still returns on its receipt.
 func TestRequestCoreToStoresOneCopyPerMessageAndRecipientAcrossAttempts(t *testing.T) {
+	t.Parallel()
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -182,6 +185,7 @@ func TestRequestCoreToStoresOneCopyPerMessageAndRecipientAcrossAttempts(t *testi
 // traffic is frozen, so the client stays CONNECTED, buffers the publish, and its
 // flush waits for a PONG that cannot come until the request window runs out.
 func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
+	t.Parallel()
 	srv, uri := startNATS(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
@@ -245,6 +249,7 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 // stored each time. Which MsgId a forward carries is its caller's choice (cmd/listener,
 // roleForward.msgID; the publish route's bus.ForwardMsgID).
 func TestARequestCoreToUnderOneMsgIDIsStoredOnce(t *testing.T) {
+	t.Parallel()
 	_, url, client := requestClient(t)
 	item := contracts.Envelope{
 		EventID: "dispatch-7", Source: "dispatch", SourceEventID: "7",
@@ -293,6 +298,7 @@ func TestARequestCoreToUnderOneMsgIDIsStoredOnce(t *testing.T) {
 // runs out, never nil and never ErrReceiptTimeout, so the listener reports it delivery_failed. The
 // same responder on a subject the stream captures is a nil error.
 func TestRequestCoreToReportsAReceiptWithoutTheStreamsAcknowledgementAsNotStored(t *testing.T) {
+	t.Parallel()
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -349,6 +355,7 @@ func TestRequestCoreToReportsAReceiptWithoutTheStreamsAcknowledgementAsNotStored
 // well inside the window, and stores the forward once however often it is sent (its Nats-Msg-Id).
 // On a subject no stream captures and nobody subscribes it returns ErrForwardNotStored.
 func TestStartRequestStoredToCountsTheStreamsAcknowledgementAlone(t *testing.T) {
+	t.Parallel()
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)

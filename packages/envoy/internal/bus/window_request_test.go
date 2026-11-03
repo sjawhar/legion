@@ -72,6 +72,7 @@ func answerOf(t *testing.T, outcome <-chan error, within time.Duration) error {
 // A Request returns on the receiver's empty receipt. The stream that captures the agent subject
 // acknowledges its copy too, and without AcceptStreamAck that acknowledgement is passed over.
 func TestARequestReturnsOnTheReceiversEmptyReceipt(t *testing.T) {
+	t.Parallel()
 	_, url, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_receipt")
 	responder(t, url, subject)
@@ -86,6 +87,7 @@ func TestARequestReturnsOnTheReceiversEmptyReceipt(t *testing.T) {
 // never as a lost connection: the server's no-responders answer is not a receipt and does not end
 // the wait.
 func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
+	t.Parallel()
 	const timeout = 300 * time.Millisecond
 	_, _, client := requestClient(t)
 
@@ -107,6 +109,7 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 // receipt under `unanswered` and a forward that may never have left this process under `failed` -
 // and both still wrap ErrNotAcknowledged, so a caller that only backs the send off is unaffected.
 func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
+	t.Parallel()
 	server, _, client := requestClient(t)
 	window := client.WindowUntil(nil)
 
@@ -136,6 +139,7 @@ func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
 // says so, as for a holder delivered from that stored copy; otherwise the Request waits on for a
 // receipt that never comes.
 func TestARequestCountsTheStreamsAcknowledgementOnlyWhenAskedTo(t *testing.T) {
+	t.Parallel()
 	_, _, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_stored")
 	window := client.WindowUntil(nil)
@@ -154,6 +158,7 @@ func TestARequestCountsTheStreamsAcknowledgementOnlyWhenAskedTo(t *testing.T) {
 // often they are sent, the repeat's duplicate acknowledgement still answering it; the same envelope
 // to another subject is a copy of its own there.
 func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
+	t.Parallel()
 	_, _, client := requestClient(t)
 	window := client.WindowUntil(nil)
 	item := forwardEnvelope("once")
@@ -193,6 +198,7 @@ func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
 // its whole timeout - 30 s here - for a PONG no server sends. The loss is the answer either way,
 // and it is given the moment the loss is seen.
 func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
+	t.Parallel()
 	var client *bus.Client
 	server, _, client := requestClient(t, bus.WithBeforeRequestFlush(func() {
 		waitUntil := time.Now().Add(5 * time.Second)
@@ -220,6 +226,7 @@ func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
 
 // A Request to a subject NATS does not accept is refused before anything is sent.
 func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
+	t.Parallel()
 	_, _, client := requestClient(t)
 	select {
 	case err := <-client.WindowUntil(nil).Request("notifications.agent..bad", forwardEnvelope("bad"), bus.RequestOptions{}):
@@ -234,6 +241,7 @@ func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 // Many Requests in flight on one window, sent from several goroutines while others publish on it,
 // are each answered by their own receipt.
 func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
+	t.Parallel()
 	const senders = 20
 	_, url, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_request_many")
@@ -268,6 +276,7 @@ func TestManyRequestsInFlightOnOneWindowEachTakeTheirOwnAnswer(t *testing.T) {
 // flush, ErrUnavailable when the flush runs out of time on a connection that stays connected (a
 // silent server), and ErrUnavailable once the connection is lost.
 func TestProbeAnswersWhetherTheWindowsConnectionStillAnswers(t *testing.T) {
+	t.Parallel()
 	server, _, client := requestClient(t)
 	window := client.WindowUntil(nil)
 
@@ -304,6 +313,7 @@ func TestProbeAnswersWhetherTheWindowsConnectionStillAnswers(t *testing.T) {
 // connection is otherwise 5 s: the stream holds nothing it sent once the client is connected again.
 // A window pinned to a live connection answers a send past its deadline the same way, at once.
 func TestAWindowSendsNothingPastItsDeadline(t *testing.T) {
+	t.Parallel()
 	server, _, client := requestClient(t)
 	subject := contracts.AgentSubject("ses_window_deadline")
 	server.Stop(t)

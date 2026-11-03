@@ -1,5 +1,9 @@
 package bus
 
+// Every test here captures the default slog handler (captureLogs, below), a process-wide swap,
+// so none of them is parallel, nor is any test of another file that calls it
+// (dispatch://INFRA-1075).
+
 import (
 	"bytes"
 	"context"

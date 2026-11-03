@@ -19,6 +19,11 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
+// testRescanDelay is the rescan delay of every watcher here that scans again
+// (kvwatch.WithRescanDelay): the production second buys a watcher time for a bucket to settle,
+// and a test that drives a rescan gains nothing from waiting it out.
+const testRescanDelay = 20 * time.Millisecond
+
 // jsonLogger is a JSON logger over a buffer, the shape of the one the listener hands a watcher, and
 // a reader that decodes its records back, so a test asserts a line's fields rather than its
 // rendering. Nothing reaches it through slog.Default(): a line the watcher writes anywhere but its
@@ -81,6 +86,7 @@ func record(t *testing.T, records []map[string]any, msg string) map[string]any {
 // the role restore line's: entries are the live keys the scan delivered, delete_markers what it
 // streamed past to find them.
 func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	const (
@@ -136,6 +142,7 @@ func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 // nil marker a complete scan ends with, so a reader that only watches the marker cannot tell them
 // apart (kvwatchtest.TimingOut stands in for the timer).
 func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	for _, key := range []string{"one", "two", "three"} {
@@ -178,6 +185,7 @@ func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 // closes and a key is written while no watcher runs, so the Rewatch resumes and its scan is that
 // key; the scan is held at it, so the test asks while that scan has not completed.
 func TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	if _, err := kv.Put("before-start", []byte("1")); err != nil {
@@ -256,6 +264,7 @@ func TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey(t *testing.T) {
 // A first scan nats.go's idle timer ended releases readiness but is not complete, and without
 // WithRescan it stays so: nothing scans the bucket again until a Rewatch.
 func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	for _, key := range []string{"one", "two", "three"} {
@@ -264,7 +273,10 @@ func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
 		}
 	}
 	into := newSeen()
-	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset)
+	// The rescan delay bounds the wait below: a watcher without WithRescan must still not have
+	// scanned again once a WithRescan one would have.
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset,
+		kvwatch.WithRescanDelay(testRescanDelay))
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -273,7 +285,7 @@ func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
 		t.Fatalf("WaitReady: %v", err)
 	}
 	// Longer than a WithRescan watcher waits before it scans again.
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(3 * testRescanDelay)
 	if _, complete := w.Complete(); complete {
 		t.Fatal("a first scan the idle timer ended reads as complete")
 	}
@@ -285,6 +297,7 @@ func TestAFirstScanTheIdleTimerEndedIsNotComplete(t *testing.T) {
 // WithRescan ends the wait a timed-out first scan leaves: the watcher scans the bucket again on the
 // same handle, and once that scan delivers every key the cache is complete and holds them all.
 func TestWithRescanCompletesAFirstScanTheIdleTimerEnded(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	for _, key := range []string{"one", "two", "three"} {
@@ -295,7 +308,7 @@ func TestWithRescanCompletesAFirstScanTheIdleTimerEnded(t *testing.T) {
 	logger, records := jsonLogger(t)
 	into := newSeen()
 	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOutFirst(kv, 1)}, into.apply, into.reset,
-		kvwatch.WithLogger(logger), kvwatch.WithRescan())
+		kvwatch.WithLogger(logger), kvwatch.WithRescan(), kvwatch.WithRescanDelay(testRescanDelay))
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

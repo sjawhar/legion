@@ -45,6 +45,7 @@ func sourceEventID(t *testing.T, data []byte) string {
 // answered accepted, and the stream stores a run sent back to back on one window's connection in
 // send order.
 func TestPublishAsyncKeepsSendOrder(t *testing.T) {
+	t.Parallel()
 	const count = 500
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
@@ -101,6 +102,7 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 // resends with no attempt counted, so the caller backs the envelope off. Nothing reaches a core
 // subscriber of the topic.
 func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -137,6 +139,7 @@ func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) 
 // is in the channel at once, ErrUnavailable, which a caller tells apart from a failure of the
 // envelope itself.
 func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.T) {
+	t.Parallel()
 	server, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -169,6 +172,7 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 // next connection with no attempt counted: it is ErrNotAcknowledged, which the caller backs off.
 // Deleting the stream makes the server answer the stream's subject with no responders.
 func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -196,6 +200,7 @@ func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *test
 // server that has gone silent leaves it, is ErrNotAcknowledged once the acknowledgement's 5 s run
 // out, not ErrUnavailable: the connection never read as lost.
 func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	t.Parallel()
 	server, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {

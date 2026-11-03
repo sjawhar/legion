@@ -61,6 +61,7 @@ func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValu
 // session the fresh claim already superseded, which would tell the sender
 // something false about role state.
 func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const (
 		role        = "reviewer"

@@ -174,6 +174,7 @@ func exceptionProbe(t *testing.T, client *bus.Client) *natsgo.Subscription {
 // A holder whose first forward draws no receipt, as one whose connection is moving to another
 // server, gets the same envelope again, and the sender's answer is the 200 of its receipt.
 func TestPublishRouteForwardsARoleMessageAgainUntilItsHolderConfirms(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "second-attempt"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
@@ -203,6 +204,7 @@ func TestPublishRouteForwardsARoleMessageAgainUntilItsHolderConfirms(t *testing.
 // A holder that never confirms leaves the sender a 504 naming receipt_timeout once the send's
 // window has passed, rather than a 200 for a message nobody took.
 func TestPublishRouteAnswersReceiptTimeoutWhenTheHolderNeverConfirms(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "silent-holder"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_silent", role, nil)
@@ -234,6 +236,7 @@ func TestPublishRouteAnswersReceiptTimeoutWhenTheHolderNeverConfirms(t *testing.
 // /v1/roles/<role> gives the same stalled read - the bus-unavailable 503 with Retry-After: 1,
 // naming the read - rather than holding the sender past its window.
 func TestPublishRouteAnswersBusUnavailableWhenTheClaimReadStalls(t *testing.T) {
+	t.Parallel()
 	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -274,6 +277,7 @@ func TestPublishRouteAnswersBusUnavailableWhenTheClaimReadStalls(t *testing.T) {
 // A holder that does not advertise the payload's delivery mode is refused as /v1/messages/send
 // refuses it, naming the holder, and is sent nothing.
 func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "no-steer"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_aside_only", role, []string{"aside"})
@@ -292,6 +296,7 @@ func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T)
 // A sender that holds the role itself is answered 200 and nothing is sent, to the holder or on the
 // role lane, as the role lane skips an echo.
 func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "self-held"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_self", role, nil)
@@ -322,6 +327,7 @@ func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
 // A re-send under the key of a message its holder already confirmed is answered 200 and not
 // forwarded again: the holder took it once.
 func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "repeat-key"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
@@ -349,6 +355,7 @@ func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
 // topic, on any machine; the sender is told which one did not confirm, and the one that did took
 // the forward once. A session served on a port is not asked for a receipt.
 func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const topic = "notifications.team.confirm-squad"
 	register := func(sessionID string, entry session.SessionEntry) {
@@ -393,6 +400,7 @@ func TestPublishRouteNamesTheAdHocTopicSubscriberThatDidNotConfirm(t *testing.T)
 // push to, and nothing was heard from it. A recipient that never sends its receipt must still be
 // named as not confirming, rather than counted delivered from that record.
 func TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	live, err := openLiveTopics([]string{testnats.URL(t)}, harness.config.machineID, liveDeliveryHandler(harness.config))
 	if err != nil {
@@ -437,6 +445,7 @@ func TestPublishRouteDoesNotCountTheLiveLanesSkippedPushAsAConfirmation(t *testi
 // depend on how soon the failure came, and a topic with no recipient is not answered as if a
 // session had failed to confirm it.
 func TestPublishRouteAnswersPublishFailedForAnAdHocTopicItCouldNotPublish(t *testing.T) {
+	t.Parallel()
 	const topic = "notifications.team.unpublished"
 	cases := []struct {
 		name   string
@@ -510,6 +519,7 @@ func TestPublishRouteAnswersPublishFailedForAnAdHocTopicItCouldNotPublish(t *tes
 // messagesDelivered, as a send answered not_confirmed counts each recipient that did not confirm;
 // with no recipient it counts nothing.
 func TestPublishRouteCountsEachRecipientOfAnAdHocTopicItForwardedNothingTo(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		recipients []string
@@ -587,6 +597,7 @@ func TestPublishRouteCountsEachRecipientOfAnAdHocTopicItForwardedNothingTo(t *te
 // window rather than after the bus's own 5 s reconnect wait, which outlasts envoy-client's 5 s
 // attempt: the sender's client would abort before the answer arrives.
 func TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown(t *testing.T) {
+	t.Parallel()
 	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -624,6 +635,7 @@ func TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown(t *t
 // the durable acknowledges it and delivers it to nobody, so a serve-port session subscribed to the
 // copy's topic is not sent the message a second time.
 func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
+	t.Parallel()
 	var pushes atomic.Int32
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
 		pushes.Add(1)
@@ -671,6 +683,7 @@ func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
 // and recipient, not one per attempt; the durable acknowledges a stored forward copy and delivers
 // nothing.
 func TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice(t *testing.T) {
+	t.Parallel()
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "stored-once"
 	const holder = "ses_stored_once"

@@ -85,6 +85,7 @@ func assertRecordFields(t *testing.T, record map[string]any, want map[string]any
 // delivery read back from notifications.agent.<id> is the second half: a 200 alone would pass
 // even if the envelope never left the listener.
 func TestSendReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
+	t.Parallel()
 	const target = "ses_cold_cache_target"
 	registrar, cold := trailingListeners(t)
 	if err := registrar.sessions.Put(target, session.SessionEntry{
@@ -146,6 +147,7 @@ func TestSendReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 // identical request before the cut, which answers 200 — without it a rig that refused every send
 // (a bad body, an unregistered target) would pass this test with a 503 of a different kind.
 func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
+	t.Parallel()
 	const target = "ses_cut_bus_target"
 	// The relay the reconnect test uses (reconnect_shutdown_test.go): cut below closes every live
 	// link and refuses every connection after it, as the hub's virtual machine being recreated
@@ -238,6 +240,7 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 // in the warm session cache, so its read is not what is under test. The negative control is the
 // identical request before the freeze, answered 200 on the same rig.
 func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.T) {
+	t.Parallel()
 	const (
 		target = "ses_frozen_bus_target"
 		sender = "ses_frozen_bus_sender_with_no_interest_record"
@@ -340,6 +343,7 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 // topic goes to the bus as written, so `notifications..x` clears the handler's prefix checks and
 // is refused by the bus's own subject check (bus.ErrInvalidSubject).
 func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) {
+	t.Parallel()
 	const target = "ses_refused_publish_target"
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
@@ -438,6 +442,7 @@ func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) 
 // the line's own fields (the summary among them) are checked on a refusal that has an envelope
 // and on one refused before any envelope exists.
 func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
+	t.Parallel()
 	const target = "ses_recorded_target"
 	const sender = "ses_recorded_sender"
 	client := setupPublishTestClient(t)
@@ -645,6 +650,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 // it in one thing only — the bucket no longer answers — so a rig that refused every send could
 // not produce the pair.
 func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	const target = "ses_unanswered_store_read"
 	const sender = "ses_unanswered_store_sender"
 	_, observer := trailingListeners(t)

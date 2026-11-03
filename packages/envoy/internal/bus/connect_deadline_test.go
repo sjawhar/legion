@@ -19,6 +19,7 @@ func (deadlinePassedContext) Deadline() (time.Time, bool) { return time.Now().Ad
 // TestPublishBoundsReconnectWhenNATSUnavailable, as a nil pointer dereference in
 // (*nats.Conn).JetStream under PublishCoreTo.
 func TestADialPastItsDeadlineReturnsAnError(t *testing.T) {
+	t.Parallel()
 	conn, err := connectWithContext(deadlinePassedContext{context.Background()}, "deadline-test", []string{"nats://127.0.0.1:1"}, nil, nil, nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatalf("connectWithContext past its deadline returned conn=%v and no error", conn)

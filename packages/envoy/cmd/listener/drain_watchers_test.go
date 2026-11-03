@@ -19,6 +19,7 @@ import (
 // end finds its consumer gone and says so in a line only kvwatch.Watcher.End writes, and a
 // shutdown with every consumer present leaves none of the listener's behind.
 func TestTheListenerShutdownEndsItsKVWatchersBeforeTheDrain(t *testing.T) {
+	t.Parallel()
 	binary := cmdtest.Build(t, "envoy-listener")
 	for _, test := range []struct {
 		name         string

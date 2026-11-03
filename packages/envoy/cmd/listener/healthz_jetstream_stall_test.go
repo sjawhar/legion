@@ -141,6 +141,7 @@ func (r *subjectStallRelay) close() {
 // that check: 503 unhealthy, naming the dependency and the context's deadline. The negative control
 // is /healthz on the same rig before the stall: 200 healthy.
 func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.T) {
+	t.Parallel()
 	for _, stall := range []struct {
 		name     string
 		prefixes []string

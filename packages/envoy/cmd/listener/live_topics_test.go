@@ -169,6 +169,7 @@ func requirePromptCarries(t *testing.T, text string, item contracts.Envelope) {
 // publishes, so nothing in the listener's /v1 path can hand it to the session. A second prompt
 // within a second would be the same publish delivered twice.
 func TestAServingPortReceivesATopicTheStreamDoesNotStore(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "live-topics",
 		"ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_HOST_BRIDGE=127.0.0.1")
@@ -195,6 +196,7 @@ func TestAServingPortReceivesATopicTheStreamDoesNotStore(t *testing.T) {
 // (notifications.github.>), so the prompt comes through the listener's durable, whose first
 // delivery the 10 s bound covers with room.
 func TestAListenerReachesASessionAtTheHostItRecorded(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "recorded-host")
 	listener.waitHealthy(t)
@@ -302,6 +304,7 @@ func (p *listenerProcess) awaitSessionsListed(t *testing.T, sessionIDs ...string
 // the role lane and once through the live lane. Each still reaches its session once: a topic the
 // stream stores and an inbox message at a serving port, and a role message at its holder.
 func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "stored-once", liveLaneEnv...)
 	listener.waitHealthy(t)
@@ -337,6 +340,7 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 // second listener waits on the durable the first holds and never turns healthy, so its live lane
 // is open once it logs so.
 func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	first := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
@@ -389,6 +393,7 @@ func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
 // every lane also reaches the agent subjects' lanes, a private stream subject the listener does
 // not store (bus.ReachesPrivateStreamSubject).
 func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "exception-read-back", liveLaneEnv...)
 	listener.waitHealthy(t)
@@ -435,6 +440,7 @@ func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
 // no port. Core NATS keeps one publisher's order, so a valid envelope published after them being
 // the first prompt shows they were dropped, not late.
 func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "invalid-envelope", liveLaneEnv...)
 	listener.waitHealthy(t)
@@ -478,6 +484,7 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 // publisher's order, so a team topic's envelope published after the frame being the first prompt
 // shows the frame was dropped, not late.
 func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "relay-subject", liveLaneEnv...)
 	listener.waitHealthy(t)
@@ -502,6 +509,7 @@ func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
 // refuses the subscription, and the listener exits 1 with an ERROR naming the variable that asked
 // for it and the subject, rather than run delivering none of those topics.
 func TestAListenerWhoseGrantRefusesEveryTopicEndsItsStart(t *testing.T) {
+	t.Parallel()
 	const machineID = "hub-grant"
 	config := fmt.Sprintf(`jetstream {}
 authorization {
@@ -537,6 +545,7 @@ authorization {
 // owner delivered. Reaching a session at its recorded host must not let a second listener on the
 // bus that can reach that host deliver the same inbox message again: the session receives it once.
 func TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	owner := startListenerProcess(t, binary, uri, "inbox-owner", "ENVOY_HOST_BRIDGE=127.0.0.1")
@@ -561,6 +570,7 @@ func TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBu
 // exception on the inbox's exceptions lane for a message the owner had delivered, one for each
 // listener that does not own the session.
 func TestANonOwningListenerLeavesAnInboxMessageToTheOwnerSilently(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	owner := startListenerProcess(t, binary, uri, "silent-owner")
@@ -596,6 +606,7 @@ func TestANonOwningListenerLeavesAnInboxMessageToTheOwnerSilently(t *testing.T) 
 // must make no second delivery. The owner's machine id that resolves nowhere, recorded as the host,
 // is reached only through the owner's bridge; with no bridge the owner dials the recorded host.
 func TestAMovedSessionReceivesEachKindOnceWhateverTheBridges(t *testing.T) {
+	t.Parallel()
 	const (
 		live      = "ENVOY_SUBSCRIBE_ALL_TOPICS=1"
 		unreached = "ENVOY_HOST_BRIDGE=127.0.0.2"
@@ -666,6 +677,7 @@ func TestAMovedSessionReceivesEachKindOnceWhateverTheBridges(t *testing.T) {
 // its own machine's sessions, whatever name they reported. The recorded host here resolves nowhere,
 // so a prompt arriving proves the bridge was used.
 func TestAListenerReachesItsOwnSessionThroughItsBridge(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "bridge-own", "ENVOY_HOST_BRIDGE=127.0.0.1")
 	listener.waitHealthy(t)

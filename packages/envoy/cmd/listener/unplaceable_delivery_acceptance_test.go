@@ -117,6 +117,7 @@ func deliveredSeries(status string) string {
 // The negative control is the Get below: if the cache held the target the push would prove nothing
 // about reading through to the bucket, since every warm-cache delivery already pushes.
 func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
+	t.Parallel()
 	const target = "ses_cold_cache_delivery_target"
 	// Each push to a serving port runs on that session's own worker (servePortWorkers), off this
 	// goroutine, so the pushes are recorded through the shared log (pushLog, main_test.go) and read
@@ -184,12 +185,21 @@ type unplaceableDeliveryRun struct {
 	consumer string
 }
 
+// testUnplaceableRetryDelay is the NAK delay every configuration this package's tests build asks
+// for (newListenerDeliveryHarnessOn). It is defaultUnplaceableRetryDelay for now: three subtests
+// below read the state between a deferral and the redelivery it asks for (no exception yet, no
+// give-up line yet, the NAK counter at one), and a shorter delay lets the redelivery land before
+// the read, so each of those reads must become a wait on the redelivery itself before this can
+// be shortened. The field it is passed through
+// (listenerDeliveryHandlerConfig.unplaceableRetryDelay) is what makes that possible.
+const testUnplaceableRetryDelay = defaultUnplaceableRetryDelay
+
 // oneDeferralWindow is a retry window that buys exactly one deferral: the handler spends a window
-// in whole unplaceableRetryDelay steps counted from the first delivery, so one delay and a half
-// buys one deferral whatever the delay itself is. The first delivery is deferred and the
-// redelivery, the second, is given up - a decision made on the delivery count alone, so no slow
-// machine can move it.
-const oneDeferralWindow = unplaceableRetryDelay + unplaceableRetryDelay/2
+// in whole retry-delay steps counted from the first delivery, so one delay and a half buys one
+// deferral whatever the delay itself is. The first delivery is deferred and the redelivery, the
+// second, is given up - a decision made on the delivery count alone, so no slow machine can move
+// it.
+const oneDeferralWindow = testUnplaceableRetryDelay + testUnplaceableRetryDelay/2
 
 // unplaceableHarness is the listener the runs below drive: a transport that fails the test on any
 // push, for the runs whose sessions have nothing to push to at all.
@@ -294,6 +304,7 @@ func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness,
 // subtest: there the same message is given up on its first delivery, with no NAK and no deferral,
 // so a pass here cannot come from a rig that defers nothing.
 func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
+	t.Parallel()
 	t.Run("a window retries, then gives up once", func(t *testing.T) {
 		run := startUnplaceableDeliveryRun(t, "ses_unplaceable_retried", oneDeferralWindow, 0)
 		harness := run.harness
@@ -446,6 +457,7 @@ func TestUnplaceableAgentDeliveryRetriesThenGivesUp(t *testing.T) {
 // attempt whatever its reason, so a rig with one proves nothing about which causes are retried.
 // Each cause is deferred first, and only the delivery after the window's one deferral is given up.
 func TestGiveUpCounterSeparatesItsCauses(t *testing.T) {
+	t.Parallel()
 	const (
 		noRecord       = "ses_cause_no_record"
 		noPushTarget   = "ses_cause_no_push_target"
@@ -580,6 +592,7 @@ func preloadDeferrals(t *testing.T, set *unplaceableDeferrals, n int) {
 // cap, the same message on the same rig is deferred, so the give-up above is the cap's doing and
 // not the rig's.
 func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
+	t.Parallel()
 	t.Run("a message that finds the cap reached is given up at once", func(t *testing.T) {
 		harness := unplaceableHarness(t)
 		cfg := harness.config
@@ -640,8 +653,8 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 }
 
 // twoDeferralWindow buys two deferrals, as oneDeferralWindow buys one: the window is spent in
-// whole unplaceableRetryDelay steps, and the half-step keeps the arithmetic off the boundary.
-const twoDeferralWindow = 2*unplaceableRetryDelay + unplaceableRetryDelay/2
+// whole retry-delay steps, and the half-step keeps the arithmetic off the boundary.
+const twoDeferralWindow = 2*testUnplaceableRetryDelay + testUnplaceableRetryDelay/2
 
 // A redelivery gives its deferral slot back. The set (unplaceableDeferrals) holds the messages
 // this listener is holding deferred right now, so a slot that is taken and never released is a
@@ -659,6 +672,7 @@ const twoDeferralWindow = 2*unplaceableRetryDelay + unplaceableRetryDelay/2
 // still holds it after the give-up - and a release that is not keyed on the message would show up
 // here as a count below the cap while the message is still held.
 func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
+	t.Parallel()
 	harness := unplaceableHarness(t)
 	cfg := harness.config
 	cfg.unplaceableRetryWindow = twoDeferralWindow
@@ -713,6 +727,7 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 // under the cap, the same redelivery on the same rig is deferred at attempt 2, so the give-up
 // above is the cap holding and not a rig whose redeliveries can never be deferred.
 func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
+	t.Parallel()
 	start := func(t *testing.T, target string, preload int) (listenerDeliveryHarness, *unplaceableDeferrals) {
 		t.Helper()
 		harness := unplaceableHarness(t)
@@ -791,8 +806,9 @@ func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
 // same window on the same rig, one delivery earlier, is deferred, so the give-up is the cap and not
 // a rig whose late deliveries can never be deferred.
 func TestAWindowPastTheDurablesMaxDeliverStillGivesUpBeforeIt(t *testing.T) {
+	t.Parallel()
 	const window = 10 * time.Minute
-	if deferrals := int(window / unplaceableRetryDelay); deferrals < consumerMaxDeliver {
+	if deferrals := int(window / testUnplaceableRetryDelay); deferrals < consumerMaxDeliver {
 		t.Fatalf("a %s window buys %d deferrals, fewer than the durable's MaxDeliver of %d: it no longer reaches the cap this test exists for", window, deferrals, consumerMaxDeliver)
 	}
 	start := func(t *testing.T, target string, handlerFirstSees uint64) unplaceableDeliveryRun {
@@ -887,6 +903,7 @@ func recordsFor(records []deliveryRecord, sessionID string) []deliveryRecord {
 // would bring: the give-up keeps the attempt entry, so that delivery is an attempt-dedupe skip,
 // where an entry cleared at the give-up would run the handler again.
 func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
+	t.Parallel()
 	const target = "ses_notice_too_large"
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
 		t.Errorf("the session has no record, so nothing may be pushed to it; got a push to %s", request.URL)

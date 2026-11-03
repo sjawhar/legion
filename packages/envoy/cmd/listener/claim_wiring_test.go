@@ -10,6 +10,7 @@ import (
 // arbitrated (see session.mergeForClaim). Dropping it silently reinstates
 // last-writer-wins routing.
 func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID: "ses_x",
 		Dir:       "/work",
@@ -32,6 +33,7 @@ func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
 // as Host, kept separate from MachineID (always the registering listener's own machine, never the
 // caller's), which decides which listener fans a topic out to the session.
 func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID: "ses_z",
 		Port:      1,
@@ -47,6 +49,7 @@ func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
 }
 
 func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
+	t.Parallel()
 	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
 	// invent one: an empty Host is what sends the owning listener's delivery (the only one; no
 	// other listener delivers to the session) to its fallback, host.docker.internal, and display
@@ -61,6 +64,7 @@ func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
 // The plugin a session registers through and that plugin's build reach the session entry, with
 // the surrounding space a session id loses dropped too.
 func TestSessionEntryFromSubscribe_CarriesThePluginAndItsVersionTrimmed(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID:     "ses_plugin",
 		Plugin:        " @sjawhar/pi-envoy\n",
@@ -73,6 +77,7 @@ func TestSessionEntryFromSubscribe_CarriesThePluginAndItsVersionTrimmed(t *testi
 }
 
 func TestSessionEntryFromSubscribe_DefaultsThePluginAndItsVersionEmpty(t *testing.T) {
+	t.Parallel()
 	// A plugin predating the fields sends neither key; the entry invents neither.
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old"}, "example-listener", sessionDeliveryOutcome{})
 
@@ -84,6 +89,7 @@ func TestSessionEntryFromSubscribe_DefaultsThePluginAndItsVersionEmpty(t *testin
 // The client instance id reaches the session entry, where a soft claim naming a predecessor
 // session reads it to tell that predecessor's own instance from another instance's live session.
 func TestSessionEntryFromSubscribe_CarriesTheClientInstanceID(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID:        "ses_instance",
 		Port:             42145,
@@ -98,6 +104,7 @@ func TestSessionEntryFromSubscribe_CarriesTheClientInstanceID(t *testing.T) {
 // The id is compared as stored (session.InstanceMatches trims nothing), so the surrounding space
 // a session id loses is dropped here, where the wire value enters the entry.
 func TestSessionEntryFromSubscribe_TrimsTheClientInstanceID(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{
 		SessionID:        "ses_instance_spaced",
 		ClientInstanceID: " \t4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a\n",
@@ -109,6 +116,7 @@ func TestSessionEntryFromSubscribe_TrimsTheClientInstanceID(t *testing.T) {
 }
 
 func TestSessionEntryFromSubscribe_DefaultsTheClientInstanceIDEmpty(t *testing.T) {
+	t.Parallel()
 	// A client predating the field sends no key; the entry invents none, and the empty id is
 	// what keeps the old soft-claim rule for it (session.InstanceMatches). The same empty id is
 	// written over any id a previous registration stored, since the entry is built fresh from
@@ -121,6 +129,7 @@ func TestSessionEntryFromSubscribe_DefaultsTheClientInstanceIDEmpty(t *testing.T
 }
 
 func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
+	t.Parallel()
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami", sessionDeliveryOutcome{})
 
 	if got.Driving {
@@ -129,6 +138,7 @@ func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
 }
 
 func TestSessionEntryFromSubscribe_CarriesSelfSubscribedFlag(t *testing.T) {
+	t.Parallel()
 	// Given
 	var body subscribeBody
 	if err := json.Unmarshal([]byte(`{"session_id":"ses_omp","self_subscribed":true}`), &body); err != nil {

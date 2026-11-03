@@ -67,6 +67,7 @@ func failReconnectHooks(t *testing.T, client *bus.Client) {
 // the grace: the bus runs the hooks again within seconds, so that must stay 200 healthy rather
 // than report every reconnect. The other is a whole grace of clock before any reconnect, below.
 func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
+	t.Parallel()
 	client, clock, get := hookStallFixture(t, "listener-healthz-hook-stall")
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("/healthz before any reconnect = %d %v, want 200 healthy", code, body)
@@ -128,6 +129,7 @@ func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClo
 // the stall deciding first and reporting such a listener as merely degraded, which every probe that
 // reads /healthz then leaves in service (INFRA-743).
 func TestHealthzReportsARecreatedDurableThroughAHookStall(t *testing.T) {
+	t.Parallel()
 	consumer := "listener-healthz-hook-stall-unbound"
 	client, clock, get := hookStallFixture(t, consumer)
 

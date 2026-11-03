@@ -50,6 +50,7 @@ func routingMatches(items map[string]Interest, machineID, subject string) []stri
 }
 
 func TestSubjectIndexMatchesAsRoutingMatchDoes(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		pattern, subject string
 		want             bool
@@ -108,6 +109,7 @@ func randomTokens(rng *rand.Rand, alphabet []string) string {
 // routing.Match does, as interests are added, replaced and removed; and once every one is removed it
 // holds nothing.
 func TestSubjectIndexAgreesWithRoutingMatchOnGeneratedInterests(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(594, 10))
 	patternTokens := []string{"a", "b", "c", "", "*", ">"}
 	subjectTokens := []string{"a", "b", "c", ""}
@@ -163,6 +165,7 @@ func TestSubjectIndexAgreesWithRoutingMatchOnGeneratedInterests(t *testing.T) {
 // matched once the watcher delivers it, a topic removed or an interest deleted stops matching, and a
 // machine's index holds only that machine's interests.
 func TestSubjectIndexFollowsTheInterestBucket(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	r, err := Open(conn, WithReplicas(1))

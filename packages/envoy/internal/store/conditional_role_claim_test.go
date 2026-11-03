@@ -71,6 +71,7 @@ func raceConditionalClaim(t *testing.T, role, seed, winner, claimant string) (*R
 // to a claim that landed in between: the caller is told its revision is gone, not that the store
 // failed, and the claim it made is nowhere.
 func TestAConditionalClaimThatLosesTheConditionalWriteIsAMismatchNotAStoreFailure(t *testing.T) {
+	t.Parallel()
 	const (
 		role     = "raced-role"
 		seed     = "ses_seed"
@@ -101,6 +102,7 @@ func TestAConditionalClaimThatLosesTheConditionalWriteIsAMismatchNotAStoreFailur
 // conditional one is still refused, because the revision its caller sequenced on is gone. The
 // session now holds the role, so its record keeps the role's topic.
 func TestAConditionalClaimLostToAClaimOfItsOwnSessionIsStillAMismatch(t *testing.T) {
+	t.Parallel()
 	const (
 		role     = "raced-own-role"
 		seed     = "ses_own_seed"

@@ -24,6 +24,7 @@ import (
 // relay holds its copy, and everything stored behind it waits out attemptCacheTTL - five minutes
 // in which the session is given nothing at all (INFRA-594).
 func TestAnUnreadableDeliveryModeDoesNotStallTheSessionsLaterMessages(t *testing.T) {
+	t.Parallel()
 	const (
 		relayedPort = 4096
 		corePort    = 4097

@@ -9,6 +9,7 @@ import (
 // The listener's durable and role-lane queue are the names cmd/listener spelled itself before they
 // moved here: a space in the machine id becomes a hyphen in both.
 func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ machineID, durable, queue string }{
 		{"example-host-a", "listener-example-host-a", "envoy-listener-example-host-a"},
 		{"example host", "listener-example-host", "envoy-listener-example-host"},
@@ -25,6 +26,7 @@ func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
 // The live lane's queue group spells the machine id as the role lanes' does, and is a group of its
 // own: in the role lanes' group the live lane would be a member NATS could hand a role message to.
 func TestListenerLiveQueueIsItsOwnGroupForTheMachine(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ machineID, queue string }{
 		{"example-host-a", "envoy-listener-live-example-host-a"},
 		{"example host", "envoy-listener-live-example-host"},
@@ -40,6 +42,7 @@ func TestListenerLiveQueueIsItsOwnGroupForTheMachine(t *testing.T) {
 }
 
 func TestDispatchNamesKeepDispatchsExistingNames(t *testing.T) {
+	t.Parallel()
 	if got := bus.DispatchDeliveryDurable; got != "delivery-events" {
 		t.Errorf("DispatchDeliveryDurable = %q, want %q", got, "delivery-events")
 	}

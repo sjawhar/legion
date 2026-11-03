@@ -3,6 +3,7 @@ package store
 import "testing"
 
 func TestMergeTopics(t *testing.T) {
+	t.Parallel()
 	item := Interest{Topics: []string{"notifications.github.>", "notifications.slack.*.*.mention"}}
 	next := Merge(item, []string{"notifications.slack.*.*.mention", "notifications.agent.s1"})
 	if len(next.Topics) != 3 {
@@ -11,6 +12,7 @@ func TestMergeTopics(t *testing.T) {
 }
 
 func TestRemoveTopics(t *testing.T) {
+	t.Parallel()
 	item := Interest{Topics: []string{"a", "b", "c"}}
 	next := Remove(item, []string{"b"})
 	if len(next.Topics) != 2 {

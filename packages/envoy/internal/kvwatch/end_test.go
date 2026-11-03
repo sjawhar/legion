@@ -46,6 +46,7 @@ func testConsumers(t *testing.T, conn *natsgo.Conn) []string {
 // waits for that watch and ends its watcher too, deleting its consumer, so nothing is left for the
 // connection's drain to delete.
 func TestEndEndsAWatcherArmedAfterTheStop(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
@@ -84,6 +85,7 @@ func TestEndEndsAWatcherArmedAfterTheStop(t *testing.T) {
 // was ended within it. The watch ends its watcher itself once it arms it, so its consumer is still
 // deleted.
 func TestAWatchStillStartingAtEndsDeadlineIsAnError(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
@@ -131,6 +133,7 @@ func (w drainingStop) Stop() error {
 // which nats.go refuses as "connection draining" once the connection's drain begins: the consumer
 // is left to the server, as End's own are, so the stop is a warning, never an error.
 func TestALateWatchAfterALostConnectionIsAWarning(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
 	held := &drainingStopKV{heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}}
@@ -214,6 +217,7 @@ func TestEndCalledTwiceAtOnceReturnsForBoth(t *testing.T) {
 // A delete that fails for any reason but its consumer being gone stays an ERROR: here the bucket's
 // stream was deleted under the watcher, so the server answers "stream not found".
 func TestAFailedConsumerDeleteAtTheEndIsAnError(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
@@ -238,6 +242,7 @@ func TestAFailedConsumerDeleteAtTheEndIsAnError(t *testing.T) {
 // End is bounded by its context: against a server that does not answer, it returns at the
 // deadline and logs the unanswered delete as an ERROR rather than holding the shutdown.
 func TestEndIsBoundedByItsContext(t *testing.T) {
+	t.Parallel()
 	srv, uri := testnats.Start(t)
 	_, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)

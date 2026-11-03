@@ -21,6 +21,7 @@ import (
 // cannot, whose holders no build can reach any more. An entry past even a delete's bound, which only
 // another writer could store (testnats.RawOnlyKey), is skipped, and the sweeps go on.
 func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T) {
+	t.Parallel()
 	readableRole, unreadableRole := testnats.LegacyKeys(bus.RoleClaimBucket, "r")
 	readableSession, unreadableSession := testnats.LegacyKeys(bus.InterestBucket, "s")
 	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(bus.RoleClaimBucket, "o"), testnats.RawOnlyKey(bus.InterestBucket, "o")
@@ -77,6 +78,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 // check: the caller named nothing too long, and its claim is written. The old holder's interest
 // keeps the topic until the interest reaper removes it.
 func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
+	t.Parallel()
 	readable, unreadable := testnats.LegacyKeys(bus.InterestBucket, "s")
 	roles := map[string]string{"legacy-readable": readable, "legacy-unreadable": unreadable}
 	registry, _, _ := openRegistryOver(t, func(_ natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue) {
@@ -112,6 +114,7 @@ func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
 // caller's request over every other key: the reapers skip it, and removing a session skips a claim
 // stored under one.
 func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
+	t.Parallel()
 	type stored struct {
 		bucket, key string
 		value       any

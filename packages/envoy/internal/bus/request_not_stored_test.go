@@ -24,6 +24,7 @@ import (
 // acknowledgement comes back sends nothing more: the forward answers ErrNotStored and
 // ErrWindowDeadline, and the stream holds nothing of it.
 func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
+	t.Parallel()
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(limit))

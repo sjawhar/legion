@@ -71,6 +71,7 @@ func assertUnreadableRoleClaimAnswer(t *testing.T, recorder *httptest.ResponseRe
 }
 
 func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
+	t.Parallel()
 	const role = "reviewer"
 	for _, tc := range unreadableRoleClaims {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,6 +86,7 @@ func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 // A role send through the publish route answers the same record as the lookup does, and records it under its own
 // outcome rather than bus_unavailable, at WARN as every refusal is.
 func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
+	t.Parallel()
 	const role = "reviewer"
 	topic := contracts.RoleTopicPrefix + role
 	for _, tc := range unreadableRoleClaims {

@@ -1,5 +1,10 @@
 package bus_test
 
+// Every test here sets ENVOY_NATS_SOCKS5_PROXY or ENVOY_ALLOW_REMOTE_NATS with t.Setenv, which
+// panics the process beside t.Parallel, so no test of this file is parallel; the subtests that
+// call t.Parallel are parallel only with each other, under a serial parent
+// (dispatch://INFRA-1075).
+
 import (
 	"bytes"
 	"context"

@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here captures the default slog handler (captureLogs, stream_config_test.go), a
+// process-wide swap, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"context"
 	"errors"

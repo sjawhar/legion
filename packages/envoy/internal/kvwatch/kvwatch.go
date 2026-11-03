@@ -64,6 +64,9 @@ type Watcher struct {
 	// after arms the wait between a stop nobody asked for and the ERROR that says no repair came,
 	// time.AfterFunc unless WithAfterFunc replaced it, so a test fires that wait itself.
 	after AfterFunc
+	// rescanDelay is how long a WithRescan watcher waits before it scans the bucket again,
+	// defaultRescanDelay unless WithRescanDelay replaced it.
+	rescanDelay time.Duration
 
 	// openResumed arms the watcher a resuming watch installs, bus.KeyValue.WatchAllFrom unless a
 	// test replaced it (WithResumeOpener, export_test.go), so a test drives a resume that fails to
@@ -148,18 +151,30 @@ func WithAfterFunc(after AfterFunc) Option {
 	return func(w *Watcher) { w.after = after }
 }
 
-// rescanDelay is how long a watcher WithRescan made waits, after its first scan timed out or a
-// rescan failed to start, before it scans the bucket again.
-const rescanDelay = time.Second
+// defaultRescanDelay is how long a watcher WithRescan made waits, after its first scan timed out
+// or a rescan failed to start, before it scans the bucket again. WithRescanDelay sets another,
+// so a test drives a rescan without waiting a production second for each one.
+const defaultRescanDelay = time.Second
 
 // WithRescan makes the watcher scan the bucket again whenever its first scan does not complete:
-// when nats.go's idle timer ends that scan, the watcher replaces itself, after rescanDelay, with
-// one on the same handle (KV), whose own first scan delivers every key again. It goes on doing so
-// until a scan completes, or a Rewatch, a Stop or the watcher's own end takes the generation out of
-// its hands. Without it a timed-out scan leaves Complete false until the next Rewatch. A cache
-// that answers only from a complete view (Complete) needs it, or nothing would end that wait.
+// when nats.go's idle timer ends that scan, the watcher replaces itself, after its rescan delay,
+// with one on the same handle (KV), whose own first scan delivers every key again. It goes on
+// doing so until a scan completes, or a Rewatch, a Stop or the watcher's own end takes the
+// generation out of its hands. Without it a timed-out scan leaves Complete false until the next
+// Rewatch. A cache that answers only from a complete view (Complete) needs it, or nothing would
+// end that wait.
 func WithRescan() Option {
 	return func(w *Watcher) { w.rescan = true }
+}
+
+// WithRescanDelay sets how long a watcher WithRescan made waits before it scans the bucket again,
+// in place of defaultRescanDelay. A value of zero or less keeps the default.
+func WithRescanDelay(d time.Duration) Option {
+	return func(w *Watcher) {
+		if d > 0 {
+			w.rescanDelay = d
+		}
+	}
 }
 
 // New returns the watcher for the bucket kv is a handle on. name labels its log lines and its
@@ -181,6 +196,7 @@ func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset fun
 		first:           kv,
 		kv:              kv,
 		after:           func(d time.Duration, f func()) Timer { return time.AfterFunc(d, f) },
+		rescanDelay:     defaultRescanDelay,
 		openResumed:     openResumedWatch,
 	}
 	for _, option := range options {
@@ -849,9 +865,10 @@ func (w *Watcher) scanEnded(generation uint64, timedOut bool) {
 	}
 }
 
-// armRescan scans the bucket again after rescanDelay, replacing generation's watcher (rescanFrom).
+// armRescan scans the bucket again after the watcher's rescan delay, replacing generation's
+// watcher (rescanFrom).
 func (w *Watcher) armRescan(generation uint64) {
-	time.AfterFunc(rescanDelay, func() { w.rescanFrom(generation) })
+	time.AfterFunc(w.rescanDelay, func() { w.rescanFrom(generation) })
 }
 
 // rescanFrom replaces generation's watcher, whose first scan timed out, with a new one on the same

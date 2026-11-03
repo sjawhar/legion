@@ -21,6 +21,7 @@ import (
 // record a worker leaves when its push is handed back or its process ends, and the message is the
 // relay's to deliver from then on.
 func TestARelayHoldDelaysOnlyThatSession(t *testing.T) {
+	t.Parallel()
 	const (
 		heldPort = 4096
 		freePort = 4097

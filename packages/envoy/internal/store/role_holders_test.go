@@ -135,6 +135,7 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 // claim watcher has ended (here its bucket went away) and nothing has replaced it, or no watcher
 // follows the claims at all.
 func TestRolesHeldByRefusesWhenItsViewCannotAnswer(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -222,6 +223,7 @@ func restartRoleViewTimingOutAfter(t *testing.T, reg *Registry, rawRoles natsgo.
 // of a claim the scan did not deliver without its roles. The watcher scans the bucket again
 // (newRoleWatcher's kvwatch.WithRescan), and the view answers once that scan completes.
 func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -265,6 +267,7 @@ func TestARoleViewWhoseFirstScanTimedOutAnswersOnlyOnceItsRescanCompletes(t *tes
 // WaitForCacheReady returns only once that view is complete, and RolesHeldBy answers the moment it
 // returns, with no retry and no poll.
 func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -313,6 +316,7 @@ func TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers(t *testing.T) {
 // writes at a lower revision than the old bucket's claim of the same role (architect's) gives its
 // holder the role.
 func TestARecreatedRoleBucketsViewAnswersOnlyOnceItsRefillCompletes(t *testing.T) {
+	t.Parallel()
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	reg, err := Open(conn, WithReplicas(1))
@@ -455,6 +459,7 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 // with the old write's holder (or none) until the new bucket's numbering passes it. The control is
 // the same write with no reset between: it applies, and fences out an older delivery.
 func TestAClaimWriteAnsweredAcrossARecreatedRoleBucketLeavesTheNewBucketsView(t *testing.T) {
+	t.Parallel()
 	r := &Registry{}
 	epoch := r.roleHolderEpoch()
 	r.resetRoleHolders()

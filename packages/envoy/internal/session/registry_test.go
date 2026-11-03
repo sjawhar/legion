@@ -160,8 +160,11 @@ func TestSessionRegistry_GetNotFound(t *testing.T) {
 }
 
 func TestSessionRegistry_TTLExpiry(t *testing.T) {
+	// A liveness window of its own, short because the test waits one out: the registry enforces
+	// the TTL itself, so nothing here depends on its length.
+	const ttl = 300 * time.Millisecond
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(ttl))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -177,17 +180,20 @@ func TestSessionRegistry_TTLExpiry(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		if _, err := reg.Get("ses_expiry"); err != nil {
 			return
 		}
 	}
-	t.Fatal("session entry did not expire within 5s (TTL was 2s)")
+	t.Fatalf("session entry did not expire within 5s (TTL was %s)", ttl)
 }
 
 func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
+	// Each wait below is three quarters of the window, as 1.5 s was of the two seconds this
+	// test used: the refresh lands inside the first window and the entry outlives the second.
+	const ttl = time.Second
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(ttl))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -197,12 +203,12 @@ func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
 		t.Fatalf("put failed: %v", err)
 	}
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(3 * ttl / 4)
 	if err := reg.Put("ses_refresh", entry); err != nil {
 		t.Fatalf("refresh put failed: %v", err)
 	}
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(3 * ttl / 4)
 
 	if _, err := reg.Get("ses_refresh"); err != nil {
 		t.Fatalf("expected entry to still exist after TTL refresh, got: %v", err)

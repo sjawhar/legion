@@ -112,6 +112,7 @@ func wantWriteBusUnanswered(t *testing.T, route string, recorder *httptest.Respo
 // /v1/sessions/<session_id>'s the session bucket's read-then-delete. The negative control is each
 // route asked before the freeze, on the same rig, for a session of its own: each is served.
 func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.T) {
+	t.Parallel()
 	const (
 		topic         = "notifications.team.write-routes"
 		otherTopic    = "notifications.team.write-routes-other"
@@ -206,6 +207,7 @@ func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.
 // of another role (role-store-control) by the same claimant on the same rig before the freeze: it
 // is served.
 func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.T) {
+	t.Parallel()
 	const claimant = "ses_role_store_claimant"
 	for _, freeze := range []struct {
 		name, trigger, body string
@@ -236,6 +238,7 @@ func TestAClaimWhoseRoleStoreStopsAnsweringIsAnsweredInsideTheBudget(t *testing.
 // of store answers, a store answer wrapped alone, and a store answer wrapped with its detail by one
 // fmt.Errorf (an unreadable record and its decode error) are each still the store's answer.
 func TestAJoinedStoreErrorIsTheStoresAnswerOnlyWhenEveryPartIs(t *testing.T) {
+	t.Parallel()
 	dropped := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}
 	for _, c := range []struct {
 		name     string

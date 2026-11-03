@@ -82,13 +82,13 @@ func AwaitStreamLeader(t testing.TB, js natsgo.JetStreamContext, stream, not str
 		})
 }
 
-// awaitInfo reads an info every retryInterval until a read succeeds and done holds for it, and
-// returns that info; after connectTimeout it fails the test with failure, the last info and the
-// last error.
+// awaitInfo reads an info until a read succeeds and done holds for it, waiting a little longer
+// between tries each time (backoff), and returns that info; after connectTimeout it fails the
+// test with failure, the last info and the last error.
 func awaitInfo[T any](t testing.TB, failure string, read func() (*T, error), done func(*T) bool) *T {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
-	for {
+	for wait := (backoff{}); ; wait.next() {
 		info, err := read()
 		if err == nil && done(info) {
 			return info
@@ -96,7 +96,6 @@ func awaitInfo[T any](t testing.TB, failure string, read func() (*T, error), don
 		if time.Now().After(deadline) {
 			t.Fatalf("%s within %s: %+v (%v)", failure, connectTimeout, info, err)
 		}
-		time.Sleep(retryInterval)
 	}
 }
 

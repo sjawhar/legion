@@ -131,6 +131,7 @@ func startWatching(t *testing.T, kv bus.KeyValue, entries int) (*kvwatch.Watcher
 // revision it applied: with nothing written since, it applies nothing, and its warm-up line says it
 // resumed. A rewatch of a large bucket then costs what changed, not the bucket.
 func TestARewatchWithNoWritesResumesAndAppliesNothing(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "a", "b", "c")
 	w, into, records := startWatching(t, kv, 3)
@@ -156,6 +157,7 @@ func TestARewatchWithNoWritesResumesAndAppliesNothing(t *testing.T) {
 // Rewatch on the replacement connection applies exactly what was written meanwhile, puts, a delete
 // and a purge, and nothing it had already applied, and the cache then equals the bucket.
 func TestARewatchAfterALostConnectionAppliesOnlyWhatWasWritten(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
 	putKeys(t, kv, "kept", "deleted", "purged", "updated")
@@ -192,6 +194,7 @@ func TestARewatchAfterALostConnectionAppliesOnlyWhatWasWritten(t *testing.T) {
 // A recreated bucket numbers its revisions from 1 again, so nothing applied from the old one says
 // where to resume in it: the Rewatch empties the cache and reads the new bucket in full.
 func TestARewatchOntoARecreatedBucketReadsItInFull(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "ghost", "other")
 	w, into, records := startWatching(t, kv, 2)
@@ -217,6 +220,7 @@ func TestARewatchOntoARecreatedBucketReadsItInFull(t *testing.T) {
 // The Rewatch reads the bucket in full instead, as before; it is not a recreated bucket, so the
 // cache is not emptied.
 func TestARewatchOntoAStreamBehindTheAppliedRevisionReadsItInFull(t *testing.T) {
+	t.Parallel()
 	_, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
@@ -265,6 +269,7 @@ func TestARewatchOntoAStreamBehindTheAppliedRevisionReadsItInFull(t *testing.T) 
 // says nothing about the keys it never delivered: the next Rewatch reads the bucket in full. Once
 // that read completes, the one after it resumes.
 func TestARewatchAfterATimedOutFirstScanReadsInFull(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "a", "b", "c")
 	logger, records := jsonLogger(t)
@@ -292,6 +297,7 @@ func TestARewatchAfterATimedOutFirstScanReadsInFull(t *testing.T) {
 // the watcher's error, naming the closed connection, and logged, so /healthz and the self-health
 // rebuild see the cache is frozen rather than a watcher that hangs with nothing reporting it.
 func TestAResumedWatcherWhoseConnectionClosesRecordsItsEnd(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "a")
 	w, _, records := startWatching(t, kv, 1)
@@ -315,6 +321,7 @@ func TestAResumedWatcherWhoseConnectionClosesRecordsItsEnd(t *testing.T) {
 // slow enough to fail the one can still answer the other, where a failed Rewatch would leave the
 // cache frozen behind a stopped watcher.
 func TestARewatchWhoseResumeCannotBeCreatedReadsTheBucketInFull(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "a", "b", "c")
 	logger, records := jsonLogger(t)
@@ -386,6 +393,7 @@ func (w *endedWatcher) Stop() error                          { w.end(); return n
 // the closed connection rather than "<name> watcher stopped", which reading the cause here would
 // have taken away from it.
 func TestAResumedWatchThatEndsAtItsMarkerIsNotTimedOut(t *testing.T) {
+	t.Parallel()
 	conn, kv := bucket(t, testnats.URL(t))
 	putKeys(t, kv, "a")
 	logger, records := jsonLogger(t)

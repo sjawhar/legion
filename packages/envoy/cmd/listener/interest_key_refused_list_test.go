@@ -35,6 +35,7 @@ import (
 // answers the refused key as the caller's own input: 413 for the too-long id and 400 for the
 // invalid one, with no Retry-After, since a retry sends the same key.
 func TestTheSessionListKeepsASessionWhoseIDTheInterestBucketRefuses(t *testing.T) {
+	t.Parallel()
 	const (
 		ordinary   = "ses_refused_list_ordinary"
 		invalidKey = "ses:bad"

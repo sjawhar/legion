@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv and captures the default slog handler, both
+// process-wide, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"encoding/json"
 	"fmt"

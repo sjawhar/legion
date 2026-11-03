@@ -18,6 +18,7 @@ import (
 // (LEGION-690). A registration of the same subject and queue still replaces the held one, as the
 // listener's self-health rebuild relies on.
 func TestAnotherSubscriptionOnOneTransportIsRefused(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	publisher, err := nats.Connect(uri)
 	if err != nil {

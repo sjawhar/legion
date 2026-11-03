@@ -74,11 +74,16 @@ type listenerDeliveryHandlerConfig struct {
 	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held
 	// in the stream and redelivered before it is given up with a record of its own
 	// (agentSubjectDelivery). main.go reads it from ENVOY_UNPLACEABLE_RETRY_WINDOW, defaulting
-	// to defaultUnplaceableRetryWindow. It is spent as whole deferrals of unplaceableRetryDelay
+	// to defaultUnplaceableRetryWindow. It is spent as whole deferrals of the retry delay below
 	// each, counted from the message's first delivery, so a window shorter than one delay - a
 	// zero one, what a caller that does not set this field asks for - retries nothing: every
 	// unplaceable delivery is given up on its first attempt.
 	unplaceableRetryWindow time.Duration
+	// unplaceableRetryDelay is the NAK delay a deferral of such a delivery asks for, which the
+	// window above is spent in whole steps of. main.go leaves it unset and the handler then
+	// takes defaultUnplaceableRetryDelay; a test sets a short one so the redelivery it must see
+	// comes in milliseconds (listenerDeliveryHandlerConfig.retryDelay).
+	unplaceableRetryDelay time.Duration
 	// deferredUnplaceable is the set of agent deliveries this listener is holding deferred right
 	// now, the budget unplaceableDeferralCap bounds. It is required: main.go makes one and sets
 	// it once, in its deliveryConfig, so every handler built from that config - the role lane's

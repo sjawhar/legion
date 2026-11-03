@@ -1,5 +1,8 @@
 package main
 
+// Every test here sets NATS_NKEY_SEED with t.Setenv (startUngrantedListener), which panics the
+// process beside t.Parallel, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"encoding/json"
 	"net/http"

@@ -275,6 +275,7 @@ func waitForMatchCount(t *testing.T, env *testEnv, machineID, topic string, want
 }
 
 func TestE2E_WebhookToSession(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	recorder := newSessionRecorder(t)
 	env.registerSession("ses_webhook", recorder.port, []string{"notifications.slack.*.*.mention"})
@@ -301,6 +302,7 @@ func TestE2E_WebhookToSession(t *testing.T) {
 }
 
 func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	recorder := newSessionRecorder(t)
 	env.registerSession("ses_local", recorder.port, nil)
@@ -346,6 +348,7 @@ func TestE2E_AgentToAgent_LocalMachine(t *testing.T) {
 // subscription makes this listener its owner (session.ErrWrongMachine is for a session another
 // listener owns), and the owner pushes to the machine the session's record names.
 func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	defer func(originalClient *http.Client) {
 		env.deliverer.HTTPClient = originalClient
@@ -390,6 +393,7 @@ func TestE2E_AgentToAgent_RemoteMachine(t *testing.T) {
 }
 
 func TestE2E_RestartResilience(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	recorder := newSessionRecorder(t)
 	env.registerSession("ses_restart", recorder.port, []string{"notifications.slack.*.*.mention"})
@@ -430,6 +434,7 @@ func TestE2E_RestartResilience(t *testing.T) {
 }
 
 func TestE2E_DeadSessionFanout(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	recorder := newSessionRecorder(t)
 	broadcastTopic := "notifications.slack.*.*.mention"
@@ -452,6 +457,7 @@ func TestE2E_DeadSessionFanout(t *testing.T) {
 }
 
 func TestE2E_IdempotencyKey(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	recorder := newSessionRecorder(t)
 	env.registerSession("ses_idempotent", recorder.port, nil)
@@ -471,6 +477,7 @@ func TestE2E_IdempotencyKey(t *testing.T) {
 }
 
 func TestE2E_InterestReaperCleanup(t *testing.T) {
+	t.Parallel()
 	env := setupTestEnv(t)
 	if _, err := env.registry.Upsert(store.Interest{SessionID: "ses_stale", MachineID: "test-machine", Dir: "/stale"}, []string{"notifications.slack.*.*.mention"}); err != nil {
 		t.Fatalf("upsert stale interest: %v", err)

@@ -41,6 +41,7 @@ type connectOpts struct {
 	replicas                    int
 	streamMaxBytes              int64
 	keepInterval                time.Duration
+	drainHookReserve            time.Duration
 	keptBuckets                 []string
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
@@ -63,7 +64,7 @@ func (o connectOpts) connectionSettings(credential nats.Option) nats.Option {
 
 // parseConnectOptions applies options over the defaults every connect starts from.
 func parseConnectOptions[O ConnectOption](options []O) connectOpts {
-	opts := connectOpts{name: "envoy", replicas: 1, keepInterval: defaultKeepInterval, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	opts := connectOpts{name: "envoy", replicas: 1, keepInterval: defaultKeepInterval, drainHookReserve: defaultDrainHookReserve, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
 	for _, o := range options {
 		o.apply(&opts)
 	}
@@ -254,6 +255,10 @@ type Client struct {
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
+	// drainHookReserve is the part of Drain's timeout this client keeps from its delivery
+	// subscriptions for the drain hooks and the connection's own drain
+	// (defaultDrainHookReserve).
+	drainHookReserve time.Duration
 	// reconnectWaitTick, when not nil, runs at each pass of ensureConnWithContext's wait for a
 	// reconnect, before the pass blocks; a connection event it causes is read before the wait looks
 	// at its context, as one that wakes the wait would be. It is nil outside tests: a test sets it
@@ -441,6 +446,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
+		drainHookReserve:            opts.drainHookReserve,
 		reconnectWaitTick:           opts.reconnectWaitTick,
 		beforeRequestFlush:          opts.beforeRequestFlush,
 		stopCh:                      make(chan struct{}),
@@ -1102,7 +1108,7 @@ func (c *Client) Close() {
 // connection is closed (awaitKeeper).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	deliveriesDeadline := deadline.Add(-min(drainHookReserve, timeout*3/10))
+	deliveriesDeadline := deadline.Add(-min(c.drainHookReserve, timeout*3/10))
 	c.subscriptionsMu.Lock()
 	if c.stopMode == clientRunning {
 		c.stopMode = clientDraining
@@ -1155,16 +1161,18 @@ func (c *Client) Drain(timeout time.Duration) error {
 	}
 }
 
-// drainHookReserve is the part of Drain's timeout kept from the delivery subscriptions for the
-// drain hooks and the connection's own drain, so a delivery still in its handler near the deadline
-// cannot leave the hooks no time and make each KV watcher's consumer delete fail at ERROR. A
-// delivery's handler can take seconds (a role-lane forward waits up to 2 s for its receipt, a
-// session delivery up to its request limit), while a hook's delete is one round trip per watcher,
-// run for every watcher at once, and the connection's drain a flush and a close: 3 s is
-// comfortably more than one round trip even over a relay. The listener drains for 13 s, so its
+// defaultDrainHookReserve is the part of Drain's timeout kept from the delivery subscriptions for
+// the drain hooks and the connection's own drain, so a delivery still in its handler near the
+// deadline cannot leave the hooks no time and make each KV watcher's consumer delete fail at
+// ERROR. A delivery's handler can take seconds (a role-lane forward waits up to 2 s for its
+// receipt, a session delivery up to its request limit), while a hook's delete is one round trip
+// per watcher, run for every watcher at once, and the connection's drain a flush and a close: 3 s
+// is comfortably more than one round trip even over a relay. The listener drains for 13 s, so its
 // deliveries keep the 10 s they had before the hooks and the hooks get their 3 s on top. A drain
 // shorter than 10 s keeps 30% of its timeout instead, so its deliveries still get most of it.
-const drainHookReserve = 3 * time.Second
+// withDrainHookReserve sets a client's own, so a test can prove the division of a drain in
+// milliseconds rather than in the tens of seconds the deployed reserve divides.
+const defaultDrainHookReserve = 3 * time.Second
 
 // drainDeliveries drains the delivery subscriptions, pass after pass while a bind in flight
 // installs one more, and waits until each is no longer valid, at the latest until deadline.

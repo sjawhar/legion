@@ -37,6 +37,7 @@ import (
 // TestAnUnreadableDeliveryModeDoesNotStallTheSessionsLaterMessages holds the same for a session
 // the fan-out does resolve; this one is the recipient it cannot.
 func TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay(t *testing.T) {
+	t.Parallel()
 	const (
 		relayedPort = 4096
 		corePort    = 4097

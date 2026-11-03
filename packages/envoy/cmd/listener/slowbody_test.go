@@ -1,5 +1,8 @@
 package main
 
+// A test here swaps the standard log package's writer (log.SetOutput), a process-wide default,
+// so none of this file's tests is parallel (dispatch://INFRA-1075).
+
 import (
 	"bufio"
 	"bytes"

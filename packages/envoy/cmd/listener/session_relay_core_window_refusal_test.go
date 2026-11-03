@@ -36,6 +36,7 @@ import (
 // through a session with no entry, and TestARefusedMessageNeverHoldsTheRelayWhateverTheEntrySaid
 // drives every entry state through it.
 func TestAnUnreadableDeliveryModeInACoreWindowLeavesNoHoldForItsRelay(t *testing.T) {
+	t.Parallel()
 	const (
 		relayedPort = 4096
 		corePort    = 4097

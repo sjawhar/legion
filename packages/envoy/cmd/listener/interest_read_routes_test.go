@@ -30,6 +30,7 @@ import (
 // freeze on the same rig: each answers 200, or the 404 the bucket's word that the key is absent
 // earns.
 func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.T) {
+	t.Parallel()
 	const (
 		missed = "ses_interest_routes_subscribed_to_nothing"
 		cached = "ses_interest_routes_cached_interest"

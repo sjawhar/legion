@@ -1,5 +1,9 @@
 package bus_test
 
+// Every test here captures the default slog handler (captureLogs, stream_config_test.go) or sets
+// NATS_NKEY_SEED with t.Setenv, both process-wide, so none of them is parallel
+// (dispatch://INFRA-1075).
+
 import (
 	"encoding/json"
 	"errors"

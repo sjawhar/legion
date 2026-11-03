@@ -30,6 +30,7 @@ import (
 // What it does not prove: that the server's refusal arrives as bus.ErrStreamFull. That is
 // internal/bus's own ground (streamFull), and here the error is built as streamFull builds it.
 func TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer(t *testing.T) {
+	t.Parallel()
 	subject := contracts.RoleTopicPrefix + "reviewer"
 	full := fmt.Errorf("%w: %w", bus.ErrStreamFull,
 		&nats.APIError{Code: http.StatusServiceUnavailable, ErrorCode: 10077, Description: "maximum bytes exceeded"})

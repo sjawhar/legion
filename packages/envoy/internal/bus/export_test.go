@@ -1,5 +1,7 @@
 package bus
 
+import "time"
+
 // WithReconnectWaitTick runs tick at each pass of the client's wait for a reconnect
 // (ensureConnWithContext), before the pass blocks, and reads a connection event tick causes before
 // the wait looks at its context, so a test outside the package can tell a publish is inside that
@@ -17,4 +19,13 @@ func WithReconnectWaitTick(tick func()) ConnectOption {
 // tests only; no production connect can set it.
 func WithBeforeRequestFlush(before func()) ConnectOption {
 	return clientOption(func(o *connectOpts) { o.beforeRequestFlush = before })
+}
+
+// WithDrainHookReserve sets the part of Drain's timeout the client keeps from its delivery
+// subscriptions for the drain hooks and the connection's own drain, in place of
+// defaultDrainHookReserve, so a test outside the package can prove how a drain divides its
+// timeout in milliseconds rather than in the tens of seconds the deployed reserve divides. It is
+// compiled into the package's tests only; no production connect can set it.
+func WithDrainHookReserve(d time.Duration) ConnectOption {
+	return clientOption(func(o *connectOpts) { o.drainHookReserve = d })
 }

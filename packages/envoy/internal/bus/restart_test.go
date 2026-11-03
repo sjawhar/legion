@@ -1,5 +1,9 @@
 package bus_test
 
+// Every test here captures the default slog handler (captureBusLogs, below), a process-wide
+// swap, so none of them is parallel, nor is any test of another file that calls it
+// (dispatch://INFRA-1075).
+
 import (
 	"bytes"
 	"encoding/json"
@@ -145,11 +149,8 @@ func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	started := make(chan struct{}, 1)
-	if _, err := client.SubscribeCore("notifications.role.reconnect-during-drain", func(*natsgo.Msg) {
-		started <- struct{}{}
-		time.Sleep(20 * time.Second)
-	}, "reconnect-during-drain"); err != nil {
+	hold, started := heldDelivery(t)
+	if _, err := client.SubscribeCore("notifications.role.reconnect-during-drain", hold, "reconnect-during-drain"); err != nil {
 		t.Fatalf("role subscribe: %v", err)
 	}
 	if err := client.Conn.Publish("notifications.role.reconnect-during-drain", nil); err != nil {

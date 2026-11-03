@@ -32,6 +32,7 @@ import (
 // bucket. The negative control is a second session with a readable record on the same rig,
 // served 200 with its topics.
 func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.T) {
+	t.Parallel()
 	const (
 		readable   = "ses_interest_record_readable"
 		unreadable = "ses_interest_record_unreadable"

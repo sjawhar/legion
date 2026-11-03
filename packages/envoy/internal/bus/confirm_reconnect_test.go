@@ -82,6 +82,7 @@ func serveFake(conn net.Conn, deny string) {
 // reconnect clears the recorded violation before it has counted itself, so the connection's last
 // error and reconnect count read exactly as they did before the publish.
 func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
+	t.Parallel()
 	subject := "notifications.role.reviewer"
 	var once sync.Once
 	disconnected := make(chan struct{})
@@ -119,6 +120,7 @@ func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
 // is not confirmed either: the connection reads as connected again with no error, and only its
 // reconnect count shows the violation may have gone with the old connection.
 func TestConfirmPublishedRefusesADenialACompletedReconnectCleared(t *testing.T) {
+	t.Parallel()
 	subject := "notifications.role.reviewer"
 	var once sync.Once
 	reconnected := make(chan struct{})
@@ -158,6 +160,7 @@ func (sliceError) Error() string { return "slice error" }
 
 // sameError never panics on a value that cannot be compared, and counts it as a change.
 func TestSameErrorTreatsAValueThatCannotBeComparedAsChanged(t *testing.T) {
+	t.Parallel()
 	if sameError(sliceError{[]int{1}}, sliceError{[]int{1}}) {
 		t.Fatal("two incomparable error values read as the same error")
 	}
@@ -246,6 +249,7 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 // The state a publish is judged against is read before the publish: a violation the server reports
 // while the publish call is still running is this publish's denial, not a state it started from.
 func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
+	t.Parallel()
 	subject := "notifications.role.reviewer"
 	conn := answeringServer(t, subject, false)
 	client := &Client{Conn: conn}
@@ -269,6 +273,7 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 // during it - still counts as delivered when the stream's acknowledgement and its receipt arrive,
 // since they prove it.
 func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
+	t.Parallel()
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}
 
@@ -280,6 +285,7 @@ func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
 // An unconfirmed forward with no receipt returns why it is unconfirmed, never ErrReceiptTimeout,
 // which the listener treats as delivered to a live holder.
 func TestAnUnconfirmedForwardWithoutAReceiptIsNotAReceiptTimeout(t *testing.T) {
+	t.Parallel()
 	conn := answeringServer(t, "notifications.other", false)
 	client := &Client{Conn: conn}
 

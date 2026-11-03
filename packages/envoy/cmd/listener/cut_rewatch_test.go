@@ -41,6 +41,7 @@ var cutRewatchCaches = []string{
 // branch a rewatch replaced is pinned by the unit test of internal/kvwatch. What this test holds
 // is the whole cut path, every cache's replacement included, to no ERROR at all.
 func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
+	t.Parallel()
 	server, uri := testnats.Start(t)
 	// The live topics lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS (liveLaneEnv), and both
 	// clients connect before the listener reports itself healthy.

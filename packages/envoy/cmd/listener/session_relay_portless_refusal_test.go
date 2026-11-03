@@ -19,6 +19,7 @@ import (
 // branch (`relayJudges := relayed && target.Port > 0`). The relay of a portless session publishes
 // frames and judges nothing, so a refusal left to it is reported by nobody.
 func TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode(t *testing.T) {
+	t.Parallel()
 	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
 	portless := "ses_portless_" + id.New()
 	topic := "notifications.github.acme.portless-" + id.New() + ".mention"

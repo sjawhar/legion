@@ -66,6 +66,7 @@ func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 // That holds for a start whose settings match the deployment's and for one whose replica setting
 // is 1 with no byte limit set: a start never lowers the copies and never drops a deployed limit.
 func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoesNotOwn(t *testing.T) {
+	t.Parallel()
 	for _, drift := range []struct {
 		name   string
 		change func(*nats.StreamConfig)
@@ -124,6 +125,7 @@ func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoes
 // metadata and its first and last sequence, and every durable consumer created with no replica
 // count of its own (as the listener's and Dispatch's two are) moves to three copies with it.
 func TestAStartRaisesAnR1StreamToThreeCopiesKeepingItsMessagesAndMovingItsConsumers(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	for i := range 5 {
@@ -172,6 +174,7 @@ func TestAStartRaisesAnR1StreamToThreeCopiesKeepingItsMessagesAndMovingItsConsum
 // changes nothing else about the bucket's stream, whatever else the opener's configuration says.
 // OpenKeyValue, the rebuild path, raises nothing, and a bucket is never lowered.
 func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testing.T) {
+	t.Parallel()
 	_, js := startClusterJetStream(t)
 	const bucket = "envoy_raise_test"
 	created, err := js.CreateKeyValue(&nats.KeyValueConfig{
@@ -234,6 +237,7 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 // that sets a smaller one, as a program still set to the old limit after a raise, keeps the larger
 // deployed limit and writes nothing: a start never lowers it.
 func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	info := testnats.AwaitSettledStream(t, js, Stream)
@@ -266,6 +270,7 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 
 // A start that sets a byte limit gives it to a deployed stream with none.
 func TestAStartGivesItsByteLimitToAStreamWithNone(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3))
 	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got > 0 {
@@ -282,6 +287,7 @@ func TestAStartGivesItsByteLimitToAStreamWithNone(t *testing.T) {
 // through a window's send, and keeps every message it stored before it filled: the same count,
 // first and last sequence, bytes and contents (single server, small limit).
 func TestAFullStreamRefusesAPublishAndKeepsEveryStoredMessage(t *testing.T) {
+	t.Parallel()
 	const limit = 16 << 10
 	client, err := ConnectOwningStream([]string{testnats.URL(t)}, WithStreamMaxBytes(limit))
 	if err != nil {
@@ -354,6 +360,7 @@ func TestAFullStreamRefusesAPublishAndKeepsEveryStoredMessage(t *testing.T) {
 // A raise while a publisher sends loses nothing the stream acknowledged: every publish is either
 // acknowledged and then stored at its sequence, or answered with an error.
 func TestRaisingTheStreamWhileAPublisherSendsKeepsEveryAcknowledgedMessage(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 
@@ -402,6 +409,7 @@ func TestRaisingTheStreamWhileAPublisherSendsKeepsEveryAcknowledgedMessage(t *te
 // Two starts raising the same R1 stream and the same R1 bucket at once both succeed and leave
 // three copies of each.
 func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	const bucket = "envoy_race_test"
@@ -441,6 +449,7 @@ func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
 // setting, for the stream and for a bucket, whose error names the bucket's stream first, and leaves
 // both as they were.
 func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(1))
 	const bucket = "envoy_refused_test"
@@ -472,6 +481,7 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 // succeeds and writes nothing to either; a create at three copies with one server stopped fails,
 // naming the setting.
 func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T) {
+	t.Parallel()
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	const bucket = "envoy_stopped_test"
@@ -510,6 +520,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 // A create of the stream at three copies with one server of three stopped fails the start, and the
 // error names the replica setting.
 func TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting(t *testing.T) {
+	t.Parallel()
 	cluster := testnats.StartCluster(t, 3)
 	cluster.Servers[2].Stop(t)
 	cluster.AwaitReady(t)
@@ -528,6 +539,7 @@ func TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting(t *testing.T)
 // create at more than one copy but takes an update to more, recording the count while it holds one
 // copy, so a refused raise is TestARefusedRaiseNamesTheReplicaSetting's, on a cluster.
 func TestARefusedStreamNamesTheSettingsItCarried(t *testing.T) {
+	t.Parallel()
 	const tooLarge = int64(1) << 60
 	for _, row := range []struct {
 		name    string
@@ -565,6 +577,7 @@ func TestARefusedStreamNamesTheSettingsItCarried(t *testing.T) {
 // On a single server with the default settings, a start after the one that created the stream and
 // a bucket writes nothing to either.
 func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
+	t.Parallel()
 	uri := testnats.URL(t)
 	client, err := ConnectOwningStream([]string{uri})
 	if err != nil {

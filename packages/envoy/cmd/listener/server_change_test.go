@@ -201,6 +201,7 @@ type serverChangeRun struct {
 // skipped; a route that counted that record as the stand-in's receipt would answer 200 for an
 // ad-hoc message sent while the stand-in is held off, and fail assertion 1.
 func TestServerChange(t *testing.T) {
+	t.Parallel()
 	runs := []serverChangeRun{
 		{name: "live lane off, senders through S"},
 		{name: "live lane on, senders through H", env: liveLaneEnv, sendThroughHolder: true},

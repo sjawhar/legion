@@ -1,5 +1,8 @@
 package bus_test
 
+// Every test here sets ENVOY_ALLOW_REMOTE_NATS or a seed file with t.Setenv, which panics the
+// process beside t.Parallel, so none of them is parallel (dispatch://INFRA-1075).
+
 import (
 	"errors"
 	"net"
