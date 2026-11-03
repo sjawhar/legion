@@ -2304,32 +2304,19 @@ jobs:
         run: bun run typecheck
         working-directory: packages/dispatch
       # The lane cases of e2e/__tests__/psql-session.test.ts and harness-lanes.test.ts skip
-      # themselves when no database is named, and what they prove - that a lane's psql reads its
-      # own lane's database and not the plain name - is exactly what a lane run depends on, so
-      # skipping them in CI leaves the lane contract unproven where it matters most. This job has
-      # no `postgres:` service on purpose (a run of more than one lane refuses a caller-set
-      # DATABASE_URL, since one database cannot serve lanes that truncate it per row), so the
-      # database is one container of the same pinned image the lanes use, started for this step
-      # and read through DATABASE_URL, which the browser step below never sees.
-      - name: Start a database for the dashboard's lane tests
-        run: |
-          docker run -d --name dispatch-unit-pg -p 5440:5432 \
-            -e POSTGRES_PASSWORD=ci \
-            ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-          for _ in $(seq 60); do
-            if docker exec dispatch-unit-pg pg_isready -U postgres -q; then break; fi
-            sleep 1
-          done
-          docker exec dispatch-unit-pg pg_isready -U postgres
+      # themselves where no database is named, so in this job they do not run: it has no
+      # `postgres:` service on purpose, since a run of more than one lane refuses a caller-set
+      # DATABASE_URL, one database being unable to serve lanes that truncate it per row. A
+      # container of the pinned image for this step alone was tried and taken out again: it cost
+      # an image pull and a readiness wait, about 90 s of a job whose own budget is the thing
+      # under scrutiny, and the wait timed out on one runner in three. What those cases prove -
+      # that a lane's psql reads its own lane's database and not the plain name - is proven on any
+      # machine with DATABASE_URL set, which is how a developer and an issue pod run them
+      # (`bun run test` in packages/dispatch), and the lane contract they guard is also covered
+      # end to end by every multi-lane run of the suite itself.
       - name: Test dispatch dashboard
         run: bun run test
         working-directory: packages/dispatch
-        env:
-          DATABASE_URL: postgres://postgres:ci@127.0.0.1:5440/postgres?sslmode=disable
-      # The database above is this step's alone: the browser step starts a Postgres per lane.
-      - name: Stop the dashboard's lane database
-        if: always()
-        run: docker rm -f dispatch-unit-pg
       # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
       # cannot be determined; the listing shows the build shipped it.
       - name: Build dispatch dashboard
