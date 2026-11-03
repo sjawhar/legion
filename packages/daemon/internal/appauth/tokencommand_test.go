@@ -348,6 +348,31 @@ func TestTokenModeACallerDeadlineNeitherKillsNorRepeatsTheCommand(t *testing.T) 
 	}
 }
 
+// A caller whose deadline ended before the command finished, and who comes back only after it
+// finished, gets the finished run's release; the command does not run again.
+func TestTokenModeACallerAfterTheRunFinishedGetsItsResult(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	runs := filepath.Join(t.TempDir(), "runs")
+	command := fmt.Sprintf(`echo run >>%q; sleep 0.5; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_x","expires_at":"%s"}}}'`,
+		runs, now.Add(time.Hour).Format(time.RFC3339))
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
+	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", false); !errors.Is(err, ErrCommandPending) {
+		t.Fatalf("a caller past its deadline = %v, want ErrCommandPending", err)
+	}
+	time.Sleep(800 * time.Millisecond)
+	later, cancelLater := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelLater()
+	got, err := tokens.runTokenCommand(later, Implement, tokens.apps.Implement, "acme", false)
+	if err != nil || got["acme"].token != "ghs_x" {
+		t.Fatalf("the caller after the run finished = %v, %v; want the finished run's release", got, err)
+	}
+	if data, _ := os.ReadFile(runs); strings.Count(string(data), "run") != 1 {
+		t.Fatalf("the command ran %d times, want once", strings.Count(string(data), "run"))
+	}
+}
+
 // A lease GitHub refuses with 401 (the App uninstalled while its token lived) is dropped and
 // minted once more, so InstalledOn answers not installed rather than an error.
 func TestTokenModeInstalledOnRemintsAfterA401(t *testing.T) {

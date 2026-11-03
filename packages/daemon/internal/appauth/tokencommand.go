@@ -120,17 +120,35 @@ func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.
 			}
 			m.mu.Lock()
 			close(run.done)
-			delete(m.commands, key)
 			m.mu.Unlock()
+			// A caller whose deadline ended may come back after the run finished: keep the result
+			// for finishedRunKeep, or until a caller reads it, so that caller gets it and the
+			// command is not run again.
+			time.AfterFunc(finishedRunKeep, func() { m.forgetRun(key, run) })
 		}()
 	}
 	m.mu.Unlock()
 	select {
 	case <-run.done:
+		m.forgetRun(key, run)
 		return run.installations, run.err
 	case <-ctx.Done():
 		return nil, &TransientError{Err: fmt.Errorf("%s for %q is still running after %v (a grant may wait on a person's approval): %w", tokenCommandField(role), owner, ctx.Err(), ErrCommandPending)}
 	}
+}
+
+// finishedRunKeep is how long a finished token_command run's result waits for a caller whose own
+// deadline ended before the run did: longer than the boot's longest wait between attempts
+// (appMintRetry.Max, 30 s), far shorter than a released token's life.
+var finishedRunKeep = 2 * time.Minute
+
+// forgetRun drops run from the shared runs if it is still key's run.
+func (m *Manager) forgetRun(key string, run *commandRun) {
+	m.mu.Lock()
+	if m.commands[key] == run {
+		delete(m.commands, key)
+	}
+	m.mu.Unlock()
 }
 
 // Close ends every token_command still running and waits for each to exit; a later call needing
