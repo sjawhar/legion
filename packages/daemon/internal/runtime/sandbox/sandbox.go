@@ -111,6 +111,13 @@ type Runtime struct {
 	launcherAuth                   launcherCredentials
 	now                            func() time.Time
 	log                            *slog.Logger
+	// podShapes is the configuration each kind of pod is built from now (podShape), by kind,
+	// encoded once here. Every input of a shape — the image, the kind's reservation, the
+	// operator's volumes and mounts and the disk — is set at construction and never written
+	// again, so the pod template that records a shape (podTemplate) and the sweep that compares a
+	// stored one against it (PodDrift, once per claim of the deployment per tick) read a string
+	// rather than marshalling that configuration again.
+	podShapes map[podKind]string
 	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
 	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
 	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
@@ -353,6 +360,9 @@ func configureProber(opts Options) (*Runtime, error) {
 	if r.log == nil {
 		r.log = slog.Default()
 	}
+	// Last, after the logger a failed encoding is reported through: every input is settled above
+	// and none is written again, so each kind's shape is encoded here and only read afterwards.
+	r.podShapes = map[podKind]string{issuePod{}: podShape(r, issuePod{}), controllerPod{}: podShape(r, controllerPod{})}
 	return r, nil
 }
 
@@ -613,13 +623,25 @@ func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, 
 	}
 }
 
-// storedSandbox is the claim's Sandbox in the synced store, or nil.
-func (r *Runtime) storedSandbox(name string) (*sandbox, error) {
+// storedObject is the claim's Sandbox in the synced store as the informer holds it, undecoded, or
+// nil. A reader of one field takes it as it is, the way ReconcileOrphans reads the store: decoding
+// a whole Sandbox costs tens of kilobytes and hundreds of allocations, which no read of a label or
+// an annotation needs.
+func (r *Runtime) storedObject(name string) (*unstructured.Unstructured, error) {
 	obj, ok, err := r.sandboxes.GetStore().GetByKey(r.namespace + "/" + name)
 	if err != nil || !ok {
 		return nil, err
 	}
-	return decodeSandbox(obj.(*unstructured.Unstructured))
+	return obj.(*unstructured.Unstructured), nil
+}
+
+// storedSandbox is the claim's Sandbox in the synced store, decoded, or nil.
+func (r *Runtime) storedSandbox(name string) (*sandbox, error) {
+	u, err := r.storedObject(name)
+	if err != nil || u == nil {
+		return nil, err
+	}
+	return decodeSandbox(u)
 }
 
 // storedPod is the pod named name in the synced store, or nil.
@@ -650,15 +672,27 @@ func terminal(p *corev1.Pod) bool {
 // image, the one this runtime launches every container with (r.image), and whether there is one.
 // A pod is built whole from one image, so one container's drift is the pod's: it was launched by
 // another release of the daemon, and its agents call this daemon as that release — for a route it
-// no longer serves, a variable it no longer sets — until the pod is replaced. relaunch replaces
-// such a pod at the next launch of any of its roles, as it does one holding a moved address
-// (movedInPod), and ReconcileOrphans warns of each one it finds. A nil pod holds no drift: it is
-// replaced for being absent.
+// no longer serves, a variable it no longer sets — until the pod is replaced. A launch into an
+// issue pod on another image keeps it (relaunch): such a pod is replaced by its update round, once
+// every worker in it has pushed its work and signalled (PodDrift, ReplacePod). The controller's
+// pod, which no round covers, is replaced by the next launch into it that installs nothing
+// (roundCovers), and the repository cache's own pod, which holds no worker, by its next sweep
+// (reconcileCachePod). ReconcileOrphans warns of each one it finds. A nil pod holds no drift: it
+// is replaced for being absent.
 func imageDrift(p *corev1.Pod, image string) (string, bool) {
 	if p == nil {
 		return "", false
 	}
-	for _, containers := range [][]corev1.Container{p.Spec.InitContainers, p.Spec.Containers} {
+	return imageOtherThan(&p.Spec, image)
+}
+
+// imageOtherThan is the image a container of spec runs that is not image, and whether there is
+// one: the init containers first, then the pod's own, so a caller naming the drift names the
+// first container that differs in the order a pod starts them. It is the scan both readings of
+// that rule share — a running pod's (imageDrift) and a stored pod template's
+// (templateImageDrift).
+func imageOtherThan(spec *corev1.PodSpec, image string) (string, bool) {
+	for _, containers := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
 		for _, c := range containers {
 			if c.Image != image {
 				return c.Image, true
@@ -949,13 +983,14 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // of the claim, and are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
 // Each Sandbox whose pod runs an image other than the runtime's (imageDrift), or as a
 // ServiceAccount other than the configured one (accountDrift), is warned of, named with both
-// images or both accounts, at the boot reconciliation and at every sweep until a relaunch of one
-// of its roles replaces the pod (warnPodDrift): a release whose daemon stops serving a route, or
-// stops setting a variable, that the previous image's agents call or read leaves such a pod's
+// images or both accounts, at the boot reconciliation and at every sweep until the pod is
+// replaced — its update round's replacement for the image, a relaunch of one of its roles for the
+// account, which no round answers (warnPodDrift): a release whose daemon stops serving a route,
+// or stops setting a variable, that the previous image's agents call or read leaves such a pod's
 // agents calling this daemon as the older release, and a pod created under an account the
 // configuration has since moved off leaves its agents holding the identity that account grants,
-// so a release is pinned, or the old account deleted, only once every tree is drained or every pod
-// relaunched, and the boot log is where an operator reads which pods are still to go. Only a
+// so a release is pinned, or the old account deleted, only once every tree is drained or every
+// pod relaunched, and the boot log is where an operator reads which pods are still to go. Only a
 // warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
@@ -1009,7 +1044,7 @@ func (r *Runtime) warnPodDrift(u *unstructured.Unstructured) {
 		return
 	}
 	if other, drifted := imageDrift(pod, r.image); drifted {
-		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until the pod is relaunched", u.GetName(), other, r.image),
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until its update round replaces the pod", u.GetName(), other, r.image),
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}
 	if account, drifted := accountDrift(pod, r.pod.ServiceAccount); drifted {

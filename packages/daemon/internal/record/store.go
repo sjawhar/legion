@@ -489,8 +489,27 @@ func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*P
 	return pr, nil
 }
 
+// The three reads below key the pull_requests table on its repository — PullRequestByBranch,
+// PullRequestByNumber and PullRequestRecorded — and each compares that name without case, as
+// every other comparison of two repository names in the daemon does (PutIssue's strings.EqualFold
+// above, ghrepo.Renames.Same): GitHub spells a repository as its owner does, the row carries the
+// spelling of the fact that opened the pull request, and a fact that names the same repository in
+// another spelling names the same row. The exact match was the outlier, and it lost exactly the
+// row a configured rename exists to find — a pull request recorded under GitHub's spelling of the
+// name the repository moved from, read under the pair's spelling of it — leaving a recorded pull
+// request read as one the daemon does not record.
+//
+// Each read is bounded by an index on the expression it writes: PullRequestByNumber and
+// PullRequestRecorded by pull_requests_lower_repo_number, PullRequestByBranch by
+// pull_requests_lower_repo_branch, both from migration 20261102095707, which replaced 0062's
+// pull_requests_repo_number. An index on (repo, number) or (repo, branch) bounds none of these
+// reads, because lower(repo) is not the indexed expression: the planner walks the whole index and
+// filters every row it reads, a cost that grows with the records of finished issues, which are
+// never deleted. 0004's unique pull_requests_repo_branch stays the table's uniqueness rule. No
+// other read of the table keys on the repository.
+
 func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error) {
-	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and branch = $2", repo, branch))
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where lower(repo) = lower($1) and branch = $2", repo, branch))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -504,7 +523,7 @@ func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, bra
 // listing every issue and reading each one's pull request — a read per issue for every check,
 // review and push event — and the row is one query away.
 func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error) {
-	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and number = $2", repo, number))
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where lower(repo) = lower($1) and number = $2", repo, number))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -524,7 +543,7 @@ type RowQuerier interface {
 // no lock, so a caller with no fact lock can ask before it does any other work.
 func PullRequestRecorded(ctx context.Context, q RowQuerier, repo string, number int) (bool, error) {
 	var recorded bool
-	if err := q.QueryRow(ctx, `select exists(select 1 from pull_requests where repo = $1 and number = $2)`, repo, number).Scan(&recorded); err != nil {
+	if err := q.QueryRow(ctx, `select exists(select 1 from pull_requests where lower(repo) = lower($1) and number = $2)`, repo, number).Scan(&recorded); err != nil {
 		return false, fmt.Errorf("read whether %s#%d is recorded: %w", repo, number, err)
 	}
 	return recorded, nil
