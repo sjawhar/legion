@@ -209,3 +209,55 @@ func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing
 		t.Errorf("the replaced controller pod holds %+v, which a pod created now is not handed", drifted)
 	}
 }
+
+// Reading an empty gh directory as the empty owner set costs nothing while the project it serves
+// has no owner either: the comparison asks whether a served owner is missing, and no owner is
+// served. Were it the other way round, every launch of such a deployment's controller would
+// replace the pod it just made, for ever, since the replacement's gh directory is empty too.
+func TestAnOwnerlessControllerIsKeptWhileItsProjectStaysOwnerless(t *testing.T) {
+	ownerless := func(o *Options) {
+		o.GitHubCredential = func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+			return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
+		}
+		o.GitHubOwners = func() []string { return nil }
+	}
+	g := newRig(t, nil, withOptions(ownerless))
+	spec := controllerSpec(t)
+	loc := g.spawn(spec)
+	r2 := secondRuntime(t, g, ownerless)()
+	g.connectRunning(controllerToken, loc.Sandbox.Generation)
+	g.eventually("the controller's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	if held := r2.driftedInPod(g.pod(loc.Sandbox.Name), claim.RoleController); len(held) > 0 {
+		t.Fatalf("the controller's pod reads drift %+v while its project still serves no owner", held)
+	}
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-controller-g2", controllerSession
+	next, err := r2.Resume(g.ctx, &loc, spec)
+	if err != nil {
+		t.Fatalf("Resume the controller: %v", err)
+	}
+	if next.Sandbox.PodUID != loc.Sandbox.PodUID {
+		t.Errorf("the launch replaced pod %s with %s though nothing of its gh changed", loc.Sandbox.PodUID, next.Sandbox.PodUID)
+	}
+}
+
+// The two pods movedGhOwners must leave alone whatever the daemon serves. A pod with no gh volume
+// of the role at all is no pod of this runtime's making, and the runtime cannot say what it holds.
+// A pod projecting an owner the daemon no longer serves is ahead of the daemon, not behind it: a
+// stale directory costs nothing, and remaking the pod would delete the issue's disk for it.
+func TestMovedGhOwnersLeavesAPodItCannotJudgeAndOneAheadOfTheDaemon(t *testing.T) {
+	g := newRig(t, nil)
+	name := roleVolume(ghVolume, claim.RoleTester)
+	for what, spec := range map[string]corev1.PodSpec{
+		"no gh volume of this role at all": {Volumes: []corev1.Volume{{Name: "another-volume"}}},
+		"an owner the daemon no longer serves": {Volumes: []corev1.Volume{{Name: name, VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{Items: ghItemsFor(append([]string{"zeta"}, staticOwners...)...)},
+		}}}},
+	} {
+		if moved, ok := g.r.movedGhOwners(spec, claim.RoleTester); ok {
+			t.Errorf("%s: moved %q, want the pod left where it is", what, moved.String())
+		}
+	}
+}
