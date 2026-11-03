@@ -869,8 +869,9 @@ func (r *renderedReplica) spliceTouched(room string) (changed bool, asks func() 
 }
 
 // keep makes markdown, rendered with layout, the replica's rendering (replicaRendering), a
-// rendering inside the schema (recordVerdict), and reports whether it changed the replica's markdown: the replica takes layout either way, and
-// keeps the markdown string it holds where markdown equals it. The caller holds mu.
+// rendering inside the schema (recordVerdict), and reports whether it changed the replica's
+// markdown: the replica takes layout either way, and keeps the markdown string it holds where
+// markdown equals it. The caller holds mu.
 func (r *renderedReplica) keep(markdown string, layout *pmdoc.Layout) bool {
 	r.recordVerdict(nil)
 	if held := r.rendering; held != nil && held.markdown == markdown {

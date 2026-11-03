@@ -524,9 +524,12 @@ func TestAGateRefusalOrFailedCommitStoresNothingOfTheBatchAndEachUpdateEndsOnce(
 			t.Cleanup(func() { service.removeConnection(artifactID, 11) })
 			updates := make([][]byte, 3)
 			credits := make([]*UpdateCredit, 3)
+			// A browser's update names the peer ygo applied it for; a nil origin is ygo's own
+			// cleanup, which credits no one (creditContentChange).
+			browser := &browserOrigin{}
 			for index := range updates {
 				_, updates[index] = peerEdit(t, live, appendBlocks(t, fmt.Sprintf("Queued %d.\n", index)))
-				credits[index] = service.creditContentChange(artifactID, nil, &instance.hold)
+				credits[index] = service.creditContentChange(artifactID, browser, &instance.hold)
 				service.queueUpdateClass(artifactID, updates[index],
 					documentUpdateClass{seq: uint64(index + 1), contentChanged: true, durable: true, credit: credits[index], cursor: &instance.cursor}, false)
 			}

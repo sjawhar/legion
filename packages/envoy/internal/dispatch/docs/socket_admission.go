@@ -38,13 +38,13 @@ type preloadedDocument struct {
 }
 
 // takePreload is the update a socket's admission check loaded for room, with the tree it read from
-// it and the rendering it made of that tree (nil for an empty history), while the durable head is still the one it loaded: every write
-// that changes a document's stored state raises its head (an append, a rebuild), and compaction
-// keeps both the head and the state. The head is the head tracker's when it trusts itself
-// (headTracker.head), which costs no read, and otherwise read from the store. A stale or absent
-// preload is no answer, and the caller loads the room itself. Either way the entry gives up the
-// state it held: the socket that offered it holds the entry until it ends (offerPreload). The
-// preload's hold on room's head-tracker entry ends once the head is read.
+// it and the rendering it made of that tree (nil for an empty history), while the durable head is
+// still the one it loaded: every write that changes a document's stored state raises its head (an
+// append, a rebuild), and compaction keeps both the head and the state. The head is the head
+// tracker's when it trusts itself (headTracker.head), which costs no read, and otherwise read from
+// the store. A stale or absent preload is no answer, and the caller loads the room itself. Either
+// way the entry gives up the state it held: the socket that offered it holds the entry until it
+// ends (offerPreload). The preload's hold on room's head-tracker entry ends once the head is read.
 func (s *Service) takePreload(room string) (persistence.LoadResult, *pmdoc.Node, *replicaRendering, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
@@ -194,11 +194,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // An ask holding blocks off its content rule is inside it: the editor keeps such an ask rather
 // than normalizing it away, and settlement marks it `invalid`. The server decides it for every
 // client at once, by the same document and rendering `/text` answers with (readDocument), so a
-// socket is refused exactly when that read is ErrDocOutsideSchema. A resident room's update observer has rendered the room after every update
-// it took, as that read renders it, and recorded the verdict (residentVerdict), which is taken
-// as it stands; only a room with no verdict - not resident, or with a replica that lost the room's
-// state - is read and rendered here. A cold socket offers the state it read to the room's load
-// (offerPreload), and withdraw is what the socket's end runs to take that offer back.
+// socket is refused exactly when that read is ErrDocOutsideSchema. A resident room's update
+// observer has rendered the room after every update it took, as that read renders it, and recorded
+// the verdict (residentVerdict), which is taken as it stands; only a room with no verdict - not
+// resident, or with a replica that lost the room's state - is read and rendered here. A cold
+// socket offers the state it read, and what it rendered of it, to the room's load (offerPreload),
+// and withdraw is what the socket's end runs to take that offer back.
 func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func(), err error) {
 	switch s.residentVerdict(room) {
 	case verdictInsideSchema:

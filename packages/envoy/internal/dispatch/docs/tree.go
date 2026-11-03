@@ -288,9 +288,10 @@ func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, layout, documentSchemaError(err)
 }
 
-// replicaRenderingOf is tree's rendering as a room's replica keeps one (replicaRendering): the markdown
-// and the layout recorded with it, rendered once (documentRenderingWithLayout). A tree that does
-// not render has none, and the rendering's error, a document outside the schema among them.
+// replicaRenderingOf is tree's rendering as a room's replica keeps one (replicaRendering): the
+// markdown and the layout recorded with it, rendered once (documentRenderingWithLayout). A tree
+// that does not render has none, and the rendering's error, a document outside the schema among
+// them.
 func replicaRenderingOf(tree *pmdoc.Node) (*replicaRendering, error) {
 	markdown, _, layout, err := documentRenderingWithLayout(tree)
 	if err != nil {
