@@ -69,7 +69,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -171,7 +171,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -218,7 +218,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             }
@@ -373,7 +373,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -478,7 +478,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -644,7 +644,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -715,7 +715,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             }
@@ -775,7 +775,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -811,7 +811,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -869,7 +869,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -985,7 +985,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -1042,7 +1042,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -1312,7 +1312,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -1366,7 +1366,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },
@@ -1432,7 +1432,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             }
@@ -1517,7 +1517,7 @@
               "origin": {
                 "cwd": "/workspace",
                 "host": "omp",
-                "machine": "legion-infra-infra-635",
+                "machine": "test-machine",
                 "session_title": "Record the command surface"
               }
             },

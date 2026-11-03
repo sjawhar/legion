@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { ASK_QUESTION_MAX, dispatchToolSpecs } from "@legion/contracts";
@@ -23,7 +23,9 @@ import { fakeSearchResponse } from "./fake-search-response";
  *
  * What is normalised, and why:
  * - Every run uses the same fixed session, host, cwd, repository and issue keys, so nothing in a
- *   request or a printed line comes from the machine it ran on.
+ *   request or a printed line comes from the machine it ran on. The machine's own name is one of
+ *   those: `machineId()` reads `ENVOY_MACHINE_ID` and falls back to the kernel hostname, which a
+ *   write's `origin` carries, so this test sets that variable and puts back what it found.
  * - A request's path keeps its query parameters sorted by name, because `URLSearchParams` order
  *   follows the order the caller happened to append in.
  * - `Idempotency-Key` is dropped from the recorded headers: `DispatchClient` mints a fresh UUID
@@ -39,6 +41,18 @@ import { fakeSearchResponse } from "./fake-search-response";
 
 const GOLDEN = path.resolve(import.meta.dir, "fixtures/command-surface.json");
 const UPDATE = process.env.UPDATE_COMMAND_SURFACE === "1";
+
+// machineId() falls back to the kernel hostname, which would write this box's name into the
+// record; the variable it honours is set here so the record is the same on every machine.
+const MACHINE = "test-machine";
+const MACHINE_BEFORE = process.env.ENVOY_MACHINE_ID;
+beforeAll(() => {
+  process.env.ENVOY_MACHINE_ID = MACHINE;
+});
+afterAll(() => {
+  if (MACHINE_BEFORE === undefined) delete process.env.ENVOY_MACHINE_ID;
+  else process.env.ENVOY_MACHINE_ID = MACHINE_BEFORE;
+});
 
 const SESSION = "session-1";
 const ISSUE = "DSP-1";
