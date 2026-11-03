@@ -258,8 +258,9 @@ export interface WriteAdvice {
   /**
    * The approval a document write superseded: the version it stored replaced the one a person
    * had approved, so that approval is stale until someone approves the new version or a later
-   * write stores the approved version's text again exactly, which carries the approval to that
-   * write's version. A Legion design gate is such an approval, so this write closed it. Set by a
+   * write stores the approved version's text again exactly with no decision block in it decided
+   * since, which carries the approval to that write's version. A Legion design gate is such an
+   * approval, so this write closed it. Set by a
    * document edit and by an upload that replaced an existing document, and only on the write that
    * superseded the approval: a write on a document nobody approved, one whose approval was
    * already stale, and one whose version carried that approval forward (the approval carry: an
@@ -644,7 +645,8 @@ export type ArtifactReviewState = "approved" | "changes_requested";
  *  when that answer is the whole change since the version he approved (`reason`: `Carried forward
  *  from the approval of version <N>: the answer to a decision block was the whole change since
  *  it.`), or a version whose text is byte for byte that of the version the document's newest
- *  review approved, such as an accidental edit undone (`reason`: `Carried forward from the
+ *  review approved and whose every decision block is as its stored row has it (nobody decided one
+ *  since), such as an accidental edit undone (`reason`: `Carried forward from the
  *  approval of version <N>: this version's text is that version's, unchanged.`). A carried review
  *  is `approved` in the approver's name, and its `ask_id` is null unless a request was open at the
  *  carry, which it answers `Approve` in his name. */
@@ -2326,9 +2328,10 @@ export interface ArtifactHumanEditedEventPayload {
  *  approval ask the review answered, null when given from the document header with no
  *  approval ask open at that version. A third provenance is the carry: Dispatch records an
  *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
- *  when that answer is the whole change since the version he approved; its `reason` names the
- *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
- *  carry, which it answers (see `ArtifactReview`). */
+ *  when that answer is the whole change since the version he approved, and at a version whose
+ *  text is byte for byte the approved version's with no decision block in it decided since; its
+ *  `reason` names the carry and the version it follows, and its `ask_id` is null unless a request
+ *  was open at the carry, which it answers (see `ArtifactReview`). */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;

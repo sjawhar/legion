@@ -1,15 +1,17 @@
 kind: Fixed
 body: |-
     A Dispatch document version whose stored text is byte for byte the text of the version the
-    document's newest review approved keeps that approval: an accidental edit undone exactly, or a
-    version a route wrote over a document that changed nothing. The version write records an
-    `approved` review at the new version in the approver's name, with the reason `Carried forward
-    from the approval of version <N>: this version's text is that version's, unchanged.`, appends
-    `artifact.approved` before the version's own `artifact.version`, and answers an open approval
-    request `Approve`. The write supersedes no approval, so its advice has no
-    `superseded_approval`. Before, every later version left the approval stale, and the person had
-    to approve the same text again. A version whose decision blocks changed is judged by the answer
-    carry alone, as before.
+    document's newest review approved, and whose every decision block is as its row has it, keeps
+    that approval: an accidental edit undone exactly, by an edit or an upload, or a version a route
+    wrote over a document that changed nothing. The version write records an `approved` review at
+    the new version in the approver's name, with the reason `Carried forward from the approval of
+    version <N>: this version's text is that version's, unchanged.`, appends `artifact.approved`
+    before the version's own `artifact.version`, and answers an open approval request `Approve`.
+    The write supersedes no approval, so its advice has no `superseded_approval`. Before, every
+    later version left the approval stale, and the person had to approve the same text again. A
+    block someone decided since the approval comes back in the same bytes while its row holds that
+    decision, so such a version carries nothing, and a version whose decision blocks changed is
+    judged by the answer carry alone, as before.
 time: 2026-11-03T03:30:00.000000000Z
 custom:
     Issue: pr2703

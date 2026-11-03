@@ -1224,8 +1224,10 @@ export const dispatchToolSpecs = [
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
       "approval goes stale when the document changes outside its decision blocks after it, until " +
       "a later version's text is exactly the approved version's again, as when an accidental " +
-      "edit is undone exactly: that version carries the approval, so nothing is requested for it. " +
-      "After any other change, request approval again once that revision is complete and " +
+      "edit is undone exactly, and no decision block in it was decided since: that version " +
+      "carries the approval and the document reads approved at it, so nothing is requested for " +
+      "it. When the document does not read approved, request approval again once that revision " +
+      "is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", with a one-sentence summary naming what changed since the earlier approval: the card " +
       "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +

@@ -449,7 +449,7 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on the first keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text it covers.
 A margin record changes the marks map alone, never the text, so its transactional write (`applyMargin`) records `false` without rendering the document again, and the room's update observer keeps its rendering for the publish of one whose fork was built from that same room (`liveWriteOrigin.marginOnly`).
 One forked from the store (`coldFork`) can carry deletes the room never took, since ygo encodes an update with its document's whole delete set, so its publish is rendered as any other update is.
-Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's, which carries an approval pinned to that one to it (`docs.carryApproval`) rather than staling it:
+Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's, which carries an approval pinned to that one to it (`docs.carryApproval`, while its decision blocks are as their rows have them) rather than staling it:
 an upload to an existing document (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`) always inserts one;
 `POST /artifacts/{id}/versions` and accepting a suggestion always name one through `NamedVersion`;
 and `POST /edits` names one through `NamedVersion` when it is sent with a `summary` and its `changed` is true.

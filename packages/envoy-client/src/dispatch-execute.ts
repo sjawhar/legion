@@ -335,7 +335,7 @@ function renderAdvice(
   const superseded = advice.superseded_approval;
   if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
     lines.push(
-      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version} or a later write stores the text of version ${superseded.approved_version} again exactly, with no decision block in it decided since: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
     );
   }
 
