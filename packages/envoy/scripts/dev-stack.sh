@@ -72,6 +72,10 @@
 # trap stops every process by the pid this script started it as, drops the two databases it
 # created and nothing else, and leaves the logs; it runs on a normal exit, on Ctrl-C, on SIGTERM
 # and on a failure part way through, so a start that fails before "ready" leaves nothing running.
+# A SIGTERM sent to the whole process group, as a supervisor's stop sends it, is that same stop,
+# and so is the same signal repeated while the stop runs. The exception is a signal this script
+# cannot take: a run ended by SIGKILL, which no process can trap, leaves its two databases on the
+# server for someone to drop by hand, as does any other signal this script does not trap.
 #
 #   LEGION_TEST_PG_DSN=... bash scripts/dev-stack.sh    # a Legion pod: the variable is already set
 #   bash scripts/dev-postgres.sh                        # a box with Docker: start the shared
@@ -245,9 +249,29 @@ DISPATCH_DB_CREATED=false
 # so an interrupted run never reports success. Each process is stopped by the pid this script
 # started it as, in the reverse of the order they were started, and each database is dropped with
 # (force) once its server has no connection of this run's left to lose.
+#
+# A stop by signal reaches this shell more than once: a process group's SIGTERM is delivered to
+# this shell as well as to every process of the stack, a supervisor repeats the signal, and a run
+# already on its way out through the EXIT trap (a process of the stack took that same signal
+# first) has its own still to take. So the first thing cleanup does is ignore INT and TERM for
+# the rest of the run, and it returns at once when it is already running. What it must not do is
+# put either signal back on its default disposition, as `trap - INT TERM` here once did: a repeat
+# arriving then kills the run between the kills and the drops below, and a signal bash has taken
+# but not yet run the handler for is re-raised by bash at its next trap check, the `wait` in the
+# loop below among them ("run_pending_traps: bad value in trap_list[15]: (nil)", then "signal
+# handler is SIG_DFL, resending 15 (SIGTERM) to myself"). Either way the two databases outlived
+# the run. Ignoring is also the one disposition a child inherits through the exec, so the psql
+# each drop runs is out of the reach of a signal sent to the whole group too, and no drop is
+# killed half done.
+cleanup_running=false
 cleanup() {
   local rc="$1" pid
-  trap - EXIT INT TERM
+  if [ "$cleanup_running" = true ]; then
+    return 0
+  fi
+  cleanup_running=true
+  trap - EXIT
+  trap '' INT TERM
   set +e
   for pid in "$DISPATCH_PID" "$LISTENER_PID" "$NATS_PID" "$BROKER_PID" "$ISSUER_PID" "$KEEPER_PID"; do
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then

@@ -25,15 +25,18 @@
 # there at all; (c) "dev-stack: ready." is printed exactly once, with the export block after it;
 # (d) the two instances mint different database names, different ports and different work
 # directories, and neither names the other's; (e) the one trap stops every process it started and
-# drops exactly the two databases it created, on a normal exit, on INT, and on a failure part way
-# through, which leaves nothing running; and (f) a run given no database URL refuses with exit 2,
-# naming all three sources.
+# drops exactly the two databases it created, on a normal exit, on INT, on a SIGTERM to its whole
+# process group sent again while the stop runs, and on a failure part way through, which leaves
+# nothing running; and (f) a run given no database URL refuses with exit 2, naming all three
+# sources.
 set -euo pipefail
-# Monitor mode, for the INT case alone: a background command of a shell without job control
-# inherits SIGINT ignored, and a shell cannot trap a signal that was ignored when it started, so
-# an instance started with & from this script could not run its own INT trap at all. With -m each
-# instance is a process group of its own with the default dispositions, so the INT this test
-# sends reaches dev-stack.sh's trap exactly as a terminal's Ctrl-C does.
+# Monitor mode, for the two cases that signal an instance: a background command of a shell
+# without job control inherits SIGINT ignored, and a shell cannot trap a signal that was ignored
+# when it started, so an instance started with & from this script could not run its own INT trap
+# at all. With -m each instance is a process group of its own with the default dispositions, so
+# the INT this test sends reaches dev-stack.sh's trap exactly as a terminal's Ctrl-C does, and
+# the group the SIGTERM case signals holds that instance and every process of its stack and
+# nothing of this test's own.
 set -m
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -546,7 +549,42 @@ assert_everything_stopped 'instance 2'
 assert_databases_dropped 'instance 2' "$psql_calls2" "$suffix2"
 printf 'PASS: INT stopped every process instance 2 started, dropped both its databases and exited 130\n'
 
-# (e3) A failure part way through, before ready: the broker refuses to start, so the run fails,
+# (e3) A stop by signal, as a supervisor sends one: SIGTERM to the whole process group, which
+# reaches dev-stack.sh as it reaches every process of its stack, and sent again while the stop
+# is running. Both databases are dropped, exactly as on a normal exit. The run that found this
+# left them on the server: cleanup disarmed its own TERM trap, so a signal bash had taken and
+# not yet handled was re-raised with the shell back on the default disposition, which killed the
+# run between the kills and the drops.
+run_instance 1 "$log1" "$psql_calls1" "$curl_calls1"
+assert_instance_ready 'the SIGTERM stop' "$log1" "$psql_calls1" "$curl_calls1"
+term_suffix="$run_suffix"
+term_kept_port="$kept_port"
+declare -A term_port=()
+for name in "${!process_port[@]}"; do term_port["$name"]="${process_port[$name]}"; done
+# -PID is the instance's own process group, which set -m gave it. The signal is sent again, as
+# fast as this shell can send it, for as long as that group holds a process: one of the repeats
+# then certainly arrives while the stop is already running, which is the case this is here for
+# and what the group's own signal does to dev-stack.sh by chance whenever a process of the stack
+# takes it first. The loop ends the moment there is no process left to signal.
+for _ in $(seq 1 200); do
+  kill -TERM -"${instance_pid[1]}" 2>/dev/null || break
+done
+wait_for_exit 1
+# 143 when dev-stack.sh's own TERM trap ran the stop, 0 when a process of the stack took the
+# same signal first and the stop ran from the EXIT trap of that clean exit: a group's signal
+# reaches both, and which of the two gets there first is the kernel's to decide.
+[[ "$exited_status" -eq 143 || "$exited_status" -eq 0 ]] ||
+  fail "the SIGTERM stop exited $exited_status, neither 143 nor the status of a process of its own"
+grep -q 'dev-stack: stopped; logs kept in' "$log1" ||
+  fail "the SIGTERM stop did not reach the end of its cleanup"
+process_port=()
+for name in "${!term_port[@]}"; do process_port["$name"]="${term_port[$name]}"; done
+kept_port="$term_kept_port"
+assert_everything_stopped 'the SIGTERM stop'
+assert_databases_dropped 'the SIGTERM stop' "$psql_calls1" "$term_suffix"
+printf 'PASS: SIGTERM to the whole process group, sent again while the stop ran, stopped every process of the run and dropped both its databases\n'
+
+# (e4) A failure part way through, before ready: the broker refuses to start, so the run fails,
 # and the processes it had already started are stopped and its databases dropped all the same.
 DEV_STACK_TEST_BROKER_FAILS=1 run_instance 1 "$log1" "$psql_calls1" "$curl_calls1"
 wait_for_exit 1
