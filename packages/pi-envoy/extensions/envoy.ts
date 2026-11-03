@@ -2880,13 +2880,14 @@ export default function envoyExtension(pi: PiApi): void {
   // Every session id this process has been on: a move with no word back to one is a rollback.
   const knownSessions = new Set<string>();
 
-  // The sessions this process has left and still holds a broker client for: a key pair and a
-  // renewing token each (`CLIENTS`, @legion/envoy-client/broker-credential). A session goes in
-  // when the host leaves it (`noteMove`, and the pass that closes its agent subject) and out
-  // when the pass has made its last call for it — the hand-back of its role (`settleRole`),
-  // which presents that session's own credential — so a process that moves between sessions all
-  // day renews one token rather than one per session it ever bound. A pass that decided nothing
-  // leaves its entries here for the next.
+  // The sessions this process has left and still holds a broker client for: a key pair and the
+  // token last traded for it (`CLIENTS`, @legion/envoy-client/broker-credential). A session goes
+  // in when the host leaves it (`noteMove`, and the pass that closes its agent subject) and out
+  // once the pass has run its role move (`settleRole`), the last call that presents that
+  // session's own credential — whether or not that move decided anything — so a process that
+  // moves between sessions all day holds one client rather than one per session it ever bound.
+  // Only a pass fenced before that point leaves its entries here for the next; a later hand-back
+  // for a session already forgotten trades again under that session's name.
   const leftSessions = new Set<string>();
 
   interface PassCause {
@@ -3014,9 +3015,9 @@ export default function envoyExtension(pi: PiApi): void {
       )) ?? false;
     handle.check();
     // The role move above was the last call for every session this process has left, so each
-    // one's key pair and renewing token at the broker go now (`leftSessions`). The session
-    // running now is never one of them: a rollback to a session this pass left behind keeps
-    // trading under it.
+    // one's key pair and token go now (`leftSessions`), whether or not the move decided. The
+    // session running now is never one of them: a rollback to a session this pass left behind
+    // keeps trading under it.
     leftSessions.delete(host);
     for (const other of leftSessions) forgetBrokerSession(other);
     leftSessions.clear();
