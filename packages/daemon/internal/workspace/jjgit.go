@@ -101,8 +101,8 @@ const commandWaitDelay = time.Second
 // it: once the command has exited on its own, commandWaitDelay can hold Run open past the budget
 // for a child still holding the command's pipes, and the command's own exit is then its answer. A
 // command that never started because an earlier one on the same budget spent it timed out too,
-// while a command the caller's own context stopped — the restore runs under the launcher's
-// (internal/launcher), not under a budget of its own — reports its exit, not a timeout.
+// while a command the caller stopped by cancelling its context, rather than the budget ending
+// it, reports its exit, not a timeout.
 //
 // The save (internal/shim) and the restore (internal/launcher) both run here: they run the same
 // two tools over the same workspace, and a restore wedged on a stale index.lock or on a git
