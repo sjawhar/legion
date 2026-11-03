@@ -972,7 +972,9 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		}
 		if auth.MatchesSharedAgentToken(r, token, s.deps.AgentTokens) {
 			accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
-			return model.Actor{}, false, nil
+			// A credential that holds no scope, not the absence of one: the deployment's one
+			// shared token is nobody's, so it acts as no person.
+			return model.Actor{Credential: &model.Credential{}}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
 			return s.serviceTokenActor(r, token)
@@ -995,7 +997,13 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	accesslog.Note(r.Context(), accesslog.KindUser, login)
-	return model.Actor{Kind: "user", ID: login}, true, nil
+	// A person at a browser is the person, so their cookie holds every scope and names no agent
+	// that acted for them.
+	return model.Actor{
+		Kind:       "user",
+		ID:         login,
+		Credential: &model.Credential{Scopes: []string{model.ScopePerson, model.ScopeApprove}},
+	}, true, nil
 }
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
@@ -1022,18 +1030,26 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 			"service-account token rejected (%s)", reason)
 	}
 	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
-	return model.Actor{Service: &claims.Subject}, false, nil
+	// A credential that holds no scope, not the absence of one: a pod's projected token proves a
+	// workload and no person, so it acts as nobody.
+	return model.Actor{Service: &claims.Subject, Credential: &model.Credential{}}, false, nil
 }
 
+// actorFrom is the actor a write records: the caller optionalActor resolved, or, for a bearer
+// that proves no session of its own, the session its body names. The request's credential stops
+// here (model.Actor.Recorded): a handler stores this actor and compares it with a stored one,
+// which carries none.
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {
 		return model.Actor{}, err
 	}
-	if present {
-		return actor, nil
+	if !present {
+		if actor, err = bearerSessionActor(r, actor, supplied); err != nil {
+			return model.Actor{}, err
+		}
 	}
-	return bearerSessionActor(r, actor, supplied)
+	return actor.Recorded(), nil
 }
 
 // bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
@@ -1075,6 +1091,10 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 		Origin:  supplied.Origin,
 		Owner:   authenticated.Owner,
 		Service: authenticated.Service,
+		// The credential's own, as Owner and Service are: this branch rebuilds the actor field by
+		// field, so a credential left out here is one the caller proved and the request no longer
+		// carries.
+		Credential: authenticated.Credential,
 	}, nil
 }
 
@@ -1122,6 +1142,9 @@ func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst 
 	return true
 }
 
+// requireHuman answers the person behind a request, refusing every credential that is not a
+// person's own. The actor it hands back is the one the route records, so the request's
+// credential stops here as it does in actorFrom (model.Actor.Recorded).
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {
@@ -1132,7 +1155,7 @@ func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Act
 		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users may perform this action")
 		return model.Actor{}, false
 	}
-	return actor, true
+	return actor.Recorded(), true
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:

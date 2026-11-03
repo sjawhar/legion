@@ -6,9 +6,51 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
+
+// The OAuth scopes a credential can hold. ScopePerson is "this credential acts as its person",
+// which every route a person reaches through the dashboard requires; ScopeApprove is the right to
+// settle what a person settles — an approval, an ask's answer — which no credential holds without
+// ScopePerson, since a credential that does not act as its person has nobody to approve for.
+const (
+	ScopePerson  = "person"
+	ScopeApprove = "approve"
+)
+
+// ActorAct names the agent that acted when a credential acted for its person, so a write records
+// which credential made it and not only whom it was made for: Session is the session a
+// broker-issued token proved, TokenID and TokenName the personal token presented, and Scopes the
+// scopes that credential holds. A browser's cookie is the person themselves acting, so it names
+// no agent and carries none of this.
+type ActorAct struct {
+	Session   string   `json:"session,omitempty"`
+	TokenID   string   `json:"token_id,omitempty"`
+	TokenName string   `json:"token_name,omitempty"`
+	Scopes    []string `json:"scopes,omitempty"`
+}
+
+// Credential is the request's credential as optionalActor resolved it: the scopes it holds, and
+// the agent it names. A pointer, so Actor stays comparable with ==, which this package's callers
+// and its tests rely on.
+type Credential struct {
+	// Scopes are the OAuth scopes the credential holds: ScopePerson, ScopeApprove, or neither.
+	Scopes []string
+	// Session is the session a broker-issued token proved, and is empty for every other
+	// credential, none of which proves one.
+	Session string
+	// TokenID and TokenName name a personal token, and are empty for every other credential.
+	TokenID   string
+	TokenName string
+}
+
+// Holds reports whether the credential holds one scope. A nil Credential holds none, so a
+// caller that resolved to no credential at all is refused by the same test.
+func (c *Credential) Holds(scope string) bool {
+	return c != nil && slices.Contains(c.Scopes, scope)
+}
 
 // Actor identifies the user or agent session that caused a change. Service is
 // the verified Kubernetes subject of the projected service-account token a
@@ -24,6 +66,27 @@ type Actor struct {
 	Owner   *string      `json:"owner,omitempty"`
 	Service *string      `json:"service,omitempty"`
 	Project *string      `json:"project,omitempty"`
+	// Act names the agent that made this act for the person, and is set only where a
+	// credential acted as its person (requireScope). A browser's act carries none, and so
+	// does an agent's own write on a route that always took tokens, which is recorded as the
+	// session it always was.
+	Act *ActorAct `json:"act,omitempty"`
+	// Credential is what authenticated the request: the OAuth scopes it holds and how it names
+	// the agent behind it. It is a fact of the request and never of the record, so it is not
+	// serialised; requireScope copies what it needs onto Act, and Recorded drops it from the
+	// actor a handler writes and compares.
+	Credential *Credential `json:"-"`
+}
+
+// Recorded is the actor as a write records it: the request's credential dropped. Dispatch
+// compares a stored actor with the caller's using == — a comment's author against the caller
+// editing it, a room's connected writers against the one that edited — and a stored actor was
+// decoded from JSON, which carries no credential, so an actor a handler records or compares
+// must carry none either. actorFrom and requireHuman, the two helpers that hand a handler its
+// actor, are where the request's credential stops.
+func (a Actor) Recorded() Actor {
+	a.Credential = nil
+	return a
 }
 
 // SameAs reports whether two actors are the same writer: one session id, or one human login.
@@ -50,11 +113,13 @@ type ActorOrigin struct {
 	SessionTitle string `json:"session_title,omitempty"`
 }
 
-// AgentToken is the safely displayable metadata for a human-owned agent token.
+// AgentToken is the safely displayable metadata for a human-owned agent token. Scopes is the
+// OAuth scopes the token holds, the set its bearer may act within.
 type AgentToken struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	Prefix     string     `json:"prefix"`
+	Scopes     []string   `json:"scopes"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at"`

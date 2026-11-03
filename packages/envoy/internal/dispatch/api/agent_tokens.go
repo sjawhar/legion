@@ -30,7 +30,7 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select id::text, name, prefix, created_at, last_used_at, revoked_at
+		select id::text, name, prefix, scopes, created_at, last_used_at, revoked_at
 		from agent_tokens
 		where owner = $1
 		order by created_at desc
@@ -133,13 +133,14 @@ func (s *server) revokeAgentToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) personalTokenActor(ctx context.Context, plaintext string) (model.Actor, error) {
 	hash := sha256.Sum256([]byte(plaintext))
-	var owner string
+	var id, name, owner string
+	var scopes []string
 	var revokedAt *time.Time
 	err := s.deps.Store.Pool.QueryRow(ctx, `
-		select owner, revoked_at
+		select id::text, name, owner, scopes, revoked_at
 		from agent_tokens
 		where token_hash = $1
-	`, hash[:]).Scan(&owner, &revokedAt)
+	`, hash[:]).Scan(&id, &name, &owner, &scopes, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Actor{}, nil
 	}
@@ -158,7 +159,13 @@ func (s *server) personalTokenActor(ctx context.Context, plaintext string) (mode
 	`, hash[:]); err != nil {
 		return model.Actor{}, fmt.Errorf("record agent token use: %w", err)
 	}
-	return model.Actor{Kind: "session", Owner: &owner}, nil
+	// The token's own row says what it may do, and it names the credential that acted: the
+	// person's token, not the person at a browser.
+	return model.Actor{
+		Kind:       "session",
+		Owner:      &owner,
+		Credential: &model.Credential{Scopes: scopes, TokenID: id, TokenName: name},
+	}, nil
 }
 
 func newAgentToken() (string, [sha256.Size]byte, error) {
@@ -172,7 +179,7 @@ func newAgentToken() (string, [sha256.Size]byte, error) {
 
 func scanAgentToken(row rowScanner) (model.AgentToken, error) {
 	var token model.AgentToken
-	if err := row.Scan(&token.ID, &token.Name, &token.Prefix, &token.CreatedAt, &token.LastUsedAt, &token.RevokedAt); err != nil {
+	if err := row.Scan(&token.ID, &token.Name, &token.Prefix, &token.Scopes, &token.CreatedAt, &token.LastUsedAt, &token.RevokedAt); err != nil {
 		return model.AgentToken{}, fmt.Errorf("scan agent token: %w", err)
 	}
 	return token, nil
