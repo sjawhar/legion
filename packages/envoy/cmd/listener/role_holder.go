@@ -54,17 +54,23 @@ func (s roleHolderSessions) Holder(ctx context.Context, sessionID string) (sessi
 // state, so a caller that used to read this answer as "the role is free now" is told plainly that
 // the claim still stands.
 type roleHolderError struct {
-	Error         string        `json:"error"`
-	Reason        roles.State   `json:"reason"`
-	Holder        string        `json:"holder,omitempty"`
-	HolderState   session.State `json:"holder_state,omitempty"`
-	LastSeen      *int64        `json:"last_seen,omitempty"`
-	ClaimReleased *bool         `json:"claim_released,omitempty"`
+	Error       string        `json:"error"`
+	Reason      roles.State   `json:"reason"`
+	Holder      string        `json:"holder,omitempty"`
+	HolderState session.State `json:"holder_state,omitempty"`
+	// ClaimRevision is the role's claim revision, as the 200 reports it: the revision of the
+	// claim a lapsed holder still holds, and zero for an unclaimed role, so a scheduler
+	// reading this 404 can claim the role with if_claim_revision and have that claim refused
+	// if the role moved in between.
+	ClaimRevision uint64 `json:"claim_revision"`
+	LastSeen      *int64 `json:"last_seen,omitempty"`
+	ClaimReleased *bool  `json:"claim_released,omitempty"`
 }
 
 func writeRoleHolderError(w http.ResponseWriter, role string, result roles.Resolution) {
 	response := roleHolderError{
-		Reason: result.State,
+		Reason:        result.State,
+		ClaimRevision: result.ClaimRevision,
 	}
 	switch result.State {
 	case roles.Unclaimed:

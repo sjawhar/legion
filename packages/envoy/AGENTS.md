@@ -3420,7 +3420,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   one naming no holder, or JSON that is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After` (`writeRoleClaimUnreadable`), because the bus answered and a retry reads the same record.
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
-  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the `holder`, its `holder_state` (`unresponsive` inside the gone horizon, `gone` past it), `claim_released: false`, since nothing here releases a claim, and a `last_seen` whenever the listener can still name one (`session.LastSeenMemory`, 2 hours).
+  It answers `404 {"error":…,"reason":"unclaimed","claim_revision":0}` for a role with no claim, or `reason: "holder_lapsed"` with the `holder`, its `holder_state` (`unresponsive` inside the gone horizon, `gone` past it), `claim_released: false`, since nothing here releases a claim, a `last_seen` whenever the listener can still name one (`session.LastSeenMemory`, 2 hours), and the `claim_revision` of the claim that still stands, which a conditional claim takes as its `if_claim_revision`.
   A later attempt gives that `unclaimed` 404 too, the claim being gone, but never `holder_lapsed`:
   a holder it finds past the live window keeps its claim and fails that attempt alone.
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
@@ -3489,6 +3489,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   A role store call that did not answer within its cap or that budget (the claim read or the holder's session read) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
   and a claim record no read can decode is, as on the publish route, `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After`.
+  Every holder answer, the 200 and the 404 alike, carries `claim_revision`: the `envoy_roles` revision of the role's claim record as this lookup leaves it, which `/v1/roles/set` takes back as `if_claim_revision` (the 503s and the unreadable-record 500 above carry an error alone, as they always did).
+  It is the revision the live holder's claim was read at, the revision of a lapsed claim this lookup kept (a restored claim still inside its restart grace), and `0` for a role no record claims — an unclaimed one, and a lapsed holder whose claim this lookup released.
 
 - `/v1/roles/set` (POST)
 
@@ -3500,6 +3502,12 @@ Each item below names an endpoint and its method, then its contract, and an item
   A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
   The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
   The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
+  A claim carrying `if_claim_revision` is conditional: it lands only while the role's claim record is still at that revision, the one a `/v1/roles/<role>` lookup reported as `claim_revision`, and `0` names a role with no claim record at all, so such a claim lands only while none exists.
+  Any other revision in the bucket, a record where the claim names none, or none where it names one is `409 {error, role, holder, claim_revision}`, where `claim_revision` is the revision the bucket does hold (`0` for no record) and `holder` the session its claim names (empty for none), and so is a claim that passed that check and then lost its conditional write to a claim that landed in between.
+  **No claim record is written**, so the role keeps the holder the standing claim gave it: the precondition is weighed before the claimant's interest record is touched, and a claim that lost the conditional write rolls that record's topic back unless the winning claim names that same session, whose record then keeps the lane topic of the role it now holds (`store.Registry.SetRoleWithPrevious`, `store.ErrRoleClaimRevisionMismatch`).
+  The claimant's own session registration is refreshed before any of this, as it is on every claim this route takes, conditional or not.
+  A claim with no `if_claim_revision` is weighed by the soft and last-claim-wins rules alone, exactly as before the field.
+  It is how a scheduler turns a lookup of a role and the claim that follows into one decision, which neither last-claim-wins nor a soft claim can do: a claim that landed in between refuses this one rather than being overwritten by it.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)

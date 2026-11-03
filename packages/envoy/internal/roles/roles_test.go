@@ -13,13 +13,14 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// claims is a ClaimStore in memory: holder is the claim every read answers, readErr fails every
-// read, and reads counts them. It has no release and no write of any kind, as the interface it
-// implements has none.
+// claims is a ClaimStore in memory: holder is the claim every read answers, revision the role
+// bucket revision it was read at, readErr fails every read, and reads counts them. It has no
+// release and no write of any kind, as the interface it implements has none.
 type claims struct {
-	holder  string
-	readErr error
-	reads   int
+	holder   string
+	revision uint64
+	readErr  error
+	reads    int
 }
 
 func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
@@ -27,7 +28,11 @@ func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
 	if c.readErr != nil {
 		return store.RoleClaim{}, c.readErr
 	}
-	return store.RoleClaim{HolderSessionID: c.holder}, nil
+	claim := store.RoleClaim{HolderSessionID: c.holder}
+	if c.holder != "" {
+		claim.Revision = c.revision
+	}
+	return claim, nil
 }
 
 // sessions is a SessionLookup in memory: entries are the records it holds, remembered what it can
@@ -176,6 +181,52 @@ func TestResolveHolderNamesTheStepThatFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ClaimRevision is the revision of the claim record the resolution read, and a record stands
+// behind every holder here, since nothing releases one: the claim's own revision on a live holder
+// and on a lapsed one alike, zero where no claim stands, and zero for a claim read from a
+// firstHolder copy, which carries no revision. That revision is what a conditional claim names as
+// its precondition, so a scheduler can take the role of a holder that never came back.
+func TestResolveHolderReportsTheRevisionOfTheClaimItRead(t *testing.T) {
+	held := sessions{
+		Windows:    roles.Windows{Live: time.Minute, Horizon: time.Hour},
+		entries:    map[string]session.SessionEntry{"ses_live": registered(time.Second), "ses_stalled": registered(30 * time.Minute)},
+		remembered: map[string]int64{},
+	}
+	for _, tc := range []struct {
+		name   string
+		claims *claims
+		state  roles.State
+		want   uint64
+	}{
+		{"a live holder", &claims{holder: "ses_live", revision: 7}, roles.Live, 7},
+		{"a holder that stopped answering", &claims{holder: "ses_stalled", revision: 9}, roles.Lapsed, 9},
+		{"a holder with no record left", &claims{holder: "ses_departed", revision: 11}, roles.Lapsed, 11},
+		{"no claim", &claims{holder: "", revision: 7}, roles.Unclaimed, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, held, "reviewer")
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if resolution.State != tc.state || resolution.ClaimRevision != tc.want {
+				t.Fatalf("resolution %+v, want %s at claim revision %d", resolution, tc.state, tc.want)
+			}
+		})
+	}
+	t.Run("a holder read from a firstHolder copy", func(t *testing.T) {
+		bucket := &claims{holder: "ses_live", revision: 7}
+		resolution, err := roles.ResolveHolderFrom(context.Background(), bucket, func(string) (string, error) {
+			return "ses_live", nil
+		}, held, "reviewer")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if resolution.State != roles.Live || resolution.ClaimRevision != 0 || bucket.reads != 0 {
+			t.Fatalf("resolution %+v after %d claim reads, want live at revision 0 with no claim read", resolution, bucket.reads)
+		}
+	})
 }
 
 // No read starts once the context has ended: the answer is the context's error, naming the role,

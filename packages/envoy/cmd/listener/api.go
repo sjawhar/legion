@@ -1349,6 +1349,17 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // caller's attempt (writeStoreError). The store's own answers keep the answers they had: a held
 // role is a 409, a refused key a 413 or 400, and an unreadable claim the 503 or 500 it was.
 //
+// A claim that carries if_claim_revision is conditional: it lands only while the role's claim
+// record is still at that revision, the one GET /v1/roles/<role> reported as claim_revision, and
+// 0 names a role with no record at all. A revision the bucket no longer holds - when the claim is
+// read, or by the time its conditional write reaches the bucket - is a 409 of its own
+// (store.ErrRoleClaimRevisionMismatch), naming the role, the revision the bucket does hold as
+// claim_revision and its holder. No claim record is written, so the role keeps the holder the
+// standing claim gave it; the claimant's own session registration is refreshed before any of
+// this, as it is on every claim this route takes, conditional or not. It is how a scheduler
+// turns a read of a role and the claim that
+// follows into one decision, which neither last-claim-wins nor a soft claim can do.
+//
 // logger is registerV1Routes's own. One decision of this route is logged with it: a soft claim that
 // takes a role from the predecessor it names because the claimant's entry or the predecessor's
 // carries no client instance id, which is the one takeover the route cannot tell from a different
@@ -1384,6 +1395,16 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			// and the claim answers 409 naming it. Only honoured with soft;
 			// ignored otherwise.
 			PreviousSessionID string `json:"previous_session_id"`
+			// The revision GET /v1/roles/<role> reported as claim_revision when this
+			// claimant read the role. The claim lands only while the role bucket still
+			// holds that very revision, and 0 names a role with no claim record at all,
+			// so a claim with if_claim_revision: 0 lands only while none exists. Any
+			// other revision in the bucket, a record where this names none, or none
+			// where this names one is 409, and so is a claim that lost the race to a
+			// claim landing between this claimant's read and its write; no claim record
+			// is written. Omitted (null), the claim is weighed by the
+			// soft and last-claim-wins rules alone, exactly as before this field.
+			IfClaimRevision *uint64 `json:"if_claim_revision"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid json")
@@ -1476,7 +1497,17 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 				}
 			}
 		}
-		item, err := d.registry.SetRoleWithPrevious(ctx, body.SessionID, machineID, body.Role, previous, body.Soft, supersedable...)
+		item, err := d.registry.SetRoleWithPrevious(ctx, body.SessionID, machineID, body.Role, previous, body.Soft, body.IfClaimRevision, supersedable...)
+		var stale *store.ErrRoleClaimRevisionMismatch
+		if errors.As(err, &stale) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":          err.Error(),
+				"role":           stale.Role,
+				"holder":         stale.Holder,
+				"claim_revision": stale.Actual,
+			})
+			return
+		}
 		var held *store.ErrRoleHeld
 		if errors.As(err, &held) {
 			writeJSON(w, http.StatusConflict, map[string]string{
@@ -1508,6 +1539,12 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 // and is answered as the publish route answers it (writeBusUnavailable): the 503 with
 // Retry-After: 1 whose body begins busUnansweredPrefix and names the call, or the 413 and 400 a
 // refused key gets.
+//
+// Both answers carry claim_revision, the role bucket revision of the claim record the resolution
+// read: the revision the live holder's claim was read at on the 200, and on the 404 the revision
+// of a lapsed holder's claim, which stands until the role reaper takes it, or 0 for a role no
+// record claims. A scheduler reads it and hands it back as POST /v1/roles/set's
+// if_claim_revision, so its claim is refused if the role moved in between.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1539,15 +1576,16 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		// and as the holder's state is named on a publish answer: a caller reads one field on
 		// every role answer rather than inferring the state from the status code.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"role":         role,
-			"holder":       result.Holder,
-			"holder_state": result.HolderState,
-			"title":        result.Entry.Title,
-			"dir":          result.Entry.Dir,
-			"machine_id":   result.Entry.MachineID,
-			"host":         result.Entry.HostOrMachine(),
-			"capabilities": append([]string{}, result.Entry.Capabilities...),
-			"last_seen":    result.Entry.UpdatedAt,
+			"role":           role,
+			"holder":         result.Holder,
+			"holder_state":   result.HolderState,
+			"title":          result.Entry.Title,
+			"dir":            result.Entry.Dir,
+			"machine_id":     result.Entry.MachineID,
+			"host":           result.Entry.HostOrMachine(),
+			"capabilities":   append([]string{}, result.Entry.Capabilities...),
+			"last_seen":      result.Entry.UpdatedAt,
+			"claim_revision": result.ClaimRevision,
 		})
 	}
 }

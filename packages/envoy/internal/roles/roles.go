@@ -104,6 +104,15 @@ type Resolution struct {
 	// shorter than that horizon, so a caller that gives a dead holder's role up reads this before
 	// it counts a holder dead.
 	LastSeen int64
+	// ClaimRevision is the claim store's revision of the claim record this resolution read, which
+	// GET /v1/roles/<role> reports as claim_revision and a conditional claim names as its
+	// precondition. A claim record stands behind every resolution that names a holder, since no
+	// resolution here takes one away, so it is the revision that record was read at on Live and
+	// Lapsed alike, and zero for Unclaimed. A resolution whose claim came from a firstHolder
+	// (ResolveHolderFrom) read no record and carries zero whatever the store holds, since the
+	// copy names a holder and no revision; a caller that reports the revision reads the claim
+	// store.
+	ClaimRevision uint64
 }
 
 // Step names the read a resolution failed at.
@@ -204,7 +213,10 @@ func ResolveHolderFrom(ctx context.Context, claims ClaimStore, firstHolder func(
 	if lastSeen == 0 {
 		lastSeen = sessions.LastSeen(holder)
 	}
-	resolved := Resolution{State: Lapsed, Holder: holder, HolderState: state, Entry: entry, LastSeen: lastSeen}
+	// The claim record stands whatever the holder's state: nothing here releases one. So the
+	// revision read is the revision a conditional claim can be made against, on Lapsed as on
+	// Live, which is how a scheduler takes a role from a holder that never came back.
+	resolved := Resolution{State: Lapsed, Holder: holder, HolderState: state, Entry: entry, LastSeen: lastSeen, ClaimRevision: claim.Revision}
 	if state == session.Live {
 		resolved.State = Live
 	}
