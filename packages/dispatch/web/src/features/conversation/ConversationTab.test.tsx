@@ -32,6 +32,7 @@ import type {
 import { stubMatchMedia } from "../margin/margin-fixture";
 import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { userPreferenceStorageKey } from "../shell/userPreference";
 import { writesOf } from "../writes/write-store";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
@@ -2238,3 +2239,41 @@ test("the read mark writes the issue's head seq as the reader, and retries an un
     viewport.restore();
   }
 });
+
+// The Conversation folds nothing and carries no order control: every thread in it reads the way
+// the reader set the Inbox's View menu.
+for (const order of ["oldest", "newest"] as const) {
+  test(`a thread's replies read ${order} first`, async () => {
+    const key = userPreferenceStorageKey("alice", "inbox.thread-order");
+    window.localStorage.setItem(key, order);
+    const stub = stubLists({
+      messages: [
+        thread(message("message-1"), [
+          message("reply-1", { created_at: "2026-09-09T00:01:00Z", in_reply_to: "message-1" }),
+          message("reply-2", { created_at: "2026-09-09T00:02:00Z", in_reply_to: "message-1" }),
+        ]),
+      ],
+    });
+    const queryClient = newQueryClient();
+    // The browser's order is the signed-in person's, so the card waits on who they are.
+    seedUnread(queryClient, { issue: "CORE-1" }, []);
+    const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+
+    try {
+      const replies = await screen.findByRole("list", { name: "Replies" });
+      await waitFor(() =>
+        expect(
+          Array.from(replies.querySelectorAll("li"), (item) => item.getAttribute("data-turn"))
+        ).toEqual(
+          order === "oldest"
+            ? ["message:reply-1", "message:reply-2"]
+            : ["message:reply-2", "message:reply-1"]
+        )
+      );
+    } finally {
+      view.unmount();
+      stub.restore();
+      window.localStorage.removeItem(key);
+    }
+  });
+}

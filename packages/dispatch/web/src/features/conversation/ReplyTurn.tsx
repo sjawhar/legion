@@ -27,8 +27,9 @@ export function TurnActions({ children }: { children: ReactNode }): ReactNode {
   );
 }
 
-/** The replies beneath a thread's root, oldest first, indented under a rule so the exchange
- *  reads as one thread. */
+/** The replies beneath a thread's root, in the reader's own thread order
+ *  (`features/inbox/thread-layout.ts`), indented under a rule so the exchange reads as one
+ *  thread. */
 export function ThreadReplies({ children }: { children: ReactNode }): ReactNode {
   return (
     <ol

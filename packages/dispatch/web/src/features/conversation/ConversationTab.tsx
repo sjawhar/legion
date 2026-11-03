@@ -37,6 +37,8 @@ import {
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
+import { useThreadOrder } from "../inbox/preferences";
+import { threadLayout } from "../inbox/thread-layout";
 import { writePin } from "../issue/pin-write";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
 import { ThreadCard } from "../margin/ThreadCard";
@@ -280,10 +282,14 @@ function Thread({
     owner: { issue: issueKey },
     threadId: root.root.id,
   });
+  // A thread in the Conversation folds nothing: the reader's order alone places its replies
+  // (`features/inbox/thread-layout.ts`).
+  const [threadOrder] = useThreadOrder();
+  const { shown } = threadLayout({ collapse: false, order: threadOrder, replies: root.replies });
   if (root.replies.length === 0) return null;
   return (
     <ThreadReplies>
-      {root.replies.map((reply) => (
+      {shown.map((reply) => (
         <ConversationReply
           agents={agents}
           currentReplyId={currentReplyId}

@@ -1714,7 +1714,7 @@ test("a resolved ask keeps its question and options and carries a resolution bad
   }
 });
 
-test("AskCard shows the newest two replies, expands older replies, and puts a fresh reply first", async () => {
+test("AskCard shows the newest two replies, expands the earlier ones, and puts a fresh reply last", async () => {
   const input = answered(ask(), ["Ship"]);
   let replies = [
     reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
@@ -1754,22 +1754,22 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
   try {
     const threadElement = await view.findByTestId("thread-ask-1");
     await waitFor(() =>
-      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+      expect(shownReplyBodies(threadElement)).toEqual(["Newer reply", "Newest reply"])
     );
     expect(view.queryByText("Middle reply")).toBeNull();
 
-    const showMore = view.getByRole("button", { name: "Show 3 more replies" });
+    const showMore = view.getByRole("button", { name: "Show 3 earlier replies" });
     expect(showMore.getAttribute("aria-expanded")).toBe("false");
     expect(showMore.getAttribute("aria-controls")).not.toBeNull();
     showMore.focus();
     fireEvent.click(showMore);
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual([
-        "Newest reply",
-        "Newer reply",
-        "Middle reply",
-        "Older reply",
         "Oldest reply",
+        "Older reply",
+        "Middle reply",
+        "Newer reply",
+        "Newest reply",
       ])
     );
     const showFewer = view.getByRole("button", { name: "Show fewer replies" });
@@ -1778,7 +1778,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     expect(controlledBy(showFewer)?.textContent).toContain("Middle reply");
     fireEvent.click(showFewer);
     await waitFor(() =>
-      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+      expect(shownReplyBodies(threadElement)).toEqual(["Newer reply", "Newest reply"])
     );
 
     fireEvent.click(view.getByRole("button", { name: "Write a reply" }));
@@ -1786,7 +1786,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     fireEvent.change(replyField, { target: { value: "Fresh reply" } });
     fireEvent.submit(replyField.closest("form") as HTMLFormElement);
     await waitFor(() =>
-      expect(shownReplyBodies(threadElement)).toEqual(["Fresh reply", "Newest reply"])
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Fresh reply"])
     );
   } finally {
     view.unmount();
@@ -1833,7 +1833,7 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
   }
 });
 
-test("a reply arriving while the older replies are shown lands first and keeps them shown", async () => {
+test("a reply arriving while the earlier replies are shown lands last and keeps them shown", async () => {
   const input = answered(ask(), ["Ship"]);
   let replies = [
     reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
@@ -1860,12 +1860,12 @@ test("a reply arriving while the older replies are shown lands first and keeps t
 
   try {
     const threadElement = await view.findByTestId("thread-ask-1");
-    fireEvent.click(await view.findByRole("button", { name: "Show 1 more reply" }));
+    fireEvent.click(await view.findByRole("button", { name: "Show 1 earlier reply" }));
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual([
-        "Newest reply",
-        "Middle reply",
         "Oldest reply",
+        "Middle reply",
+        "Newest reply",
       ])
     );
 
@@ -1880,10 +1880,10 @@ test("a reply arriving while the older replies are shown lands first and keeps t
 
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual([
-        "Arriving reply",
-        "Newest reply",
-        "Middle reply",
         "Oldest reply",
+        "Middle reply",
+        "Newest reply",
+        "Arriving reply",
       ])
     );
     const showFewer = view.getByRole("button", { name: "Show fewer replies" });
@@ -1924,18 +1924,18 @@ test("a link to a folded reply opens the fold and still lets the reader collapse
     // The link names a reply behind the fold, so the card lands with the fold open.
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual([
-        "Newest reply",
-        "Middle reply",
         "Oldest reply",
+        "Middle reply",
+        "Newest reply",
       ])
     );
 
     // The reader stays on that URL, so the link must not pin the fold open.
     fireEvent.click(view.getByRole("button", { name: "Show fewer replies" }));
     await waitFor(() =>
-      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Middle reply"])
+      expect(shownReplyBodies(threadElement)).toEqual(["Middle reply", "Newest reply"])
     );
-    const showMore = view.getByRole("button", { name: "Show 1 more reply" });
+    const showMore = view.getByRole("button", { name: "Show 1 earlier reply" });
     expect(showMore.getAttribute("aria-expanded")).toBe("false");
 
     fireEvent.click(showMore);

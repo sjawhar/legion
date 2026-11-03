@@ -62,7 +62,9 @@ import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { EarlierApproval } from "./EarlierApproval";
+import { useThreadOrder } from "./preferences";
 import { clearReplyDraft } from "./reply-drafts";
+import { useUnreadReplies } from "./thread-layout";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> =>
@@ -339,6 +341,18 @@ export function AskCard({
     owner: askRepliesOwner(displayedAsk),
     threadId: displayedAsk.id,
   });
+  // The one order every thread reads in, the reader's own (`preferences.ts`): it places the
+  // replies, this card's options and answer box, and the thread's reply composer.
+  const [threadOrder] = useThreadOrder();
+  const answerFirst = threadOrder === "newest";
+  // Which replies are unread, from the same set the mark above watches: an unread reply is never
+  // folded away. A card that marks nothing read reads nothing, so it folds by count alone.
+  const unreadReplies = useUnreadReplies({
+    enabled: markRead,
+    owner: askRepliesOwner(displayedAsk),
+    replies: threadQuery.data?.replies,
+    threadId: displayedAsk.id,
+  });
   const referencedByNode =
     reference === undefined || referencedByCount === 0 ? null : (
       <div className="mt-3">
@@ -365,7 +379,9 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        order={threadOrder}
         thread={threadQuery}
+        unread={unreadReplies}
         uploadOwner={uploadOwner}
       />
     ) : (
@@ -375,7 +391,9 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        order={threadOrder}
         thread={threadQuery}
+        unread={unreadReplies}
         uploadOwner={uploadOwner}
       />
     );
@@ -675,7 +693,9 @@ export function AskCard({
           answer again; your draft text is still here.
         </p>
       ) : null}
-      {threadNode}
+      {/* The options and the answer box sit where the order puts a thread's reply box: under
+          the question in Newest first, at the foot of the card in Oldest first. */}
+      {answerFirst ? null : threadNode}
       <form className="mt-3 space-y-3" onSubmit={submit} ref={trackForm}>
         {displayedAsk.options.length === 0 ? null : (
           <fieldset className="min-w-0 space-y-2">
@@ -766,6 +786,7 @@ export function AskCard({
           />
         ) : null}
       </form>
+      {answerFirst ? threadNode : null}
       <AskRecipients
         askId={displayedAsk.id}
         claimant={threadQuery.data?.claimant ?? null}
