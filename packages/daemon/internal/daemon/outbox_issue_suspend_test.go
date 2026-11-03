@@ -587,15 +587,22 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 		PluginContract: 24,
 	}
 	t.Cleanup(sup.stop)
-	// The root's architect works on, with its session; each child has one role stopped with its
-	// session retained, as a phase's end leaves it, supervised by this daemon.
+	// The root's architect works on, with its session, and its implementer works the implementing
+	// phase the root stands in: an issue that holds an admission slot has a worker with the task
+	// of its phase, and admission's pass starts one again for a slot whose worker has none
+	// (admit's resumeSlottedWorkers). Each child has one role stopped with its session retained,
+	// as a phase's end leaves it, supervised by this daemon.
 	architect := supervise.Claim{Token: "legion-legion-legion-208-architect", Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: root.Key, Role: claim.RoleArchitect,
 		State: supervise.StateWorking, Generation: 1, Session: "saved-architect", SessionFile: "/legion/sessions/architect.jsonl"}
+	implementer := supervise.Claim{Token: "legion-legion-legion-208-implementer", Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: root.Key, Role: claim.RoleImplementer,
+		State: supervise.StateWorking, Generation: 1, Session: "saved-implementer", SessionFile: "/legion/sessions/implementer.jsonl",
+		Pending: &supervise.Delivery{ID: "outbox:1", Task: "Continue root. Issue: LEGION-208. Phase: implementing.", Generation: 1,
+			Phase: phase.Implementing, QueuedAt: time.Now(), DeliveredAt: time.Now(), ConfirmedAt: time.Now()}}
 	planner := supervise.Claim{Token: "legion-legion-legion-209-planner", Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: done.Key, Role: claim.RolePlanner,
 		State: supervise.StateSuspended, Generation: 1, Session: "saved-planner", SessionFile: "/legion/sessions/planner.jsonl"}
 	tester := supervise.Claim{Token: "legion-legion-legion-210-tester", Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: parked.Key, Role: claim.RoleTester,
 		State: supervise.StateSuspended, Generation: 1, Session: "saved-tester", SessionFile: "/legion/sessions/tester.jsonl"}
-	for _, c := range []supervise.Claim{architect, planner, tester} {
+	for _, c := range []supervise.Claim{architect, implementer, planner, tester} {
 		if err := st.PutClaim(ctx, c); err != nil {
 			t.Fatal(err)
 		}

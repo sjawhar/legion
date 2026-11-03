@@ -183,7 +183,9 @@ func TestAPhaseEndedMessageRetriesEveryFailureButNoHolder(t *testing.T) {
 // redRunner is an outbox runner over an isolated database holding LEGION-208 in from, with the
 // pull request a red is about to settle on and the phase rows of the roles that worked it, wired to
 // the workflow engine as production wires it: a fact applied against the pool queues its rows, and
-// one drain runs them.
+// one drain runs them. The issue holds the admission slot its work holds: it stands in a worker
+// phase before the red and in another after it, so the implementer's start is delivered the
+// moment the drain reaches it rather than waiting for a slot (holdSlot).
 func redRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, publisher notify.Publisher) (*outbox, *supervisor, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
@@ -192,6 +194,7 @@ func redRunner(t *testing.T, from phase.Phase, status string, uncompleted bool, 
 	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-208", Title: "Workflow", Phase: from, Generation: 1, Status: status, Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, issue)
+	holdSlot(t, pool, issue.Key)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets",
 			Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1", HeadUpdatedAt: time.Now(), Failing: []string{},

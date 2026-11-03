@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -52,13 +53,18 @@ func (w *workflowRuntime) observeWaitedOn(ctx context.Context) []intake.IssueSta
 	return w.readObserved(ctx, keys)
 }
 
-// waitedOn is the distinct keys of the unfinished blockers of everything this daemon holds back,
-// in one short read-only transaction: the judgement the deciders themselves make, read rather
-// than remade (blockers.Blocked), over every root on the waiting line (record.Waiting) and every
-// recorded child a blocker holds at phase.Admitted. A candidate the rule exempts is read for
-// nothing, as promotion admits it whatever its links say and nothing consults the answer
-// (blockers.Exempt), and the keys come out in that judgement's own order, by the issue waiting
-// on them.
+// waitedOn is the distinct keys of everything this daemon holds something back for, in one short
+// read-only transaction: the judgement the deciders themselves make, read rather than remade
+// (blockers.Blocked), over every root on the waiting line (record.Waiting), every recorded child
+// a blocker holds at phase.Admitted, and every open Dispatch child holding a parent's own first
+// phase (workflow.ChildWaitsOf). A candidate the rule exempts is read for nothing, as promotion
+// admits it whatever its links say and nothing consults the answer (blockers.Exempt), and the
+// keys come out in that judgement's own order, by the issue waiting on them.
+//
+// An open child is in the set because the turn's re-read is what rewrites its mirror row. A
+// child the architect filed and has not released has no event this daemon consumes — it reaches
+// the mirror from a Dispatch listing alone — so without this its row would stand until the next
+// boot, and its move to icebox or to another parent would not end the wait it holds.
 func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -73,14 +79,30 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list the admission slots: %w", err)
 	}
-	waiting := record.Waiting(issues, slots)
-	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(issues, waiting))
+	facts, err := record.ReadLineFacts(ctx, tx, w.records, w.dispatchProject, issues)
 	if err != nil {
 		return nil, err
 	}
+	// The rows of every issue a blocker can hold are read before the line, which leaves such an
+	// issue out and cannot judge that itself (record.LineFacts.Held); the roots the line names
+	// are read after it, since only the line says which they are.
+	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(issues, nil))
+	if err != nil {
+		return nil, err
+	}
+	facts.Held = blockers.HeldIssues(rows, issues)
+	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, w.records, w.dispatchProject, issues, facts.Gates); err != nil {
+		return nil, err
+	}
+	waiting := record.WaitingIssues(record.Waiting(issues, slots, facts))
+	named, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(nil, waiting))
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(rows, named)
 	var keys []string
 	seen := make(map[string]struct{})
-	for _, blocked := range blockers.Blocked(rows, issues, waiting) {
+	for _, blocked := range blockers.Blocked(rows, issues, waiting, record.ChildWaitRows(facts.ChildWaits)) {
 		for _, blocker := range blocked.BlockedBy {
 			if _, repeated := seen[blocker]; repeated {
 				continue
@@ -124,8 +146,12 @@ func (w *workflowRuntime) readObserved(ctx context.Context, keys []string) []int
 			w.log.Warn("the controller tick's re-read of a blocker failed", "issue", key, "error", err)
 			continue
 		}
-		observed = append(observed, intake.IssueStatus{
-			Key: key, Status: issue.Status, Blockers: issue.BlockedBy, Seq: issue.LastSeq, ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread})
+		parent := ""
+		if issue.Parent != nil {
+			parent = *issue.Parent
+		}
+		observed = append(observed, intake.IssueStatus{Key: key, Status: issue.Status, Blockers: issue.BlockedBy, Seq: issue.LastSeq,
+			ClaimedBy: issue.Claim.Holder(), ClaimKnown: !issue.ClaimUnread, Parent: parent})
 	}
 	return observed
 }

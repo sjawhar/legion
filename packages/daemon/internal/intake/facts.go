@@ -408,11 +408,13 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 }
 
 // IssueStatus is one issue of the daemon's project as Dispatch shows it now: its key, its status,
-// the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
-// turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
-// same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue read behind
-// this view shows the claim unless it names no actor.
+// the keys it says it is blocked by, its Dispatch parent, and the Dispatch sequence that view
+// stands at. The periodic turn's re-read carries them on its ControllerTick, and blockers.Mirror
+// writes each through the same sequence-fenced write an event's own row takes, so a view older
+// than an event already applied changes nothing — except the parent, which record.PutDispatchIssue
+// writes outside that fence, since only a listing or a detail read carries one. ClaimedBy and
+// ClaimKnown are DispatchIssue's: the issue read behind this view shows the claim unless it names
+// no actor.
 type IssueStatus struct {
 	Key        string
 	Status     string
@@ -420,6 +422,10 @@ type IssueStatus struct {
 	Seq        int64
 	ClaimedBy  string
 	ClaimKnown bool
+	// Parent is the key of the issue's Dispatch parent, empty for a root or for a view that does
+	// not show one. The children-first rule reads the mirror's parent column to find what hangs
+	// under an issue (workflow.ChildWaits), so every observation that knows the parent carries it.
+	Parent string
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a

@@ -106,28 +106,33 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 // re-admission included: the hand-over made it a tree of its own for good. A key Reconcile holds,
 // the candidate's or its target's, is left for release to apply first, when respectHolds is set.
 //
-// It loops until a pass adopts nothing, and returns the issues and slots that pass read: it wrote
-// nothing, so they are the record as it stands. Each adoption makes a root a member, never a root
-// again, so the roots bound the passes. A candidate whose target root is itself a candidate waits
-// for the next pass, so nested queued roots join the live tree at the top once each, rather than
-// passing through the queued tree between; candidates whose parents form a cycle are each other's
-// targets and stay roots of their own.
+// It loops until a pass adopts nothing, and returns the issues, slots and line facts that pass
+// read: it wrote nothing, so they are the record as it stands, and promotion reuses them rather
+// than reading the tree lifecycles, the gates and the owed starts a second time. Each adoption
+// makes a root a member, never a root again, so the roots bound the passes. A candidate whose
+// target root is itself a candidate waits for the next pass, so nested queued roots join the
+// live tree at the top once each, rather than passing through the queued tree between;
+// candidates whose parents form a cycle are each other's targets and stay roots of their own.
 //
 // It reads the project's live records (record.Store.LiveIssues). A candidate's parent may be a
 // finished child of a live tree, which that read leaves out, so the parents it does not hold are
 // read by key (record.Store.IssuesOf); a target is a live tree's root, which it always holds.
-func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) ([]record.Issue, []record.Slot, error) {
+func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHolds bool) ([]record.Issue, []record.Slot, record.LineFacts, error) {
 	for {
 		issues, err := a.store.LiveIssues(ctx, tx, a.project)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list admission issues: %w", err)
+			return nil, nil, record.LineFacts{}, fmt.Errorf("list admission issues: %w", err)
 		}
 		slots, err := a.store.Slots(ctx, tx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list admission slots: %w", err)
+			return nil, nil, record.LineFacts{}, fmt.Errorf("list admission slots: %w", err)
+		}
+		facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+		if err != nil {
+			return nil, nil, record.LineFacts{}, err
 		}
 		// A target whose tree is not live is skipped here, so every target asked about is live.
-		live := record.LiveRoots(issues, slots)
+		live := record.LiveRoots(issues, facts)
 		recorded := make(map[string]record.Issue, len(issues))
 		for _, issue := range issues {
 			recorded[issue.Key] = issue
@@ -145,7 +150,7 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 		}
 		parents, err := a.store.IssuesOf(ctx, tx, a.project, unread)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read the parents of the queued roots: %w", err)
+			return nil, nil, record.LineFacts{}, fmt.Errorf("read the parents of the queued roots: %w", err)
 		}
 		for _, parent := range parents {
 			recorded[parent.Key] = parent
@@ -165,7 +170,7 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 			}
 			refusal, err := a.engine.AdoptionRefusal(ctx, tx, issue, target.Key)
 			if err != nil {
-				return nil, nil, fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
+				return nil, nil, record.LineFacts{}, fmt.Errorf("read whether %s joins the tree of %s: %w", issue.Key, target.Key, err)
 			}
 			if refusal == nil {
 				candidates = append(candidates, adoption{issue: issue, target: target, parent: *issue.Parent})
@@ -177,12 +182,12 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 				continue
 			}
 			if err := a.engine.Adopt(ctx, tx, candidate.issue, candidate.target, candidate.parent); err != nil {
-				return nil, nil, fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
+				return nil, nil, record.LineFacts{}, fmt.Errorf("adopt %s into the tree of %s: %w", candidate.issue.Key, candidate.target.Key, err)
 			}
 			adopted = true
 		}
 		if !adopted {
-			return issues, slots, nil
+			return issues, slots, facts, nil
 		}
 	}
 }

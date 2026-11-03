@@ -337,7 +337,7 @@ func startTask(t *testing.T, pool *pgxpool.Pool, role claim.Role) string {
 	t.Helper()
 	var task string
 	if err := pool.QueryRow(context.Background(), `select coalesce(max(payload->>'task'), '') from outbox
-		where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = $1`, string(role)).Scan(&task); err != nil {
+		where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '' and payload->>'role' = $1`, string(role)).Scan(&task); err != nil {
 		t.Fatalf("read the %s's start: %v", role, err)
 	}
 	return task

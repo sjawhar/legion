@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -124,12 +125,19 @@ func catchUpClock() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time
 // client, with admission at cap: what the boot catch-up runs on.
 func catchUpRig(t *testing.T, client dispatch.Client, cap int) (*pgxpool.Pool, *workflowRuntime) {
 	t.Helper()
+	return catchUpRigLogging(t, client, cap, quietLogger())
+}
+
+// catchUpRigLogging is catchUpRig writing the runtime's and admission's own lines to log, for a
+// test that reads what the daemon logged rather than what the store holds.
+func catchUpRigLogging(t *testing.T, client dispatch.Client, cap int, log *slog.Logger) (*pgxpool.Pool, *workflowRuntime) {
+	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, quietLogger())
-	admission := admit.New(records, engine, cap, "CAPTURE", quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, log)
+	admission := admit.New(records, engine, cap, "CAPTURE", log)
 	return pool, &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, log: quietLogger(), bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
+		handlers: []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
 }
 
 // bootCatchUp runs the boot's catch-up as the boot does: every root it reads is held in the
@@ -213,6 +221,9 @@ func TestCatchUpReadsAnAdmittedRootsAsksFromItsLastHandout(t *testing.T) {
 			return err
 		}
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
 			return err
 		}
 		return seedCaptureArchitect(ctx, tx, true)
@@ -604,6 +615,11 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if err := records.PutIssue(ctx, tx, captureRoot(phase.AwaitingPerson, &record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}})); err != nil {
 			return err
 		}
+		// The root's tree was opened when it was admitted: that row, not a slot, is what says
+		// it runs, and the resume's own first phase is started from the line of a live tree.
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
+			return err
+		}
 		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3})
 	})
 	if err := bootCatchUp(t, w); err != nil {
@@ -712,6 +728,9 @@ func slottedCapture(t *testing.T, pool *pgxpool.Pool, gate *record.DesignGate, c
 			return err
 		}
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
 			return err
 		}
 		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-200", Tree: "CAPTURE-200", Project: "CAPTURE", Title: "next", Phase: phase.Admitted,
@@ -913,6 +932,9 @@ func TestADelayedRegistrationDoesNotStrandARootAcrossASeedAndABoot(t *testing.T)
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: time.Now()}); err != nil {
 			return err
 		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
+			return err
+		}
 		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3})
 	})
 	ctx := context.Background()
@@ -1010,6 +1032,9 @@ func TestARootRecordedBeforeTheCursorGetsOneAtItsFirstHandout(t *testing.T) {
 			return err
 		}
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
 			return err
 		}
 		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-200", Tree: "CAPTURE-200", Project: "CAPTURE", Title: "next", Phase: phase.Admitted,

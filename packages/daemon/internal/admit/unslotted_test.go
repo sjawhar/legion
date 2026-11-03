@@ -29,11 +29,15 @@ func TestAWaitingRootMovedToARunningTreesStatusLeavesTheWorkflow(t *testing.T) {
 	for _, tc := range []struct {
 		name, actor, status string
 		phase               phase.Phase
+		// handedOverFrom is the tree a root carried its run out of: a root past admitted waits
+		// in the line only as a tree another tree handed over, since a root's own record is
+		// what says its generation has still to run (record.Waiting).
+		handedOverFrom string
 	}{
 		{name: "a person's in_progress", status: "in_progress", phase: phase.Admitted},
 		{name: "an outside session's in_progress", actor: "ses-outsider", status: "in_progress", phase: phase.Admitted},
 		{name: "an outside session's needs_review", actor: "ses-outsider", status: "needs_review", phase: phase.Admitted},
-		{name: "a person's in_progress on a root carried into implementing", status: "in_progress", phase: phase.Implementing},
+		{name: "a person's in_progress on a root carried into implementing", status: "in_progress", phase: phase.Implementing, handedOverFrom: "LEGION-200"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -42,7 +46,7 @@ func TestAWaitingRootMovedToARunningTreesStatusLeavesTheWorkflow(t *testing.T) {
 			seedSlotted(t, pool, "LEGION-1", "A")
 			seedWaiting(t, pool, "LEGION-5", "B")
 			waiting := issue(t, pool, "LEGION-5")
-			waiting.Phase = tc.phase
+			waiting.Phase, waiting.HandedOverFrom = tc.phase, tc.handedOverFrom
 			putIssue(t, pool, waiting)
 			assertWaiting(t, pool, []string{"LEGION-5"})
 
@@ -82,32 +86,23 @@ func TestAWaitingRootMovedToARunningTreesStatusLeavesTheWorkflow(t *testing.T) {
 	}
 }
 
-// A root admitted into a slot whose slot then went without its tree finishing — the state an
-// earlier release left, at any status only a running tree has — is released at the boot read, even
-// with a slot free: the controller is told, and nothing starts for it. A running root, one taken out
-// of the line by its label (a pause the label ends), and another project's root in the same store
-// are left as they are.
+// A root recorded in the workflow at a status only a running tree has, whose tree nothing will
+// open again — the state dispatch://INFRA-129 reported, which an earlier release left — is
+// released at the boot read, even with a slot free: the controller is told, and nothing starts
+// for it. Its tree holds no lifecycle, which is what says a tree runs now: a root of a tree that
+// does run holds no slot while it waits for its merge, in accepting or for its own first phase,
+// and the net must leave every one of those alone. A running root, one taken out of the line by
+// its label (a pause the label ends), and another project's root in the same store are left as
+// they are.
 func TestTheBootReadReleasesARootThatHeldNoSlotAndWaitedForNone(t *testing.T) {
 	for _, status := range []string{"in_progress", "testing", "needs_review", "retro"} {
 		t.Run(status, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			seedSlotted(t, pool, "LEGION-RUN", "A")
-			seedSlotted(t, pool, "LEGION-81", "B")
-			inTx(t, pool, func(tx pgx.Tx) {
-				records := record.NewStore()
-				stranded, err := records.Issue(context.Background(), tx, "LEGION-81")
-				if err != nil || stranded == nil {
-					t.Fatalf("read LEGION-81: %#v, %v", stranded, err)
-				}
-				stranded.Status, stranded.DispatchStatus, stranded.LastDispatchSeq = status, status, 5
-				if err := records.PutIssue(context.Background(), tx, *stranded); err != nil {
-					t.Fatalf("put LEGION-81: %v", err)
-				}
-				if err := records.ReleaseSlot(context.Background(), tx, "LEGION-81"); err != nil {
-					t.Fatalf("release LEGION-81's slot: %v", err)
-				}
-			})
+			putIssue(t, pool, record.Issue{Key: "LEGION-81", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject,
+				Title: "LEGION-81", Tree: "LEGION-81", Phase: phase.Admitted, Generation: 1, Status: status, DispatchStatus: status, Rank: "B",
+				HandedOver: true, LastDispatchSeq: 5})
 			putIssue(t, pool, record.Issue{Key: "LEGION-OFF", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-OFF", Tree: "LEGION-OFF",
 				Phase: phase.Admitted, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "C", LastDispatchSeq: 5})
 			putIssue(t, pool, record.Issue{Key: "OTHER-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "OTHER", Title: "OTHER-1", Tree: "OTHER-1",

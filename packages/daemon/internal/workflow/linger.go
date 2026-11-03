@@ -203,16 +203,6 @@ func awaitsMerge(issue record.Issue) bool {
 	return issue.Phase == phase.AwaitingMerge || issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge
 }
 
-// InWorkflow says whether an issue is in the workflow: its status is one the workflow runs in and
-// its phase short of done. One still admitted counts, since it will run — a root reopened inside
-// its linger (admit's readmit) stands in `admitted` with no role's phase until its architect
-// reaches planning, and is running again from the reopen. It is the production check's "runs
-// again" predicate (check.go) and the outbox's (checkLookHolds): a look of an issue that runs
-// again would resume the implementer and relaunch its Sandbox under the run, so none starts.
-func InWorkflow(issue record.Issue) bool {
-	return !record.OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
-}
-
 // beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
 // if it has one, as a child's leave does. Its one caller (leave) calls it once per close: a root
 // that already lingers leaves no second time.

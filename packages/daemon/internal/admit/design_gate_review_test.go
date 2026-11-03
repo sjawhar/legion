@@ -310,8 +310,15 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 				Since:                record.EventMark{Seq: 10},
 			})
 
-			if got := issue(t, pool, "LEGION-100"); got.Phase != phase.Admitted || got.Awaiting != nil {
-				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it admitted with no wait", got)
+			// A root whose gate stands open takes its slot for its own first phase, which the
+			// registration neither causes nor stops; one whose gate is closed stays admitted
+			// with its architect's spec still to be approved.
+			stands := phase.Admitted
+			if tc.open {
+				stands = phase.Planning
+			}
+			if got := issue(t, pool, "LEGION-100"); got.Phase != stands || got.Awaiting != nil {
+				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it %s with no wait", got, stands)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
@@ -366,8 +373,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			if opened := gateNotices(t, pool, "LEGION-100", "design-approved"); len(opened) != 0 {
 				t.Fatalf("design-approved notices = %#v, want none for a superseded review", opened)
 			}
-			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open || !reflect.DeepEqual(*gate, tc.gate) {
-				t.Fatalf("gate after the superseded review = %#v, want it unchanged: %#v", gate, tc.gate)
+			// PutGate records that a person's approval once stood on the gate's current version
+			// (DesignGate.EverOpened), which is how a root at admitted after its gate opened is
+			// told from one whose architect is still writing the spec.
+			want := tc.gate
+			want.EverOpened = classify.DesignGateOpen(tc.gate)
+			if gate := storedGate(t, pool, "LEGION-100"); classify.DesignGateOpen(*gate) != tc.open || !reflect.DeepEqual(*gate, want) {
+				t.Fatalf("gate after the superseded review = %#v, want it unchanged: %#v", gate, want)
 			}
 		})
 		// The same late review on a root waiting on its gate from a later hand-back answers nothing:
@@ -379,9 +391,14 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: record.EventMark{Seq: 20, At: reviewedAt.Add(time.Minute)}})
 			seedGate(t, pool, tc.gate)
 			applyFact(t, pool, admission, "superseded-review", tc.late)
-			got := issue(t, pool, "LEGION-100")
-			if got.Answered() != tc.open || tc.open && got.Awaiting.AnsweredBy != record.AnsweredByApproval {
-				t.Fatalf("root after a review the person had already followed with another = %#v, want answered %t, and by the open gate's approval if so", got, tc.open)
+			if tc.open {
+				// The gate stands open, so it answers the wait and the root resumes in that
+				// same pass: its architect's turns need no slot once the gate has opened.
+				assertResumed(t, pool)
+				return
+			}
+			if got := issue(t, pool, "LEGION-100"); got.Answered() {
+				t.Fatalf("root after a review the person had already followed with another = %#v, want it still waiting", got)
 			}
 		})
 	}

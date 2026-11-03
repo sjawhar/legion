@@ -5,13 +5,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -342,17 +340,29 @@ func (e *Engine) rejectStaleHandover(ctx context.Context, tx pgx.Tx, issue recor
 	return true, nil
 }
 
-// admittedRoot says whether issue is the root of a tree that runs: it holds an admission slot and
-// does not linger. A root waiting for a slot runs nothing yet.
+// admittedRoot says whether issue is the root of a tree that is running now: its lifecycle
+// stands open under the workflow's own authority and it does not linger. It is the lifecycle
+// rather than a slot because a slot counts one issue at work now, and a running tree holds none
+// of its own while every issue in it waits in the line.
+//
+// It is deliberately not record.TreeLive, which also calls a root waiting in the line for its
+// tree to be opened live, so that a todo child of such a root records into the tree that will
+// adopt it. Its one caller asks whether a session's lifecycle status write lands on a tree
+// already running (sessionStatusWrite), and a root waiting for its slot runs nothing: where no
+// tree runs, an outside session's write is a person's move, which is the whole of the question.
 func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (bool, error) {
 	if !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
 		return false, nil
 	}
-	slots, err := e.store.Slots(ctx, tx)
+	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
 		return false, err
 	}
-	return slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == issue.Key }), nil
+	lifecycle, _, err := e.store.TreeLifecycle(ctx, tx, project, issue.Key)
+	if err != nil {
+		return false, err
+	}
+	return lifecycle.OpenUnderWorkflow(), nil
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
@@ -459,19 +469,26 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
-// enterChild records a todo child under root's live tree, admitted at generation on the repository
-// at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child keeps the repository it was first recorded with, but not
-// the mark of a run it had before (record.Issue.TakenBack): the run this opens is a new one, which
-// has stood in no phase yet, and a blocker it now waits on holds it like any other child's.
+// enterChild records a todo child under root's live tree, admitted at generation on the
+// repository at names, at its default branch and with GitHub's spelling of it. A re-entered child
+// keeps the repository it was first recorded with, but not the mark of a run it had before
+// (record.Issue.TakenBack): the run this opens is a new one, which has stood in no phase yet, and
+// a blocker it now waits on holds it like any other child's.
 //
-// It is the one door every child start funnels through — the architect's release_children, a
-// person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
-// child that waits on an unfinished Dispatch issue is withheld. Such a child is recorded and left
-// at phase.Admitted, exactly as a child whose tree's design gate is still closed is, and
-// StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
-// read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
-// this same transaction, before the engine was asked anything.
+// It is the one door every child enters its tree through — the architect's release_children, a
+// person's move of a child to todo, and a rerun or reopen through ReenterChild — and it starts
+// nothing. A child is an issue the admission cap counts now, so what starts its first phase is
+// its slot: it waits at phase.Admitted in the waiting line (record.Waiting), behind its tree's
+// design gate and behind whatever unfinished Dispatch issue it names, and admission's promotion
+// starts it (gateOpened) when the line reaches it. The gate and the blockers are therefore read
+// where the line is read, once for the whole project, rather than here once per child.
+//
+// A child entering beneath an ancestor the daemon has already accepted waits for that ancestor
+// to close before anything starts it (record.AcceptedAncestor, which the waiting line reads),
+// and the tree's architect is told so here. The two doors an agent uses refuse such a child
+// outright (api's CHILD_UNDER_ACCEPTED_PARENT), so what reaches this is a person's own move to
+// todo, which the daemon records rather than undoes: the record is the honest one, and the
+// notice says what the daemon will and will not do with it.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
@@ -480,23 +497,11 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, []string{child.Key})
-	if err != nil {
+	ancestor, err := record.AcceptedAncestorOf(ctx, e.store, tx, root.Tree, child.Key, parentKey)
+	if err != nil || ancestor == "" {
 		return err
 	}
-	if waits := blockers.Holds(rows, child); len(waits) > 0 {
-		e.logOnCommit(ctx, "workflow: the child waits on unfinished work, so it is recorded admitted and not started",
-			"issue", child.Key, "tree", child.Tree, "blockers", waits)
-		return nil
-	}
-	gate, err := e.store.Gate(ctx, tx, root.Key)
-	if err != nil {
-		return err
-	}
-	if gate != nil && classify.DesignGateOpen(*gate) && !root.AwaitingPerson() {
-		return e.gateOpened(ctx, tx, child)
-	}
-	return nil
+	return e.notice(ctx, tx, child.Key, ChildUnderAcceptedParentNotice(child.Key, ancestor))
 }
 
 func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComplete) (intake.Result, error) {
@@ -655,7 +660,7 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	// workflow (one reopened inside its linger with a look still open at the reopen) takes the
 	// live-phase path below instead, where the failure holds the phase and is told; its stale look
 	// ends at the look's own bound (check_look), which endLookPending keeps for the run.
-	if fact.Role == claim.RoleImplementer && !InWorkflow(*issue) {
+	if fact.Role == claim.RoleImplementer && !record.InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
@@ -792,11 +797,16 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 // signOff is the architect's acceptance of a reviewed head: it moves the issue from accepting to
 // retro and starts the implementer there, told the review's handoff and the pull request as the
 // approval told it before acceptance existed. Outside accepting it changes nothing and says so.
-// Nothing beneath the issue holds it: the acceptance is of the issue's own reviewed head, and the
-// tree's order is kept at the close instead, where a root whose pull request merged while any
-// other issue of its tree is still in the workflow waits in awaiting_merge until the last of them
-// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request out
-// of retro, READY and the merge queue for as long as any issue beneath it ran.
+//
+// It is refused while any issue beneath the one being accepted is still in the workflow
+// (OpenBeneath), with SIGNOFF_CHILD_IN_WORKFLOW naming them. A parent's work is proved by a head
+// that carries its children's merges: accepted first, it would reach retro, READY and the merge
+// queue with their work not in it, which is what dispatch://INFRA-980 forbids. The acceptance
+// was held this way once before (dispatch://INFRA-229) and the hold was taken off because a
+// parent's approved pull request then waited outside the merge queue and went stale against its
+// base; under children-first a parent starts its own phases only after its children have left,
+// so by the time it is accepted there is nothing left to wait for, and the refusal is the
+// backstop for a child filed after the parent started.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -804,6 +814,14 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	}
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
+	}
+	open, err := e.openBeneath(ctx, tx, *issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if len(open) > 0 {
+		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s is not accepted while these issues beneath it are still in the workflow: %s. A parent's head proves its children's merged work, so it is accepted after them: take each one to done, or out of the workflow with park_child, and sign off again",
+			issue.Key, strings.Join(open, ", "))), nil
 	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
@@ -958,146 +976,52 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 	return Row{}, false
 }
 
-// advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
-// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
-// gate it was held by is its tree's, the issues it waits on are its own, and only
-// StartUnblockedChildren, when the last of them closes, starts it.
+// StartFirstPhase starts the first phase of one issue the waiting line has just given a slot to,
+// and tells its tree's architect that a child of it started (ChildStartedNotice). It is the
+// half of the old gate-opening behaviour that needs a slot, and it is deliberately the only half
+// here.
 //
-// The tree's root is started whatever its links say. Its links are read once, when promotion
-// admits it into a slot, and a root at admitted here has passed that moment: it holds its slot and
-// its tree runs, and a blocker added to a tree already running never re-checks it. Held here, it
-// would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
-// the state's `blocked` names no slotted root — so it would be neither started nor reported.
-func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
-	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
+// It replaces the two doors that used to start a first phase themselves, the gate's opening
+// (advanceAdmittedTree) and a child's release (enterChild), which are gone. Neither could stay:
+// an issue that started at its gate's opening would be in a worker phase with no slot, and would
+// then join the line's first part by the moment its gate opened rather than by its tree root's
+// Dispatch rank, so a tree that keeps filing children would take the slots a higher-ranked root
+// is waiting for. An issue that has not started waits at admitted in the line's second part,
+// which is ordered by that rank, and this is where it starts.
+//
+// Choosing the issues — a member of a live tree, standing where enterChild left it
+// (phase.Admitted) with its tree's design gate open and no unfinished Dispatch issue of its own
+// — happens outside the cap loop, once per admission pass, over the facts that pass already read
+// (record.Waiting and the mirror rows admission loads beside it). That selection needs no slot
+// and costs nothing, so a pass that stops at a held candidate still makes it, and the state's
+// `blocked` still reports exactly what the deciders decided.
+//
+// The start itself, its log line and the architect's notice all say that the issue starts
+// planning, so all of them wait for the slot and travel together: told for an issue that got no
+// slot, the notice would tell the tree's architect that a child began work it has not begun. A
+// pass that stops at a held candidate therefore withholds the start and the notice of it alike,
+// which is the honest pair.
+//
+// waited is every issue the mirror row still names, in Dispatch's own order, all of them done by
+// now — or empty, when the issue named none or someone took its blocked-by links off while it
+// waited, which the notice's reason says instead. A tree's own root gets no notice: the
+// architect this would tell is the worker being started, and its own task says it is starting.
+func (e *Engine) StartFirstPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, waited []string) error {
+	if err := e.gateOpened(ctx, tx, issue); err != nil {
+		return err
+	}
+	if claim.IsTreeRoot(issue.Key, issue.Tree) {
+		e.logOnCommit(ctx, "workflow: the root of this tree takes its slot and starts its own first phase", "issue", issue.Key)
 		return nil
 	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
-		return err
+	if len(waited) == 0 {
+		e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
+			"issue", issue.Key, "tree", issue.Tree)
+	} else {
+		e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
+			"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(members, nil))
-	if err != nil {
-		return err
-	}
-	for _, issue := range members {
-		if issue.Phase != phase.Admitted {
-			continue
-		}
-		if waits := blockers.Holds(rows, issue); len(waits) > 0 {
-			e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
-				"issue", issue.Key, "tree", root.Tree, "blockers", waits)
-			continue
-		}
-		if err := e.gateOpened(ctx, tx, issue); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// StartUnblockedChildren starts every child among issues that nothing holds any longer: one that is
-// no tree root of its own, stands where enterChild or the gate's opening left it (phase.Admitted),
-// has no unfinished blocker in the mirror rows, and whose tree would start it now — live
-// (record.TreeLive) with its design gate open. One whose tree is still closed is the gate's, whose
-// own opening starts it.
-//
-// Such a child either waited until the last issue it named closed, or had its links taken off while
-// it waited: an edit that changes no status, which the engine's own handling of the event does not
-// act on, and after which the state's `blocked` no longer names it. Left here, that child would
-// stand unstarted and unreported for good; it starts as a child whose tree's gate opened onto it
-// does. Either way its tree's architect is told it starts (ChildUnblockedNotice), with a reason
-// saying which of the two cleared its hold: a start nobody hears of is the very silence the hold's
-// report exists to remove.
-//
-// Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
-// so every fact, tick, hold release and boot reconcile is a look at every held child. What the
-// trees of those children are read with is one read each, not one per tree: a project whose trees
-// each hold such a child would otherwise cost a root, a slot list, a record list and a gate per
-// tree on every fact, under the one fact lock (intake.ApplyFact). The roots come from issues,
-// which the caller read; the slots are read once (their own read, since promotion has just
-// written to them); and the gates of the candidate trees come in one read (record.Store.Gates).
-func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
-	var candidates []record.Issue
-	trees := map[string]struct{}{}
-	for _, issue := range issues {
-		// Startable: holdable, with nothing it waits on unfinished. blockers.Holds cannot gate
-		// this, since it is nil for an issue that is not holdable too.
-		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
-			continue
-		}
-		candidates = append(candidates, issue)
-		trees[issue.Tree] = struct{}{}
-	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	starts, err := e.treesStartingChildren(ctx, tx, issues, slices.Sorted(maps.Keys(trees)))
-	if err != nil {
-		return err
-	}
-	for _, issue := range candidates {
-		if !starts[issue.Tree] {
-			continue
-		}
-		if err := e.gateOpened(ctx, tx, issue); err != nil {
-			return err
-		}
-		waited := rows[issue.Key].Blockers
-		if len(waited) == 0 {
-			e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
-				"issue", issue.Key, "tree", issue.Tree)
-		} else {
-			e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
-				"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
-		}
-		if err := e.notice(ctx, tx, issue.Key, ChildUnblockedNotice(issue.Key, issue.Tree, waited)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// treesStartingChildren says, for each tree of trees, whether it starts a child of its own now:
-// its root is among issues, not waiting on a person (a root whose wait a person's approval
-// answered, opening its gate, starts its children with its resume, advanceAdmittedTree, once it
-// has its slot again), the tree is live, and its design gate is open — the conditions enterChild
-// and advanceAdmittedTree between them stand for. issues is the caller's read of the project's
-// records, which holds every root of those trees; a tree whose root it does not hold starts
-// nothing, as one with no record does.
-func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, trees []string) (map[string]bool, error) {
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("list admission slots: %w", err)
-	}
-	// Liveness is record.LiveRoots, TreeLive over the records already in hand: a root the waiting
-	// line holds under an unreleased child (the ancestry hold) is live there and so is live here,
-	// and a lingering root is live in neither.
-	live := record.LiveRoots(issues, slots)
-	// A root waiting on a person starts no child of its own: it gives its slot back while it
-	// waits and its tree stays live, so liveness alone would read it as a tree that starts its
-	// children. Its children start with its resume (advanceAdmittedTree).
-	waits := map[string]bool{}
-	for _, issue := range issues {
-		waits[issue.Key] = issue.AwaitingPerson()
-	}
-	open := make([]string, 0, len(trees))
-	for _, tree := range trees {
-		held, recorded := waits[tree]
-		if _, running := live[tree]; recorded && !held && running {
-			open = append(open, tree)
-		}
-	}
-	gates, err := e.store.Gates(ctx, tx, open)
-	if err != nil {
-		return nil, err
-	}
-	starts := make(map[string]bool, len(trees))
-	for _, tree := range open {
-		gate, held := gates[tree]
-		starts[tree] = held && classify.DesignGateOpen(gate)
-	}
-	return starts, nil
+	return e.notice(ctx, tx, issue.Key, ChildStartedNotice(issue.Key, issue.Tree, waited))
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row

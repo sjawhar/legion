@@ -108,28 +108,50 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 	return unfinished
 }
 
-// Blocked is every issue Legion is waiting to start that waits on an issue Dispatch has not
-// finished, by issue key: what the daemon's state shows under `blocked` and what a tick notice
-// tells the controller, from the one judgement both readings and both deciders share.
+// Blocked is every issue Legion is waiting to start that waits on another issue, by issue key:
+// what the daemon's state shows under `blocked` and what a tick notice tells the controller,
+// from the one judgement both readings and both deciders share.
 //
-// It is the two decisions themselves, read rather than made: a root of waiting — the line
-// admission promotes from, which the caller passes as it computes it — that promotion skips
-// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holds;
-// workflow.Engine.StartUnblockedChildren starts it once Holdable meets nothing Unfinished). A
-// candidate the rule exempts is never judged, as the decider that would admit it does not judge
-// it either (Exempt): what promotion starts whatever its links say is never reported as waiting
-// on them.
-func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
-	blocked := make([]record.BlockedIssue, 0, len(waiting))
+// It is the decisions themselves, read rather than made: a root of waiting — the line admission
+// promotes from, which the caller passes as it computes it — that promotion skips (WaitsOn), and
+// a recorded child the workflow holds at `admitted` (Holds; admission starts it once Holdable
+// meets nothing Unfinished). A candidate the rule exempts is never judged, as the decider that
+// would admit it does not judge it either (Exempt): what promotion starts whatever its links say
+// is never reported as waiting on them.
+//
+// more is what a decider outside this package has already judged and rendered, which today is
+// the children-first wait (workflow.ChildWaitRows): that rule reads the mirror's parent column
+// against the daemon's records rather than an issue's blocked-by links, so it cannot be made
+// here, and it must still reach the one list a reader reads. A key both deciders name keeps one
+// row, with each one's issues in it — the deciders are independent, and an issue can wait on a
+// link and on a child at once.
+func Blocked(rows map[string]Row, issues, waiting []record.Issue, more []record.BlockedIssue) []record.BlockedIssue {
+	blocked := make([]record.BlockedIssue, 0, len(waiting)+len(more))
+	at := make(map[string]int, len(waiting)+len(more))
+	add := func(key string, waits []string) {
+		if index, named := at[key]; named {
+			for _, wait := range waits {
+				if !slices.Contains(blocked[index].BlockedBy, wait) {
+					blocked[index].BlockedBy = append(blocked[index].BlockedBy, wait)
+				}
+			}
+			return
+		}
+		at[key] = len(blocked)
+		blocked = append(blocked, record.BlockedIssue{Issue: key, BlockedBy: waits})
+	}
 	for _, issue := range waiting {
 		if waits := WaitsOn(rows, issue); len(waits) > 0 {
-			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: waits})
+			add(issue.Key, waits)
 		}
 	}
 	for _, issue := range issues {
 		if waits := Holds(rows, issue); len(waits) > 0 {
-			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: waits})
+			add(issue.Key, waits)
 		}
+	}
+	for _, row := range more {
+		add(row.Issue, row.BlockedBy)
 	}
 	slices.SortFunc(blocked, func(a, b record.BlockedIssue) int { return cmp.Compare(a.Issue, b.Issue) })
 	return blocked
@@ -183,14 +205,28 @@ func Holdable(issue record.Issue) bool {
 // Holds is what holds issue where it stands: the issues it waits on that are not done
 // (Unfinished) when a blocker can hold it there (Holdable), and nothing otherwise. It exempts
 // nothing: a child held at phase.Admitted is held whatever its mark (Exempt). It is the one
-// statement of the child hold rule — what a held child waits on — which the workflow's hold
-// (workflow.Engine.enterChild, its advanceAdmittedTree, and the linger's hand-over in
-// settleUnfinished) and the child half of Blocked all read. Its converse, a child nothing holds
-// any longer, is Holdable with nothing Unfinished, which StartUnblockedChildren asks directly:
-// an empty Holds cannot say that, since it is empty for an issue that is not holdable too.
+// statement of the child hold rule — what a held child waits on — which the waiting line's own
+// hold (record.LineFacts.Held, through HeldIssues) and the child half of Blocked both read.
 func Holds(rows map[string]Row, issue record.Issue) []string {
 	if !Holdable(issue) {
 		return nil
 	}
 	return Unfinished(rows, issue.Key)
+}
+
+// HeldIssues is the set of issues among issues that a blocker holds where they stand (Holds),
+// which is what the waiting line takes as record.LineFacts.Held: the line must not offer a slot
+// to an issue whose first phase an unfinished Dispatch issue holds, and it cannot judge that
+// itself, since internal/record may not read this package. Every caller that reads the line
+// therefore loads the mirror rows first (Load over Judged with no line) and fills the field from
+// here, so the line, the promotion's own skip and the state's `blocked` all answer from one
+// judgement of one read.
+func HeldIssues(rows map[string]Row, issues []record.Issue) map[string]struct{} {
+	held := make(map[string]struct{})
+	for _, issue := range issues {
+		if len(Holds(rows, issue)) > 0 {
+			held[issue.Key] = struct{}{}
+		}
+	}
+	return held
 }

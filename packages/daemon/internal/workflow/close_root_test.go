@@ -118,11 +118,14 @@ func TestCloseRootIsRefusedOnceATreeHasStartedOrForAChild(t *testing.T) {
 func TestAPhaseChangeIsOneJournalLine(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedTreeLifecycle(t, pool, "LEGION-1")
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateOff, slog.New(slog.NewTextHandler(&logged, nil)))
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "gate", intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register the gate: %v", err)
 	}
+	// The gate's opening releases the root; the waiting line starts its first phase.
+	startUnblockedChildren(t, pool, engine)
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		if strings.Contains(line, `msg="workflow: phase changed"`) {

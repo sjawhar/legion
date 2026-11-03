@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -337,12 +336,14 @@ func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record
 // claims. The boot's sweep closes a migrated issue the same way (booted).
 //
 // A root's close waits for the rest of its tree: the linger it would begin suspends every member
-// mid-turn, so a child's finished phase would be refused 409 TREE_LINGERING and its work lost. This
-// wait is where the daemon keeps a tree's order, so nothing beneath an issue holds its acceptance
-// (signOff). It reads the flat tree (treeMembers), not the parent relation, because the linger
-// stops every member of the tree, whatever it hangs under. It is kept inside the branch where the
-// tree does not linger: a member of a tree that already lingers must still close at its merge,
-// which suspends nothing further and is the one thing that still moves there.
+// mid-turn, so a child's finished phase would be refused 409 TREE_LINGERING and its work lost. It
+// waits on the one set both acceptance rules read (OpenBeneath), which for a tree root is every
+// other member of the tree still in the workflow, read from the flat tree rather than the parent
+// relation because the linger stops every member whatever it hangs under, and which leaves out an
+// issue the daemon itself holds at admitted beneath this root — without that the two would wait on
+// each other for ever, as OpenBeneath's own comment sets out. The wait is kept inside the branch
+// where the tree does not linger: a member of a tree that already lingers must still close at its
+// merge, which suspends nothing further and is the one thing that still moves there.
 func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) ([]string, error) {
 	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
 		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
@@ -355,7 +356,7 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 		return nil, err
 	}
 	if !lingers {
-		waiting, err := e.openBeside(ctx, tx, issue)
+		waiting, err := e.openBeneath(ctx, tx, issue)
 		if err != nil {
 			return nil, err
 		}
@@ -390,27 +391,6 @@ func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue,
 		}
 	}
 	return nil, e.openCheck(ctx, tx, issue, *pr, true)
-}
-
-// openBeside is the sorted keys of the other members of issue's tree that are still in the
-// workflow (InWorkflow) when issue is that tree's root, and nothing at all when it is not: only a
-// root's close lingers the tree, so only a root waits for it.
-func (e *Engine) openBeside(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
-	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return nil, nil
-	}
-	members, err := e.treeMembers(ctx, tx, issue)
-	if err != nil {
-		return nil, err
-	}
-	open := []string{}
-	for _, member := range members {
-		if member.Key != issue.Key && InWorkflow(member) {
-			open = append(open, member.Key)
-		}
-	}
-	slices.Sort(open)
-	return open, nil
 }
 
 // closed records the pull request closed unmerged, which a re-admitted generation drops, and tells

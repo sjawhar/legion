@@ -771,6 +771,19 @@ func (s *Postgres) DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root s
 	return nil
 }
 
+// TellChildrenFirst records that issue's architect has been told, for the run generation, that
+// the issue waits for its own Dispatch children, and reports whether this call is the telling: a
+// second call at the same generation changes nothing and answers false, so the one row decides
+// who tells. at is the moment the pass ran, kept for a reader of the table alone.
+func (s *Postgres) TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue string, generation uint64, at time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, `insert into children_first_notices (issue, generation, told_at) values ($1, $2, $3)
+		on conflict (issue, generation) do nothing`, issue, int64(generation), at)
+	if err != nil {
+		return false, fmt.Errorf("mark %s told it waits for its children: %w", issue, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *Postgres) ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error) {
 	err = tx.QueryRow(ctx, "select approved_version, latest_version from readmitted_approvals where issue = $1", root).Scan(&approved, &latest)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1579,6 +1592,66 @@ func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int
 	return id, nil
 }
 
+// ReplaceOwedStart writes row's payload over the start the issue already owes its worker — its
+// oldest unleased supervise start marked needsSlot — and says whether it found one. The caller
+// enqueues row itself when it did not (workflow.StartOrOwe), which is the back-to-back case the
+// daemon has always had: two transitions before the worker runs leave one start, the later one.
+//
+// It updates that row in place rather than deleting it and inserting a fresh one because the
+// row's id and created_at are the waiting line's own ordering key (OwedStart): the issue queued
+// when its work first came back, and a second transition arriving while it waits is the same
+// wait carrying a newer task, not a new turn at the back of the line. The earlier task is
+// already dead whichever path wrote it — the transition minted a new assignment onto the role's
+// phases row in its own transaction, so a completion of the earlier one is refused
+// HANDOFF_STALE_ASSIGNMENT — so no information is lost with it. A row under a live lease is not
+// updated: its slot came, its lane has it, and the caller's own row is the next start.
+//
+// A partial unique index on the pending start would be the other way to keep one row, and is not
+// available: Enqueue allows one `on conflict` target per statement and already spends it on
+// ready_merge (readyMergeConflict).
+func (s *Postgres) ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRow) (bool, error) {
+	if !json.Valid(row.Payload) {
+		return false, fmt.Errorf("replace the owed start of %s: payload is not JSON", row.Issue)
+	}
+	tag, err := tx.Exec(ctx, `update outbox set payload = $2 where id = (select id from outbox
+		where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
+			and payload->>'needsSlot' = 'true' and lease_until is null order by id limit 1)`,
+		row.Issue, string(row.Payload))
+	if err != nil {
+		return false, fmt.Errorf("replace the owed start of %s: %w", row.Issue, err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// OwedStarts is every pending worker start of project's issues that waits for its issue's
+// admission slot and no lane has ever leased, oldest first by the pair the waiting line orders
+// them on (OwedStart), with the role, phase and generation each row serves. A row under a lease,
+// live or expired, is left out: its issue holds a slot already, so it is neither waiting in the
+// line nor safe for admission's repair to finish.
+func (s *Postgres) OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error) {
+	rows, err := tx.Query(ctx, `select issue, created_at, id, coalesce(payload->>'role', ''), coalesce(payload->>'phase', ''),
+			coalesce((payload->>'generation')::bigint, 0)
+		from outbox where kind = $1 and split_part(issue, '-', 1) = $2
+			and payload->>'op' = 'start' and payload->>'needsSlot' = 'true' and lease_until is null
+		order by created_at, id`, string(OutboxKindSupervise), project)
+	if err != nil {
+		return nil, fmt.Errorf("list the starts %s owes its workers: %w", project, err)
+	}
+	defer rows.Close()
+	var owed []OwedStart
+	for rows.Next() {
+		var start OwedStart
+		if err := rows.Scan(&start.Issue, &start.CreatedAt, &start.ID, &start.Role, &start.Phase, &start.Generation); err != nil {
+			return nil, fmt.Errorf("list the starts %s owes its workers: %w", project, err)
+		}
+		owed = append(owed, start)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the starts %s owes its workers: %w", project, err)
+	}
+	return owed, nil
+}
+
 // The outbox's runnable predicates are one SQL text, so the lanes' list of due rows (DueRows), their
 // claim (ClaimRow) and the state report's held rows (HeldRows) can never disagree about which row
 // may run. Each refers to the statement's first five parameters, which outboxDueArgs supplies — $1
@@ -1589,20 +1662,30 @@ func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int
 // outboxUnleasedDue is a row due at $1 that no live lease holds.
 const outboxUnleasedDue = `outbox.next_at <= $1 and (outbox.lease_until is null or outbox.lease_until <= $1)`
 
-// outboxInOrder is the two rules that hold a due row behind an older one of its issue. An issue's
-// Dispatch status writes run one at a time in the order they were made: a status row waits while an
-// older one for the same issue is unfinished, because each carries the status its predecessor
-// leaves, and a newer write run first would find the board short of it and finish unwritten as
-// though a human had moved it. A start of an issue's role waits while an older issue_branch row of
-// the issue is unfinished, so no role starts before its issue's branch exists on GitHub
-// (IssueBranch), and a create GitHub keeps refusing holds the issue's roles back while the row
-// retries. Supervise rows need no other such rule: a stop names the run it ends through the claim's
-// own record of the newest start run against it (claims.last_start_row), so ordering them here
-// would buy nothing that survives a retry the runtime delayed.
+// outboxInOrder is the three rules that hold a due row back behind something else of its issue. An
+// issue's Dispatch status writes run one at a time in the order they were made: a status row waits
+// while an older one for the same issue is unfinished, because each carries the status its
+// predecessor leaves, and a newer write run first would find the board short of it and finish
+// unwritten as though a human had moved it. A start of an issue's role waits while an older
+// issue_branch row of the issue is unfinished, so no role starts before its issue's branch exists
+// on GitHub (IssueBranch), and a create GitHub keeps refusing holds the issue's roles back while
+// the row retries. And a start marked as waiting for the issue's admission slot
+// (SuperviseRequest.NeedsSlot) waits while the slots table names no slot of that issue: the
+// admission cap counts the issues at work, and this row is the delivery that puts one to work, so
+// it is where the cap is applied. Supervise rows need no other such rule: a stop names the run it
+// ends through the claim's own record of the newest start run against it (claims.last_start_row),
+// so ordering them here would buy nothing that survives a retry the runtime delayed.
+//
+// None of the three holds an issue's later rows back. A row that is merely unclaimable takes no
+// lease, and the lane rule (outboxLaneFree) blocks only on a live lease, so an issue whose worker
+// start waits for a slot still runs its close's suspend, its Dispatch status writes and its
+// notices as they come due. That is what lets a transition apply at once and hold only the start.
 const outboxInOrder = `not (outbox.kind = $2 and exists (select 1 from outbox older
 			where older.kind = $2 and older.issue = outbox.issue and older.id < outbox.id))
 		and not (outbox.kind = $3 and outbox.payload->>'op' = 'start' and exists (select 1 from outbox branch
-			where branch.kind = $4 and branch.issue = outbox.issue and branch.id < outbox.id))`
+			where branch.kind = $4 and branch.issue = outbox.issue and branch.id < outbox.id))
+		and not (outbox.kind = $3 and outbox.payload->>'op' = 'start' and coalesce(outbox.payload->>'needsSlot', '') = 'true'
+			and not exists (select 1 from slots where slots.issue = outbox.issue))`
 
 // outboxLaneFree is the rule that a lifecycle row ($5 is the lifecycle lane's kinds) runs only while
 // no other lifecycle row of its issue is under a live lease. Each lifecycle row reads the issue and

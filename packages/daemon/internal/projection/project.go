@@ -4,6 +4,7 @@ package projection
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -209,21 +210,40 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		projected.Issues[current.Issue] = view
 	}
 
-	waiting := record.Waiting(issues, slots)
+	facts, err := record.ReadLineFacts(ctx, tx, s, project, issues)
+	if err != nil {
+		return api.State{}, err
+	}
+	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it
+	// judges wait on, read in this transaction's snapshot like every other fact here. The rows
+	// of every issue a blocker can hold come before the line, because the line leaves out an
+	// issue whose first phase one of them holds and cannot judge that itself
+	// (record.LineFacts.Held); the children-first wait is read the same way and for the same
+	// reason (record.LineFacts.ChildWaits, workflow.ChildWaitsOf), and is judged here rather
+	// than read from anywhere, since the daemon stores it nowhere; the roots the line then
+	// names are read after it, since only the line can say which they are. The deciders' own
+	// judgement (blockers.Blocked) then names exactly the roots admission skips, the issues it
+	// holds back and the parents whose children go first.
+	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, nil))
+	if err != nil {
+		return api.State{}, err
+	}
+	facts.Held = blockers.HeldIssues(rows, issues)
+	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, s, project, issues, facts.Gates); err != nil {
+		return api.State{}, err
+	}
+	waiting := record.WaitingIssues(record.Waiting(issues, slots, facts))
+	named, err := blockers.Load(ctx, tx, s, project, blockers.Judged(nil, waiting))
+	if err != nil {
+		return api.State{}, err
+	}
+	maps.Copy(rows, named)
 	projected.Admission.Active = active
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it judges
-	// wait on, read in this transaction's snapshot like every other fact here: one query
-	// (blockers.Load of blockers.Judged), then the deciders' own judgement (blockers.Blocked), so the
-	// state names exactly the roots admission skips and the children the workflow holds.
-	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, waiting))
-	if err != nil {
-		return api.State{}, err
-	}
-	projected.Admission.Blocked = blockers.Blocked(rows, issues, waiting)
+	projected.Admission.Blocked = blockers.Blocked(rows, issues, waiting, record.ChildWaitRows(facts.ChildWaits))
 	projected.PendingStatusWrites = make([]api.PendingStatusWrite, 0, len(pending))
 	for _, row := range pending {
 		if _, known := knownIssues[row.Issue]; !known {

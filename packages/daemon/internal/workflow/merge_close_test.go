@@ -397,8 +397,14 @@ func TestAnIssueReachingAwaitingMergeOnAMergedPullRequestWaitsForItsTree(t *test
 
 // Which members hold a merged root's close up: an issue is in the workflow when its status is one
 // the workflow runs in and its phase is short of done, so a child in backlog and a child already
-// done hold it not at all, while a released child that has not started a phase and one held
-// because its worker ran out of launches both do.
+// done hold it not at all, while one held because its worker ran out of launches does.
+//
+// A released child that has not started a phase holds it no longer. It stands at admitted
+// beneath a root in awaiting_merge, a root the daemon has already accepted, so the daemon itself
+// pins the child there until that root closes (record.AcceptedAncestor), and a child the daemon
+// pins is left out of the set the close waits on (record.OpenBeneath). Counting it would
+// deadlock the pair. This is the one recorded departure from the spec of dispatch://INFRA-980,
+// decided on dispatch://INFRA-980/comment/d642164a-31d2-4d6c-ae5e-4da5dd0b9104.
 func TestWhichChildrenHoldAMergedRootsCloseUp(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -407,7 +413,7 @@ func TestWhichChildrenHoldAMergedRootsCloseUp(t *testing.T) {
 	}{
 		{name: "parked in backlog", child: record.Issue{Key: "LEGION-209", Phase: phase.Implementing, Status: "backlog"}},
 		{name: "already done", child: record.Issue{Key: "LEGION-209", Phase: phase.Done, Status: "done"}},
-		{name: "released, no phase started", child: record.Issue{Key: "LEGION-209", Phase: phase.Admitted, Status: "todo"}, waits: true},
+		{name: "released, no phase started", child: record.Issue{Key: "LEGION-209", Phase: phase.Admitted, Status: "todo"}},
 		{name: "held out of launches", child: record.Issue{Key: "LEGION-209", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Status: "in_progress"}, waits: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -620,14 +626,19 @@ func issueOutboxOf(t *testing.T, pool *pgxpool.Pool, issue, kind string) []outbo
 	return got
 }
 
-// superviseRowsOf decodes issue's supervise rows of op, oldest first.
+// superviseRowsOf decodes issue's supervise rows of op, oldest first, with the relaunch half of
+// a phase-worker start left out: a start is two rows (StartOrOwe), one that brings the role's
+// session back carrying no task and one that carries the task and waits for the issue's slot,
+// and it is the second every caller here is about.
 func superviseRowsOf(t *testing.T, pool *pgxpool.Pool, issue, op string) []record.SuperviseRequest {
 	t.Helper()
 	var requests []record.SuperviseRequest
 	for _, row := range issueOutboxOf(t, pool, issue, "supervise") {
-		if request := decodeSupervise(t, row); string(request.Op) == op {
-			requests = append(requests, request)
+		request := decodeSupervise(t, row)
+		if string(request.Op) != op || request.Op == "start" && request.Task == "" {
+			continue
 		}
+		requests = append(requests, request)
 	}
 	return requests
 }

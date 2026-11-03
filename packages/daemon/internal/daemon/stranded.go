@@ -40,7 +40,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 			return err
 		}
 		claims = ofProject(claims, projectToken)
-		stranded, err = workflow.Stranded(ctx, tx, records, claims)
+		stranded, err = workflow.Stranded(ctx, tx, records, project, claims)
 		return err
 	}); err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {

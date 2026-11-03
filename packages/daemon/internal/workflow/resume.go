@@ -34,15 +34,18 @@ import (
 // operator resumes the claim, and a suspension recorded before the source existed (unknown) may be
 // a drain made before the upgrade, so both are left as they are.
 //
-// The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
-// whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
-// stay suspended until re-admission runs the tree again. Accepting's owner is the tree's
-// architect, which admission starts with the tree, so no issue there is given one. Each owner is
-// given the start admission gives a re-admitted tree's mid-phase child, through the outbox's start
-// like every other start: its claim resumed by rule, and the task that carries its phase on
-// (ResumePhaseTask, the merger's with the head its round approved), which the outbox does not
-// deliver to a claim still holding its phase's task. A role a start already covers (StartFor) gets
-// no second. The sweep runs first so the resume reads the trees it closed as lingering.
+// The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the
+// workflow whose tree is live — its lifecycle stands open under the workflow (record.LiveRoots) —
+// and does not linger: a lingering tree's claims stay suspended until re-admission runs the tree
+// again. Liveness is the lifecycle rather than the root's slot because a slot now counts one
+// issue at work, and a running tree holds none of its own while its issues wait in the line.
+// Accepting's owner is the tree's architect, which admission starts with the tree, so no issue
+// there is given one. Each owner is given the start admission gives a re-admitted tree's
+// mid-phase child, through the outbox's start like every other start (StartOrOwe): its claim is
+// resumed by rule at once, and the task that carries its phase on (ResumePhaseTask, the merger's
+// with the head its round approved) waits for the issue's slot; the outbox does not deliver it
+// to a claim still holding its phase's task. A role a start already covers (StartFor) gets no
+// second. The sweep runs first so the resume reads the trees it closed as lingering.
 func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted) (intake.Result, error) {
 	if err := e.sweepMerged(ctx, tx); err != nil {
 		return intake.Result{}, err
@@ -63,25 +66,29 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	if err != nil {
 		return intake.Result{}, err
 	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return intake.Result{}, err
-	}
+	own := make([]record.Issue, 0, len(issues))
 	byKey := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
+		if issue.Project == e.cfg.Project {
+			own = append(own, issue)
+		}
 	}
-	slotted := make(map[string]bool, len(slots))
-	for _, slot := range slots {
-		slotted[slot.Issue] = true
+	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own)
+	if err != nil {
+		return intake.Result{}, err
 	}
+	live := record.LiveRoots(own, facts)
 	for _, issue := range issues {
 		role := RoleFor(issue.Phase)
 		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
 			continue
 		}
 		root, ok := byKey[issue.Tree]
-		if !ok || !slotted[root.Key] || root.Lingers() {
+		if !ok || root.Lingers() {
+			continue
+		}
+		if _, running := live[root.Key]; !running {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)
@@ -105,8 +112,8 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Generation: issue.Generation,
-			Phase: issue.Phase, Task: task, ResumeTask: true, RuleResume: true}); err != nil {
+		if err := StartOrOwe(ctx, tx, e.store, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role,
+			Generation: issue.Generation, Phase: issue.Phase, Task: task, ResumeTask: true, RuleResume: true}, e.now()); err != nil {
 			return intake.Result{}, err
 		}
 		e.logOnCommit(ctx, "workflow: the boot starts a suspended claim that owns its issue's phase", "issue", issue.Key, "role", role,

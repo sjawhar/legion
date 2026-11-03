@@ -86,6 +86,11 @@ func putPreviousRun(t *testing.T, cfg config.Config, run previousRun) {
 		if _, err := st.AdmitClaim(ctx, c); err != nil {
 			t.Fatalf("put %s: %v", c.Token, err)
 		}
+		if c.Pending != nil {
+			if err := st.PutDelivery(ctx, c.Token, *c.Pending); err != nil {
+				t.Fatalf("put the task %s kept: %v", c.Token, err)
+			}
+		}
 	}
 }
 
@@ -109,6 +114,15 @@ func previousClaim(t *testing.T, cfg config.Config, tree, issue string, role cla
 // operatorHeld is c as the operator's suspend leaves it: suspended, recorded as the operator's.
 func operatorHeld(c supervise.Claim) supervise.Claim {
 	c.SuspendedBy = supervise.SuspendedByOperator
+	return c
+}
+
+// holdingTask is c as a suspension leaves a worker that kept the task its start gave it: the
+// delivery stays unconfirmed through the suspension (supervise's settle), so the work is still the
+// claim's. Admission's repair of a slot whose worker has no task passes such a claim over
+// (admit's resumeSlottedWorkers), which is what a previous daemon's slotted worker looks like.
+func holdingTask(c supervise.Claim, p phase.Phase, task string) supervise.Claim {
+	c.Pending = &supervise.Delivery{ID: "delivery:" + string(c.Token), Task: task, Generation: c.Generation, Phase: p, QueuedAt: time.Now().UTC()}
 	return c
 }
 
@@ -180,6 +194,11 @@ func keysOf(state map[string]json.RawMessage) []string {
 // architects under `resume`, the suspended phase workers under `suspendedWorkers`, the failed
 // architects under `retry` and the failed phase workers under `needsWorkflowStart`; the state
 // carries the same claims, each with its state.
+//
+// Every slot here holds a worker with work, as a previous daemon's slot does: the suspended and
+// failed workers kept the task their start gave them (holdingTask) and the planner's start is
+// still queued. A slot whose worker has neither is not stranded but repaired, since admission
+// starts that worker's phase again on its first pass (admit's resumeSlottedWorkers).
 func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	key := func(n string) string { return cfg.Project + "-" + n }
@@ -189,8 +208,14 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	child := runningRoot(lingeringChild, phase.Retro)
 	child.Tree, child.Parent = lingering, &parked.Key
 	// The tester's start for its phase is due in an hour: the outbox holds it, but the operator
-	// suspended the tester, so the start waits for the operator's resume and wakes nothing.
+	// suspended the tester, so the start waits for the operator's resume and wakes nothing. The
+	// planner's is due then too, so the planning root's slot holds a worker whose start is owed
+	// and only its architect, which that start does not wake, is stranded.
 	queuedStart, err := record.NewOutboxRow(tested, record.SuperviseRequest{Op: "start", Tree: tested, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing, Task: "Test it."}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedPlan, err := record.NewOutboxRow(planning, record.SuperviseRequest{Op: "start", Tree: planning, Role: claim.RolePlanner, Generation: 1, Phase: phase.Planning, Task: "Plan it."}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,13 +225,13 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 		claims: []supervise.Claim{
 			previousClaim(t, cfg, implementing, implementing, claim.RoleArchitect, supervise.StateSuspended),
 			previousClaim(t, cfg, implementing, implementing, claim.RolePlanner, supervise.StateSuspended),
-			previousClaim(t, cfg, implementing, implementing, claim.RoleImplementer, supervise.StateSuspended),
-			previousClaim(t, cfg, reviewing, reviewing, claim.RoleReviewer, supervise.StateFailed),
+			holdingTask(previousClaim(t, cfg, implementing, implementing, claim.RoleImplementer, supervise.StateSuspended), phase.Implementing, "Implement it."),
+			holdingTask(previousClaim(t, cfg, reviewing, reviewing, claim.RoleReviewer, supervise.StateFailed), phase.Reviewing, "Review it."),
 			operatorHeld(previousClaim(t, cfg, tested, tested, claim.RoleTester, supervise.StateSuspended)),
 			previousClaim(t, cfg, lingering, lingeringChild, claim.RoleImplementer, supervise.StateSuspended),
 			previousClaim(t, cfg, planning, planning, claim.RoleArchitect, supervise.StateFailed),
 		},
-		rows: []record.OutboxRow{queuedStart},
+		rows: []record.OutboxRow{queuedStart, queuedPlan},
 	})
 	var logs syncBuffer
 	o := fakeRuntime(fake.NewRuntime(), &built{})

@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 type projectionStore struct {
@@ -28,6 +30,37 @@ type projectionStore struct {
 	// key, which is the order the state's `blocked` is judged from. DispatchIssuesOf serves the rows
 	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
+	// lifecycles names the trees whose lifecycle stands open under the workflow, which is what
+	// says a tree runs (record.TreeLive); gates is the design gate of each root that has one;
+	// owed is the start each issue owes a worker of it, which is a returning issue's place in
+	// the waiting line. The three are what record.ReadLineFacts reads for the line.
+	lifecycles []string
+	gates      map[string]record.DesignGate
+	owed       []record.OwedStart
+}
+
+func (s projectionStore) TreeLifecycles(_ context.Context, _ pgx.Tx, project string, trees []string) (map[string]treelifecycle.Lifecycle, error) {
+	open := make(map[string]treelifecycle.Lifecycle, len(s.lifecycles))
+	for _, tree := range s.lifecycles {
+		if slices.Contains(trees, tree) {
+			open[tree] = treelifecycle.Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: treelifecycle.AuthorityWorkflow}
+		}
+	}
+	return open, nil
+}
+
+func (s projectionStore) Gates(_ context.Context, _ pgx.Tx, trees []string) (map[string]record.DesignGate, error) {
+	gates := make(map[string]record.DesignGate, len(s.gates))
+	for _, tree := range trees {
+		if gate, held := s.gates[tree]; held {
+			gates[tree] = gate
+		}
+	}
+	return gates, nil
+}
+
+func (s projectionStore) OwedStarts(context.Context, pgx.Tx, string) ([]record.OwedStart, error) {
+	return s.owed, nil
 }
 
 func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) {
@@ -73,6 +106,32 @@ func (s projectionStore) DispatchIssuesOf(_ context.Context, _ pgx.Tx, _ string,
 	return rows, nil
 }
 
+// DispatchChildren groups the mirror's rows under the parent each names, as the real store does:
+// the children-first judgement reads it for every issue whose own first phase has not started
+// (record.ChildWaitsOf).
+func (s projectionStore) DispatchChildren(_ context.Context, _ pgx.Tx, _ string, parents []string) (map[string][]record.DispatchIssueRow, error) {
+	children := make(map[string][]record.DispatchIssueRow, len(parents))
+	for _, row := range s.mirror {
+		if row.Parent != "" && slices.Contains(parents, row.Parent) {
+			children[row.Parent] = append(children[row.Parent], row)
+		}
+	}
+	return children, nil
+}
+
+// IssuesOf is the record of each of keys this store holds, as the real store reads them by
+// primary key: the children-first judgement reads the record of every child it judges, which
+// may be a member that has left the workflow and so is not among the live issues.
+func (s projectionStore) IssuesOf(_ context.Context, _ pgx.Tx, _ string, keys []string) ([]record.Issue, error) {
+	var issues []record.Issue
+	for _, issue := range s.issues {
+		if slices.Contains(keys, issue.Key) {
+			issues = append(issues, issue)
+		}
+	}
+	return issues, nil
+}
+
 // projectedAt is the fixed instant every test here projects at.
 var projectedAt = time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 
@@ -80,11 +139,13 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	now := projectedAt
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "done", Rank: "00000"},
-			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
-			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-			{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true},
-			{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-214", Status: "todo", Rank: "00002", HandedOver: true},
+			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Phase: phase.Done, Status: "done", Rank: "00000"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Phase: phase.Admitted, Status: "backlog", Rank: "00001"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+			// A root another tree handed over carrying the phase it ran there waits for its tree
+			// to be opened like any other: its promotion opens it and starts that phase's role.
+			{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true, HandedOverFrom: "LEGION-200"},
+			{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-214", Phase: phase.Admitted, Status: "todo", Rank: "00002", HandedOver: true},
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
@@ -413,9 +474,10 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 			{Key: "LEGION-208", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing},
 			{Key: "LEGION-209", Tree: "LEGION-208", Status: "todo", Phase: phase.Admitted},
 			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Phase: phase.Admitted, Rank: "00012", HandedOver: true},
-			// A re-admitted root waiting for a slot with its run already under way: promotion
-			// admits it whatever its links say, so the state reports no wait for it either.
-			{Key: "LEGION-211", Tree: "LEGION-211", Status: "todo", Phase: phase.Testing, Rank: "00011", HandedOver: true},
+			// A root another tree handed over, waiting for a slot with its run already under
+			// way: promotion admits it whatever its links say, so the state reports no wait for
+			// it either.
+			{Key: "LEGION-211", Tree: "LEGION-211", Status: "todo", Phase: phase.Testing, Rank: "00011", HandedOver: true, HandedOverFrom: "LEGION-200"},
 		},
 		slots: []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: projectedAt}},
 		mirror: []record.DispatchIssueRow{
@@ -448,5 +510,67 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 	}
 	if none.Admission.Blocked == nil || len(none.Admission.Blocked) != 0 {
 		t.Fatalf("blocked with nothing waiting on a link = %#v, want an empty list", none.Admission.Blocked)
+	}
+}
+
+// lineIssue is one record of the waiting line's fixture, carrying the fields the line reads and
+// the repository fields every projected issue has. It is internal/admit's own lineIssue
+// (line_order_test.go) written for this package, so the two fixtures are read side by side.
+func lineIssue(key, tree, status string, stands phase.Phase, rank string) record.Issue {
+	return record.Issue{Key: key, Tree: tree, Project: "LEGION", Title: key, Phase: stands, Generation: 1,
+		Status: status, DispatchStatus: status, Rank: rank, HandedOver: true,
+		Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}
+}
+
+// A4, read through the projected state rather than through record.Waiting: admission.waiting is
+// the line in the line's own order, so a reader of GET /legion/v1/state — the controller, the
+// Legion view — sees what admission will promote next and in what order.
+//
+// The fixture is the one internal/admit's TestTheWaitingLineRunsReturnsFirstThenTheBoardsRank
+// proves over record.Waiting, so the two say the same thing about the same facts: the issues
+// whose work came back first, oldest first on the one time axis an owed start and a gate's
+// approval share, and then the issues whose first phase has never started, by the Dispatch rank
+// of their tree's root. A root a person moved back to todo while its own tree runs is in no part
+// of it: it holds no slot, and it is no root that never ran.
+func TestProjectShowsTheWaitingLineInTheLinesOwnOrder(t *testing.T) {
+	opened := projectedAt.Add(-2 * time.Hour)
+	approved := 1
+	store := projectionStore{
+		issues: []record.Issue{
+			lineIssue("LEGION-10", "LEGION-10", "in_progress", phase.Admitted, "M"),
+			lineIssue("LEGION-11", "LEGION-10", "todo", phase.Admitted, "N"),
+			lineIssue("LEGION-12", "LEGION-10", "retro", phase.Merging, "O"),
+			lineIssue("LEGION-20", "LEGION-20", "todo", phase.Admitted, "A"),
+			lineIssue("LEGION-30", "LEGION-30", "todo", phase.Admitted, "Z"),
+			lineIssue("LEGION-50", "LEGION-50", "todo", phase.Accepting, "B"),
+		},
+		lifecycles: []string{"LEGION-10", "LEGION-50"},
+		gates: map[string]record.DesignGate{
+			"LEGION-10": {Issue: "LEGION-10", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 7, At: opened}, EverOpened: true},
+			"LEGION-50": {Issue: "LEGION-50", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 8, At: opened}, EverOpened: true},
+		},
+		owed: []record.OwedStart{{Issue: "LEGION-12", ID: 42, CreatedAt: projectedAt.Add(-time.Hour)}},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	want := []string{"LEGION-10", "LEGION-12", "LEGION-20", "LEGION-11", "LEGION-30"}
+	if !reflect.DeepEqual(got.Admission.Waiting, want) {
+		t.Fatalf("admission.waiting = %#v, want %#v: the approved root's own first phase and the returning child first, then the board's rank",
+			got.Admission.Waiting, want)
+	}
+
+	// The gate opened before the child's start came back, so the root goes first; an approval
+	// that lands after it puts the root behind the child, which is the one axis the two share.
+	gate := store.gates["LEGION-10"]
+	gate.ApprovedMark.At = projectedAt
+	store.gates["LEGION-10"] = gate
+	got, err = Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project with the gate opened last: %v", err)
+	}
+	if want := []string{"LEGION-12", "LEGION-10", "LEGION-20", "LEGION-11", "LEGION-30"}; !reflect.DeepEqual(got.Admission.Waiting, want) {
+		t.Fatalf("admission.waiting with the gate opened last = %#v, want %#v", got.Admission.Waiting, want)
 	}
 }

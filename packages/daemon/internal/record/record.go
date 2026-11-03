@@ -1133,6 +1133,12 @@ type Store interface {
 	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
 	// ReadmittedApproval is the pair root keeps, in any state, zeros when it keeps none.
 	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// TellChildrenFirst marks that issue's architect has been told, for the run generation, that
+	// the issue's own first phase waits for the Dispatch children under it, and reports whether
+	// this call is the telling. The wait itself is never stored, so that a stale mirror row
+	// costs one pass; the telling is, so that the pass every fact, tick, hold release and boot
+	// runs does not tell it again. A re-admission opens a new generation and so tells it anew.
+	TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue string, generation uint64, at time.Time) (bool, error)
 	// ForgetKeptDecisions tells what outbox row's published catch-up named of what tree is owed
 	// (KeptDecisions), of the rows row claims or nothing claims: every parked decision still
 	// standing at the reference and time it named — a newer decision on the same reference, kept
@@ -1233,6 +1239,17 @@ type Store interface {
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
 	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
+	// ReplaceOwedStart writes row's payload over the issue's oldest unleased supervise start that
+	// waits for the issue's admission slot (SuperviseRequest.NeedsSlot) and says whether it found
+	// one, so two transitions before that slot leave exactly one start, the later one, in the
+	// place in the waiting line the first one took. A row under a live lease is not touched; the
+	// caller then enqueues its own.
+	ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRow) (bool, error)
+	// OwedStarts is every pending worker start of the Dispatch project key project that waits for
+	// its issue's admission slot, oldest first by creation time and then id — the waiting line's
+	// own ordering key for the issues whose work came back (Waiting). An issue holding two of
+	// them appears twice, oldest first.
+	OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
 	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue

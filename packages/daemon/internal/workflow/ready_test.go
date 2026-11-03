@@ -677,7 +677,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			var got phase.Phase
 			var starts, rounds, told int
 			if err := pool.QueryRow(t.Context(), `select phase,
-				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
+				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
 				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
 				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != tc.at || starts != 0 || rounds != 2 || told != 0 {

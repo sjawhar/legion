@@ -254,7 +254,7 @@ func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.Pr
 	if err != nil {
 		return err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check waits while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA,
 			"look", check.Looks, "phase", issue.Phase)
 		return nil
@@ -288,7 +288,7 @@ func (e *Engine) closeCheck(ctx context.Context, tx pgx.Tx, check *record.Produc
 	if err != nil {
 		return err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check closed while its issue runs again; its implementer and pod are the run's", "issue", issue.Key,
 			"mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return nil
@@ -385,7 +385,7 @@ func (e *Engine) wake(ctx context.Context, tx pgx.Tx, check *record.ProductionCh
 	if issue == nil {
 		return fmt.Errorf("production check of %s: its issue is not recorded", check.Issue)
 	}
-	runsAgain := InWorkflow(*issue)
+	runsAgain := record.InWorkflow(*issue)
 	if runsAgain || check.LookOpen {
 		why := "a look is open"
 		if runsAgain {
@@ -567,7 +567,7 @@ func (e *Engine) checkBound(ctx context.Context, tx pgx.Tx, fact intake.CheckBou
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if InWorkflow(issue) {
+	if record.InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check bound came due while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return intake.Result{}, e.closeCheck(ctx, tx, check, record.CheckNotRun)
 	}

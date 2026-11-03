@@ -19,7 +19,8 @@ import (
 )
 
 // childStarts counts what LEGION-209's first phase queued: its planner's starts, its branch rows
-// and the child-status notices its architect was told.
+// and the child-status notices its architect was told, one of which is the notice a child's own
+// start sends (workflow.ChildStartedNotice).
 func childStarts(t *testing.T, pool *pgxpool.Pool) (starts, branches, notices int) {
 	t.Helper()
 	for _, e := range effects(t, pool) {
@@ -60,11 +61,14 @@ func freeTheSlot(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // The resume of a root whose wait a person's approval answered starts each child released under
-// its gate once: the resume advances the tree, and the pass's start of unblocked children reads the
-// child as the resume left it. (Round 1, standard P2 and adversarial P2-2.)
+// its gate once: the resume advances the tree, and the child takes the next free slot in the
+// same pass. The cap is 2 because the root's own first phase is an issue at work beside its
+// child's now — the gate's opening starts neither of them, and both wait in the line — so under
+// a cap of 1 the root would take the only slot and the child would start nowhere.
+// (Round 1, standard P2 and adversarial P2-2.)
 func TestAResumeStartsEachReleasedChildOnce(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 2)
 	seedReleasedChild(t, pool)
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3})
 	tick(t, pool, admission, "tick-1")
@@ -78,8 +82,8 @@ func TestAResumeStartsEachReleasedChildOnce(t *testing.T) {
 	if got := issue(t, pool, "LEGION-209").Phase; got != phase.Planning {
 		t.Fatalf("child phase = %s, want planning after its root's resume", got)
 	}
-	if starts, branches, notices := childStarts(t, pool); starts != 1 || branches != 1 || notices != 0 {
-		t.Fatalf("planner starts = %d, branch rows = %d, unblocked notices = %d; want 1, 1, 0", starts, branches, notices)
+	if starts, branches, notices := childStarts(t, pool); starts != 1 || branches != 1 || notices != 1 {
+		t.Fatalf("planner starts = %d, branch rows = %d, child-status notices = %d; want 1, 1, and the one notice its start sends", starts, branches, notices)
 	}
 }
 
@@ -214,6 +218,13 @@ func TestARegistrationsChangesReadOnAWaitingRootIsToldOnce(t *testing.T) {
 // named by the resume, never by a notice held beside it: when a later approval superseded it, the
 // resume's design-approved wake is the newest word and nothing asks for a revision; when none did,
 // the resume asks for the revision. (Round 3, adversarial P3-1.)
+//
+// The wait is answered by a person's answer to the architect's question ask-q, not by an
+// approval of the spec. An approval is no longer an answer that leaves a window: it opens the
+// gate, and a root whose gate has ever opened needs no slot to resume (admit's slotFor), so its
+// resume runs in the approval's own fact and every later review lands on a running root. The
+// window this pins — answered, not yet resumed, because the cap has no slot for it — is what a
+// question's answer still leaves, and the rule under test is the same one.
 func TestAChangesRequestOnAnAnsweredWaitIsNamedByTheResume(t *testing.T) {
 	at := fixedNow.Add(-30 * time.Second)
 	review := func(kind intake.DispatchArtifactKind, seq int64, reason string) intake.DispatchArtifact {
@@ -227,15 +238,15 @@ func TestAChangesRequestOnAnAnsweredWaitIsNamedByTheResume(t *testing.T) {
 		absent   []string
 	}{
 		{"a later approval superseded it",
-			[]intake.DispatchArtifact{review(intake.DispatchArtifactApproved, 7, ""), review(intake.DispatchArtifactChangesRequested, 8, "wait no"),
-				review(intake.DispatchArtifactApproved, 9, "")},
+			[]intake.DispatchArtifact{review(intake.DispatchArtifactChangesRequested, 8, "wait no"), review(intake.DispatchArtifactApproved, 9, "")},
 			[]string{workflow.DesignApprovedWake}, []string{"revise"}},
 		{"no approval followed it",
-			[]intake.DispatchArtifact{review(intake.DispatchArtifactApproved, 7, ""), review(intake.DispatchArtifactChangesRequested, 8, "wait no")},
+			[]intake.DispatchArtifact{review(intake.DispatchArtifactChangesRequested, 8, "wait no")},
 			[]string{"wait no", "revise the spec"}, []string{workflow.DesignApprovedWake}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, admission := waitingRoot(t, config.DesignGateRootIssues)
+			answerWait(t, pool, "LEGION-208", record.AnsweredByAsk, "ask-q")
 			for i, fact := range tc.reviews {
 				applyFact(t, pool, admission, fmt.Sprintf("review-%d", i), fact)
 			}
@@ -325,7 +336,7 @@ func TestAGateWaitAnsweredByTheGateSwitchedOffResumesInThatPass(t *testing.T) {
 // standard P3-2 read this as missing; the run it carries already exempts it, and this pins that.
 func TestAnAnsweredRootIsNotReportedAsBlocked(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 1)
 	tick(t, pool, admission, "tick-1")
 	answerWait(t, pool, "LEGION-208", record.AnsweredByAsk, "ask-q")
 	// A link added while it waited, on an issue Dispatch shows unfinished; LEGION-300 holds the one

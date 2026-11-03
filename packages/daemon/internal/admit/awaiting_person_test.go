@@ -84,14 +84,16 @@ func seedDispatchClaim(t *testing.T, pool *pgxpool.Pool, issue, holder string) {
 }
 
 // awaitingRig is a slotted root whose architect handed question ask-q back, with a second root
-// waiting in line behind it, and the admission that decides them on every fact.
-func awaitingRig(t *testing.T, pool *pgxpool.Pool) *Admission {
+// waiting in line behind it, and the admission that decides them on every fact. cap is that
+// admission's cap, which counts issues at work rather than trees: a test about the root alone
+// takes 1, and one whose tree also starts a child of its own takes one slot per issue.
+func awaitingRig(t *testing.T, pool *pgxpool.Pool, cap int) *Admission {
 	t.Helper()
 	seedSlotted(t, pool, "LEGION-208", "U")
 	seedWaiting(t, pool, "LEGION-300", "V")
 	seedArchitectClaim(t, pool, "LEGION-208", true)
 	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
-	return newAdmission(t, 1, nil)
+	return newAdmission(t, cap, nil)
 }
 
 // supervise returns every supervise request queued for issue, in order.
@@ -113,7 +115,7 @@ func superviseRequests(t *testing.T, pool *pgxpool.Pool, issue string) []record.
 // slot it gave back goes to the root waiting behind it.
 func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 1)
 	tick(t, pool, admission, "tick-1")
 
 	root := issue(t, pool, "LEGION-208")
@@ -155,7 +157,7 @@ func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
 // starts the next wait.
 func TestAnAnsweredRootTakesTheNextSlotAndResumesItsArchitect(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 1)
 	tick(t, pool, admission, "tick-1")
 	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
 		t.Fatalf("phase = %s, want the root waiting", got)
@@ -305,7 +307,7 @@ func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
 // record, so a question it shows may already be answered. The hold's release decides it.
 func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 1)
 	admission.pending = map[string]intake.DispatchIssue{"LEGION-208": {Key: "LEGION-208", Status: "todo", Seq: 20}}
 	admission.target = 100
 	tick(t, pool, admission, "tick-held")
@@ -364,7 +366,7 @@ func TestAnAwaitingRootAnOutsiderClaimedLeavesTheWorkflow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			admission := awaitingRig(t, pool)
+			admission := awaitingRig(t, pool, 1)
 			tick(t, pool, admission, "tick-1")
 			if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
 				t.Fatalf("phase = %s, want the root waiting", got)
@@ -401,7 +403,7 @@ func TestAnAwaitingRootAnOutsiderClaimedLeavesTheWorkflow(t *testing.T) {
 // its architect told, as on a root that holds its slot.
 func TestASessionsStatusWriteOnARootWaitingOnAPersonIsSetBack(t *testing.T) {
 	pool := migratedPool(t)
-	admission := awaitingRig(t, pool)
+	admission := awaitingRig(t, pool, 1)
 	engine := admission.engine
 	tick(t, pool, admission, "tick-1")
 	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {

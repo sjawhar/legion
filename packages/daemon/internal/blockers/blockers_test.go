@@ -132,7 +132,7 @@ func TestBlockedListsTheWaitingRootsAndTheHeldChildrenByKey(t *testing.T) {
 		{Issue: "LEGION-211", BlockedBy: []string{"LEGION-300"}},
 		{Issue: "LEGION-213", BlockedBy: []string{"LEGION-302"}},
 	}
-	if got := Blocked(rows, issues, waiting); !reflect.DeepEqual(got, want) {
+	if got := Blocked(rows, issues, waiting, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Blocked = %#v, want %#v by issue key", got, want)
 	}
 }
@@ -140,7 +140,7 @@ func TestBlockedListsTheWaitingRootsAndTheHeldChildrenByKey(t *testing.T) {
 // Nothing blocked is an empty list, never nil: the state serves it as an array and the notice
 // leaves it out.
 func TestBlockedIsEmptyWhenNothingWaitsOnALink(t *testing.T) {
-	got := Blocked(map[string]Row{}, []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Admitted}}, nil)
+	got := Blocked(map[string]Row{}, []record.Issue{{Key: "LEGION-209", Tree: "LEGION-208", Phase: phase.Admitted}}, nil, nil)
 	if len(got) != 0 || got == nil {
 		t.Fatalf("Blocked = %#v, want an empty list", got)
 	}

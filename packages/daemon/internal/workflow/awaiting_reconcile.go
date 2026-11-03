@@ -17,33 +17,38 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// ReconcileAwaiting moves each admitted root of project that holds a slot and now waits only on a
-// person into awaiting_person, or, when a person already acted after its wait would begin, gives
-// its architect the resume task where it stands. It also answers each root waiting on a person
-// whose design gate is open (answerOpenGates). It reads only the record, so the same record gives
-// the same decision, and admission calls it on every pass (Admission.promoteHolds): a guard that
+// ReconcileAwaiting moves each admitted root of project that now waits only on a person into
+// awaiting_person, or, when a person already acted after its wait would begin, gives its
+// architect the resume task where it stands. It also answers each root waiting on a person whose
+// design gate is open (answerOpenGates). It reads only the record, so the same record gives the
+// same decision, and admission calls it on every pass (Admission.promoteHolds): a guard that
 // clears on any path — a member leaving, a claim released, the label put back, the architect's
-// start taken — is seen at the next fact. issues and slots are the caller's snapshot of the
-// record, and held names each root the caller still holds for the Dispatch consumer to catch up
-// (nil holds none): a root whose listing is ahead of the record decides nothing until the consumer
-// has reached it, so a question already answered on Dispatch does not start a wait here first. It
-// returns the roots that entered awaiting_person, whose slots the caller releases, and whether it
-// wrote any issue of the snapshot, which the caller then reads again.
-func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, slots []record.Slot, held func(string) bool) ([]string, bool, error) {
+// start taken — is seen at the next fact. issues is the caller's snapshot of the record, and
+// held names each root the caller still holds for the Dispatch consumer to catch up (nil holds
+// none): a root whose listing is ahead of the record decides nothing until the consumer has
+// reached it, so a question already answered on Dispatch does not start a wait here first. It
+// returns the roots that entered awaiting_person, whose slots the caller releases, and whether
+// it wrote any issue of the snapshot, which the caller then reads again.
+//
+// It asks nothing about slots. It used to consider only a root that held one, which was then the
+// same as "a root whose tree runs"; a slot now counts one issue at work, and a root at admitted
+// after its gate has opened holds none while its tree works. Such a root is exactly the one that
+// can be left waiting on a person, so the slot condition would stop it recording
+// awaiting_person and the state would lose its waitingOn. Every other condition stands:
+// decideAwait's own rule that no other issue of the tree may be in a phase keeps a root whose
+// tree is working out of the wait, and the slot the wait used to give back is now implied by the
+// release rule itself (admit's needsSlot).
+func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project string, issues []record.Issue, held func(string) bool) ([]string, bool, error) {
 	changed, err := e.answerOpenGates(ctx, tx, project, issues, held)
 	if err != nil {
 		return nil, false, err
-	}
-	slotted := make(map[string]struct{}, len(slots))
-	for _, slot := range slots {
-		slotted[slot.Issue] = struct{}{}
 	}
 	var roots []record.Issue
 	for _, issue := range issues {
 		if held != nil && held(issue.Key) {
 			continue
 		}
-		if _, ok := slotted[issue.Key]; ok && issue.Project == project && claim.IsTreeRoot(issue.Key, issue.Tree) &&
+		if issue.Project == project && claim.IsTreeRoot(issue.Key, issue.Tree) &&
 			issue.Phase == phase.Admitted && issue.DeclaredSeq != 0 {
 			roots = append(roots, issue)
 		}
@@ -87,7 +92,7 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 		if err != nil {
 			return nil, false, err
 		}
-		view := awaitView{Root: root, Slotted: true, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
+		view := awaitView{Root: root, Unresumable: unresumable, Run: runs[tokens[i]], Asks: asks[root.Key], Gate: gate, Armed: e.armed()}
 		for _, member := range issues {
 			if member.Tree == root.Key && member.Key != root.Key {
 				view.Members = append(view.Members, member)
@@ -208,15 +213,14 @@ const (
 	actTakeIn
 )
 
-// awaitView is what decideAwait reads of one root: its record, whether it holds a slot, the other
-// members of its tree, why it could not resume (Unresumable, "" when it could), its architect's run
+// awaitView is what decideAwait reads of one root: its record, the other members of its tree,
+// why it could not resume (Unresumable, "" when it could), its architect's run
 // at the root's generation, its asks' mirror rows, its design gate (nil for none), and whether the
 // design gate is armed. The gate's document (gateArtifact) names its approval requests — every
 // approval row of that document — and their answer is a review rather than a person's act on an
 // ask (RootAsk.PersonActSeq).
 type awaitView struct {
 	Root        record.Issue
-	Slotted     bool
 	Members     []record.Issue
 	Unresumable string
 	Run         record.RoleRun
@@ -253,8 +257,8 @@ type awaitDecision struct {
 func decideAwait(v awaitView) awaitDecision {
 	root := v.Root
 	switch {
-	case root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) || !v.Slotted:
-		return awaitDecision{Why: "it is not an admitted root holding its slot"}
+	case root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !record.InWorkflow(root):
+		return awaitDecision{Why: "it is not an admitted root of a tree in the workflow"}
 	case root.DeclaredSeq == 0:
 		return awaitDecision{Why: "its architect has handed nothing to a person since it was last given work"}
 	}
@@ -264,7 +268,7 @@ func decideAwait(v awaitView) awaitDecision {
 		return awaitDecision{Act: actTakeIn, Why: "nothing it handed back is still with the person"}
 	}
 	for _, member := range v.Members {
-		if InWorkflow(member) && member.Phase != phase.Admitted {
+		if record.InWorkflow(member) && member.Phase != phase.Admitted {
 			return awaitDecision{Why: fmt.Sprintf("%s of its tree is in %s", member.Key, member.Phase)}
 		}
 	}
@@ -411,8 +415,10 @@ func (e *Engine) tellInPlace(ctx context.Context, tx pgx.Tx, root record.Issue, 
 // ResumeAwaitedRoot gives the architect's live claim a task telling it what answered its wait,
 // how its spec stands now, and what of the root is still with the person or waits on it. It is a
 // handout (Store.StartHandout): what the architect handed back before it is answered or listed
-// here, and only a hand-back after it starts the next wait. When the gate is open it advances the
-// now-admitted tree only after the root has its slot again.
+// here, and only a hand-back after it starts the next wait. The members an open gate releases are
+// not started here: each is an issue the cap counts, so each takes its own place in the waiting
+// line and starts at its own slot (record.Waiting's LineFirstPhase), in the same admission pass
+// that resumed this root.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
@@ -430,9 +436,6 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: task,
 	}); err != nil {
 		return err
-	}
-	if gate != nil {
-		return e.advanceAdmittedTree(ctx, tx, root, *gate)
 	}
 	return nil
 }

@@ -1403,17 +1403,19 @@ func pushedFromTo(from, to, pusher string) intake.Fact {
 // generation, the phase the start serves and the assignment it hands that role. The list is
 // asserted whole rather than key by key, so a start that grows a field nobody meant it to carry —
 // a role to wait for before it acts, say — fails here.
-const phaseStartKeys = "assignment,generation,op,phase,role,task,tree"
+const phaseStartKeys = "assignment,generation,needsSlot,op,phase,role,task,tree"
 
-// implementerStart is the task of the implementer's start the outbox holds. The start carries
-// phaseStartKeys and nothing else: it runs at once, as every other start does, whatever phase the
-// red took the issue out of, and waits for no turn to end.
+// implementerStart is the task of the implementer's start the outbox holds, the row that carries
+// the task: a start is two rows (workflow.StartOrOwe), and the relaunch row, which carries no
+// task, is the other. The task row carries phaseStartKeys and nothing else; needsSlot is among
+// them, because the delivery of a worker's task is the one part of a transition that waits, for
+// the issue's admission slot.
 func implementerStart(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var task, keys string
 	if err := pool.QueryRow(context.Background(), `select payload->>'task',
 		(select string_agg(key, ',' order by key) from jsonb_object_keys(payload) as key)
-		from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task, &keys); err != nil {
+		from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '' and payload->>'role' = 'implementer'`).Scan(&task, &keys); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
 	if keys != phaseStartKeys {

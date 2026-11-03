@@ -61,6 +61,8 @@ func TestAChildIsRecordedOnItsResolvedRepositoryAndItsDefaultBranch(t *testing.T
 	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 
 	apply("child-todo", childTodo(1, "acme/tools"))
+	// The release records the child; the waiting line is what starts its first phase.
+	startUnblockedChildren(t, pool, testEngine(config.DesignGateRootIssues, nil))
 	child := issueRecord(t, pool, "LEGION-209")
 	if child == nil || child.Repo != "acme/tools" || child.DefaultBranch != "release/v7.1" || child.Phase != phase.Planning {
 		t.Fatalf("child = %#v, want it planning on acme/tools at release/v7.1", child)

@@ -98,6 +98,23 @@ type HeldRow struct {
 	WaitsOn int64
 }
 
+// OwedStart is one pending, never-leased worker start that waits for its issue's admission slot
+// (SuperviseRequest.NeedsSlot), as the waiting line orders it: the row's own creation time and
+// its id. That pair is the line's ordering key because it is durable — the transition wrote the
+// row in its own transaction, and a restart finds it exactly where it was — and because it is
+// already the order the issue's work came back in, which is the order the line gives those
+// issues their slots back (Waiting). The role, phase and generation the row serves travel with
+// it so that the one read also answers admission's repair of a row that has outlived the
+// fences the outbox would have run it under.
+type OwedStart struct {
+	Issue      string
+	CreatedAt  time.Time
+	ID         int64
+	Role       claim.Role
+	Phase      phase.Phase
+	Generation uint64
+}
+
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
 
@@ -455,6 +472,16 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
+	// NeedsSlot marks a phase worker's start as the one part of a transition that waits for its
+	// issue's admission slot. The cap counts the issues at work, so what it must bound is the task
+	// that puts a worker to work; everything else the transition writes — the phase, the Dispatch
+	// status, the assignment on the role's phases row, the notices — is written in the
+	// transition's own transaction and waits for nothing. The hold is on this row's claimability
+	// alone (store.go's outboxInOrder): a row that is merely unclaimable takes no lease, so none
+	// of its issue's later rows is held behind it, and the relaunch half of the start travels in
+	// a row of its own that carries no task at all (workflow.StartOrOwe), so the worker's session
+	// is relaunched and answering questions while its next task waits in the line.
+	NeedsSlot bool `json:"needsSlot,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -903,6 +930,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
 		}
+		if value.NeedsSlot && (value.Op != "start" || value.Task == "" || value.Phase == "") {
+			return fmt.Errorf("a supervise start held for an admission slot requires a start with a task and a phase")
+		}
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
 		}
@@ -967,7 +997,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "children-first", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

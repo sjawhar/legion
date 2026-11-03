@@ -278,15 +278,88 @@ func (e *Engine) restart(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.started(ctx, tx, issue, role, task, row.Assignment)
 }
 
+// ResumeSlottedWorker starts again the worker of the phase issue stands in, with restart's
+// semantics: the assignment the role's phases row already names, so a completion still in flight
+// is never refused for an assignment nothing ever delivered, and the phase's resume task, which
+// says to carry the work on rather than beginning it. It is exported for admission's repair of a
+// slot whose worker has no task (admit's resumeSlottedWorkers), which is the one caller: every
+// other way back into a phase is a transition with a task of its own. The task is
+// ResumePhaseTask rather than ResumeTask: restart appends the merger's approved head itself
+// (withApprovedHead), so taking ResumeTask's copy of it would name the head twice.
+func (e *Engine) ResumeSlottedWorker(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role) error {
+	return e.restart(ctx, tx, issue, role, ResumePhaseTask(issue))
+}
+
 // started enqueues the start both make, for a role start and restart have already held to one
-// that works a phase.
+// that works a phase. It goes through StartOrOwe, so the worker's session comes back at once and
+// only its new task waits for the issue's admission slot.
 func (e *Engine) started(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task, assignment string) error {
 	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
 	if err != nil {
 		return err
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
-		Generation: issue.Generation, Phase: issue.Phase, Assignment: assignment})
+	return StartOrOwe(ctx, tx, e.store, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
+		Generation: issue.Generation, Phase: issue.Phase, Assignment: assignment}, e.now())
+}
+
+// StartOrOwe writes the start of a phase worker as two outbox rows in the caller's own
+// transaction, which is how the admission cap bounds the issues at work without stopping
+// anything that is already running. It is exported because admission starts phase workers too
+// (admit's startMidPhaseMembers), and every start of a worker the daemon makes comes through
+// here, so there is one implementation of the rule and one place to test it.
+//
+// The first row is the relaunch: the caller's request with no task, no assignment and none of the
+// marks that belong to a task (Kept, ResumeTask, RuleResume, NeedsSlot). It is claimable at once,
+// and the outbox's start case runs its whole relaunch half on it — it stops the role elsewhere,
+// re-points a carried claim at this tree, provisions the workspace and creates the claim when
+// there is none, records the start against the claim, and spawns, rule-resumes or retries it by
+// state — and delivers nothing, because the delivery is guarded by a task the row does not carry.
+// So the worker's session is live and answering questions while its next task waits.
+//
+// The second row is the task, the caller's own request marked NeedsSlot, which the outbox holds
+// unclaimable while the issue holds no slot (store.go's outboxInOrder). It is written through
+// Store.ReplaceOwedStart first: an issue that already owes a start and has not had its slot yet
+// keeps that row's id and created_at, which is its place in the waiting line, and carries the
+// later transition's task instead, so two transitions before the slot start the worker once. Only
+// when no such row is there — the first start, or one the lane has already leased because the
+// slot came — is a row of its own enqueued, which is what the daemon has always done for
+// back-to-back transitions.
+//
+// Which mark rides on which row follows from that split. The relaunch row keeps only what names
+// the run it brings back — the op, the tree, the role, the generation and the phase — and the
+// task row keeps everything that describes the task: the task itself, the assignment the
+// transition minted, the decisions the task names (Kept), ResumeTask, which says the outbox must
+// not deliver it to a claim already working that phase's task, and RuleResume, which says a
+// claim that spends its launch budget on it is left failed for the boot report rather than
+// retried. RuleResume therefore rides on the row that carries the task and not on the relaunch
+// before it; the boot only ever resumes a suspended claim, which the relaunch resumes by rule
+// without spending a launch budget, so the row that could spend one is the row still marked.
+//
+// Re-running the relaunch half when the task row is finally claimed is safe and is the reason the
+// two rows can be the same request: the claim is found, recording the start only notes the newer
+// row's id, and the state the relaunch left the claim in — ready, idle or working — is named by
+// none of the cases of that switch, so nothing is spawned, resumed or retried a second time.
+func StartOrOwe(ctx context.Context, tx pgx.Tx, store record.Store, issue string, payload record.SuperviseRequest, at time.Time) error {
+	relaunch := payload
+	relaunch.Task, relaunch.Assignment, relaunch.Kept = "", "", nil
+	relaunch.ResumeTask, relaunch.RuleResume, relaunch.NeedsSlot = false, false, false
+	row, err := record.NewOutboxRow(issue, relaunch, at)
+	if err != nil {
+		return err
+	}
+	if err := store.Enqueue(ctx, tx, row); err != nil {
+		return err
+	}
+	payload.NeedsSlot = true
+	owed, err := record.NewOutboxRow(issue, payload, at)
+	if err != nil {
+		return err
+	}
+	replaced, err := store.ReplaceOwedStart(ctx, tx, owed)
+	if err != nil || replaced {
+		return err
+	}
+	return store.Enqueue(ctx, tx, owed)
 }
 
 // assign mints the assignment this start hands role on issue, writes it onto the role's phases row
@@ -422,22 +495,28 @@ func ChildReenteredNotice(child, root string) record.Notice {
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
 }
 
-// ChildUnblockedNotice is the notice the tree's architect is told whenever a child it holds for
-// blockers starts (Engine.StartUnblockedChildren), its reason saying what cleared the hold. waited
-// is every issue the child's mirror row still names, in Dispatch's own order, all of them done by
-// now: the last of them closed. Empty, the child names none any longer — someone (a person or
-// the tree's architect) took its blocked-by links off while it waited — and the reason says that
-// instead. A start nobody hears of is the silent state the hold's report exists to remove, so
-// neither path starts a child without one. It is the same child-status kind a child's leave and a
-// re-entry are told with — the daemon's notice routing sends one on a non-root child to the
-// architect that owns it — and not phase-finished: no phase of the child ended, it is beginning
-// its first.
-func ChildUnblockedNotice(child, root string, waited []string) record.Notice {
+// ChildStartedNotice is the notice the tree's architect is told whenever a child of it starts
+// its first phase (Engine.StartFirstPhase), its reason saying why it starts now. waited is every
+// issue the child's mirror row still names, in Dispatch's own order, all of them done by now:
+// the last of them closed, which is what freed the child.
+//
+// Empty, the child's own links say nothing about why it starts, and the reason says what is true
+// of every child the line starts instead: it reached the front of the waiting line and took a
+// slot. That covers both an issue that never named a blocker — which is most of them now that a
+// child waits for a slot like any other issue — and one whose blocked-by links a person or the
+// architect took off while it waited, which the record cannot tell apart from the first. Naming
+// links that were taken off would be a guess, and a reason the architect reads and cannot check
+// is worse than a plain one.
+//
+// A start nobody hears of is the silent state the hold's report exists to remove, so no child
+// starts without one. It is the same child-status kind a child's leave and a re-entry are told
+// with — the daemon's notice routing sends one on a non-root child to the architect that owns it
+// — and not phase-finished: no phase of the child ended, it is beginning its first.
+func ChildStartedNotice(child, root string, waited []string) record.Notice {
 	reason := fmt.Sprintf("%s starts planning under %s: every issue it waited on (%s) is done", child, root, strings.Join(waited, ", "))
 	if len(waited) == 0 {
-		reason = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", child, root)
+		reason = fmt.Sprintf("%s starts planning under %s: it reached the front of the waiting line and took an admission slot", child, root)
 	}
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}
 }
-
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

@@ -188,6 +188,37 @@ func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue
 	return recorded, tx.Commit(ctx)
 }
 
+// acceptedAncestor is the issue above key in tree whose own reviewed head the daemon has already
+// accepted, and "" when none has been (record.AcceptedAncestorOf), read in one short read-only
+// transaction. parent is the Dispatch parent of a child that has no record yet, which is every
+// child release_children releases from backlog or triage; it is empty for a recorded child,
+// whose own record names its parent.
+func (s *server) acceptedAncestor(ctx context.Context, tree, key, parent string) (string, error) {
+	if s.pool == nil || s.records == nil {
+		return "", errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	ancestor, err := record.AcceptedAncestorOf(ctx, s.records, tx, tree, key, parent)
+	if err != nil {
+		return "", err
+	}
+	return ancestor, tx.Commit(ctx)
+}
+
+// childUnderAcceptedParent is what release_children and rerun_child answer for an issue whose
+// ancestor the daemon has already accepted, naming the ancestor and what undoes the refusal.
+// Both routes say one sentence, because they refuse for one reason: a parent's head proves its
+// children's merged work, so nothing enters the workflow beneath a head already accepted.
+// operation is what the caller would do again once the ancestor has closed.
+func childUnderAcceptedParent(child, ancestor, operation string) string {
+	return fmt.Sprintf("%s is beneath %s, whose own reviewed head the daemon has already accepted, and work entering the workflow beneath %s now would let it merge a head that does not carry that work; %s once %s has closed, or take %s back with a backward move first",
+		child, ancestor, ancestor, operation, ancestor, ancestor)
+}
+
 // architectForIssue authorizes an architect's operation on a recorded issue of its tree, and
 // returns the grant and that record.
 func (s *server) architectForIssue(w http.ResponseWriter, r *http.Request, grantID, issue string) (credential.Grant, record.Issue, bool) {
@@ -769,6 +800,25 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
+	// No child enters the workflow beneath an ancestor the daemon has already accepted: that
+	// ancestor's own head is approved and on its way to the merge queue, and work released under
+	// it now would let it merge a head that does not carry that work (dispatch://INFRA-980,
+	// "Children first"). The whole wave is refused rather than part of it, as every other
+	// refusal here is, so the architect retries one call. The chain is read from the records of
+	// the architect's tree, starting at the Dispatch parent of a child the records do not hold
+	// yet, and walks past a parent already done to whichever issue above it still merges.
+	for _, child := range children {
+		parent := intake.ObservedIssue(child.view).Parent
+		ancestor, err := s.acceptedAncestor(r.Context(), grant.Tree, child.view.Key, parent)
+		if err != nil {
+			writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree of the children to release")
+			return
+		}
+		if ancestor != "" {
+			writeFailure(w, http.StatusConflict, "CHILD_UNDER_ACCEPTED_PARENT", childUnderAcceptedParent(child.view.Key, ancestor, "release it again"))
+			return
+		}
+	}
 	if !s.adoptReleasedChildren(w, r, grant.Tree, children) {
 		return
 	}
@@ -1308,6 +1358,12 @@ func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
 // run starts under the tree from planning (the workflow's reenterChild), and the event, once
 // delivered, changes nothing. A running child is parked first, and a lingering tree runs nothing
 // more; a todo it reached anyway would admit the child as an orphan root of its own.
+//
+// It is refused while an ancestor of the child has already been accepted
+// (CHILD_UNDER_ACCEPTED_PARENT): work entering the workflow beneath such an ancestor would let
+// that ancestor merge a head that does not carry it, which is the order children-first keeps.
+// The ancestor is named, and the chain is walked past a parent already done, so a grandchild
+// under a done parent is refused by whichever issue above it is still merging.
 func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 	child, ok := s.childOfTree(w, r)
 	if !ok {
@@ -1324,6 +1380,15 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 	}
 	if root.Lingers() {
 		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
+		return
+	}
+	ancestor, err := s.acceptedAncestor(r.Context(), child.Tree, child.Key, "")
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree of the child to rerun")
+		return
+	}
+	if ancestor != "" {
+		writeFailure(w, http.StatusConflict, "CHILD_UNDER_ACCEPTED_PARENT", childUnderAcceptedParent(child.Key, ancestor, "run it again"))
 		return
 	}
 	if written, ok := s.setDispatchStatus(w, r, child.Key, "todo"); ok && s.applyOwnStatusWrite(w, r, written) {

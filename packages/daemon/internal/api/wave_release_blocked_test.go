@@ -30,11 +30,17 @@ import (
 // releaseRoot is the live tree every release of these tests belongs to.
 const releaseRoot = "LEGION-208"
 
-// releaseHarness is release_children over the daemon's own handler chain (daemon/workflow.go,
+// releaseHarness is release_children over the daemon's whole handler chain (daemon/workflow.go,
 // releaseHandlers): the mirror first, so the one fact that records a released child also records
-// what Dispatch says it waits on, and the engine behind it withholds the first phase of a child that
-// waits. The tree is live, its design gate approved only when open says so — the gate, not a
-// blocker, is what holds every child of a tree whose design is not approved yet.
+// what Dispatch says it waits on, then the engine, then admission. The tree is live, its design
+// gate approved only when open says so — the gate, not a blocker, is what holds every child of a
+// tree whose design is not approved yet.
+//
+// Admission is in the chain because nothing else starts a released child any more: a child is an
+// issue the admission cap counts, so its first phase begins when the waiting line gives it a slot
+// (record.LineFirstPhase), not when the release records it. A harness without admission would
+// answer every release "started nothing", which says nothing about the release. The cap is large
+// enough that no wave of these tests queues behind it.
 func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 	t.Helper()
 	h := newHarness(t)
@@ -65,6 +71,7 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
+	h.openTree(t, testDispatchProject, releaseRoot)
 	statuses.issues = map[string]dispatch.Issue{
 		releaseRoot: {Key: releaseRoot, ResolvedRepo: "acme/widgets", Status: "in_progress"},
 	}
@@ -75,9 +82,9 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 // the Dispatch consumer applies a delivered event with: the mirror, then the engine.
 func releaseHandlers() []intake.Handler {
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, log)
+	return []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 8, testDispatchProject, log)}
 }
 
 // deliverEcho applies the todo event a release's write made, as the Dispatch consumer delivers it
@@ -553,24 +560,6 @@ func TestWaveReleaseRecordsWrittenDescendantsOfATodoChildOfTheWave(t *testing.T)
 	}
 }
 
-// releaseHarnessWithAdmission is releaseHarness over the daemon's whole handler chain: the mirror,
-// the engine and admission (daemon/workflow.go), which takes an unrecorded todo issue carrying the
-// legion label for an orphan and records it as a root of its own.
-func releaseHarnessWithAdmission(t *testing.T) (*harness, *statusRecorder) {
-	t.Helper()
-	h, statuses := releaseHarness(t, true)
-	records := record.NewStore()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, log)
-	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, DispatchProject: testDispatchProject,
-		OperatorToken: testOperatorToken, Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 4, testDispatchProject, log)},
-		Dispatch: statuses,
-	}).Handler
-	return h, statuses
-}
-
 // labelledChild is a child of parent carrying the legion label, in Dispatch status status.
 func labelledChild(key, parent, status string) dispatch.Issue {
 	child := todoChild(key)
@@ -583,7 +572,7 @@ func labelledChild(key, parent, status string) dispatch.Issue {
 // parent. Recorded from its write before its parent, no handler of the workflow would record it,
 // and admission would take it for an orphan and record it as a root of its own.
 func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *testing.T) {
-	h, statuses := releaseHarnessWithAdmission(t)
+	h, statuses := releaseHarness(t, true)
 	parent, labelled := "LEGION-209", "LEGION-210"
 	statuses.issues[parent] = todoChild(parent)
 	statuses.issues[labelled] = labelledChild(labelled, parent, "backlog")
@@ -603,7 +592,7 @@ func TestWaveReleaseRecordsALabelledChildUnderAnUnrecordedTodoChildInItsTree(t *
 // the release writes todo, under a todo child of the wave, is recorded only after the written child
 // is, and joins the tree.
 func TestWaveReleaseRecordsATodoChildUnderAWrittenChildOfTheWaveInItsTree(t *testing.T) {
-	h, statuses := releaseHarnessWithAdmission(t)
+	h, statuses := releaseHarness(t, true)
 	top, middle, bottom := "LEGION-209", "LEGION-210", "LEGION-211"
 	statuses.issues[top] = todoChild(top)
 	written := backlogChild(middle)
@@ -628,7 +617,7 @@ func TestWaveReleaseRecordsATodoChildUnderAWrittenChildOfTheWaveInItsTree(t *tes
 // under it: named once, it has its own depth in releaseOrder, not that depth counted once per
 // naming, which put it after its child and had admission record the child as a root of its own.
 func TestWaveReleaseNamingAChildTwiceKeepsItAheadOfItsChild(t *testing.T) {
-	h, statuses := releaseHarnessWithAdmission(t)
+	h, statuses := releaseHarness(t, true)
 	top, middle, bottom := "LEGION-209", "LEGION-210", "LEGION-211"
 	statuses.issues[top] = todoChild(top)
 	written := backlogChild(middle)

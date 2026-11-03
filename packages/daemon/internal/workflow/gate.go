@@ -158,9 +158,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, nil
 	}
 	// The gate of this document was already open at this version: the architect was told then, so
-	// the registration tells it nothing again. Advancing the admitted tree and releasing a refused
-	// READY change nothing that already moved. A root waiting on a person is told by its resume,
-	// which says how its spec stands (answerOpenGates), so it gets no notice now as well.
+	// the registration tells it nothing again. Releasing a refused READY changes nothing that
+	// already moved. A root waiting on a person is told by its resume, which says how its spec
+	// stands (answerOpenGates), so it gets no notice now as well. The members the opening
+	// releases are started by admission's own pass over this same fact, which gives each the slot
+	// its first phase needs (record.Waiting's LineFirstPhase).
 	switch {
 	case issue.AwaitingPerson():
 		e.logOnCommit(ctx, "workflow: a root waiting on a person is told its open gate by its resume", "issue", issue.Key, "version", gate.LatestVersion)
@@ -170,9 +172,6 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		}
 	default:
 		e.logOnCommit(ctx, "workflow: a registration of a gate already open at its version tells the architect nothing", "issue", issue.Key, "version", gate.LatestVersion)
-	}
-	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
-		return intake.Result{}, err
 	}
 	if err := e.advancePendingReady(ctx, tx, fact.Issue, gate); err != nil {
 		return intake.Result{}, err
@@ -814,9 +813,8 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 				return err
 			}
 		}
-		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
-			return err
-		}
+		// The members the opening releases take their first phase from admission's pass over this
+		// same fact, each at the slot that phase needs (record.Waiting's LineFirstPhase).
 	}
 	return e.advancePendingReady(ctx, tx, key, updated)
 }

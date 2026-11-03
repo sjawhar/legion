@@ -394,7 +394,7 @@ func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
 		t.Fatalf("the issue is in %s, want implementing", got)
 	}
 	var task string
-	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' order by id desc limit 1").Scan(&task); err != nil {
+	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> '' order by id desc limit 1").Scan(&task); err != nil {
 		t.Fatalf("read the implementer's start task: %v", err)
 	}
 	if !strings.Contains(task, "rename the widget") || strings.Contains(task, "one more thought") {
@@ -565,7 +565,7 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 				t.Fatalf("the issue is in %s, want %s", got, tc.want)
 			}
 			var starts int
-			if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
+			if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''
 				and payload->>'role' = 'reviewer' and payload->>'phase' = 'reviewing'`).Scan(&starts); err != nil {
 				t.Fatal(err)
 			}
@@ -604,7 +604,7 @@ func TestARetryOfAStuckRoundTellsTheReviewerWhy(t *testing.T) {
 		t.Fatalf("the architect was told %d times (%+v), want once: at the completion, not at the retry", len(told), told)
 	}
 	var task string
-	if err := pool.QueryRow(t.Context(), `select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'
+	if err := pool.QueryRow(t.Context(), `select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''
 		and payload->>'role' = 'reviewer' order by id desc limit 1`).Scan(&task); err != nil {
 		t.Fatalf("read the reviewer's retry task: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
 		t.Fatalf("the architect was told the round was stuck %d times (%+v), want once: at the completion, before the red", len(got), got)
 	}
 	var starts int
-	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
+	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''
 		and payload->>'role' = 'implementer'`).Scan(&starts); err != nil || starts != 1 {
 		t.Fatalf("implementer starts = %d, %v; want one", starts, err)
 	}
@@ -694,7 +694,7 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 			}
 			starts := func(role claim.Role) int {
 				var n int
-				if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
+				if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''
 					and payload->>'role' = $1`, string(role)).Scan(&n); err != nil {
 					t.Fatalf("count the %s's starts: %v", role, err)
 				}

@@ -1778,6 +1778,22 @@ func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row recor
 	return nil
 }
 
+// PutSlot grants the slot and then wakes the issue's lifecycle lane once the transaction
+// commits. A grant writes a slots row and no outbox row, so nothing would otherwise tell the
+// lane that anything changed — and the thing the grant releases is an outbox row: the worker
+// start the transition left unclaimable until the issue held a slot
+// (record.SuperviseRequest.NeedsSlot). Without this wake that task would sit until the lane's
+// next sweep, up to one outbox lease behind the grant. The wake belongs here rather than in
+// record.Store for the same reason every other wake does: the store is the daemon's
+// transactional record and knows nothing of the lanes that run beside it.
+func (s projectRecords) PutSlot(ctx context.Context, tx pgx.Tx, slot record.Slot) error {
+	if err := s.Store.PutSlot(ctx, tx, slot); err != nil {
+		return err
+	}
+	s.wakeOnCommit(ctx, record.OutboxRow{Issue: slot.Issue, Kind: record.OutboxKindSupervise})
+	return nil
+}
+
 // wakeOnCommit wakes the row's lane once the transaction that wrote it commits. A write made
 // outside a commit scope (intake.WithCommitHooks) has no commit to wait for: its lane is woken at
 // once, and the write is logged with its caller, since a lane woken before the row is visible
@@ -1821,7 +1837,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	stranded, err := workflow.Stranded(ctx, tx, records, s.project, claims)
 	if err != nil {
 		return api.State{}, err
 	}
