@@ -30,7 +30,11 @@ commands:
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
-  seed-finish      after seed: wait for the outbox and the block-index backfill, vacuum, install the commit-time trigger
+  seed-finish      after seed: wait for the outbox, the block-index backfill and, with -url, for
+                   meaning search to embed the seed; vacuum, install the commit-time trigger
+  stub-embed       serve Azure's embeddings route over https with a certificate it generates
+                   (-cert-out, for Dispatch's SSL_CERT_FILE): deterministic 1536-float vectors,
+                   so a deployment with no Azure still embeds what the seed writes
   cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
   curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
   codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
@@ -89,6 +93,8 @@ func main() {
 		err = runTables(os.Args[2:])
 	case "seed-finish":
 		err = runSeedFinish(os.Args[2:])
+	case "stub-embed":
+		err = runStubEmbed(os.Args[2:])
 	case "cgroup-merge":
 		err = runCgroupMerge(os.Args[2:])
 	case "curves":
