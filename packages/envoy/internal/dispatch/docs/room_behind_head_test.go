@@ -1423,6 +1423,88 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 	}
 }
 
+// A read made inside an append's cursor window takes the room, not the stored document. The
+// window is the same one a write must not fork the store in (the test above): a browser's append
+// raises the head when it commits and takes that version into its room's cursor a moment later,
+// and a read compares the head it reads without the document's lock against that cursor
+// (heldTree, docTree), so inside the window it finds a healthy room one version behind the head.
+// The store at that head holds less than the room - the keystroke the room took while the append
+// was committing has not been appended yet - so a read that took the stored document would
+// answer without text the room has already sent the browser that typed it. That is how
+// TestDeleteColumnWithAListedColumnRemovesThatCell (package api) read a document holding only
+// its intro paragraph after a browser peer had added a table the room answered its sync with
+// (CI run 41548117572). The read takes the room instead (storeHoldsTheRoom), and once the room's
+// appends have landed it takes the store again.
+func TestAReadInsideAnAppendsCursorWindowTakesTheRoom(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which holds no window between a commit and its cursor", service.persistence)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	var opened, closed sync.Once
+	releaseWindow := func() { closed.Do(func() { close(release) }) }
+	// Before the service's own cleanup, which cannot shut down while an append is held here.
+	t.Cleanup(releaseWindow)
+	appends.afterAppendCommit = func(room string, _ persistence.Version) {
+		held := false
+		if room == artifactID {
+			opened.Do(func() { held = true })
+		}
+		if !held {
+			return
+		}
+		close(committed)
+		<-release
+	}
+
+	// The browser's first edit commits its append and holds the window open from inside it. Its
+	// second reaches the room while that append is still there, so the room holds a paragraph the
+	// store has not taken.
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Alpha paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's first edit: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the browser's append never committed, so no window opened")
+	}
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Bravo paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's second edit: %v", err)
+	}
+	if !roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands at the head inside its own append's cursor window, so nothing here is tested")
+	}
+	if stored := storedMarkdown(t, service.store, artifactID); strings.Contains(stored, "Bravo paragraph.") {
+		t.Fatalf("the stored document = %q, want it without the keystroke the room took inside the window", stored)
+	}
+
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("a read inside the window: %v", err)
+	}
+	for _, want := range []string{"Alpha paragraph.", "Bravo paragraph."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("a read inside the window = %q, want the room's own %q", text, want)
+		}
+	}
+	if _, err := service.BlockForQuote(context.Background(), artifactID, "Bravo paragraph."); err != nil {
+		t.Fatalf("docTree inside the window: %v; want the block the room holds", err)
+	}
+
+	releaseWindow()
+	waitForLandedAppends(t, service, artifactID)
+	if text, err := service.Text(context.Background(), artifactID); err != nil || !strings.Contains(text, "Bravo paragraph.") {
+		t.Fatalf("a read once the room's appends landed = %q, %v; want both paragraphs", text, err)
+	}
+}
+
 // recordedClasses holds what a service's room update observer recorded for each update its rooms
 // applied (documentUpdateClass), read in the moment between that observer and ygo's persistence
 // observer, which takes the record (consumeUpdateClass). An observer registered in

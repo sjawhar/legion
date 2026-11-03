@@ -711,8 +711,9 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 // (joinRead), otherwise the live room's, which it loads, read as of one moment (liveTree): the
 // room's peers and the service write the room while a walk reads it. It is never older than the
 // stored head read before the room (readStoredHead): a room behind that head, one another process
-// wrote past and whose catch-up has not landed, is read from the store (storedTree), and the read
-// waits for no catch-up. Inside a write transaction the tree may be the write's own rendering of
+// wrote past and whose catch-up has not landed, is read from the store (storedTree) while the
+// store holds everything that room holds (storeHoldsTheRoom), and the read waits for no
+// catch-up. Inside a write transaction the tree may be the write's own rendering of
 // the fork (reuseRendering), which every caller - VerifyMark, BlockForQuote, SuggestionKind,
 // prevalidateLiveOperations, currentToken and an ApplyOps with no operation - only reads, and
 // which a caller must never change.
@@ -736,7 +737,7 @@ func (s *Service) docTree(ctx context.Context, artifactID string) (*pmdoc.Node, 
 	var treeErr error
 	behind := false
 	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if !s.roomHoldsHead(doc, head) {
+		if !s.roomHoldsHead(doc, head) && s.storeHoldsTheRoom(artifactID, doc) {
 			behind = true
 			return
 		}

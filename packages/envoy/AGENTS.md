@@ -737,7 +737,8 @@ A settlement whose room is behind catches it up under the document's lock it hol
 the caught-up rows re-arm it, and the re-armed settlement versions every update.
 Its authors come from `doc_pending_authors` and its actor from `doc_settlements_pending.last_actor`, read under the lock (`settlementAuthors`), so its credit does not depend on which process settles.
 A named or snapshot version whose room is behind the head, read under the document's advisory lock, is rendered from the stored document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those changes.
-A read (`heldTree`, `docTree`, `joinRead`) compares the room's cursor with the stored head and reads the store when the room is behind, without waiting for the catch-up.
+A read (`heldTree`, `docTree`, `joinRead`) compares the room's cursor with the stored head and reads the store when the room is behind, without waiting for the catch-up — but only while the store holds everything the room holds (`storeHoldsTheRoom`, the instance's unstored updates after a drain of its log).
+A room behind the head that holds an update of its own the store has not taken is read from the room: the stored document is missing that update, so a read taking it would answer without text the room has already sent its browsers, and a browser's own append is enough to leave its room judged behind for the moment between that append's commit and the cursor advance inside the same lock (`appendUpdate`).
 
 Room sync closes and reloads a room only when its stored history is replaced under it (`historyReplaced`):
 a rebuild deleted every row and seeded head+1, a prune or a delete lowered the head, or a compaction folded rows the room has not taken in yet (`compactKeep` = 1 keeps the head row, so a room at the head is unaffected).

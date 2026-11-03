@@ -76,11 +76,29 @@ func (s *Service) readStoredHead(ctx context.Context, artifactID string) (int64,
 // follows the update into the document, so a room it reports holds that much, and a room only
 // gains updates, so it holds them for every read after this. A room behind head is missing an
 // update another process stored that its catch-up has not applied yet (roomCatchUps), and a read
-// takes the stored document instead (storedTree) rather than wait for that catch-up. A room that
-// keeps no cursor is not judged behind: nothing says it is (roomBehindHead).
+// takes the stored document instead (storedTree) rather than wait for that catch-up, while the
+// store holds everything that room holds (storeHoldsTheRoom). A room that keeps no cursor is not
+// judged behind: nothing says it is (roomBehindHead).
 func (s *Service) roomHoldsHead(live *crdt.Doc, head int64) bool {
 	cursor := s.cursorOf(live)
 	return cursor == nil || cursor.heldThrough() >= head
+}
+
+// storeHoldsTheRoom reports whether the stored document holds every update live, room's resident
+// instance, has applied: the instance lists none of its own as unstored, after a drain of the
+// room's update log, so an update the room committed a moment ago counts (unstoredSnapshot).
+//
+// A read of a room behind the stored head takes the stored document only while this holds
+// (heldTree, docTree). The store is then that room and what another process stored on top of it,
+// so the read is older than neither. Where the room holds an update the store does not, the
+// stored document is not a newer document but an incomplete one, and a read that took it would
+// take back text the room has already answered its own browsers with - a browser's keystroke,
+// whose own append raises the head and takes that version into the room's cursor a moment later
+// (appendUpdate), is enough to leave the room judged behind with its text held by nobody else.
+// Such a read takes the room: it is behind the head by at most what a catch-up already in flight
+// will apply (roomCatchUps), and no read of this process ever goes backwards.
+func (s *Service) storeHoldsTheRoom(room string, live *crdt.Doc) bool {
+	return len(s.unstoredSnapshot(room, live)) == 0
 }
 
 // roomHeld reports whether this process holds a room of room, resident or still loading.

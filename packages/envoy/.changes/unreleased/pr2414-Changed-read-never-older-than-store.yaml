@@ -1,8 +1,11 @@
 kind: Changed
 body: |-
   A document read never returns text older than the stored head. A read whose room is behind the
-  head reads the stored document and waits for no catch-up. Before, a read on one process could
-  return a room's text from before another process's write.
+  head reads the stored document and waits for no catch-up, while the store holds everything that
+  room holds; a room holding an update of its own the store has not taken - a keystroke whose
+  append is still in flight - is read from the room instead, so no read takes back text the room
+  has already sent its browsers. Before, a read on one process could return a room's text from
+  before another process's write.
 time: 2026-10-28T12:12:16Z
 custom:
   Issue: pr2414

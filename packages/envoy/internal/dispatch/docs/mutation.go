@@ -934,7 +934,9 @@ func (s *Service) readDocument(ctx context.Context, artifactID string) (*documen
 // stored head, read after joinRead and before the room (readStoredHead): a resident room behind
 // that head - another process stored an update its catch-up has not applied yet - is read from
 // the store instead (storedTree), which does not fail the room, sound and only behind; the read
-// waits for no catch-up.
+// waits for no catch-up. A room behind the head that holds an update of its own the store has
+// not taken is read from the room all the same (storeHoldsTheRoom): the stored document is
+// missing that update, and no read takes back text the room has already sent its browsers.
 func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.Node, held bool, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return nil, false, err
@@ -955,7 +957,7 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 	if err != nil {
 		return nil, false, err
 	}
-	if !s.roomHoldsHead(live, head) {
+	if !s.roomHoldsHead(live, head) && s.storeHoldsTheRoom(artifactID, live) {
 		tree, err := s.storedTree(ctx, artifactID)
 		return tree, true, err
 	}

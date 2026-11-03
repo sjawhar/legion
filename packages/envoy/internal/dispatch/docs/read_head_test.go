@@ -232,6 +232,71 @@ func TestAReadOfARoomBehindTheStoredHeadReadsTheStoreAndOfACurrentOneReadsTheRoo
 	}
 }
 
+// A read of a room behind the stored head that holds an update of its own the store has not
+// taken reads the room, not the stored document. The stored document at that head is the one
+// thing it cannot be read from: it is missing that update, so a read taking it would answer
+// without text this process has already sent the browser that typed it, while the room is
+// missing only what a catch-up already in flight will apply. Once the room's own append has
+// landed, the store holds both and the read takes it again.
+func TestAReadOfARoomBehindTheHeadHoldingItsOwnUpdateReadsTheRoom(t *testing.T) {
+	pair := newReadPair(t)
+	ctx := context.Background()
+	const written = "Second, written on the other process."
+	const typed = "Typed into the room behind the head."
+
+	pair.leaveReaderBehind(t, "the writer's edit", func() {
+		if _, err := joinedApplyOps(pair.writer, pair.artifactID, []model.EditOp{
+			{Op: "replace", Find: "Second.", With: written},
+		}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil); err != nil {
+			t.Fatalf("edit through the writer: %v", err)
+		}
+	})
+
+	// A browser types into the reader's room while its append waits for the document's advisory
+	// lock this transaction holds, so the room holds a paragraph the store has not taken.
+	locked, err := pair.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction holding the document's lock: %v", err)
+	}
+	defer locked.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, locked, pair.artifactID); err != nil {
+		t.Fatalf("hold the document's lock: %v", err)
+	}
+	if err := browserStyleWrite(pair.reader, pair.artifactID, appendBlocks(t, typed+"\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's edit in the room behind the head: %v", err)
+	}
+	if stored := storedMarkdown(t, pair.database, pair.artifactID); strings.Contains(stored, typed) {
+		t.Fatalf("the stored document = %q, want it without the keystroke whose append is held", stored)
+	}
+
+	text, err := pair.reader.Text(ctx, pair.artifactID)
+	if err != nil || !strings.Contains(text, typed) {
+		t.Fatalf("the reader's read while its room holds an unstored keystroke = %q, %v; want that keystroke", text, err)
+	}
+	if _, err := pair.reader.BlockForQuote(ctx, pair.artifactID, typed); err != nil {
+		t.Fatalf("docTree on the room holding an unstored keystroke: %v; want the block the room holds", err)
+	}
+	if !roomBehind(t, pair.reader, pair.artifactID) {
+		t.Fatal("the reader's room stands at the head while its catch-up is held: a read forced it")
+	}
+
+	// The append lands once the lock is let go, and the store, which then holds the keystroke and
+	// the writer's edit both, is what the next read of the room behind the head takes.
+	if err := locked.Rollback(ctx); err != nil {
+		t.Fatalf("let go of the document's lock: %v", err)
+	}
+	waitForLandedAppends(t, pair.reader, pair.artifactID)
+	text, err = pair.reader.Text(ctx, pair.artifactID)
+	if err != nil {
+		t.Fatalf("the reader's read once its append landed: %v", err)
+	}
+	for _, want := range []string{typed, written} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the reader's read once its append landed = %q, want %q", text, want)
+		}
+	}
+}
+
 // A mark a browser on the writer's process placed and stored is verified on the reader at once,
 // inside a joined transaction as an anchored comment's is, while the reader's catch-up of it is
 // held: the look reads the store, so it neither waits out MarkWait nor answers ErrAnchorMissing.
