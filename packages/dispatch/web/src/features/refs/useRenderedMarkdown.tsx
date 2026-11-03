@@ -210,6 +210,13 @@ export interface RenderedMarkdownOptions {
   /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
    *  without one such a body is painted in one go, as every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
+  /** What the element holds while the parse worker still owes this source its formatting:
+   *  `"source"`, the default, the body's own literal text, which the reader reads meanwhile;
+   *  `"nothing"` for a surface whose source is no text a reader would read - a whole document,
+   *  whose markdown is as long as the page it draws, where the reader would meet 400,000
+   *  characters of syntax in one text node and the page would lay every line of it out twice
+   *  (`features/doc/DocumentPreview.tsx`). */
+  whilePending?: "source" | "nothing";
 }
 
 /** Every anchor a paint leaves for a portal: the reference anchors the link pass found, as
@@ -350,7 +357,8 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * A body longer than `markdownWorkerThreshold` is parsed off the page's own thread
  * (`markdown-engine.ts`), so it lands a frame or more after the commit that rendered it. Until
  * it does, `isPending` is set and the element holds the body's own literal text - selectable,
- * under nothing - unless it already holds a paint of an earlier source, which it keeps instead,
+ * under nothing - or nothing at all where the surface asked for that (`whilePending`), unless
+ * it already holds a paint of an earlier source, which it keeps instead,
  * so a streaming turn never flips back to its source between frames. Every paint, the pending
  * one included, recomputes the ask hosts, the reference anchors and the picture anchors in the
  * same callback, so no portal is left pointing into a page that has been replaced; a kept paint
@@ -408,6 +416,7 @@ export function useRenderedMarkdown(
     paintInSlices,
     rawHtml = "refuse",
     softBreaks = "space",
+    whilePending = "source",
   }: RenderedMarkdownOptions = {}
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
@@ -483,7 +492,11 @@ export function useRenderedMarkdown(
             // that paint goes on attaching (sjawhar/legion#2519).
             return;
           }
-          element.replaceChildren(document.createTextNode(markdown));
+          // A surface that reads as nothing until it is formatted holds nothing meanwhile
+          // (`whilePending`); every other one holds the body's own text.
+          element.replaceChildren(
+            ...(whilePending === "source" ? [document.createTextNode(markdown)] : [])
+          );
           setAskHosts(NO_ASK_HOSTS);
           const { pictures: placeholders, references } = portalAnchors(element, decorate);
           setReferenceAnchors(references);
@@ -614,7 +627,7 @@ export function useRenderedMarkdown(
       { keepAPostedParse: true }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, rawHtml, root, softBreaks]);
+  }, [Card, decorate, markdown, paint, paintInSlices, rawHtml, root, softBreaks, whilePending]);
 
   return {
     isFallback,

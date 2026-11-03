@@ -193,7 +193,13 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     refuse() {
       callbacks.at(-1)?.onOutsideSchema();
     },
-    runtime: { blockSchema, createEditor, loadTransport: async () => connect },
+    runtime: {
+      blockSchema,
+      createEditor,
+      // The fake builds its editor from nothing, so there is no chunk to start.
+      loadEditor: () => undefined,
+      loadTransport: async () => connect,
+    },
     status(state) {
       for (const callback of callbacks) {
         callback.onStatus(state);

@@ -227,7 +227,12 @@ a {
 
    That attribute is the live document's own, so the rule reaches that document alone: a past
    version (`VersionView`) writes none, and its one focus - a comment link's quote, a highlighted
-   mark - has nothing to run again after a skipped block above it paints and moves the target. */
+   mark - has nothing to run again after a skipped block above it paints and moves the target.
+
+   The document's own draw before its editor exists (`features/doc/DocumentPreview.tsx`) is the
+   same blocks of the same document, drawn in the same `data-placed` document, and is where the
+   reader first meets them, so it is skipped the same way. */
+.dispatch-doc[data-placed="false"] .dispatch-doc-preview > *,
 .dispatch-doc[data-placed="false"] .milkdown .editor > * {
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;

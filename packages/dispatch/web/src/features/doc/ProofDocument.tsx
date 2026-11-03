@@ -1,4 +1,4 @@
-import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { Link, useNavigate } from "react-router-dom";
 
 import {
@@ -56,9 +57,11 @@ import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { DocumentPreview, documentPreview } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
+import { liveTextQueryOptions } from "./live-text";
 import {
   blockOffsets,
   blockPlacements as collectBlockPlacements,
@@ -67,6 +70,7 @@ import {
   selectionBarKindFor,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
+import { takeEarlyTextRead } from "./open-document-early";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
@@ -77,14 +81,6 @@ import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
-
-/** The live document's text as the server reads it now. A read of it decides whether the editor
- * may connect: the server answers `409 DOC_SCHEMA` for a stored tree outside the Proof schema. */
-export const liveTextQueryOptions = (artifactId: string) =>
-  queryOptions({
-    queryKey: ["artifact", artifactId, "text"],
-    queryFn: () => api.getArtifactText(artifactId),
-  });
 
 /** Why an admission left the live editor closed, from its own `/text` read: a tree outside the
  * Proof schema the page offers to repair from markdown, a stored history that cannot load the page
@@ -193,6 +189,63 @@ function dispatchHrefOf(anchor: Element): string | null {
   return href?.startsWith("dispatch://") ? href : null;
 }
 
+/** Where a reader is in a document drawn as a run of top-level blocks: the first block the top
+ *  of the scrollport is in or above, and how far that block's own top sits from it. `undefined`
+ *  where there is nothing to keep: no draw, or a reader still at the document's first block and
+ *  above its top, whom any draw of it leaves where they are. */
+interface ReadersBlock {
+  readonly index: number;
+  readonly top: number;
+}
+
+function readersBlock(drawn: HTMLElement | null): ReadersBlock | undefined {
+  if (drawn === null) {
+    return undefined;
+  }
+  const blocks = drawn.children;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const { bottom, top } = blocks[index].getBoundingClientRect();
+    if (bottom > 0) {
+      return index === 0 && top >= 0 ? undefined : { index, top };
+    }
+  }
+  return undefined;
+}
+
+/** What scrolls `element`: the nearest ancestor that scrolls its own content, or the page
+ *  itself. A document is the page's own scroll on its page and a column's scroll in a reading
+ *  pane, and the reader's place is kept against whichever is carrying them. */
+function whatScrolls(element: HTMLElement): HTMLElement | null {
+  for (let box = element.parentElement; box !== null; box = box.parentElement) {
+    const overflow = window.getComputedStyle(box).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && box.scrollHeight > box.clientHeight) {
+      return box;
+    }
+  }
+  return null;
+}
+
+/** Puts the reader back where `place` left them, in a document `drawn` draws the same blocks of
+ *  in the same order. A block the new draw does not have - a document edited between the two -
+ *  leaves the page where it is, which is the browser's own scroll anchoring rather than a jump
+ *  to the wrong words. */
+function putTheReaderBack(drawn: HTMLElement, place: ReadersBlock | undefined): void {
+  const block = place === undefined ? undefined : drawn.children[place.index];
+  if (block === undefined || place === undefined) {
+    return;
+  }
+  const moved = block.getBoundingClientRect().top - place.top;
+  if (moved === 0) {
+    return;
+  }
+  const scroller = whatScrolls(drawn);
+  if (scroller === null) {
+    window.scrollBy(0, moved);
+    return;
+  }
+  scroller.scrollTop += moved;
+}
+
 export function ProofDocument({
   artifact,
   highlight,
@@ -241,9 +294,14 @@ export function ProofDocument({
   // reconnect's admission decides again.
   const [closedAdmission, setClosedAdmission] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
+  // Whether this effect's editor has its DOM in the page, which is what the document's own first
+  // draw gives way to (`DocumentPreview`). It is set in the same task the editor's DOM lands in,
+  // so the two are never both on the page.
+  const [editorDrawn, setEditorDrawn] = useState(false);
   const {
     blockSchema: runtimeBlockSchema,
     createEditor,
+    loadEditor,
     loadTransport,
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
@@ -365,6 +423,12 @@ export function ProofDocument({
     write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
+  /** Whether the reader reads the document's own markdown rather than the editor's draw of it:
+   *  from the moment `/text` lands until this effect's editor has its DOM in the page
+   *  (`DocumentPreview`). A version is its own view, and a pane is not it either: a reading
+   *  column places itself at the block its reader chose, and only the editor's blocks carry the
+   *  ids the server minted for them (`scroll-block.ts`). */
+  const showsOwnText = page && !editorDrawn && version === undefined && liveMarkdown !== "";
   const versionMarkdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown
@@ -522,6 +586,10 @@ export function ProofDocument({
     // Sockets the server refused in a row, since this editor last synced or a repair re-admitted it.
     let refusals = 0;
     let refusalTimer: number | undefined;
+    // This effect builds an editor of its own, so until it has one the reader reads the
+    // document's own text (`DocumentPreview`) - at a mount, and again wherever a rebuilt editor
+    // follows a torn-down one.
+    setEditorDrawn(false);
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
@@ -548,6 +616,9 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      // Whatever the editor drew has gone with it, so the document's own text is what the reader
+      // reads again until the next one is built.
+      setEditorDrawn(false);
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -655,35 +726,43 @@ export function ProofDocument({
       };
     };
     // Each admission - this mount, a socket the server refused as outside the Proof schema, and a
-    // blocked admission's re-admission - opens a connection only once its own fresh `/text` read
-    // succeeds, and that read alone decides: a browser editor normalizes a tree it cannot
-    // represent and writes the result back. A read that fails closes nothing already open, since
+    // blocked admission's re-admission - opens a connection only once a `/text` read succeeds,
+    // and that read alone decides: a browser editor normalizes a tree it cannot represent and
+    // writes the result back. A read that fails closes nothing already open, since
     // only an admission opens anything, so a later refetch that fails - an outage during an
     // artifact event's invalidation, say - leaves a connected editor and its unsent edits alone.
     // A blocked admission waits for the next successful read of the text, which a repair upload
     // or a rebuild brings about, and is admitted again (`readmitRef`).
+    //
+    // The first admission takes the read the shell already made for this opening of this
+    // document, where there is one (`takeEarlyTextRead`): it is a read, made because this
+    // address was opened, so it says what a read made here would say, and taking it is what
+    // keeps a large document from being downloaded twice for one opening - once for the reader
+    // to read, once for the socket. Every admission after it reads afresh, since each is
+    // answering a refusal, a repair or a rebuild that changed the stored tree.
     const admit = () => {
-      const textRead = queryClient
-        .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
-        .then(
-          () => undefined,
-          async (error: unknown) => {
-            if (isArtifactNotFound(error)) {
-              try {
-                const { deletePendingEdits } = await importWhenOnline(
-                  () => import("./pending-edits")
-                );
-                await deletePendingEdits(artifact.id);
-              } catch (deleteError) {
-                console.error(
-                  "Could not delete pending browser edits for a removed document",
-                  deleteError
-                );
-              }
+      const textRead = (
+        takeEarlyTextRead(artifact.id) ??
+        queryClient.fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
+      ).then(
+        () => undefined,
+        async (error: unknown) => {
+          if (isArtifactNotFound(error)) {
+            try {
+              const { deletePendingEdits } = await importWhenOnline(
+                () => import("./pending-edits")
+              );
+              await deletePendingEdits(artifact.id);
+            } catch (deleteError) {
+              console.error(
+                "Could not delete pending browser edits for a removed document",
+                deleteError
+              );
             }
-            return admissionBlock(error);
           }
-        );
+          return admissionBlock(error);
+        }
+      );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
           if (!mounted) {
@@ -800,12 +879,35 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
+                  // Where the reader had got to in the document's own draw, and where that
+                  // leaves them in the editor's: both draw the same document's top-level blocks
+                  // in the same order, so the block they were reading is the editor's block of
+                  // the same index (`readersBlock`).
+                  const place = readersBlock(documentPreview(parent.parentElement));
+                  // The editor's DOM is in the page already, and this runs in the same task it
+                  // landed in, so the draw it replaces goes in that task too: no frame is drawn
+                  // holding both, and none is drawn holding neither.
+                  flushSync(() => setEditorDrawn(true));
+                  // Put them back now, and again once the page's diagrams have drawn and it has
+                  // settled, exactly as a block link's focus is (`focusInEditor`): a diagram
+                  // drawn above them, and a block painting at its own height in place of the one
+                  // `contain-intrinsic-size` estimated, each move their block. A focus asked for
+                  // after this one - a block link's - drops that re-run, which is the order the
+                  // reader wants, and so does their own first scroll.
+                  if (place !== undefined) {
+                    focusInEditor(() => putTheReaderBack(handle.view.dom, place));
+                  }
                   disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
             },
           });
           document = connection;
+          // The editor's chunk is the largest the document loads and nothing about it depends on
+          // the document's state, so it downloads while the socket is admitted and the whole Yjs
+          // document arrives, rather than after (dispatch://INFRA-341, R11). `createEditor`
+          // below finds it loaded.
+          loadEditor();
         })
         .catch(reportLoadFailure);
     };
@@ -823,6 +925,7 @@ export function ProofDocument({
     createEditor,
     documentRef,
     focusInEditor,
+    loadEditor,
     loadTransport,
     page,
     pendingWaiter,
@@ -1002,6 +1105,7 @@ export function ProofDocument({
           navigate(buildReferencePath(route));
         }}
       >
+        {showsOwnText ? <DocumentPreview markdown={liveMarkdown} /> : null}
         <div ref={root} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);

@@ -32,10 +32,18 @@ export const scrollStepMs = 100;
  *  so a document that keeps growing under the scroll still ends the measurement. */
 export const scrollStepsMax = 120;
 
-/** The document's first block: the first `[data-block-id]` the editor stamps
- *  (`BLOCK_ID_ATTRIBUTE` in `web/src/features/doc/scroll-block.ts`), inside the editor root
- *  rather than anywhere in the page. */
-const firstBlockSelector = '[aria-label="Document editor"] [data-block-id]';
+/** The document's first block: the first `[data-block-id]` element
+ *  (`BLOCK_ID_ATTRIBUTE` in `web/src/features/doc/scroll-block.ts`) inside the document itself,
+ *  rather than anywhere in the page.
+ *
+ *  Two surfaces draw the document, and whichever of them is up is what the reader is reading,
+ *  which is what this number is for: the editor (`Document editor`, the one that takes edits)
+ *  and, before it exists, the document's own text drawn from the server's markdown
+ *  (`Document text`, `web/src/features/doc/DocumentPreview.tsx`). Each stamps every block it
+ *  draws with the same attribute, and the preview stands before the editor in the page, so
+ *  `querySelector` answers with the first block of whichever is drawing. */
+const firstBlockSelector =
+  '[aria-label="Document editor"] [data-block-id], [aria-label="Document text"] [data-block-id]';
 
 export interface DocumentMeasurement {
   /** Milliseconds from the start of navigation until the first block was in the viewport. */

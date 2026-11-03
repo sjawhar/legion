@@ -13,12 +13,14 @@
 // The rest of acceptance A7 is here too, and each of those rows reads a build rather than a
 // clock: a link to the decision block at the end of the larger document lands on that block, a
 // reader answers that decision, and a comment body of twenty diagrams draws only the diagrams
-// the reader has reached. They carry no throttling: what they prove is what the page does, not
-// how long it takes.
+// the reader has reached. Two rows of the draw that makes those targets reachable at all are
+// here as well: the document on the screen before its editor exists, and the editor opening
+// where its reader had got to. None of them carries throttling: what they prove is what the
+// page does, not how long it takes.
 import { expect, type Locator, test } from "@playwright/test";
 
 import { createComment, createIssue, createIssueArtifact, createProject } from "./api";
-import { documentEditor } from "./editor";
+import { documentEditor, documentTransport } from "./editor";
 import {
   commentDiagrams,
   decisionBlockId,
@@ -27,7 +29,9 @@ import {
   diagramsIn,
   documentDiagrams,
   documentNames,
+  documentTitle,
   largeDocument,
+  sectionHeading,
   smallDocument,
 } from "./large-documents";
 import { measureDocument, printMeasurement } from "./large-documents-page";
@@ -187,6 +191,85 @@ test(`a link to the decision block at the end of ${documentNames.large} lands on
     await expect(linked).toBeInViewport({ timeout: 240_000 });
     await settledScrollTop(page);
     await expect(linked).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The two rows below are about the draw that makes the numbers above reachable at all: the
+// document is drawn from its own markdown, through the read-only headless engine, before the
+// editor exists (`web/src/features/doc/DocumentPreview.tsx`). Each holds the document's socket
+// open-ended (`documentTransport`), so no sync ever reaches the page and no editor is ever
+// built: what is left on the screen is what a reader has while one is being built for them.
+
+test(`${documentNames.small} is on the screen before its editor is @phone`, async ({ browser }) => {
+  test.setTimeout(300_000);
+  const path = await seedDocument("specs-small.md", smallDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await documentTransport(page, { holding: true });
+    await page.goto(path);
+
+    // The same first block the measurement reads (`large-documents-page.ts`), drawn with no
+    // socket, no sync and no editor: it carries `data-block-id` as the editor's blocks do.
+    const firstBlock = page.locator('[aria-label="Document text"] [data-block-id]').first();
+    await expect(firstBlock).toBeInViewport({ timeout: 120_000 });
+    await expect(firstBlock).toContainText(documentTitle(documentDiagrams.small));
+    // And the sections below it are drawn too, not only the block the measurement reads.
+    await expect(page.getByRole("heading", { name: sectionHeading(0) })).toBeVisible();
+    // And the editor really is not there: the page holds no document textbox at all.
+    await expect(documentEditor(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test(`the editor opens ${documentNames.large} where its reader had got to @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(600_000);
+  const path = await seedDocument("specs-large.md", largeDocument);
+  // A section half-way down the document: far enough that a swap which kept the page's scroll
+  // offset rather than the reader's place would leave them sections away from these words.
+  const landmarkText = sectionHeading(Math.floor(documentDiagrams.large / 2));
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page, { holding: true });
+    await page.goto(path);
+
+    const landmark = page.getByRole("heading", { name: landmarkText });
+    await expect(landmark).toBeAttached({ timeout: 240_000 });
+    // The reader stops with this section's heading at the top of their screen - the block the
+    // swap reads their place from is the one the screen starts with, so this is the block the
+    // row is about. The blocks the scroll passed paint as it goes and the page settles under
+    // them, which moves the heading, so it is put back at the top once that is over. A page
+    // scrolled this far is 120,000 px from the top, so a swap that kept the page's offset
+    // rather than the reader's place would land sections away.
+    await landmark.scrollIntoViewIfNeeded();
+    await settledScrollTop(page);
+    await landmark.evaluate((heading) => heading.scrollIntoView({ block: "start" }));
+    const scrolled = await settledScrollTop(page);
+    expect(scrolled).toBeGreaterThan(10_000);
+    const where = await landmark.boundingBox();
+    expect(where?.y ?? Number.NaN).toBeLessThan(200);
+
+    await transport.release();
+    await expect(documentEditor(page)).toBeVisible({ timeout: 240_000 });
+    // The editor has replaced the draw the reader was reading, and left their own words on the
+    // same line of the screen. Read once the page has stopped moving: the editor's diagrams
+    // draw for seconds after it opens and its skipped blocks paint at their own heights, and
+    // the page is put back under the reader after each of those (`refocusAfterDiagrams`). Not
+    // to the pixel: the two draws wear different stylesheets, so the block they were reading is
+    // a few pixels taller or shorter in one than in the other.
+    await settledScrollTop(page);
+    const landed = await documentEditor(page)
+      .getByRole("heading", { name: landmarkText })
+      .boundingBox();
+    expect(Math.abs((landed?.y ?? Number.NaN) - (where?.y ?? Number.NaN))).toBeLessThan(200);
   } finally {
     await alice.close();
   }

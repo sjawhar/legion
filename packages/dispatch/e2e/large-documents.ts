@@ -46,6 +46,17 @@ function subject(index: number): string {
   return subjects[index % subjects.length];
 }
 
+/** The `index`th section's heading, counted from 0, as a reader reads it: what a row naming a
+ *  landmark part-way down a document asks for, so no row spells the heading itself. */
+export function sectionHeading(index: number): string {
+  return `${index + 1}. The ${subject(index)}`;
+}
+
+/** The document's own title line: the first block a reader meets, before any section. */
+export function documentTitle(sections: number): string {
+  return `A synthetic document of ${sections} sections`;
+}
+
 /** The sentence a section's prose opens with, which names the section so no two sections are the
  *  same bytes. */
 function proseHead(index: number): string {
@@ -158,7 +169,7 @@ function decisionSection(decision: number, sections: number): number {
 
 function sectionText(index: number, decision: number | undefined): string {
   const blocks = [
-    `## ${index + 1}. The ${subject(index)}`,
+    `## ${sectionHeading(index)}`,
     "",
     `### How the ${subject(index)} settles`,
     listBlock(index),
@@ -190,7 +201,7 @@ export function syntheticDocument(sections: number): string {
   for (let decision = 1; decision <= decisionBlocks; decision += 1) {
     decisions.set(decisionSection(decision, sections), decision);
   }
-  const written: string[] = [`# A synthetic document of ${sections} sections`];
+  const written: string[] = [`# ${documentTitle(sections)}`];
   for (let index = 0; index < sections; index += 1) {
     written.push(sectionText(index, decisions.get(index)));
   }

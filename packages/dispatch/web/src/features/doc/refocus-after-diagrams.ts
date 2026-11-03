@@ -3,6 +3,18 @@ import { mermaidDrawsWaiting } from "../refs/mermaid-diagrams";
 /** What a reader does to move on from where a link put them: press, scroll, touch or type. */
 const READER_ACTIONS = ["pointerdown", "wheel", "touchstart", "keydown"] as const;
 
+/** Calls `movedOn` the first time the reader presses, scrolls, touches or types, so a
+ *  correction of where the page sits never pulls back a reader who has moved on. Answers the
+ *  dispose. */
+function whenTheReaderMovesOn(movedOn: () => void): () => void {
+  for (const type of READER_ACTIONS) {
+    window.addEventListener(type, movedOn, { capture: true, passive: true });
+  }
+  return () => {
+    for (const type of READER_ACTIONS) window.removeEventListener(type, movedOn, true);
+  };
+}
+
 /** How long the page has to hold still - no source waiting for the diagram renderer, and a
  *  document of the same height - before the watch reads it as settled. */
 const SETTLE_MS = 300;
@@ -39,14 +51,13 @@ const WATCH_MS = 30_000;
  */
 export function refocusAfterDiagrams(refocus: () => void): () => void {
   let done = false;
+  let stopListening: (() => void) | undefined;
   const stop = () => {
     if (done) return;
     done = true;
-    for (const type of READER_ACTIONS) window.removeEventListener(type, stop, true);
+    stopListening?.();
   };
-  for (const type of READER_ACTIONS) {
-    window.addEventListener(type, stop, { capture: true, passive: true });
-  }
+  stopListening = whenTheReaderMovesOn(stop);
   const giveUpAt = performance.now() + WATCH_MS;
   let height = document.scrollingElement?.scrollHeight ?? 0;
   let stillSince = performance.now();

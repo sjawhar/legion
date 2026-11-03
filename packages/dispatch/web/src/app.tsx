@@ -9,6 +9,7 @@ import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
+import { openDocumentEarly } from "./features/doc/open-document-early";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -95,16 +96,40 @@ import {
   textTransparent,
 } from "./theme/classes";
 
-const IssuePage = lazy(() =>
-  import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
-);
+const importIssuePage = () => import("./features/issue/IssuePage");
+const IssuePage = lazy(() => importIssuePage().then((module) => ({ default: module.IssuePage })));
 
 const ProjectPage = lazy(() =>
   import("./features/project/ProjectPage").then((module) => ({ default: module.ProjectPage }))
 );
+const importDocumentPage = () => import("./features/document/DocumentPage");
 const DocumentPage = lazy(() =>
-  import("./features/document/DocumentPage").then((module) => ({ default: module.DocumentPage }))
+  importDocumentPage().then((module) => ({ default: module.DocumentPage }))
 );
+
+/**
+ * Requests the chunk of the page this address opens, as this module evaluates - which is while
+ * the shell is still asking who is signed in, and well before the route tree that would ask for
+ * it renders. A document's page used to wait for that check before its chunk was so much as
+ * requested, and then for the chunk before anything of the document was asked for
+ * (dispatch://INFRA-341, R11); the chunk needs neither, and a request for it changes nothing
+ * about what the page then shows or who may see it.
+ *
+ * The two pages that open a document are the ones worth the request: every other route's chunk
+ * is asked for by its own `lazy` as it always was, and so is this one on a later navigation,
+ * where the shell is long since up and the chunk is usually in hand.
+ */
+function requestTheOpenPagesChunk(pathname: string): void {
+  if (parseIssuePath(pathname) !== undefined) {
+    void importIssuePage().catch(() => undefined);
+    return;
+  }
+  if (parseProjectPath(pathname)?.kind === "document") {
+    void importDocumentPage().catch(() => undefined);
+  }
+}
+
+requestTheOpenPagesChunk(window.location.pathname);
 
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
@@ -833,6 +858,19 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   );
 }
 
+/** The open document's own reads, started from the address the moment the shell is up rather
+ *  than when the page that shows the document finally renders (`openDocumentEarly`). It renders
+ *  nothing, and is its own component so that a navigation re-runs this effect alone instead of
+ *  rendering the shell again. */
+function OpenDocumentEarly(): null {
+  const queryClient = useQueryClient();
+  const { pathname, search } = useLocation();
+  useEffect(() => {
+    openDocumentEarly(queryClient, pathname, search);
+  }, [pathname, queryClient, search]);
+  return null;
+}
+
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   // Signed in, and before any page's own write, the writes this person's reload interrupted go
   // on under their keys, and their refusals show again (`write-store.ts`): a composer's send, a
@@ -850,6 +888,7 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   return (
     <KeymapProvider>
       <AgentRegistryPoller />
+      <OpenDocumentEarly />
       <TextAskCard.Provider value={TextAskBlockCard}>
         <AppShell user={user} />
       </TextAskCard.Provider>

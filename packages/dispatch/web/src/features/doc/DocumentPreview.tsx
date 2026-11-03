@@ -1,0 +1,97 @@
+import { type ReactNode, useMemo, useRef, useState } from "react";
+
+import { markdownClassName } from "../refs/markdown-engine";
+import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
+import { paintBlock, paintBlockInSlices } from "../refs/paint-block";
+import { useRenderedMarkdown } from "../refs/useRenderedMarkdown";
+import { leadingBlocks } from "./document-blocks";
+
+/** The class the preview's own element carries, which `styles.css` skips the off-screen blocks
+ *  of exactly as it skips the editor's (`content-visibility`). */
+const PREVIEW_CLASS = "dispatch-doc-preview";
+
+/** The document's own draw inside `within`, while one is on the page: what the reader is
+ *  reading before the editor exists, and what `ProofDocument` reads their place out of as it
+ *  swaps the editor in. */
+export function documentPreview(within: HTMLElement | null): HTMLElement | null {
+  return within?.querySelector<HTMLElement>(`.${PREVIEW_CLASS}`) ?? null;
+}
+
+/**
+ * The document as the server's markdown reads it, drawn before the editor exists.
+ *
+ * A large document used to show the reader nothing until its socket had opened, its whole Yjs
+ * state had arrived and ProseMirror had built every one of its blocks in one task - 15.6 s on a
+ * phone for a document of 406,000 characters, against a target of 5 s (dispatch://INFRA-341,
+ * R11). None of that is needed to read it: `GET /artifacts/{id}/text` is the same document, and
+ * the read-only headless engine that draws every comment and ask body on the page parses it off
+ * the page's own thread and paints it a batch at a time (`refs/useRenderedMarkdown.tsx`,
+ * `refs/paint-block.ts`). So the reader reads the document while the editor is still being
+ * built, and `ProofDocument` swaps the editor in underneath them when it is.
+ *
+ * Its blocks carry `data-block-id`, because the headless engine stamps every block it parses
+ * (`@legion/proof-editor`'s `block-ids.ts`) and serializes the id into the DOM, as the editor
+ * does. Those ids are this parse's own, not the ones the server minted for the live tree: a
+ * block link and the margin's placements are the editor's to land, and they still are
+ * (`ProofDocument`'s `bindEditor`).
+ *
+ * It is named for what it is - `Document text`, under the `document` role - and never for the
+ * editor: it takes no edits, and a reader whose screen reader announced the document editor
+ * would be told they were in something they cannot type in. The page's one editable document
+ * is the editor, and nothing reaching for that textbox finds this instead. What reads either
+ * surface reads both by name (`e2e/large-documents-page.ts`, which measures the document's
+ * first block whichever of the two is drawing it).
+ *
+ * It draws the document in two passes, because a reader needs the screen in front of them
+ * before they need the rest. The first is the blocks the source opens with, cut at a boundary
+ * the source itself gives (`leadingBlocks`) and no longer than the page parses in its own
+ * commit (`markdownWorkerThreshold`): a screenful and more, parsed and painted in one short
+ * task, with no worker in it. The second is the whole document, parsed off the page's thread
+ * and painted a batch at a time, which replaces the first draw where it stands - the same
+ * blocks in the same order, with the reader held at the one they are reading
+ * (`useRenderedMarkdown`'s `keepTheReadersPlace`).
+ *
+ * Both passes are needed because the second one is slow and may never arrive. Measured on this
+ * pod, `iphone` at 4x throttling, the whole 406,000-character document was posted to the parse
+ * worker 3.4 s after this element mounted and answered 16 s after that, by which time the
+ * editor had replaced the draw: a preview that waited for that parse painted nothing at all,
+ * in either document, and the reader's first block was still the editor's at 15.6 s
+ * (dispatch://INFRA-341, R11). The first pass costs a parse of 2,000 characters.
+ *
+ * Until the first pass lands the element holds nothing (`whilePending: "nothing"`): 2,000
+ * characters of Markdown syntax is no document to read, and the pass that replaces it is a
+ * frame away.
+ */
+export function DocumentPreview({ markdown }: { markdown: string }): ReactNode {
+  const root = useRef<HTMLDivElement>(null);
+  const firstScreenful = useMemo(
+    () => leadingBlocks(markdown, markdownWorkerThreshold),
+    [markdown]
+  );
+  /** Whether the first draw is behind this element, which is what puts the whole document in
+   *  front of it. A document whose every block fits in the first draw is its own first draw
+   *  (`leadingBlocks` answers the source itself), so nothing is parsed twice for it. */
+  const [drawnOnce, setDrawnOnce] = useState(false);
+  const source = drawnOnce ? markdown : firstScreenful;
+  // The document's own parse policies, which are this hook's defaults: a single newline inside a
+  // paragraph is a space (hard-wrapped Markdown is one paragraph), and a line of raw HTML leaves
+  // the source to the literal-text fallback rather than drawing as text.
+  const { isFallback, isPending, portals } = useRenderedMarkdown(root, source, paintBlock, {
+    onRendered: () => setDrawnOnce(true),
+    paintInSlices: paintBlockInSlices,
+    whilePending: "nothing",
+  });
+
+  return (
+    <div
+      aria-label="Document text"
+      className={`${markdownClassName} ${PREVIEW_CLASS} max-w-none`}
+      role="document"
+      data-markdown-fallback={isFallback || undefined}
+      data-markdown-pending={isPending || undefined}
+      ref={root}
+    >
+      {portals}
+    </div>
+  );
+}

@@ -155,3 +155,28 @@ export function splitBlocks(markdown: string): DocumentBlock[] {
   }
   return blocks;
 }
+
+/**
+ * The whole top-level blocks `markdown` opens with, as much of it as `characters` allows: the
+ * first block whatever its length, and every block after it that still fits inside the budget.
+ * The whole of `markdown` where every block fits, so a caller can tell a cut source from an
+ * uncut one by identity.
+ *
+ * A block is never cut, so what this answers is Markdown in its own right - a fenced code block
+ * and a decision block come whole or not at all, and the blocks are rejoined by the one blank
+ * line `splitBlocks` says belongs between two of them. That is what lets a surface parse and
+ * draw a document's first screenful before the rest of it has been parsed at all
+ * (`DocumentPreview`): the prefix renders as the same blocks the whole document renders them as.
+ */
+export function leadingBlocks(markdown: string, characters: number): string {
+  const blocks = splitBlocks(markdown);
+  let taken = blocks[0]?.source ?? markdown;
+  for (let at = 1; at < blocks.length; at += 1) {
+    const next = `${taken}\n\n${blocks[at].source}`;
+    if (next.length > characters) {
+      return taken;
+    }
+    taken = next;
+  }
+  return markdown;
+}

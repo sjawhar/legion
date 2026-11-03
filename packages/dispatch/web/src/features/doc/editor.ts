@@ -31,10 +31,25 @@ export const editorAttributes = {
 // document mounts; `importWhenOnline` holds the retry policy for a chunk that fails offline.
 // Every editor's mermaid blocks (the live document, a read-only one, a past version) draw through
 // `requestMermaidDrawing`, in the Mermaid worker comments use, never on the page's thread.
-export const createEditor: CreateEditor = async (root, options) => {
-  const [{ createProofEditor }] = await importWhenOnline(() =>
+const editorModule = () =>
+  importWhenOnline(() =>
     Promise.all([import("@legion/proof-editor"), import("@legion/proof-editor/style.css")])
   );
+
+/**
+ * Starts the editor chunk's download without building anything with it, for a host that knows an
+ * editor is coming before it has what to build one from: `ProofDocument` asks as the socket is
+ * admitted, so the chunk arrives while the whole Yjs document does, rather than after it
+ * (dispatch://INFRA-341, R11). A second call costs nothing - the module cache answers it - and a
+ * failure is the business of the `createEditor` that follows, which reports it where a reader
+ * sees it.
+ */
+export const loadEditor = (): void => {
+  void editorModule().catch(() => undefined);
+};
+
+export const createEditor: CreateEditor = async (root, options) => {
+  const [{ createProofEditor }] = await editorModule();
   const handle = await createProofEditor(root, { ...options, drawMermaid: requestMermaidDrawing });
   for (const [name, value] of Object.entries(editorAttributes)) {
     handle.view.dom.setAttribute(name, value);
