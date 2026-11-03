@@ -42930,15 +42930,18 @@ import {
   openSync as openSync2,
   readdirSync,
   readFileSync as readFileSync3,
+  readlinkSync as readlinkSync2,
   renameSync as renameSync2,
   rmSync as rmSync3,
   statSync as statSync2,
   unlinkSync,
+  utimesSync,
   writeFileSync as writeFileSync2
 } from "fs";
 import { isAbsolute as isAbsolute2, join as join3, resolve as resolve2 } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
+var STORE_BEAT_MS = 10 * 60000;
 var MARKERS = "markers";
 var ALWAYS_GATED = {
   dispatch_ask: true,
@@ -43003,7 +43006,25 @@ function processStart(pid) {
     return null;
   }
 }
-function ownerLive(owner) {
+var ownNamespace;
+function pidNamespace() {
+  if (ownNamespace === undefined) {
+    try {
+      ownNamespace = /^pid:\[([0-9]+)\]$/.exec(readlinkSync2("/proc/self/ns/pid"))?.[1] ?? null;
+    } catch {
+      ownNamespace = null;
+    }
+  }
+  return ownNamespace;
+}
+function ownerLive(owner, now) {
+  if (owner.ns !== null && owner.ns !== pidNamespace()) {
+    try {
+      return now - storeTouched(owner.store) <= MARKER_MAX_AGE_MS;
+    } catch {
+      return false;
+    }
+  }
   if (owner.start !== null)
     return processStart(owner.pid) === owner.start;
   try {
@@ -43013,11 +43034,11 @@ function ownerLive(owner) {
     return !hasErrnoCode(error, "ESRCH");
   }
 }
-function isOwner(value) {
+function isOwnerText(value) {
   if (typeof value !== "object" || value === null)
     return false;
-  const { pid, start, store } = value;
-  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && typeof store === "string" && store.startsWith("/");
+  const { pid, start, ns, store } = value;
+  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 && (start === null || typeof start === "string") && (ns === undefined || ns === null || typeof ns === "string" && /^[0-9]+$/.test(ns)) && typeof store === "string" && store.startsWith("/");
 }
 function parseOwner(text) {
   let data;
@@ -43026,16 +43047,16 @@ function parseOwner(text) {
   } catch {
     return;
   }
-  if (!isOwner(data) || !("v" in data) || data.v !== 2)
+  if (!isOwnerText(data) || data.v !== 2)
     return;
-  const { pid, start, store, mode } = data;
+  const { pid, start, ns, store, mode } = data;
   return {
-    owner: { pid, start, store },
+    owner: { pid, start, ns: ns ?? null, store },
     mode: mode === "block" ? "block" : "warn"
   };
 }
 var OWNER_FILE = ".json";
-var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
+var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+)(?:-([0-9]+))?)?$/;
 function storeTouched(store) {
   const own = statSync2(store).mtimeMs;
   try {
@@ -43046,6 +43067,7 @@ function storeTouched(store) {
     throw error;
   }
 }
+var UNNAMESPACED_STORE_MAX_AGE_MS = 14 * 86400000;
 function sweepStores(root, now) {
   const parent = join3(root, "askgate");
   let names;
@@ -43060,15 +43082,42 @@ function sweepStores(root, now) {
       continue;
     const store = join3(parent, name);
     try {
-      if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
+      const owner = { pid: Number(match[1]), start: match[2] ?? null, ns: match[3] ?? null, store };
+      if (ownerLive(owner, now))
         continue;
-      if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
+      const unnamespaced = owner.start !== null && owner.ns === null;
+      const keep = unnamespaced ? UNNAMESPACED_STORE_MAX_AGE_MS : MARKER_MAX_AGE_MS;
+      if (now - storeTouched(store) <= keep)
         continue;
       rmSync3(store, { recursive: true, force: true });
     } catch {}
   }
 }
-function askgateState(dir) {
+function recordNamesStore(dir) {
+  const record = join3(dir, ASKGATE_RECORD);
+  let names;
+  try {
+    names = readdirSync(record);
+  } catch (error) {
+    return !hasErrnoCode(error, "ENOENT");
+  }
+  for (const name of names) {
+    if (!name.endsWith(OWNER_FILE))
+      continue;
+    try {
+      const parsed = parseOwner(readFileSync3(join3(record, name), "utf-8"));
+      if (parsed === undefined)
+        return true;
+      statSync2(parsed.owner.store);
+      return true;
+    } catch (error) {
+      if (!hasErrnoCode(error, "ENOENT"))
+        return true;
+    }
+  }
+  return false;
+}
+function askgateState(dir, now = Date.now()) {
   const record = join3(dir, ASKGATE_RECORD);
   let names;
   try {
@@ -43094,8 +43143,9 @@ function askgateState(dir) {
     const parsed = parseOwner(text);
     if (parsed === undefined)
       return { kind: "broken", problem: `${file}, is not an AskGate record` };
-    if (ownerLive(parsed.owner))
+    if (ownerLive(parsed.owner, now)) {
       live.push({ file, store: parsed.owner.store, mode: parsed.mode });
+    }
   }
   if (live.length === 0)
     return { kind: "off" };
@@ -47273,7 +47323,8 @@ function pruneSessions(root, now) {
       continue;
     const dir = join5(sessions, entry.name);
     try {
-      if (now - statSync3(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+      const idle = now - statSync3(dir).mtimeMs > IDLE_SESSION_MS;
+      if (idle && askgateState(dir, now).kind === "off" && !recordNamesStore(dir)) {
         rmSync4(dir, { recursive: true, force: true });
       }
     } catch (error) {
@@ -51209,7 +51260,7 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync3 } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename as basename2, join as join6, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
@@ -51456,7 +51507,7 @@ function cacheDirectoryName(marketplace) {
 function processExecutable(pid) {
   if (process.platform === "linux") {
     try {
-      return readlinkSync2(`/proc/${pid}/exe`);
+      return readlinkSync3(`/proc/${pid}/exe`);
     } catch {
       return;
     }
@@ -51475,7 +51526,7 @@ function stdoutIsTerminal(pid) {
   if (process.platform !== "linux")
     return;
   try {
-    const target = readlinkSync2(`/proc/${pid}/fd/1`);
+    const target = readlinkSync3(`/proc/${pid}/fd/1`);
     return target.startsWith("/dev/pts/") || /^\/dev\/tty[^S]/.test(target) || target === "/dev/tty";
   } catch {
     return;
@@ -51483,7 +51534,7 @@ function stdoutIsTerminal(pid) {
 }
 function workingDirectory(pid) {
   try {
-    return readlinkSync2(`/proc/${pid}/cwd`);
+    return readlinkSync3(`/proc/${pid}/cwd`);
   } catch {
     return;
   }
