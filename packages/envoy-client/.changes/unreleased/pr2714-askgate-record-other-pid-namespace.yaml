@@ -1,0 +1,17 @@
+kind: Fixed
+body: |-
+    The `dispatch` command no longer takes an Oh My Pi process of another pid namespace for a gone
+    one. An agent box runs its process in a pid namespace of its own over the host's state
+    directory, and the command judged each AskGate owner by its pid and start time read in its own
+    namespace: the host's daily prune, and every other box's, removed a live box process's marker
+    store once no marker had changed it for two hours, and could remove its idle session directory.
+    The box's command then refused every gated write, saying the record names a marker store that
+    cannot be read. An owner file now carries its process's pid namespace (`ns`), and its store's
+    name ends with it (`<pid>-<start>-<ns>`). The command looks up by pid only an owner of its own
+    namespace, and counts one of another namespace live while its store changed within two hours.
+    `keepStore` makes a store when it is gone and marks it changed; `writeAskgateRecord` and
+    `setRecordMode` call it before they write the owner file. An owner file without `ns` is looked
+    up by pid, as before.
+time: 2026-11-03T09:00:00.000000000Z
+custom:
+    Issue: pr2714
