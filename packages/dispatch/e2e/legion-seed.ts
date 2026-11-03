@@ -85,7 +85,7 @@ const OBSERVATIONS: readonly Observation[] = [
 export async function seedLegionFixture(stateUrl: string): Promise<void> {
   await sql(
     `INSERT INTO projects (key, name) VALUES ('${LEGION_PROJECT}', 'Acme') ON CONFLICT DO NOTHING`,
-    `INSERT INTO people (login) VALUES ('alice') ON CONFLICT DO NOTHING`,
+    `INSERT INTO people (email) VALUES ('alice') ON CONFLICT DO NOTHING`,
     `INSERT INTO issues (key, project_key, number, title, status, priority, created_by, rank) VALUES
        ('ACME-1', '${LEGION_PROJECT}', 1, 'Ship the widgets', 'in_progress', 0, ${SEED_ACTOR}, 'U'),
        ('ACME-2', '${LEGION_PROJECT}', 2, 'Ask about the gadgets', 'in_progress', 1, ${SEED_ACTOR}, 'V'),
