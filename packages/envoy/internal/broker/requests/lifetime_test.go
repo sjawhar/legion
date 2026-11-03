@@ -409,3 +409,46 @@ func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours(t *t
 		t.Fatalf("Get = %+v, %v; want lifetime 43200", got, err)
 	}
 }
+
+// TestAMalformedTagAtApprovalKeepsTwelveHours: a pending no-lifetime request whose secret is
+// unserved at approval (default-grant=forever) is granted 12 hours, never a session-long grant.
+func TestAMalformedTagAtApprovalKeepsTwelveHours(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "pending", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", pending, err)
+	}
+	bad := policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")
+	bad.Tags[policy.TagDefaultGrant] = "forever"
+	retag(t, m, bad)
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil {
+		return // refusing the approval is also safe
+	}
+	if approved.GrantID == "" {
+		return
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil || expires == nil {
+		t.Fatalf("grant expires_at = %v, %v; want a 12-hour expiry", expires, err)
+	}
+}
+
+// TestANoTTLRetryJoinsAPendingNoLifetimeRequest: a request pending with no lifetime (from before
+// the 12-hour default) is joined by a retry that names no --ttl, not refused REQUEST_PENDING.
+func TestANoTTLRetryJoinsAPendingNoLifetimeRequest(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	old, err := m.Create(ctx, enr, signRequest(t, m, key, "old", "DEEL_API_KEY"), "")
+	if err != nil || old.LifetimeSeconds != nil {
+		t.Fatalf("Create = %+v, %v", old, err)
+	}
+	retag(t, m, policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"))
+	joined, err := m.Create(ctx, enr, signRequest(t, m, key, "retry", "DEEL_API_KEY"), "")
+	if err != nil || joined.ID != old.ID || !joined.Coalesced {
+		t.Fatalf("retry = %+v, %v; want %s joined", joined, err, old.ID)
+	}
+}

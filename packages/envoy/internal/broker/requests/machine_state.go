@@ -370,7 +370,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			return Request{}, err
 		}
 		if pending.ID != "" {
-			if slices.Equal(pending.Names, sorted) && pending.joins(lifetime) {
+			if slices.Equal(pending.Names, sorted) && (pending.joins(lifetime) || (obj.LifetimeSeconds == nil && pending.Lifetime == nil)) {
 				if err := tx.Commit(ctx); err != nil {
 					return Request{}, err
 				}
@@ -446,16 +446,21 @@ const DefaultGrantLifetime = 12 * time.Hour
 
 // defaultLifetime is the lifetime a request's grant lasts: the one it signed, else
 // DefaultGrantLifetime, else nil (until its session ends) when every name opts out with
-// default-grant=session. A name the set does not serve is left to evaluate, which refuses it.
+// default-grant=session. A name the set does not serve (a malformed tag among them) keeps the
+// 12-hour default, so it never yields a session-long grant.
 func defaultLifetime(set *policy.Set, names []string, signed *int) *int {
 	if signed != nil {
 		return signed
 	}
 	for _, name := range names {
-		if secret, ok := set.Secrets[name]; ok && !secret.SessionDefault {
+		if secret, ok := set.Secrets[name]; !ok || !secret.SessionDefault {
 			seconds := int(DefaultGrantLifetime / time.Second)
 			return &seconds
 		}
+	}
+	if len(names) == 0 {
+		seconds := int(DefaultGrantLifetime / time.Second)
+		return &seconds
 	}
 	return nil
 }
