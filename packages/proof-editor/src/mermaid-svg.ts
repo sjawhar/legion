@@ -55,6 +55,35 @@ export type MermaidDrawing = { svg: SVGSVGElement } | { error: string } | { unav
  *  (`unavailable`), later when the renderer answers or fails. Returns the cancel. */
 export type MermaidDrawer = (source: string, draw: (drawing: MermaidDrawing) => void) => () => void;
 
+/** How far outside the viewport a diagram is still drawn: one viewport height each way, which is
+ *  the next scroll a reader makes (dispatch://INFRA-341, requirement R11). A document of 140
+ *  diagrams costs a phone the few around the reader rather than all of them. */
+export const MERMAID_DRAW_MARGIN = "100% 0px";
+
+/**
+ * Calls `draw` once `element` is within `MERMAID_DRAW_MARGIN` of the viewport, and never after
+ * the returned stop has run. An element already that near is drawn on the observer's first
+ * delivery, a frame after this call; a browser with no `IntersectionObserver` draws at once, as
+ * every block did before. One element is one observer, so the stop takes exactly its own block
+ * off the watch, and a block that has drawn is watched no longer.
+ */
+export function drawWhenNearViewport(element: Element, draw: () => void): () => void {
+  if (typeof IntersectionObserver === "undefined") {
+    draw();
+    return () => {};
+  }
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      draw();
+    },
+    { rootMargin: MERMAID_DRAW_MARGIN }
+  );
+  observer.observe(element);
+  return () => observer.disconnect();
+}
+
 /**
  * Mounts `svg` (cloned into `host`'s document) with a `<style>` holding `sheet` in `host`'s open
  * shadow root, replacing whatever the root held, so neither the diagram's own `<style>` nor

@@ -21,14 +21,7 @@
 // closed-source check. Before the change the editor draws with upstream's view, synchronously on
 // the page's thread, its sheet and Google Fonts `@import` in the page, so the style,
 // hostile-document, worker, time-limit, focus and no-worker rows fail.
-import {
-  type BrowserContext,
-  expect,
-  type Locator,
-  type Page,
-  type TestInfo,
-  test,
-} from "@playwright/test";
+import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -44,6 +37,7 @@ import {
   failMermaidWorkersOnCall,
   holdMermaidWorkers,
   holdWorkerSource,
+  openCommentThread,
   recordMermaidWorkers,
   refuseWorkers,
   settledScrollTop,
@@ -74,42 +68,23 @@ function flowchart(lead: string, from: string, to: string): string {
 }
 
 /** A document of `lead`, a vertical flowchart of 21 nodes in a chain (drawn taller than any
- *  project's viewport), 30 filler paragraphs and then the paragraph `target`, so `target` sits
- *  below the viewport when the page opens and the drawn diagram pushes it further down. */
+ *  project's viewport), 12 filler paragraphs and then the paragraph `target`, so `target` sits
+ *  below the viewport when the page opens and the drawn diagram pushes it further down.
+ *
+ *  Twelve rather than thirty: a diagram is drawn only once it is within one viewport height of
+ *  the reader (`MERMAID_DRAW_MARGIN`, dispatch://INFRA-341 requirement R11), and a link that
+ *  scrolls its target to the middle of the viewport leaves a diagram thirty paragraphs above it
+ *  outside that margin, where no reader of this page ever sees it and nothing draws it. These
+ *  rows are about where the link lands once a diagram above it draws, so the diagram has to be
+ *  one a reader at the target would be shown. */
 function tallDocument(lead: string, target: string): string {
   const chain = Array.from({ length: 20 }, (_, node) => `  n${node} --> n${node + 1}`);
-  const filler = Array.from({ length: 30 }, (_, index) => `Filler paragraph ${index + 1}.`);
+  const filler = Array.from({ length: 12 }, (_, index) => `Filler paragraph ${index + 1}.`);
   return `${lead}\n\n\`\`\`mermaid\ngraph TD\n${chain.join("\n")}\n\`\`\`\n\n${filler.join("\n\n")}\n\n${target}\n`;
 }
 
 function diagramIn(card: Locator): Locator {
   return card.getByRole("img", { exact: true, name: diagramName });
-}
-
-function conversationTurns(page: Page): Locator {
-  return page.getByRole("list", { name: "Conversation turns" });
-}
-
-/** The comment thread `rootId` opened in the Conversation, where its bodies render in full rather
- *  than as the collapsed card's preview: the turn itself on a desktop, the full-screen Thread
- *  view on a phone. The turn shows `lead`, the root comment's first text, before it is expanded,
- *  so the click lands on a turn that has rendered. */
-async function openCommentThread(
-  page: Page,
-  testInfo: TestInfo,
-  rootId: string,
-  lead: string
-): Promise<Locator> {
-  const turn = conversationTurns(page).locator(`:scope > li[data-turn="comment:${rootId}"]`);
-  await expect(turn).toContainText(lead);
-  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
-  if (testInfo.project.name === "iphone") {
-    const thread = page.getByRole("dialog", { name: "Thread" });
-    await expect(thread).toBeVisible();
-    return thread.locator(`li[data-turn="comment:${rootId}"]`);
-  }
-  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
-  return turn;
 }
 
 /** Both halves of the control: `card` shows the drawn diagram holding `labels`, and its source
@@ -339,7 +314,9 @@ test("an issue message holding a mermaid block draws a diagram in the Conversati
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const card = conversationTurns(page).locator(`:scope > li[data-turn="message:${message.id}"]`);
+    const card = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(`:scope > li[data-turn="message:${message.id}"]`);
     await expect(card).toContainText("The pipeline:");
     await expectDrawnDiagram(card, ["Sent", "Delivered"]);
   } finally {

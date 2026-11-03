@@ -212,6 +212,12 @@ export function ProofDocument({
   const editorRef = useRef<EditorHandle | undefined>(undefined);
   // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
   const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
+  // The bound editor's placement report, so a change in who stands at a block's pixel can ask
+  // for one outside the effect that built the editor; undefined while no editor is bound.
+  const publishPlacementsRef = useRef<(() => void) | undefined>(undefined);
+  // What `placed` is now, read inside that report rather than listed as a dependency of the
+  // effect that builds the editor, which no change of it may rebuild.
+  const placedRef = useRef(false);
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
@@ -242,7 +248,7 @@ export function ProofDocument({
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const margin = useMargin();
-  const { blockPlacements } = margin;
+  const { blockPlacements, placesItems } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
@@ -295,6 +301,17 @@ export function ProofDocument({
     queryKey: ["artifact", artifact.id, "blocks"],
     queryFn: () => api.getArtifactBlocks(artifact.id),
   });
+  /** Whether the document draws the reference badges down its right edge, which stand at the
+   *  pixel each block sits at. */
+  const showsBlockBadges =
+    blockReferencesQuery.data?.some(
+      (block) => block.references.comments + block.references.asks > 0
+    ) ?? false;
+  /** Whether anything on the page stands at the pixel a block or a mark sits at: the margin
+   *  laying its cards out beside the document, or those badges. Nothing else reads the numbers,
+   *  and measuring them costs a forced layout of the whole document each time
+   *  (`marks.ts`'s `blockOffsets`), so a reader with neither is measured for nothing. */
+  const placed = placesItems || showsBlockBadges;
   const versionQuery = useQuery({
     enabled: version !== undefined,
     queryKey: ["artifact", artifact.id, "version", version],
@@ -413,6 +430,13 @@ export function ProofDocument({
     focus();
     disposeRefocusRef.current = refocusAfterDiagrams(refocus);
   }, []);
+  // The margin coming up or going down, and the reference badges arriving, change whether the
+  // document is measured; the bound editor reports again, so a margin the reader has just opened
+  // places its cards against fresh numbers rather than the zeroes of a document nobody measured.
+  useEffect(() => {
+    placedRef.current = placed;
+    publishPlacementsRef.current?.();
+  }, [placed]);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
   // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
@@ -597,14 +621,19 @@ export function ProofDocument({
             marginRef.current.withdrawPlacements();
             return;
           }
+          // Which marks and blocks the document draws is read whatever is on screen - the margin
+          // reads it to know a mark is there to focus - but where each one sits is measured only
+          // for a reader standing something at that pixel (`placedRef`).
+          const placedNow = placedRef.current;
           marginRef.current.setMarkPlacements(
-            markPlacements(handle.view.state.doc, handle.markOffsets())
+            markPlacements(handle.view.state.doc, handle.markOffsets(placedNow))
           );
           marginRef.current.setBlockPlacements(
-            collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
+            collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom, placedNow))
           );
         });
       };
+      publishPlacementsRef.current = publishPlacements;
       const resizeObserver = new ResizeObserver(publishPlacements);
       resizeObserver.observe(handle.view.dom);
       publishPlacements();
@@ -613,6 +642,7 @@ export function ProofDocument({
         bound = false;
         disposeRefocusRef.current?.();
         disposeRefocusRef.current = undefined;
+        publishPlacementsRef.current = undefined;
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
         resizeObserver.disconnect();
@@ -940,6 +970,7 @@ export function ProofDocument({
       <article
         aria-label="Document"
         className="dispatch-doc relative"
+        data-placed={placed}
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
         onClick={(event) => {
@@ -986,9 +1017,7 @@ export function ProofDocument({
             />
           );
         })}
-        {blockReferencesQuery.data?.some(
-          (block) => block.references.comments + block.references.asks > 0
-        ) ? (
+        {showsBlockBadges && blockReferencesQuery.data !== undefined ? (
           <aside
             aria-label="Block references"
             className="pointer-events-none absolute top-0 right-0 z-10 w-8"

@@ -127,6 +127,12 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     return this.inFlight !== undefined || this.queued.length > 0;
   }
 
+  /** Whether a job under `key` is queued or in flight. An owner that would ask for it again
+   *  reads this to tell a source the page is already working on from one nobody has started. */
+  holds(key: string): boolean {
+    return this.inFlight?.job.key === key || this.queued.some((queued) => queued.job.key === key);
+  }
+
   /**
    * Adds `waiter` to the job under `key`, queuing the job `make` builds where nothing waits for
    * it yet. Where no worker will run at all, `waiter` is called inside this call with the answer

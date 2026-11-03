@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useRef } from "react";
+import { type ReactNode, type RefObject, useEffect, useRef } from "react";
 
 import type { Artifact, Ask, Event } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -22,7 +22,7 @@ import {
   useMediaQuery,
 } from "../shell/useDialog";
 import { CommentsTab, type MarginComposer, MarginComposerSlot } from "./CommentsTab";
-import { marginReplySendKey } from "./margin-context";
+import { marginReplySendKey, useMargin } from "./margin-context";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -184,6 +184,17 @@ export function MarginSheet({
   });
   // What the margin's own tabs give way to: the rail it collapses to, or a phone margin thread.
   const covered = collapsed || (isPhoneViewport && phoneThread !== undefined);
+  // The cards are laid out against the document's blocks and marks only while a reader can see
+  // them there: the desktop margin that is up, or a compact sheet the reader has opened. The open
+  // document measures where its blocks and marks sit for that alone
+  // (`features/doc/ProofDocument.tsx`, dispatch://INFRA-341 requirement R11); a margin with no
+  // owner shows nothing, and a covered one has given its room away.
+  const { setPlacesItems } = useMargin();
+  const placesItems = owner !== undefined && !covered && (sheet.expanded || !isCompactViewport);
+  useEffect(() => {
+    setPlacesItems(placesItems);
+    return () => setPlacesItems(false);
+  }, [placesItems, setPlacesItems]);
 
   return (
     <>

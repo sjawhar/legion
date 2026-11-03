@@ -391,3 +391,98 @@ test("an edit answered unavailable (no renderer can draw it) clears the earlier 
     { drawMermaid }
   );
 });
+
+/** An `IntersectionObserver` the case drives, in place of the one happy-dom gives, which reports
+ *  nothing ever: `near` reports an element as inside its observer's margin, as the browser does
+ *  once the reader has scrolled within one viewport of it. The editor reads the constructor from
+ *  the global, as a page's `window` holds it. */
+function watchedViewport(): {
+  near: (element: Element) => void;
+  restore: () => void;
+  watched: () => Element[];
+} {
+  const original = globalThis.IntersectionObserver;
+  const live = new Set<ObserverStub>();
+
+  class ObserverStub {
+    readonly targets = new Set<Element>();
+
+    constructor(readonly callback: IntersectionObserverCallback) {
+      live.add(this);
+    }
+
+    disconnect(): void {
+      this.targets.clear();
+      live.delete(this);
+    }
+
+    observe(target: Element): void {
+      this.targets.add(target);
+    }
+
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+
+    unobserve(target: Element): void {
+      this.targets.delete(target);
+    }
+  }
+
+  globalThis.IntersectionObserver = ObserverStub as unknown as typeof IntersectionObserver;
+  return {
+    near: (element) => {
+      for (const observer of [...live]) {
+        if (!observer.targets.has(element)) continue;
+        const entry = { isIntersecting: true, target: element } as unknown as IntersectionObserverEntry;
+        observer.callback([entry], observer as unknown as IntersectionObserver);
+      }
+    },
+    restore: () => {
+      globalThis.IntersectionObserver = original;
+    },
+    watched: () => [...live].flatMap((observer) => [...observer.targets]),
+  };
+}
+
+test("a mermaid block asks for nothing until it is near the viewport, and then for its source", async () => {
+  const viewport = watchedViewport();
+  const { drawMermaid, requests } = fakeDrawer();
+  try {
+    await withMarksEditor(
+      TWO_DIAGRAMS,
+      async ({ view }) => {
+        const [first, second] = blocks(view);
+        if (!first || !second) throw new Error("the document draws two code blocks");
+        // Both blocks are on the watch, and neither has cost the host a thing.
+        expect(requests).toHaveLength(0);
+        expect(viewport.watched()).toHaveLength(2);
+        expect(viewport.watched()[0]).toBe(first.frame);
+        expect(viewport.watched()[1]).toBe(second.frame);
+        expectSourceShown(first);
+        expectSourceShown(second);
+
+        viewport.near(first.frame);
+        expect(requests.map((request) => request.source)).toEqual([FIRST]);
+        requests[0]?.answer(diagram(view.dom.ownerDocument, "first"));
+        await Promise.resolve();
+        expect(shownDiagram(first)).toBe("first");
+        expect(shownDiagram(second)).toBe(null);
+        // A block that has drawn is watched no longer; the one still below the fold is.
+        expect(viewport.watched()).toHaveLength(1);
+        expect(viewport.watched()[0]).toBe(second.frame);
+
+        // An edit of the block the reader is in redraws without waiting for the watch again.
+        typeInto(view, 0, "\n  B --> C");
+        await until(() => requests.length > 1);
+        expect(requests[1]?.source).toBe(`${FIRST}\n  B --> C`);
+
+        viewport.near(second.frame);
+        expect(requests[2]?.source).toBe(SECOND);
+      },
+      { drawMermaid }
+    );
+  } finally {
+    viewport.restore();
+  }
+});

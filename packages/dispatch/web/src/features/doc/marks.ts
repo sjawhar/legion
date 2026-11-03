@@ -32,13 +32,24 @@ export function markPlacements(
   return placements;
 }
 
-export function blockOffsets(root: HTMLElement): Map<string, number> {
+/**
+ * Where each of `root`'s blocks sits, by its id, in pixels below the top of `root`.
+ *
+ * `placed` says whether anything on the page places a card or a badge against those pixels right
+ * now (`ProofDocument`). With nothing placing them each block answers 0: the ids are still every
+ * block the document draws, which is what membership is read from, but no box is measured. One
+ * `getBoundingClientRect` per block over a document of a thousand blocks, on every deep change
+ * and every `ResizeObserver` tick, is a forced layout of the whole document each time, and it
+ * forces every block the browser had skipped (`content-visibility: auto`) to lay out one at a
+ * time (dispatch://INFRA-341, requirement R11).
+ */
+export function blockOffsets(root: HTMLElement, placed: boolean): Map<string, number> {
   const offsets = new Map<string, number>();
-  const rootTop = root.getBoundingClientRect().top;
+  const rootTop = placed ? root.getBoundingClientRect().top : 0;
   for (const block of root.querySelectorAll<HTMLElement>("[data-block-id]")) {
     const blockId = block.dataset.blockId;
     if (blockId !== undefined && !offsets.has(blockId)) {
-      offsets.set(blockId, block.getBoundingClientRect().top - rootTop);
+      offsets.set(blockId, placed ? block.getBoundingClientRect().top - rootTop : 0);
     }
   }
   return offsets;

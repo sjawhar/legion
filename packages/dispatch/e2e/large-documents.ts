@@ -25,7 +25,7 @@ const largeSections = smallSections * 5;
 
 /** How many decision blocks a document holds, however many sections it has. The last of them
  *  sits in the last section, so a link to one lands near the end of the document. */
-const decisionBlocks = 5;
+export const decisionBlocks = 5;
 
 /** Every third section's diagram is a sequence diagram and the rest are flowcharts, which is
  *  about the mix the AHXV6-1 document has (17 flowcharts to 10 sequence diagrams). */
@@ -200,6 +200,28 @@ export function syntheticDocument(sections: number): string {
 /** How many Mermaid diagrams `markdown` holds. */
 export function diagramsIn(markdown: string): number {
   return markdown.match(/^```mermaid$/gm)?.length ?? 0;
+}
+
+/** How many diagrams the comment body of acceptance A7 holds. */
+export const commentDiagrams = 20;
+
+/** How long each paragraph above a diagram in that body is. Long enough that a phone's viewport
+ *  and the viewport height either side of it - the margin a diagram draws inside
+ *  (`MERMAID_DRAW_MARGIN`) - reach only the first few diagrams, and short enough that twenty of
+ *  them stay inside `DISPATCH_BODY_MAX`. */
+const commentParagraphCharacters = 1_000;
+
+/** A comment body of `diagrams` flowcharts, each under a paragraph of its own. No two are the
+ *  same source, so none of them draws from another's cache entry. */
+export function diagramComment(diagrams: number): string {
+  const written: string[] = [];
+  for (let index = 0; index < diagrams; index += 1) {
+    written.push(
+      padTo(proseHead(index), proseFiller, commentParagraphCharacters),
+      flowchart(index)
+    );
+  }
+  return `${written.join("\n\n")}\n`;
 }
 
 /** The document shaped like dispatch://AHXV6-1/artifact/intermediate-specs-md: about 81,000

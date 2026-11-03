@@ -12,7 +12,12 @@ import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
-import { type MermaidDrawer, type MermaidDrawing, showMermaidSvg } from "./mermaid-svg";
+import {
+  drawWhenNearViewport,
+  type MermaidDrawer,
+  type MermaidDrawing,
+  showMermaidSvg,
+} from "./mermaid-svg";
 
 /** How long after the last edit of a mermaid block's source the view asks for a new drawing. */
 export const EDIT_REDRAW_DELAY_MS = 300;
@@ -37,6 +42,12 @@ const mermaidCodeBlockKey = new PluginKey("mermaid-code-block");
  * the block shows its source again rather than a drawing of an earlier source. The drawer never
  * calls `draw` after its cancel, and each request cancels the one before it, so only the latest
  * request's answer ever reaches the block.
+ *
+ * Nothing is asked for until the block is within `MERMAID_DRAW_MARGIN` of the viewport
+ * (`drawWhenNearViewport`): a document of 140 diagrams otherwise spends the host's renderer, and
+ * this thread's share of each answer, on every diagram a reader has not reached. Once the block
+ * has been that near it stays so for its life - a reader editing a block is looking at it - so an
+ * edit redraws without waiting for the observer again.
  */
 class MermaidCodeBlockView implements NodeView {
   readonly dom: HTMLDivElement;
@@ -51,6 +62,10 @@ class MermaidCodeBlockView implements NodeView {
   private currentSource = "";
   private cancelRequest: (() => void) | undefined;
   private redrawTimer: number | undefined;
+  /** Whether the block has come within `MERMAID_DRAW_MARGIN` of the viewport. */
+  private nearViewport = false;
+  /** Takes the block off the viewport watch; undefined while it is not watched. */
+  private stopWatching: (() => void) | undefined;
 
   constructor(
     node: ProseMirrorNode,
@@ -94,9 +109,10 @@ class MermaidCodeBlockView implements NodeView {
 
   /**
    * Sets the layout for the block's language. A block that becomes mermaid gets the mermaid
-   * layout at once and asks for its drawing; an edit of a mermaid block's source only restarts
-   * the redraw timer, so typing a word asks once, after the pause, rather than stopping and
-   * restarting the host's worker on each key. Whatever is shown stays until the answer replaces it.
+   * layout at once and goes on the viewport watch, which asks for its drawing once it is near
+   * enough; an edit of a mermaid block's source only restarts the redraw timer, so typing a word
+   * asks once, after the pause, rather than stopping and restarting the host's worker on each
+   * key. Whatever is shown stays until the answer replaces it.
    */
   update(node: ProseMirrorNode): boolean {
     if (node.type.name !== "code_block") return false;
@@ -116,7 +132,7 @@ class MermaidCodeBlockView implements NodeView {
       if (wasMermaid) this.showPlainLayout();
     } else if (!wasMermaid) {
       this.showMermaidLayout();
-      this.requestDrawing();
+      this.drawWhenNear();
     } else {
       window.clearTimeout(this.redrawTimer);
       this.redrawTimer = window.setTimeout(() => {
@@ -150,6 +166,27 @@ class MermaidCodeBlockView implements NodeView {
     this.dom.replaceChildren(this.preview, this.status, this.sourceDetails);
   }
 
+  /** Asks for the block's drawing, now if the block has been within `MERMAID_DRAW_MARGIN` of the
+   *  viewport already, else on the watch that reports when it first is. */
+  private drawWhenNear(): void {
+    if (this.nearViewport) {
+      this.requestDrawing();
+      return;
+    }
+    if (this.stopWatching !== undefined) return;
+    this.stopWatching = drawWhenNearViewport(this.dom, () => {
+      this.stopWatching = undefined;
+      this.nearViewport = true;
+      this.requestDrawing();
+    });
+  }
+
+  private stopWatchingViewport(): void {
+    const stop = this.stopWatching;
+    this.stopWatching = undefined;
+    stop?.();
+  }
+
   /** The block left mermaid: no drawing, no request, and the `pre` alone in the frame. */
   private showPlainLayout(): void {
     this.stopDrawing();
@@ -167,11 +204,13 @@ class MermaidCodeBlockView implements NodeView {
     this.status.textContent = "";
   }
 
-  /** Cancels the earlier request and asks for the current source; the drawer may answer inside
-   *  the call (a cached drawing, or no renderer), which shows at once. */
+  /** Cancels the earlier request and asks for the current source, once the block is near enough
+   *  to the viewport to be worth drawing; the drawer may answer inside the call (a cached
+   *  drawing, or no renderer), which shows at once. A block not yet that near asks nothing: the
+   *  watch asks for whatever its source is by then. */
   private requestDrawing(): void {
     this.cancelPendingRequest();
-    if (this.drawMermaid === undefined) return;
+    if (!this.nearViewport || this.drawMermaid === undefined) return;
     this.cancelRequest = this.drawMermaid(this.currentSource, (drawing) => this.show(drawing));
   }
 
@@ -184,6 +223,7 @@ class MermaidCodeBlockView implements NodeView {
   private stopDrawing(): void {
     window.clearTimeout(this.redrawTimer);
     this.redrawTimer = undefined;
+    this.stopWatchingViewport();
     this.cancelPendingRequest();
   }
 

@@ -211,6 +211,28 @@ a {
   max-width: none;
 }
 
+/* A document of 400,000 characters is a thousand top-level blocks, and a phone pays style,
+   layout and paint for every one of them before it draws the first. `content-visibility: auto`
+   leaves the browser to skip the blocks off the screen and do that work as the reader reaches
+   them; `contain-intrinsic-size: auto 120px` gives a block it has not drawn yet a height, near a
+   paragraph's at this measure, and `auto` makes the browser keep the real one once it has drawn
+   it, so the scrollbar settles and a block link still lands (dispatch://INFRA-341, R11).
+
+   Only while nothing reads where the blocks sit. A per-element read of layout over the document
+   forces each skipped block relevant one at a time, which is the measurement against this rule
+   on conversation bodies recorded above ("A body longer than `markdownWorkerThreshold`"), so the
+   rule stands down for a document the page is measuring: the margin is up beside it, or the
+   block reference badges stand at its blocks (`data-placed`, `features/doc/ProofDocument.tsx`).
+   A phone, whose review sheet is closed, keeps it.
+
+   That attribute is the live document's own, so the rule reaches that document alone: a past
+   version (`VersionView`) writes none, and its one focus - a comment link's quote, a highlighted
+   mark - has nothing to run again after a skipped block above it paints and moves the target. */
+.dispatch-doc[data-placed="false"] .milkdown .editor > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
 /* A document's own headings are content, not the page's identity. `@legion/proof-editor` sizes
    `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
    printed that title twice, the second time at nearly twice the size of the page title 40px

@@ -127,6 +127,15 @@ export type {
   TypedBlockMenuItem,
 } from './typed-block-commands';
 
+/** How `focusMark` and `focusBlock` bring their target into view. The scroll does not animate:
+ *  a script scroll during a smooth one cuts it short, and the host corrects the landing as the
+ *  page paints under it (a diagram drawing above the target, a block the browser had skipped
+ *  painting at its own height instead of its estimate — `features/doc/refocus-after-diagrams.ts`
+ *  in Dispatch). Over a document of 400,000 characters an animated scroll was still being cut
+ *  short and restarted when the reader gave up: the link never landed
+ *  (dispatch://INFRA-341, requirement R11). */
+const FOCUS_SCROLL: ScrollIntoViewOptions = { behavior: 'auto', block: 'center' };
+
 export interface ProofEditorUser {
   name: string;
   color: string;
@@ -177,8 +186,10 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   getMarkdown(): string;
   /** Replace the current document with parsed markdown. */
   setMarkdown(markdown: string): void;
-  /** Top offset of each mark's first span relative to the library root. */
-  markOffsets(): Map<string, number>;
+  /** Top offset of each mark's first span relative to the library root, when `placed`; with
+   *  `placed` false each answers 0, so a host that places nothing against those pixels still
+   *  reads which marks the document draws without a forced layout of the whole document. */
+  markOffsets(placed: boolean): Map<string, number>;
   /** Toggle editability (e.g. for a readOnly flag change post-construction). */
   setReadOnly(readOnly: boolean): void;
   /** Apply mark metadata received from a peer, re-anchoring by quote. Unified
@@ -494,12 +505,14 @@ export async function createProofEditor(
       const { state } = view;
       view.dispatch(state.tr.replaceWith(0, state.doc.content.size, parsed.content));
     },
-    markOffsets(): Map<string, number> {
+    markOffsets(placed: boolean): Map<string, number> {
       const offsets = new Map<string, number>();
-      const rootTop = root.getBoundingClientRect().top;
+      const rootTop = placed ? root.getBoundingClientRect().top : 0;
       for (const span of view.dom.querySelectorAll<HTMLElement>('[data-id]')) {
         const id = span.dataset.id;
-        if (id && !offsets.has(id)) offsets.set(id, span.getBoundingClientRect().top - rootTop);
+        if (id && !offsets.has(id)) {
+          offsets.set(id, placed ? span.getBoundingClientRect().top - rootTop : 0);
+        }
       }
       return offsets;
     },
@@ -528,14 +541,14 @@ export async function createProofEditor(
       const escaped = cssEscapeAttrValue(markId);
       const elements = view.dom.querySelectorAll<HTMLElement>(`[data-id="${escaped}"]`);
       if (elements.length === 0) return;
-      elements[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      elements[0].scrollIntoView(FOCUS_SCROLL);
       pulseHighlight(view, 'mark', markId);
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
       const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
       if (element === null) return;
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      element.scrollIntoView(FOCUS_SCROLL);
       pulseHighlight(view, 'block', blockId);
     },
     setActiveMarks(markIds: readonly string[]): void {
