@@ -307,10 +307,12 @@ describe("dispatchToolSpecs", () => {
   });
 
   test("dispatch_project's description says to create a requested project without questions", () => {
-    expect(specFor("dispatch_project").description).toContain(
-      "When a person asks for a project, make the key from its name and create it; ask the person only when " +
-        "dispatch projects shows that the key is in use."
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
     );
+    expect(description).toContain("When no person asked for a project, do not use it");
   });
 
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {

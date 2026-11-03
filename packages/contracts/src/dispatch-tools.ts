@@ -1509,14 +1509,15 @@ export const dispatchToolSpecs = [
     example: { key: "CORE", name: "Core" },
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
-      "When a person asks for a project, make the key from its name and create it; ask the person only when " +
-      "dispatch projects shows that the key is in use. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
-      "with dispatch projects. A key that already exists is refused " +
+      "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " +
+      "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " +
+      "A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
-      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
-      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
+      "asked for a project, do not use it when an existing project already covers the work; file an issue " +
+      "there with dispatch issue instead.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z
