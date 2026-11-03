@@ -386,6 +386,12 @@ func (r *Runtime) ReplacePod(context.Context, runtime.Known, func(context.Contex
 	return nil
 }
 
+// RescueUnpushed checks nothing and answers nil: a pane's workspace is a directory on the daemon's
+// host, which no replacement deletes (ReplacePod does nothing here).
+func (r *Runtime) RescueUnpushed(context.Context, runtime.Known, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, nil
+}
+
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).
 func (r *Runtime) CleanupTree(context.Context, string) error { return nil }

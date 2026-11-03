@@ -1,0 +1,3 @@
+kind: Added
+body: |-
+    The dashboard's Spec tab shows each decision of the issue beside every spec block it shaped, marks a block a decision changed after, and, for a reader who has read a version, marks each block that changed since it and names those sections in one line above the document; both marks are editor decorations.

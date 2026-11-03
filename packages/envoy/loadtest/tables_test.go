@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +31,7 @@ func TestTablesMarkAStepWhoseStackProcessExited(t *testing.T) {
 		t.Fatalf("the Resources table lacks box busy before 42%%:\n%s", md)
 	}
 	// The killed step has no resources: its row keeps the box busy before column, empty here.
-	if !strings.Contains(section(md, "Resources"), "| killed (dispatch exited) | - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n") {
+	if !strings.Contains(section(md, "Resources"), "| killed (dispatch exited) | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n") {
 		t.Fatalf("the killed step's Resources row is not all -:\n%s", md)
 	}
 	checkRowWidths(t, md)
@@ -134,21 +137,21 @@ func TestTablesResourcesShowFailedSamplerReadsAsMissing(t *testing.T) {
 		return stepData{name: name, sum: summary{Config: summaryConfig{Step: name}, Resources: summarizeResources(ss, 0, 15)}}
 	}
 	md := renderTables([]stepData{
-		step("unread", fakeSample(0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 0, 0, readPostgres, readGoroutines),
-			fakeSample(10, 0, 0, readPostgres, readGoroutines)),
-		step("partial", fakeSample(0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 10, 100), fakeSample(10, 12, 120)),
-		step("clean", fakeSample(0, 8, 90), fakeSample(5, 9, 95), fakeSample(10, 9, 95)),
+		step("unread", fakeSample(0, 0, 0, 0, readPostgres, readGoroutines, readHeap), fakeSample(5, 0, 0, 0, readPostgres, readGoroutines),
+			fakeSample(10, 0, 0, 0, readPostgres, readGoroutines)),
+		step("partial", fakeSample(0, 0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 10, 100, 0), fakeSample(10, 12, 120, 0)),
+		step("clean", fakeSample(0, 8, 90, 20), fakeSample(5, 9, 95, 0), fakeSample(10, 9, 95, 0)),
 	})
 	text := section(md, "Resources")
-	// The columns: goroutines, pool waiters, Postgres connections max, connections waiting on a
-	// lock.
-	const goroutines, pool, pgMax, lockWait = 10, 11, 12, 13
+	// The columns: heap in use, goroutines, pool waiters, Postgres connections max, connections
+	// waiting on a lock.
+	const heap, goroutines, pool, pgMax, lockWait = 10, 11, 12, 13, 14
 
 	unread := rowCells(text, "unread")
-	if unread == nil || unread[0] != "unread (6 failed reads)" {
-		t.Fatalf("the row whose reads all failed is not marked with its 6 failed reads:\n%s", text)
+	if unread == nil || unread[0] != "unread (7 failed reads)" {
+		t.Fatalf("the row whose reads all failed is not marked with its 7 failed reads:\n%s", text)
 	}
-	for _, col := range []int{goroutines, pool, pgMax, lockWait} {
+	for _, col := range []int{heap, goroutines, pool, pgMax, lockWait} {
 		if unread[col] != "-" {
 			t.Errorf("column %d of the row whose reads all failed reads %q, want -:\n%s", col, unread[col], text)
 		}
@@ -237,7 +240,7 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 	}{
 		{"Events, delivery and requests", []int{5, 6, 7}},
 		{"Write latency by kind", nil},
-		{"Resources", []int{14}},
+		{"Resources", []int{15}},
 		{"Delivery from sending, and live socket frames", []int{1, 3}},
 	} {
 		text := section(md, c.title)
@@ -291,6 +294,66 @@ func TestTablesMarkAFailedTransactionIDRead(t *testing.T) {
 	}
 	if note := noteLine(text, "(1 failed read)"); !strings.Contains(note, "`resources.xid_read_error`") {
 		t.Errorf("no note of the failed-reads mark names summary.json `resources.xid_read_error`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+}
+
+// TestTablesNameTheDashboardTransport: the live table names the transport per step as soon as one
+// step followed the event feed on something other than the dashboard live socket, and a step of a
+// run from before the dashboard probe, whose summary.json has no config.dashboard, reads live
+// there.
+func TestTablesNameTheDashboardTransport(t *testing.T) {
+	step := func(name, dashboard string) stepData {
+		return stepData{name: name, sum: summary{Config: summaryConfig{Step: name, Dashboard: dashboard}}}
+	}
+	md := renderTables([]stepData{step("socket", dashboardLive), step("older", ""), step("events", dashboardSSE)})
+	text := section(md, "Delivery from sending, and live socket frames")
+	for step, want := range map[string]string{"socket": dashboardLive, "older": dashboardLive, "events": dashboardSSE} {
+		cells := rowCells(text, step)
+		if cells == nil || cells[len(cells)-1] != want {
+			t.Errorf("step %s names transport %q, want %q:\n%s", step, cells, want, text)
+		}
+	}
+	if note := noteLine(text, "transport:"); !strings.Contains(note, "`config.dashboard`") {
+		t.Errorf("no note of the transport column names summary.json `config.dashboard`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+
+	ws := renderTables([]stepData{step("socket", dashboardLive), step("older", "")})
+	wsText := section(ws, "Delivery from sending, and live socket frames")
+	if strings.Contains(wsText, "transport") {
+		t.Errorf("a table whose every step followed the live socket names the transport:\n%s", wsText)
+	}
+	checkRowWidths(t, ws)
+}
+
+// TestTablesReadTheOlderLiveTransport: a step directory of a run whose loadgen named the dashboard
+// transport in live.transport (ws, sse or none) and wrote no config.dashboard is read from that
+// field: sse renders as sse, with the transport column and its note, and ws as the live socket.
+func TestTablesReadTheOlderLiveTransport(t *testing.T) {
+	read := func(name, transport string) stepData {
+		t.Helper()
+		dir := t.TempDir()
+		body := fmt.Sprintf(`{"config": {"step": %q}, "live": {"transport": %q}}`, name, transport)
+		if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := readStep(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	md := renderTables([]stepData{read("older-sse", "sse"), read("older-ws", "ws")})
+	text := section(md, "Delivery from sending, and live socket frames")
+	for step, want := range map[string]string{"older-sse": dashboardSSE, "older-ws": dashboardLive} {
+		cells := rowCells(text, step)
+		if cells == nil || cells[len(cells)-1] != want {
+			t.Errorf("step %s, whose summary.json names live.transport alone, reads transport %q, want %q:\n%s", step, cells, want, text)
+		}
+	}
+	if note := noteLine(text, "transport:"); !strings.Contains(note, "`live.transport`") {
+		t.Errorf("no note of the transport column names summary.json `live.transport`:\n%s", text)
 	}
 	checkRowWidths(t, md)
 }
