@@ -531,7 +531,7 @@ func TestAFirstIndexingMarksNothingOutOfDate(t *testing.T) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-	if _, err := fixture.deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, "", nil); err != nil {
+	if _, err := fixture.deps.Docs.(*docs.Service).ReconcileBlockIndex(ctx, docs.BlockIndexCursors{}, nil); err != nil {
 		t.Fatalf("reconcile the block index: %v", err)
 	}
 	view := readIssueDecisions(t, handler, key)
