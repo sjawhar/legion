@@ -97,33 +97,100 @@ function documentOwnerValidation(
   };
 }
 
+const ARTIFACT_SOURCE_RULE = "Exactly one of path or content is required.";
+const ARTIFACT_OWNER_AND_SOURCE_RULE = `${ARTIFACT_SOURCE_RULE} Exactly one of issue and project is required; with project, artifact names the document.`;
+
+/** Joins the parts of a rule a call broke, so a refusal never names a part the call kept. */
+function brokenParts(parts: ReadonlyArray<readonly [boolean, string]>): string | undefined {
+  const broken = parts.filter(([kept]) => !kept).map(([, message]) => message);
+  return broken.length === 0 ? undefined : broken.join(" ");
+}
+
+const CONTENT_IS_MARKDOWN =
+  "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+
+const PATH_KEEPS_BYTES =
+  "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+
+const ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+
+/** A name's extension: what follows its last dot when that holds no blank. Digits count, so
+ *  "rows.jsonl.1" has one, and so does a title such as "plan v1.2", which takes content once it
+ *  ends in .md. */
+const NAME_EXTENSION = /\.([^\s.]+)$/u;
+
+const MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+
+const artifactOwner = documentOwnerValidation(false);
+
+/** The refusal of the part of dispatch_artifact's rule `value` breaks, or undefined when it keeps
+ *  the rule. Inline content is always stored as Markdown, so it goes only under a name that says
+ *  Markdown or says nothing: a .jsonl stored that way reads back with its lines joined. */
+function artifactProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly name?: unknown;
+    readonly path?: unknown;
+    readonly content?: unknown;
+  };
+  const ownerOrSourceProblem = brokenParts([
+    [artifactOwner.check(value), artifactOwner.message],
+    [
+      (typeof input.path === "string") !== (typeof input.content === "string"),
+      ARTIFACT_SOURCE_RULE,
+    ],
+  ]);
+  if (ownerOrSourceProblem !== undefined) return ownerOrSourceProblem;
+  if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
+}
+
 const documentEditOwner = documentOwnerValidation(true);
+const PRECONDITION_RULE = "A precondition selects exactly one of document or blocks.";
+
+function preconditionKept(value: unknown): boolean {
+  const input = value as { readonly precondition?: unknown };
+  if (input.precondition === undefined) return true;
+  if (typeof input.precondition !== "object" || input.precondition === null) return false;
+  const precondition = input.precondition as {
+    readonly document?: unknown;
+    readonly blocks?: unknown;
+  };
+  return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
+}
+
+function documentEditProblem(value: unknown): string | undefined {
+  return brokenParts([
+    [documentEditOwner.check(value), documentEditOwner.message],
+    [preconditionKept(value), PRECONDITION_RULE],
+  ]);
+}
+
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    if (!documentEditOwner.check(value)) return false;
-    const input = value as { readonly precondition?: unknown };
-    if (input.precondition === undefined) return true;
-    if (typeof input.precondition !== "object" || input.precondition === null) return false;
-    const precondition = input.precondition as {
-      readonly document?: unknown;
-      readonly blocks?: unknown;
-    };
-    return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
-  },
-  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
+  check: (value) => documentEditProblem(value) === undefined,
+  message: `${documentEditOwner.message} ${PRECONDITION_RULE}`,
+  refusal: (value) =>
+    documentEditProblem(value) ?? `${documentEditOwner.message} ${PRECONDITION_RULE}`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
 const commentOwner = documentOwnerValidation(true);
+const COMMENT_TURN_RULE =
+  "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+
+function commentProblem(value: unknown): string | undefined {
+  const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+  return brokenParts([
+    [commentOwner.check(value), commentOwner.message],
+    [input.turn === undefined || typeof input.reply_to_ask === "string", COMMENT_TURN_RULE],
+  ]);
+}
+
 const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
-    return (
-      commentOwner.check(value) &&
-      (input.turn === undefined || typeof input.reply_to_ask === "string")
-    );
-  },
-  message: `${commentOwner.message} turn requires reply_to_ask.`,
+  check: (value) => commentProblem(value) === undefined,
+  message: `${commentOwner.message} ${COMMENT_TURN_RULE}`,
+  refusal: (value) => commentProblem(value) ?? `${commentOwner.message} ${COMMENT_TURN_RULE}`,
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
@@ -194,29 +261,42 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 /**
- * dispatch_read: an issue, a project document, or a ref, exactly as every owned read - or a
- * `message` alone, which addresses a conversation by any message in it. A human's direct message
- * to this session and the replies to it belong to no issue or document, so the id is all there is.
+ * dispatch_read: an issue, a project (alone, its documents; with artifact, one of them), or a ref,
+ * exactly as every owned read - or a `message` alone, which addresses a conversation by any
+ * message in it. A human's direct message to this session and the replies to it belong to no
+ * issue or document, so the id is all there is.
  */
-const readOwner = documentOwnerValidation(true);
+const readOwner = documentOwnerValidation(false);
+const READ_OWNER_RULE =
+  "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+const READ_MESSAGE_RULE =
+  "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+
+/** dispatch_read's refusal: a call with message breaks only the message rule, and a call
+ *  without it only the owner rule. */
+function readProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly message?: unknown;
+    readonly issue?: unknown;
+    readonly project?: unknown;
+    readonly artifact?: unknown;
+    readonly ref?: unknown;
+  };
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone =
+    input.issue === undefined &&
+    input.project === undefined &&
+    input.artifact === undefined &&
+    input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
+
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as {
-      readonly message?: unknown;
-      readonly issue?: unknown;
-      readonly project?: unknown;
-      readonly artifact?: unknown;
-      readonly ref?: unknown;
-    };
-    if (typeof input.message !== "string") return readOwner.check(value);
-    return (
-      input.issue === undefined &&
-      input.project === undefined &&
-      input.artifact === undefined &&
-      input.ref === undefined
-    );
-  },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`,
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -879,15 +959,17 @@ export const dispatchToolSpecs = [
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
             "ask's clarification thread included). A block reference to one block of the comment " +
             "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
-            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
-            "ask id instead."
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " +
+            "with a reference to one of its parts, instead."
         )
         .optional(),
       reply_to_ask: z
         .string()
         .describe(
-          "Optional ask id to reply to, threading this comment under that question. Mutually " +
-            "exclusive with reply_to."
+          "Optional ask id to reply to, threading this comment under that question. A block " +
+            "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " +
+            "option or the answer carries) threads under that ask and names the part the reply " +
+            "answers. Mutually exclusive with reply_to."
         )
         .optional(),
       turn: z
@@ -895,7 +977,9 @@ export const dispatchToolSpecs = [
         .describe(
           "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
             "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
-            "you need the human to act - the ask returns to 'Waiting on you'."
+            "you need the human to act - the ask returns to 'Waiting on you'. human does not " +
+            "apply to an approval request a newer version moved: it stays with you until dispatch " +
+            "request-approval hands it back at the current version."
         )
         .optional(),
       images: imagesArgument(
@@ -1000,7 +1084,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
@@ -1174,15 +1258,19 @@ export const dispatchToolSpecs = [
       "nothing, and a different one is refused, since it would rewrite the card the human is " +
       "reading. Approve and Request changes each close the request, so the next call opens a new " +
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
-      "approval goes stale when the document changes outside its decision blocks after it: " +
-      "request approval again once that revision is complete and " +
+      "approval goes stale when the document changes outside its decision blocks after it, until " +
+      "a later version's text is exactly the approved version's again, as when an accidental " +
+      "edit is undone exactly, and no decision block in it was decided since: that version " +
+      "carries the approval and the document reads approved at it, so nothing is requested for " +
+      "it. When the document does not read approved, request approval again once that revision " +
+      "is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", with a one-sentence summary naming what changed since the earlier approval: the card " +
       "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +
       "A human's own answer to a decision block carries the approval to the version it writes when " +
       "that answer is the whole change since the approved version, so nothing is requested for " +
       "it. A new version of a Legion root spec closes its armed design gate until a human " +
-      "approves it; the carried approval reopens it too. " +
+      "approves it; a carried approval reopens it too. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -1210,6 +1298,7 @@ export const dispatchToolSpecs = [
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      `${ARTIFACT_CONTENT_NAME_RULE} ` +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
@@ -1222,26 +1311,15 @@ export const dispatchToolSpecs = [
       content: z
         .string()
         .describe(
-          "Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed."
+          "Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed."
         )
         .optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {
-      check: (value) => {
-        const input = value as {
-          readonly issue?: unknown;
-          readonly project?: unknown;
-          readonly path?: unknown;
-          readonly content?: unknown;
-        };
-        return (
-          documentOwnerValidation(false).check(value) &&
-          (typeof input.path === "string") !== (typeof input.content === "string")
-        );
-      },
-      message:
-        "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE,
     },
   },
   {
@@ -1250,8 +1328,9 @@ export const dispatchToolSpecs = [
     description:
       "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
+      "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
@@ -1471,11 +1550,14 @@ export const dispatchToolSpecs = [
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
-      "with dispatch projects. A key that already exists is refused " +
+      "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " +
+      "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " +
+      "A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
-      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
-      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
+      "asked for a project and an existing project already covers the work, do not create a project. File an " +
+      "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z

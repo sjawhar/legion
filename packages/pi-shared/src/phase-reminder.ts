@@ -9,6 +9,7 @@ import {
   type PhaseStallEntry,
   type PhaseStallInput,
   type PhaseStallState,
+  recordedPhaseStall,
   reminderText,
   stepPhaseStall,
   type TurnEnd,
@@ -164,7 +165,9 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   let recorded = "";
 
   const entryOf = (): PhaseStallEntry => ({
-    state: stall.state,
+    // The machine's own wait that the record does not hold (`recordedPhaseStall`): a session
+    // restores a record only after a relaunch, which is the round that wait belonged to ending.
+    state: recordedPhaseStall(stall.state),
     count: stall.count,
     reported,
     ...(reportKey === undefined ? {} : { reportKey }),
@@ -371,7 +374,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
           ? { state: "closed", count: 0 }
           : { state: entry.state, count: entry.count };
       // The run of reminders the restored count belongs to keeps its notice: a relaunch mid-run
-      // neither repeats one the listener accepted nor mints a second key for one it refused.
+      // neither repeats one the listener accepted nor mints a second key for one it refused. No
+      // record holds `awaiting-update` (`recordedPhaseStall`): the relaunch this session resumed
+      // on is the update round ending, so a restored `waiting` is a WAITING reply's, which the
+      // reminder times out as it always did.
       reported = entry?.reported ?? false;
       reportKey = entry?.reportKey;
       lastMessage = entry?.lastMessage ?? "";
@@ -416,9 +422,19 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       const before = stall.count;
       const reminder = advance(turn);
       // Every outcome but the continuation ends the run here, so the next one may continue again.
+
+      // The wait a `ready_for_update` answer created is the daemon's to end, so nothing is armed
+      // in it: the round replaces the pod, and the task it held behind the round reaches the
+      // worker in the process that comes back on the new pod, while a reminder steered in
+      // meanwhile is the turn the daemon reads as the answer retracted (`awaiting-update` in
+      // `./phase-stall`).
+      if (stall.state === "awaiting-update") {
+        continued = false;
+        return undefined;
+      }
+      // The machine sends no reminder into a quiet wait, so the timer carries the one this
+      // settling message earned, for when the wait has been long enough.
       if (stall.state === "waiting") {
-        // The machine sends no reminder into a quiet wait, so the timer carries the one this
-        // settling message earned, for when the wait has been long enough.
         continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
         return undefined;

@@ -170,6 +170,8 @@ CLAUDE_ENVOY_BUILD = reads(
         (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
         (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
         (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
+        (".github/workflows/claude-envoy-rebuild.yaml",
+         "packages/claude-envoy/tests/build-inputs.test.ts holds its on.push.paths to the files scripts/build-inputs.txt matches"),
 )
 
 
@@ -236,6 +238,8 @@ RULES = {
         Read(f"{DAEMON}/cmd/legion/testdata/gh-help/**", "internal/runtime/tmux/tmux_real_test.go:1822")],
     f"{DAEMON}/internal/stream/integration_test.go": [legion_build("internal/stream/integration_test.go:130 go build .../daemon/cmd/legion")],
     f"{DAEMON}/internal/runtime/workerbin/workerbin_test.go": reads((f"{DAEMON}/docker/gh", "internal/runtime/workerbin/workerbin_test.go:58")),
+    f"{DAEMON}/internal/testpg/file_copy_test.go": reads(
+        (f"{DAEMON}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/daemon (../..)")),
     # --- envoy
     f"{ENVOY}/cmd/broker-refgen/auth_test.go": [
         Read(f"{ENVOY}/{d}/*", "cmd/broker-refgen/auth_test.go:14 readAPI(repo root) parses it") for d in BROKER_REFGEN_DIRS],
@@ -288,6 +292,8 @@ RULES = {
         run(ENVOY, ["./..."], "internal/testnats/nats_test.go:708-709 go list -f ... ./... in packages/envoy", mode="build"),
         *[Read(g, "internal/testnats/nats_test.go:741-747 walks every .go file under packages/envoy but infra, node_modules, testdata")
           for g in envoy_top_level_but_infra()]],
+    f"{ENVOY}/internal/testpg/file_copy_test.go": reads(
+        (f"{ENVOY}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/envoy (../.., infra included)")),
     # --- envoy-infra
     f"{INFRA}/core/permissions_live_test.go": [
         run(ENVOY, ["./cmd/dispatch", "./cmd/listener"], "infra/core/permissions_live_test.go's buildEnvoyCommand go build . in ../../cmd/<dispatch|listener> (root go.work)", mode="build")],
@@ -342,13 +348,31 @@ for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
   tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
   tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
 done"""
-SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
-SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
-                 """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
+SCHEMA_STEP = "The envoy-infra plugin's schema carries the version and the download URL it was built with"
+SCHEMA_SCRIPT = (
+    'url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)\n'
+    """go build -ldflags "-X main.version=1.2.3 -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'" -o "$RUNNER_TEMP/pr" ./cmd/pulumi-resource-envoy-infra\n"""
+    "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
+    """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
+)
 # The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+
+
+# The four packages the test job's race step runs, and which its plain step therefore leaves out.
+# One list: both step texts below are built from it, and check-ci-filters.sh fails when either step
+# in ci.yaml differs from the text built here, so the two steps cannot name different sets.
+DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
+DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
+DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
+DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)
+DAEMON_PLAIN_STEP = "Test the Go daemon"
+DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
+DAEMON_PLAIN_SCRIPT = f"""\
+set -o pipefail
+go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -381,14 +405,19 @@ GATES = [
     ], reads=CI_SELF + setup_go("typecheck", f"{DAEMON}/go.mod")),
 
     gate("test", "test", runs=[
-        step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
-        step_run("test", "Test the concurrent packages under the race detector",
-                 "go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
-                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
+        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT, DAEMON, DAEMON_RACE_PKGS, race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
+    ], exact=[
+        # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
+        # pinned, as the envoy-go unit step's is. A Run cannot name "./... but the four", so the
+        # entry declares the superset ./..., as the envoy-go unit step's does; the race step's Run
+        # above is what claims the four.
+        pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
+            (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
     ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
@@ -721,6 +750,8 @@ GATES = [
         (".github/actions/install-pulumi/**", at("envoy-smoke", "./.github/actions/install-pulumi")),
         (f"{INFRA}/internal/pulumitest/pulumitest.go",
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
+        (".github/scripts/repo-paths.sh",
+         f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[
@@ -731,8 +762,8 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/scripts/e2e-local.test.sh", at("envoy-e2e-local", "Refusal test for e2e-local.sh")),
         (f"{ENVOY}/scripts/e2e-local.sh", f"{at('envoy-e2e-local', 'Local end-to-end acceptance')}; e2e-local.test.sh:6"),
-        (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:52,547-578 posts each fixture"),
-        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:582-587 runs bun in packages/envoy-client importing @legion/envoy-client/delivery"),
+        (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:54,610-641 posts each fixture"),
+        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:658-675 and :851-895 run bun in packages/envoy-client importing @legion/envoy-client/delivery and @legion/envoy-client/transport"),
         (CONTRACTS_SRC, "packages/envoy-client/src/delivery.ts imports @legion/contracts"),
     ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + CI_SELF),
 

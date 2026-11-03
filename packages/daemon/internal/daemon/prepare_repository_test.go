@@ -24,9 +24,9 @@ func TestARecordedIssuesEventIsPreparedFromItsRecord(t *testing.T) {
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-301", Tree: "LEGION-301", Project: "LEGION", Title: "existing", Phase: phase.Done,
 		Generation: 1, Status: "done", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"})
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
-	repos := newRepositories("LEGION")
+	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets")}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
-	branches := newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
+	branches := newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)
 	// zeta/tools was read once, long enough ago that preparing an issue on it reads it again, and
 	// GitHub now answers 404 for it.
 	branches.read["zeta/tools"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("zeta/tools"), DefaultBranch: "main"},

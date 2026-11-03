@@ -16,8 +16,8 @@ related_issues:
 symptoms:
   - "a change merged without a job that reads one of its files, and nothing re-ran the job"
   - "a new job never runs on a pull request, or runs on every pull request"
-  - "ci-ok fails on a draft pull request although no job failed"
-  - "ci-ok fails naming a job changes selected that ended skipped, after a re-run of failed jobs"
+  - "ci-ok never appears on a pull request although every job finished"
+  - "ci-ok stays failed after a re-run of failed jobs left a job changes selected skipped"
   - "ci-ok fails saying it does not know what selects a job"
   - "a pull request run writes an Actions cache entry"
 ---
@@ -26,51 +26,83 @@ symptoms:
 
 `.github/workflows/ci.yaml` (name `CI`) is the one workflow every pull request, every merge-queue
 group and every push to main runs. It has no `paths:`. Its first job, `changes`, reads the paths
-the change touched and selects jobs through one dorny/paths-filter filter per job. Its last job,
-`ci-ok`, condenses every job's result into one check. The deployment repository keeps its own
-router guide for its own workflows; this page covers this repository only.
+the change touched and selects jobs through one dorny/paths-filter filter per job. `ci-ok`
+condenses every job's result into one check, and no job is `ci-ok`: every job but `changes` ends
+with the `ci-ok-report` step, and the last job of the run to finish posts `ci-ok` from it (the
+section on `ci-ok` below). The deployment repository keeps its own router guide for its own
+workflows; this page covers this repository only.
 
 ## The six places a job joins
 
 1. **A filter in `changes`** that names every file the job reads (the method is below).
 2. **An output of `changes`** for that filter: `<filter>: ${{ steps.filter.outputs.<filter> }}`.
 3. **`needs: changes`** on the job, and `if: needs.changes.outputs.<filter> == 'true'`.
-4. **The job in `ci-ok`'s `needs:`.** A job that is not there can fail and still let `ci-ok`
-   pass.
-5. **The job in `ci-ok`'s `SELECTED_BY`**, mapped to the output its `if:` tests
-   (`"<job>": "<filter>"`), and in `PULL_REQUEST_ONLY` too when its `if:` also admits only
+4. **The `ci-ok-report` step as the job's last step**, the same text in every job:
+
+   ```yaml
+   - name: Report ci-ok when this is the run's last job
+     if: always()
+     uses: ./.github/actions/ci-ok-report
+     with:
+       changes: ${{ toJSON(needs.changes) }}
+       job-status: ${{ job.status }}
+   ```
+
+   A job that calls a workflow passes it `ci-ok-changes: ${{ toJSON(needs.changes) }}`, and that
+   workflow's job ends with the step under `job: <the calling job's id>` (docs-site.yaml and
+   worker-image.yaml do). A job with its own `permissions:` block repeats `actions: read` and
+   `checks: write`, which the step needs. A run whose last job lacks the step never gets `ci-ok`.
+5. **The job in `CI_OK_SELECTED_BY`** (ci.yaml's `env:`), mapped to the output its `if:` tests
+   (`"<job>": "<filter>"`), and in `CI_OK_PULL_REQUEST_ONLY` too when its `if:` also admits only
    `github.event_name == 'pull_request'`. A job that runs on no push gets its `changes` output
    set false on a push instead (`github.event_name != 'push' && steps.filter.outputs.<filter> ||
-   'false'`), so `ci-ok` reads its skip there as unselected. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
-   `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test (the
-   section on `ci-ok` below says why).
+   'false'`), so `ci-ok` reads its skip there as unselected. `ci-ok` waits for the report of
+   every job the map says `changes` selected and fails one the map does not name, and
+   `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, or a
+   job lacks the report step (the section on `ci-ok` below says why).
 6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
 A Go job also restores its caches the way the section on caches below says.
 
-## ci-ok fails a selected job that did not succeed
+## ci-ok is posted by the run's last job, and fails a selected job that did not succeed
 
-`ci-ok` runs `.github/scripts/ci-ok.sh`. It passes only when `changes` succeeded, lint
+A `ci-ok` job would wait for a runner of its own once every other job ended, behind every job the
+account started meanwhile: on 2026-11-02, with the account's runners busy all day, that wait took
+a median 39 minutes a run and up to 111. So no job posts it. The `ci-ok-report` step uploads the
+job's `job.status` as an artifact of the run (`ci-ok-<job>-<run attempt>-<status>`), then runs
+`.github/scripts/ci-ok-report.sh`, which lists the run's artifacts and, once lint and every job
+`changes` selected have reported, posts `ci-ok` on the head with the job's own `GITHUB_TOKEN`
+(the GitHub Actions App, the source main's ruleset names). Until then it says which jobs it
+waits on and exits 0; the last of them to finish posts. A re-run attempt's report replaces that
+job's earlier one.
+
+The verdict is `.github/scripts/ci-ok.sh`'s. It passes only when `changes` succeeded, lint
 succeeded (it runs on every change), every job `changes` selected succeeded, and every job it
 did not select succeeded or was skipped. ci-images is one of the selected jobs: the `ci_images`
-filter selects it, and `SELECTED_BY` maps it. A selected job that was skipped, cancelled or is
-absent from `ci-ok`'s `needs:` fails it, and it prints every job's result and whether `changes`
-selected it.
+filter selects it, and `CI_OK_SELECTED_BY` maps it. A selected job that failed, was cancelled or
+timed out fails it, and it prints every job's result and whether `changes` selected it.
 
 A skipped job reports success, so accepting any skip is not enough. When `changes` fails, every
-job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes` and
-`ci-ok`, and `changes` can succeed while the jobs it now selects stay skipped: a `ci-ok` that
-accepted those skips would pass with nothing tested. So `ci-ok.sh` decides what `changes`
-selected from its outputs, through `SELECTED_BY`: a job is selected when the output it maps to is
-`'true'`, and for a job in `PULL_REQUEST_ONLY` the run must also be a pull request's (docs,
-whose main build is docs-pages.yaml's, has its output set false on a push). A re-run that
-leaves a selected job skipped fails naming the job; re-run the whole workflow instead.
+job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes`, and
+`changes` can succeed while the jobs it now selects stay skipped: they never report, so the run
+posts no new `ci-ok` and the failed one stands. So `ci-ok-report.sh` and `ci-ok.sh` decide what
+`changes` selected from its outputs, through `CI_OK_SELECTED_BY` (one reading, in
+`.github/scripts/ci-ok.jq`): a job is selected when the output it maps to is `'true'`, and for a
+job in `CI_OK_PULL_REQUEST_ONLY` the run must also be a pull request's (docs, whose main build is
+docs-pages.yaml's, has its output set false on a push). Re-run the whole workflow instead.
 
-`check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}
-for every job in `ci-ok`'s `needs:` but `changes` and lint, when `PULL_REQUEST_ONLY` is not
-exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong
-entry would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
+`check-ci-filters.sh` fails when `CI_OK_SELECTED_BY` is not exactly {job: the output its `if:`
+tests} for every job whose `if:` tests an output of `changes`, when `CI_OK_PULL_REQUEST_ONLY` is
+not exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`, when a job
+but `changes` does not end with the report step, and when a job is named `ci-ok` or `pr-title`,
+which would post a required check itself (a skipped job posts a pass). A wrong entry would fail a
+job its `if:` rightly skipped, pass one a re-run left skipped, or post `ci-ok` before a job
+reported.
+
+A fork pull request's run gets a read-only token, which can post no check run, so a fork pull
+request gets no `ci-ok` and no push-time `pr-title`: this repository takes no fork pull
+requests, whose runs wait for an approval nobody gives.
 
 A job whose main half must run in push order, as the docs site's Pages deploy must, cannot be a
 job of the router: each push to main is a router run of its own, and a job-level concurrency group
@@ -101,7 +133,9 @@ go list -deps -test [-tags <tags>] -f '{{.Dir}}' <the packages the job's go comm
 
 For every job, add:
 
-- the composite actions it uses (`.github/actions/<name>/**`) and what they read;
+- the composite actions it uses (`.github/actions/<name>/**`) and what they read, but for the
+  `ci-ok-report` step every job ends with: lint runs it at every change, and the test job runs
+  `ci-ok-report.test.sh` when its scripts change, so a job's filter does not name it;
 - the Bun install set when the job runs `bun install` (the `bun_install` anchor);
 - Biome's files when it runs `bunx biome` (the `biome` anchor);
 - `.github/workflows/ci.yaml` itself, since a job reads its own definition.
@@ -242,21 +276,23 @@ group's `base_sha..head_sha` diff, what the queued change touches against the qu
 `ci-ok` reports on the group's commit, so the required checks pass on the merged tree before
 anything lands. A new job needs nothing extra for it. But a job whose `if:` names
 `github.event_name` must admit `merge_group`, or it skips on the group while its output selects
-it, and `ci-ok` fails there. What skips a group does so on purpose: the cache saves (push only),
-lint's pull-request text check (pr-title.yaml checks the text on the group), and worker-image
-(pull request only, so it is in `PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The
+it, and the run posts no `ci-ok` there, since `ci-ok` waits for that job's report. What skips a
+group does so on purpose: the cache saves (push only), lint's pull-request text check
+(pr-title.yaml checks the text on the group), and worker-image (pull request only, so it is in
+`CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The
 docs job runs on a group and on a pull request but on no push (its output is false there): docs-pages.yaml
 builds and publishes main's site.
 
 ## Drafts run no test job
 
-`changes` and the jobs it selects skip on a draft pull request, and `ci-ok` fails with "Draft pull
-request: no test job runs. Mark it ready for review to start them." It fails rather than passes
-because a skipped job reports success: a draft's `ci-ok` would otherwise pass with nothing tested.
-Marking the pull request ready for review (`ready_for_review`) starts a run that selects by the
-same diff. A job with `needs: changes` and a plain `if:` skips when `changes` skips, so it keeps
-the rule. A job whose `if:` starts with `!cancelled()`, to run when `changes` failed as lint,
-typecheck and test do, must also carry `!github.event.pull_request.draft`.
+`changes` and the jobs it selects skip on a draft pull request, so no job reports and the draft
+gets no `ci-ok`, which keeps it from merging with nothing tested (a skipped job reports success,
+so a passing check there would be a lie). Lint posts no `pr-title` there either; pr-title.yaml
+still checks a draft's text when it is opened, reopened or edited. Marking the pull request
+ready for review (`ready_for_review`) starts a run that selects by the same diff. A job with
+`needs: changes` and a plain `if:` skips when `changes` skips, so it keeps the rule. A job whose
+`if:` starts with `!cancelled()`, to run when `changes` failed as lint, typecheck and test do,
+must also carry `!github.event.pull_request.draft`.
 
 ## Main pushes are never cancelled
 

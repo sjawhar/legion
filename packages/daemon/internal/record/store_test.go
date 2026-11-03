@@ -54,7 +54,8 @@ func emptyStore(t *testing.T) *store.Store {
 	t.Cleanup(admin.Close)
 
 	name := "legion_record_test_" + randomSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -2085,6 +2086,169 @@ func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
 		}
 		if _, err := records.RoleRuns(ctx, tx, []RoleRunKey{tester}); err == nil {
 			t.Fatal("the tester's run read its own undecodable row without an error")
+		}
+	})
+}
+
+// A root keeps one relayed decision per Dispatch reference, the newest by its time: a later one
+// replaces it (an approval after a changes request of the same spec), an older one arriving late
+// does not. A read names them all, newest first and ties by reference, and leaves them; the forget
+// of what a delivered start named deletes exactly those, so a decision kept on a named reference
+// since stays for the next start to name.
+func TestAParkedDecisionKeepsTheNewestPerRefAndIsForgottenOnlyWhereItWasNamed(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	spec, ask := "dispatch://LEGION-210/spec", "dispatch://LEGION-210/ask/a"
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issueFixture("LEGION-210")))
+	})
+	for _, decision := range []ParkedDecision{
+		{Issue: "LEGION-210", Ref: ask, Decision: DecisionAskAnswered, Actor: "user:alice", At: t0},
+		{Issue: "LEGION-210", Ref: spec, Decision: DecisionDesignChangesRequested, Actor: "user:alice", At: t0},
+		{Issue: "LEGION-210", Ref: spec, Decision: DecisionDesignApproved, Actor: "user:alice", At: t0.Add(2 * time.Second)},
+		{Issue: "LEGION-210", Ref: ask, Decision: DecisionAskResolved, Actor: "user:bob", At: t0.Add(time.Second)},
+		{Issue: "LEGION-210", Ref: ask, Decision: DecisionAskAnswered, Actor: "user:carol", At: t0.Add(-time.Second)},
+	} {
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.AddParkedDecision(ctx, tx, decision))
+		})
+	}
+	var named []ParkedDecision
+	inTx(t, st, func(tx pgx.Tx) {
+		var err error
+		named, err = records.ParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+	})
+	want := []ParkedDecision{
+		{Issue: "LEGION-210", Ref: spec, Decision: DecisionDesignApproved, Actor: "user:alice", At: t0.Add(2 * time.Second)},
+		{Issue: "LEGION-210", Ref: ask, Decision: DecisionAskResolved, Actor: "user:bob", At: t0.Add(time.Second)},
+	}
+	if len(named) != len(want) {
+		t.Fatalf("read %#v, want %#v", named, want)
+	}
+	for i := range want {
+		got := named[i]
+		if got.Issue != want[i].Issue || got.Ref != want[i].Ref || got.Decision != want[i].Decision || got.Actor != want[i].Actor || !got.At.Equal(want[i].At) {
+			t.Fatalf("read[%d] = %#v, want %#v: each ref keeps its newest decision", i, got, want[i])
+		}
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		again, err := records.ParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+		if len(again) != len(want) {
+			t.Fatalf("a second read = %#v, want the rows still kept: only a delivery forgets them", again)
+		}
+	})
+	// A person decides again on a reference the start named, before that start is delivered.
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.AddParkedDecision(ctx, tx, ParkedDecision{Issue: "LEGION-210", Ref: spec,
+			Decision: DecisionDesignChangesRequested, Actor: "user:carol", At: t0.Add(time.Hour)}))
+		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-210", KeptDecisions{Decisions: []DecisionMark{
+			{Ref: spec, At: t0.Add(2 * time.Second)}, {Ref: ask, At: t0.Add(time.Second)}}}, 0))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		left, err := records.ParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+		if len(left) != 1 || left[0].Ref != spec || left[0].Decision != DecisionDesignChangesRequested || left[0].Actor != "user:carol" {
+			t.Fatalf("after the forget %#v, want only the decision kept since it was named", left)
+		}
+	})
+}
+
+// A root keeps one approval below its spec's latest version for its next architect's start, the
+// newest kept replacing an older one. The start reads it and leaves it; the forget of what the
+// delivered start named deletes exactly that pair, and leaves a pair a later re-admission kept.
+func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issueFixture("LEGION-211")))
+		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if approved != 0 || latest != 0 {
+			t.Fatalf("a read with nothing kept = %d, %d, want zeros", approved, latest)
+		}
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 2, 3))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 3, 4))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if approved != 3 || latest != 4 {
+			t.Fatalf("read = %d, %d, want the newest kept, 3 and 4", approved, latest)
+		}
+		again, _, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if again != 3 {
+			t.Fatalf("a second read = %d, want 3: only a delivery forgets it", again)
+		}
+	})
+	// A re-admission since the start named the pair kept a newer one, which the forget leaves.
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 4, 5))
+		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{Approved: 3, Latest: 4}, 0))
+		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if approved != 4 || latest != 5 {
+			t.Fatalf("after the forget = %d, %d, want the pair kept since, 4 and 5", approved, latest)
+		}
+		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{Approved: 4, Latest: 5}, 0))
+		if approved, _, err := records.ReadmittedApproval(ctx, tx, "LEGION-211"); err != nil || approved != 0 {
+			t.Fatalf("after the forget of the pair it named = %d, %v, want zero", approved, err)
+		}
+	})
+}
+
+// The three reads keyed by a pull request's repository find the row whatever the case the name is
+// spelled in: the row carries the spelling of the fact that opened the pull request, while a
+// later fact — an event under GitHub's own spelling of the other name of a configured rename,
+// say — names the same repository in another case. A name that is another repository still finds
+// nothing.
+func TestThePullRequestReadsFindTheRowInAnySpelling(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-303")
+	issue.Repo, issue.GitHubRepo = "sjawhar/legion", "sjawhar/legion"
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-303",
+		HeadSHA: "b1c2d3", HeadUpdatedAt: time.Date(2026, 9, 22, 14, 12, 13, 0, time.UTC),
+		Generation: int64(issue.Generation), State: PullRequestOpen}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+	})
+	for _, name := range []string{"sjawhar/legion", "SJAWHAR/Legion", "sjawhar/LEGION"} {
+		inTx(t, st, func(tx pgx.Tx) {
+			byNumber, err := records.PullRequestByNumber(ctx, tx, name, pr.Number)
+			must(t, err)
+			if byNumber == nil || byNumber.Issue != pr.Issue {
+				t.Fatalf("PullRequestByNumber(%q, %d) = %#v, want the row of %s", name, pr.Number, byNumber, pr.Issue)
+			}
+			byBranch, err := records.PullRequestByBranch(ctx, tx, name, pr.Branch)
+			must(t, err)
+			if byBranch == nil || byBranch.Issue != pr.Issue {
+				t.Fatalf("PullRequestByBranch(%q, %q) = %#v, want the row of %s", name, pr.Branch, byBranch, pr.Issue)
+			}
+			recorded, err := PullRequestRecorded(ctx, tx, name, pr.Number)
+			must(t, err)
+			if !recorded {
+				t.Fatalf("PullRequestRecorded(%q, %d) = false, want the row of %s", name, pr.Number, pr.Issue)
+			}
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		other := "cybermonklabs/legion"
+		byNumber, err := records.PullRequestByNumber(ctx, tx, other, pr.Number)
+		must(t, err)
+		byBranch, err := records.PullRequestByBranch(ctx, tx, other, pr.Branch)
+		must(t, err)
+		recorded, err := PullRequestRecorded(ctx, tx, other, pr.Number)
+		must(t, err)
+		if byNumber != nil || byBranch != nil || recorded {
+			t.Fatalf("the reads of %s = %#v, %#v, %v; want nothing: it is another repository", other, byNumber, byBranch, recorded)
 		}
 	})
 }

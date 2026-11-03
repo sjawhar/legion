@@ -257,11 +257,14 @@ export interface WriteAdvice {
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
    * The approval a document write superseded: the version it stored replaced the one a person
-   * had approved, so that approval is stale until someone approves the new version. A Legion
-   * design gate is such an approval, so this write closed it. Set by a document edit and by an
-   * upload that replaced an existing document, and only on the write that superseded the
-   * approval: a write on a document nobody approved, one whose approval was already stale, and
-   * one whose version carried that approval forward (the approval carry) each omit it.
+   * had approved, so that approval is stale until someone approves the new version or a later
+   * write stores the approved version's text again exactly with no decision block in it decided
+   * since, which carries the approval to that write's version. A Legion design gate is such an
+   * approval, so this write closed it. Set by a document edit and by an upload that replaced an
+   * existing document, and only on the write that superseded the approval: a write on a document
+   * nobody approved, one whose approval was already stale, and one whose version carried that
+   * approval forward (the approval carry: an answer to a decision block, or the approved version's
+   * text stored again) each omit it.
    */
   readonly superseded_approval?: {
     /** The version a person approved, the one this write superseded. */
@@ -638,11 +641,15 @@ export type ArtifactReviewState = "approved" | "changes_requested";
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
  *  document header (`ask_id` null unless a request was open, which the header answers), or
- *  carried by Dispatch to the version a human's answer to a decision block writes, when that
- *  answer is the whole change since the version he approved. A carried review is `approved` in
- *  his name, its `reason` names the carry (`Carried forward from the approval of version <N>: the
- *  answer to a decision block was the whole change since it.`), and its `ask_id` is null unless
- *  a request was open at the carry, which it answers `Approve` in his name. */
+ *  carried by Dispatch to a later version. A carry follows a human's answer to a decision block,
+ *  when that answer is the whole change since the version he approved (`reason`: `Carried forward
+ *  from the approval of version <N>: the answer to a decision block was the whole change since
+ *  it.`), or a version whose text is byte for byte that of the version the document's newest
+ *  review approved and whose every decision block is as its stored row has it (nobody decided one
+ *  since), such as an accidental edit undone (`reason`: `Carried forward from the
+ *  approval of version <N>: this version's text is that version's, unchanged.`). A carried review
+ *  is `approved` in the approver's name, and its `ask_id` is null unless a request was open at the
+ *  carry, which it answers `Approve` in his name. */
 export interface ArtifactReview {
   readonly id: string;
   readonly artifact_id: string;
@@ -656,7 +663,9 @@ export interface ArtifactReview {
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
  *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
- *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */
+ *  `stale` is approved at an older version: a later version leaves the approval there unless
+ *  Dispatch carries it to that version (`ArtifactReview`); `changes_requested` carries the
+ *  reviewer's reason. */
 export interface ArtifactApproval {
   readonly state: "draft" | "awaiting" | "approved" | "stale" | "changes_requested";
   readonly latest_version: number;
@@ -871,6 +880,11 @@ export interface Ask extends AnchorPosition {
   readonly created_at: string;
   /** Batches the current inbound graph-edge count for ask-list surfaces. */
   readonly referenced_by_count?: number;
+  /** The current revision of the ask's parts: the number a reference to one of them pins
+   *  (`dispatch://<key>/ask/<id>#b-<part>@v<N>`). Batched beside the part ids of the options and
+   *  the answer, so it is absent on a write's own answer and while the ask's parts are not indexed
+   *  yet, where no revision can be pinned. */
+  readonly revision?: number;
   readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
   readonly document?: InboxDocument;
   /** Inbox rows, the issue detail's `open_asks` and the issue ask list: the newest reply in the
@@ -1163,11 +1177,19 @@ export interface SessionAnswersResponse {
 }
 
 export interface AskOption {
+  /** The part this option is stored as: the block `dispatch://<key>/ask/<ask id>#b-<id>` names,
+   *  pinned to the ask's `revision` with `@v<N>`. Read-only, and carried by every read that shows
+   *  an ask's options; absent on a write's own answer, and while the ask's parts are not indexed
+   *  yet. A write that sends it back has it ignored: no caller mints or moves a part id. */
+  readonly id?: string;
   readonly label: string;
   readonly description?: string;
 }
 
 export interface AskAnswer {
+  /** The part the ask's current answer is stored as, read as an option's `id` is and never
+   *  written by a caller; a superseded answer, which no part of the ask holds, carries none. */
+  readonly id?: string;
   readonly user: string;
   readonly selected: string[];
   readonly text: string | null;
@@ -1344,14 +1366,16 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
-  /** The block of the comment this reply answers (`reply_to_block`); null on every other
-   *  comment, and absent from a Dispatch older than the field. */
+  /** The block this reply answers (`reply_to_block`): a block of the comment `reply_to` names,
+   *  or, with `ask_id`, a part of that ask; null on every other comment, and absent from a
+   *  Dispatch older than the field. */
   readonly reply_block?: ReplyBlock | null;
 }
 
-/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
- *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
- *  last text it held once removed), and whether its item's current revision no longer holds it. */
+/** The block a reply answers: its node id (`comment/<uuid>#b2`, or `ask/<uuid>#b2` for a part of
+ *  the ask the reply names), its reference (absent for a block of a direct message, which has no
+ *  address), its id, its text cut to 480 characters (the last text it held once removed), and
+ *  whether its item's current revision no longer holds it. */
 export interface ReplyBlock {
   readonly node: string;
   readonly ref?: string;
@@ -2166,12 +2190,14 @@ export type GraphEdgeKind =
 //
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
 // its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). A block of a comment or an
-// issue message (id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) carries no
-// `document`: its `parent` is the comment or message, and a comment block's `changed_version` is
-// the comment revision in which its text last changed (a message block has none). `text` and
-// `pin` are set only on the node a reference read names: `text` is the block's whole current
-// text, and `pin` answers a reference pinned to a version (or a comment's revision).
+// its text last changed (its `changed_at` is that version's time). A block of a comment, an issue
+// message or an ask (id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or
+// `ask/<ask id>#<part id>`, a part being the ask's question, one of its options or its answer)
+// carries no `document`: its `parent` is the comment, message or ask, and a comment block's or an
+// ask part's `changed_version` is the comment revision or the ask's part revision in which its
+// text last changed (a message block has none). `text` and `pin` are set only on the node a
+// reference read names: `text` is the block's whole current text, and `pin` answers a reference
+// pinned to a version (or a comment's or an ask's revision).
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -2269,6 +2295,83 @@ export interface BlockLinks {
   readonly links: BlockLink[];
 }
 
+// DecisionKeep is one person's agreement with a decision: the decision's heading block, the
+// version its text stood at when they pressed Keep, and who did when. What tells a kept decision
+// from one waiting for review again is the sum of its text, which the server records beside the
+// row and serves as `waiting_review`: a decision's `changed_version` is the greatest of the
+// blocks it holds now, so it does not move when a block is removed from the decision or moved
+// into or out of it.
+export interface DecisionKeep {
+  readonly artifact_id: string;
+  readonly block_id: string;
+  readonly changed_version: number;
+  readonly kept_by: string;
+  readonly kept_at: string;
+}
+
+// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
+// decision's own block that holds it, the spec block it names, when and in which version of
+// decisions.md the link was first written, and whether that spec block is out of date - the
+// decision changed after it first linked the block, and the block has not changed since.
+export interface DecisionLink {
+  readonly from_block: string;
+  readonly to: GraphNode;
+  readonly created_version: number;
+  readonly created_at: string;
+  readonly stale: boolean;
+}
+
+// Decision is one decision of an issue's `decisions.md`: its heading block and every block after
+// it up to the next heading of its level or higher. `kind` is "person" when its blocks mention an
+// ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
+// paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
+// `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
+// `text_sha256` is the sum of `text`, which Keep carries back to say which text it agreed with.
+// `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
+// stands.
+export interface Decision {
+  readonly block_id: string;
+  readonly heading: string;
+  readonly ref: string;
+  readonly text: string;
+  readonly text_sha256: string;
+  readonly kind: "agent" | "person";
+  readonly unsure: boolean;
+  readonly replaced: boolean;
+  readonly asks: string[];
+  readonly links: DecisionLink[];
+  readonly changed_version: number;
+  readonly changed_at: string | null;
+  readonly kept: DecisionKeep | null;
+  readonly waiting_review: boolean;
+}
+
+// IssueDecisions is GET /api/v1/issues/{key}/decisions: the issue's decisions document, the open
+// questions its spec still holds (oldest first) and each decision of that document in document
+// order. `document` is null, with no decisions, when the issue has no `decisions.md`.
+export interface IssueDecisions {
+  readonly document: string | null;
+  readonly open_questions: IssueAskRow[];
+  readonly decisions: Decision[];
+}
+
+// DocumentRead is GET and PUT /api/v1/me/documents/{id}/read: one person's last read version of a
+// document, `version` and `read_at` null when they have read none.
+export interface DocumentRead {
+  readonly artifact_id: string;
+  readonly version: number | null;
+  readonly read_at: string | null;
+}
+
+// DecisionKeptEventPayload is the payload of `decision.kept`, which a person's Keep appends on
+// the decision's issue: the document, the decision's heading block and the version its text stood
+// at. It wakes nobody - a Keep records that a person agreed, which asks its agent for nothing.
+export interface DecisionKeptEventPayload {
+  readonly artifact_id: string;
+  readonly block_id: string;
+  readonly changed_version: number;
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
@@ -2302,9 +2405,10 @@ export interface ArtifactHumanEditedEventPayload {
  *  approval ask the review answered, null when given from the document header with no
  *  approval ask open at that version. A third provenance is the carry: Dispatch records an
  *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
- *  when that answer is the whole change since the version he approved; its `reason` names the
- *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
- *  carry, which it answers (see `ArtifactReview`). */
+ *  when that answer is the whole change since the version he approved, and at a version whose
+ *  text is byte for byte the approved version's with no decision block in it decided since; its
+ *  `reason` names the carry and the version it follows, and its `ask_id` is null unless a request
+ *  was open at the carry, which it answers (see `ArtifactReview`). */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
@@ -2593,6 +2697,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_thread_state.updated";
       readonly payload: UserThreadStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "decision.kept";
+      readonly payload: DecisionKeptEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
@@ -2946,9 +3054,11 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
-  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
-   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
-   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  /** The id of the block the reply answers (`b2`): a block of the comment `reply_to` names,
+   *  checked against that comment before `reply_to` climbs to its thread's head, in an ask's
+   *  thread as anywhere else, or, with `ask_id`, a part of that ask. `400 INVALID_COMMENT`
+   *  without `reply_to` or `ask_id`, and for a block the item it is checked against does not
+   *  hold now. */
   readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;
@@ -3323,9 +3433,19 @@ const askEventPayloadFields = {
   // kind the server no longer writes (the removed `action`). The outbound `AskKind` stays narrow.
   kind: z.string().optional(),
   question: z.string().optional(),
-  options: z.array(z.object({ label: z.string().optional() })).optional(),
+  // An option and the answer carry the part id of the block each is stored as, and the payload the
+  // ask's part revision, as every other read of the ask carries them; a payload the ask has moved
+  // past carries no id, and one of an ask whose parts are not indexed yet no revision either.
+  options: z
+    .array(z.object({ id: z.string().optional(), label: z.string().optional() }))
+    .optional(),
+  revision: z.number().int().positive().optional(),
   answer: z
-    .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
+    .object({
+      id: z.string().optional(),
+      selected: z.array(z.string()).nullish(),
+      text: z.string().nullish(),
+    })
     .nullish(),
   previous_answer: z
     .object({

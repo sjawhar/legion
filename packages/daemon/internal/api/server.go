@@ -7,7 +7,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -75,6 +79,20 @@ type Options struct {
 	// refuses it either, since refusing calls with no relaunch under way would stall agents that
 	// work today.
 	PluginRelaunchable bool
+	// NoPluginInstall is supervise.Deps.NoPluginInstall as the API sees it: whether this claim's
+	// launch installs no plugin at all, which only the daemon knows, since a role's backend and
+	// the runtime it launches into are its configuration (internal/daemon's noPluginInstall — a
+	// Claude Code role's plugin in a pod is its image's own claude-envoy). Nothing of this
+	// daemon relaunches such a claim for its contract and its registration stands, so the routes
+	// serve it on the contract it speaks (staleClaim). Nil is a daemon whose every claim a
+	// relaunch can carry.
+	NoPluginInstall func(c supervise.Claim) bool
+	// CallerPod is the runtime's pod at a request's address: the uid of the project's pod that
+	// holds addr, and false for an address no pod of the project holds (the Sandbox runtime's
+	// PodAt). GET /legion/v1/state authenticates nobody, so this is how it knows which claims'
+	// plugin asked (stateFor). Nil is a runtime that runs no pods, whose every caller is served
+	// the state as this contract writes it.
+	CallerPod func(addr netip.Addr) (string, bool)
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -95,6 +113,10 @@ type Options struct {
 	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
 	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
 	GitHubOwners func() []string
+	// RepositoryRenames is the deployment's repository equivalence
+	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
+	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
+	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -168,6 +190,7 @@ type server struct {
 	state             StateSource
 	stateTransactions StateTransactions
 	consumerLag       func(ctx context.Context) []intake.ConsumerLag
+	callerPod         func(addr netip.Addr) (string, bool)
 	supervisor        Supervisor
 	bootTokens        *BootTokens
 	// project and dispatchProject are Options.Project and Options.DispatchProject.
@@ -179,26 +202,32 @@ type server struct {
 	designGate      config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
-	// pluginRelaunchable is Options.PluginRelaunchable.
+	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
 	pluginRelaunchable bool
+	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
 	githubOwners func() []string
-	githubAPI    string
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
-	pool         *pgxpool.Pool
-	handlers     []intake.Handler
-	prepare      func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread       func(resolved string) bool
-	await        func(repo, tree, child, parent string)
-	roleFor      func(phase.Phase) claim.Role
-	records      record.Store
-	dispatch     dispatch.Client
-	claimReady   func(c supervise.Claim)
+	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
+	// that says which owner's installation holds a repository recorded under the name a transfer
+	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
+	// serving reads for this server's own GitHub calls. The zero value configures none.
+	renames    ghrepo.Renames
+	githubAPI  string
+	grants     *credential.Grants
+	releaser   store.TreeReleaser
+	trees      TreeLifecycles
+	pool       *pgxpool.Pool
+	handlers   []intake.Handler
+	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread     func(resolved string) bool
+	await      func(repo, tree, child, parent string)
+	roleFor    func(phase.Phase) claim.Role
+	records    record.Store
+	dispatch   dispatch.Client
+	claimReady func(c supervise.Claim)
 	// handoffCompleted is Options.HandoffCompleted.
 	handoffCompleted func(issue string)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
@@ -226,6 +255,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
 		consumerLag:        opts.ConsumerLag,
+		callerPod:          opts.CallerPod,
 		supervisor:         opts.Supervisor,
 		bootTokens:         opts.BootTokens,
 		project:            opts.Project,
@@ -234,8 +264,10 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
+		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
+		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
@@ -284,6 +316,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
+	mux.HandleFunc("POST /legion/v1/claims/ready-for-update", s.readyForUpdate)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/claims/turn-outcome", s.turnOutcome)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
@@ -322,6 +355,25 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
+}
+
+// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
+// other name of its configured pair when the project's owners make that name's owner the one
+// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
+// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
+// than written a second time.
+func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
+	return s.renames.Serving(recorded, s.ownsOwner)
+}
+
+// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
+// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
+// — owns none.
+func (s *server) ownsOwner(owner string) bool {
+	if s.githubOwners == nil {
+		return false
+	}
+	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
@@ -439,7 +491,102 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.consumerLag != nil {
 		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, state)
+	writeJSON(w, http.StatusOK, s.stateFor(r, state))
+}
+
+// stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
+// the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
+// record the plugin contract each registration declared. A plugin reads the state with a strict
+// schema and refuses the whole body for one key it does not know, and an update round serves a
+// claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
+// whose claims record a contract below supervise.PodUpdateContract, the contract that added
+// `updateRound` and `updateHead` to the claim views, is served the state without them
+// (withoutUpdateRounds), which is the body that contract's schema describes. Every later reader
+// takes the two as optional, so the body this serves when the claims cannot be read is the one
+// both read. Any other caller — a pod at this contract, the operator's `legion state`, a tmux
+// pane — is served the state as this contract writes it.
+func (s *server) stateFor(r *http.Request, state State) State {
+	// A state with no update round on any claim view is the body every contract reads, so it is
+	// served as it is with no read of the claims: outside a roll, that is every request.
+	if s.callerPod == nil || s.supervisor == nil || !carriesUpdateRounds(state) {
+		return state
+	}
+	caller, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return state
+	}
+	pod, inPod := s.callerPod(caller.Addr().Unmap())
+	if !inPod {
+		return state
+	}
+	claims, err := s.supervisor.Claims(r.Context())
+	if err != nil {
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round fields, which every plugin contract since 45 reads",
+			"pod", pod, "error", err)
+		return withoutUpdateRounds(state)
+	}
+	if contract := podContract(claims, pod); contract == 0 || contract >= supervise.PodUpdateContract {
+		return state
+	}
+	return withoutUpdateRounds(state)
+}
+
+// carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
+func carriesUpdateRounds(state State) bool {
+	carries := func(v ClaimView) bool { return v.UpdateRound != "" || v.UpdateHead != "" }
+	for _, issue := range state.Issues {
+		if issue.Architect != nil && carries(*issue.Architect) {
+			return true
+		}
+		for _, worker := range issue.Workers {
+			if carries(worker.Claim) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
+// none records one: every role of a pod is served by the plugin that pod runs, and the body the
+// lowest of them reads is one every higher contract reads too.
+func podContract(claims []supervise.Claim, pod string) int {
+	lowest := 0
+	for _, c := range claims {
+		if c.Locator == nil || c.Locator.Sandbox == nil || c.Locator.Sandbox.PodUID != pod || c.PluginContract == 0 {
+			continue
+		}
+		if lowest == 0 || c.PluginContract < lowest {
+			lowest = c.PluginContract
+		}
+	}
+	return lowest
+}
+
+// withoutUpdateRounds is state with no claim view carrying `updateRound` or `updateHead`, the two
+// fields supervise.PodUpdateContract added to the state; nothing else of that contract is on the
+// route but `settings` keys, which every plugin reads loosely. The issue maps are copied, so the
+// state the source answered is left as it was.
+func withoutUpdateRounds(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		if issue.Architect != nil {
+			architect := *issue.Architect
+			architect.UpdateRound, architect.UpdateHead = "", ""
+			issue.Architect = &architect
+		}
+		if issue.Workers != nil {
+			workers := make(map[claim.Role]PhaseView, len(issue.Workers))
+			for role, worker := range issue.Workers {
+				worker.Claim.UpdateRound, worker.Claim.UpdateHead = "", ""
+				workers[role] = worker
+			}
+			issue.Workers = workers
+		}
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

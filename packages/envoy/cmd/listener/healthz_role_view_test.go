@@ -23,11 +23,7 @@ import (
 func healthzRoleViewRig(t *testing.T, consumer string) (func() (int, map[string]any), *store.Registry, *bus.Client) {
 	t.Helper()
 	client := setupTestNATS(t)
-	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	bindBoundDurable(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -98,7 +94,7 @@ func TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded(t *testing.T) {
 	if !strings.Contains(reported, "role claim view unavailable") || !strings.Contains(reported, store.ErrRoleViewNotReady.Error()) {
 		t.Fatalf("/healthz degraded with error %q, want it naming the role claim view and %q", reported, store.ErrRoleViewNotReady)
 	}
-	for _, field := range []string{"session_cache_ready", "session_cache_size", "live_topics", "ci_cache", "num_pending", "num_ack_pending"} {
+	for _, field := range []string{"session_cache_ready", "session_cache_size", "ci_cache", "num_pending", "num_ack_pending"} {
 		if _, ok := body[field]; !ok {
 			t.Errorf("the degraded answer %v has no %s; a reader of that field loses it while the view fills", body, field)
 		}

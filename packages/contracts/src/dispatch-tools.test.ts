@@ -306,6 +306,18 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
+  test("dispatch_project's description says to create a requested project without questions", () => {
+    const description = specFor("dispatch_project").description;
+    expect(description).toContain(
+      "When a person asks for a project, make the key from its name. Check the key with " +
+        "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
+    );
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
+  });
+
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
     const schema = schemaFor("dispatch_architecture_sync");
 
@@ -611,6 +623,41 @@ describe("dispatchToolSpecs", () => {
     }
     expect(schema.safeParse({ issue: "DSP-1", status: "closed" }).success).toBe(false);
     expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
+  });
+
+  // A refusal that joins the document-owner rule to another rule names only the parts the call
+  // broke: a call with a valid owner is never told its owner is wrong.
+  test("owner-plus-rule refusals name only the broken part", () => {
+    const turn =
+      "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+    const precondition = "A precondition selects exactly one of document or blocks.";
+    const source = "Exactly one of path or content is required.";
+    const artifactOwner =
+      "Exactly one of issue and project is required; with project, artifact names the document.";
+    const edit = { artifact: "spec.md", ops: [{ op: "delete", find: "x" }] };
+    const readOwner =
+      "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+    const readMessage =
+      "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+    for (const [tool, args, refusal] of [
+      ["dispatch_comment", { issue: "DSP-1", body: "y", turn: "agent" }, turn],
+      ["dispatch_comment", { body: "y", turn: "agent" }, `${artifactOwner} ${turn}`],
+      ["dispatch_comment", { body: "y" }, artifactOwner],
+      ["dispatch_doc_edit", { issue: "DSP-1", ...edit, precondition: {} }, precondition],
+      ["dispatch_doc_edit", { ...edit }, artifactOwner],
+      ["dispatch_artifact", { issue: "DSP-1", name: "n" }, source],
+      ["dispatch_artifact", { name: "n", content: "c" }, artifactOwner],
+      ["dispatch_artifact", { name: "n" }, `${artifactOwner} ${source}`],
+      ["dispatch_read", { issue: "DSP-1", message: "m" }, readMessage],
+      ["dispatch_read", {}, readOwner],
+    ] as const) {
+      const result = schemaFor(tool).safeParse(args);
+      expect(result.success, `${tool} ${JSON.stringify(args)}`).toBe(false);
+      expect(
+        result.error?.issues.map((issue) => issue.message),
+        `${tool} ${JSON.stringify(args)}`
+      ).toEqual([refusal]);
+    }
   });
 
   // A closed issue refuses messages, comments, and artifacts, so the reason an issue closed can
@@ -948,7 +995,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("requires artifact with project on document tools but not dispatch_artifact", () => {
+  test("requires artifact with project on document tools but not dispatch_artifact or dispatch_read", () => {
     const cases = [
       [
         "dispatch_ask",
@@ -961,7 +1008,6 @@ describe("dispatchToolSpecs", () => {
         { project: "CORE", ops: [{ op: "replace", find: "draft", with: "final" }] },
       ],
       ["dispatch_doc_read", { project: "CORE" }],
-      ["dispatch_read", { project: "CORE" }],
     ] as const;
 
     for (const [name, args] of cases) {
@@ -974,6 +1020,8 @@ describe("dispatchToolSpecs", () => {
         content: "# Runbook",
       }).success
     ).toBe(true);
+    // A project alone is the read of its documents' list.
+    expect(schemaFor("dispatch_read").safeParse({ project: "CORE" }).success).toBe(true);
   });
 
   test("accepts a project-document ref in place of issue/project on every ref-aware tool", () => {

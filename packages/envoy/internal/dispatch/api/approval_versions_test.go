@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // An approval request remains one conversation across document versions. A version move keeps its
@@ -407,13 +408,13 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 // OpenApprovalAsk waits for, then starts the human's comment, which queues on the owner row.
 func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	ctx := context.Background()
-	handler, database := newInteractionHandler(t, nil)
+	handler, database, deps := newInteractionDeps(t, nil)
 	issue := createInteractionIssue(t, handler, "TEST", "Racing hand-back", "A spec")
-	approvalRequest := func() *httptest.ResponseRecorder {
-		return sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+	approvalRequest := func(through http.Handler) *httptest.ResponseRecorder {
+		return sessionRequest(t, through, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
 			map[string]any{"actor": sessionActor(), "summary": "Caps retries at three attempts."})
 	}
-	requested := approvalRequest()
+	requested := approvalRequest(handler)
 	if requested.Code != http.StatusCreated {
 		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
 	}
@@ -435,15 +436,25 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	if _, err := hold.Exec(ctx, `select 1 from asks where id = $1 for share`, askID); err != nil {
 		t.Fatalf("hold the ask row: %v", err)
 	}
+	// Each racing request runs on a connection of its own, and the test goes on once that
+	// backend is queued behind the lock it is meant to wait on. A count of the backends queued
+	// behind the ask row would also take this issue's document settlement, which locks the
+	// issue's own row, for one of the two.
+	handBackHandler, handBackPID := oneConnectionHandler(t, deps)
 	handedBack := make(chan *httptest.ResponseRecorder, 1)
-	go func() { handedBack <- approvalRequest() }()
-	waitForDatabaseLocks(t, hold, 1)
+	go func() { handedBack <- approvalRequest(handBackHandler) }()
+	if response, early := storetest.WaitForQueuedBehind(t, hold, handBackPID, handedBack, 10*time.Second); early {
+		t.Fatalf("the hand-back answered %d before it queued behind the ask row: %s", response.Code, response.Body.String())
+	}
+	commentHandler, commentPID := oneConnectionHandler(t, deps)
 	commented := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		commented <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		commented <- dispatchRequest(t, commentHandler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{"ask_id": askID, "body": "And the backoff?"}, "alice")
 	}()
-	waitForDatabaseLocks(t, hold, 2)
+	if response, early := storetest.WaitForQueuedBehind(t, hold, commentPID, commented, 10*time.Second); early {
+		t.Fatalf("the comment answered %d before it queued behind the owner row: %s", response.Code, response.Body.String())
+	}
 	if err := hold.Rollback(ctx); err != nil {
 		t.Fatalf("release the ask row: %v", err)
 	}
@@ -479,7 +490,7 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 		t.Fatalf("event order = %v, want %v", order, want)
 	}
 	// The agent answers the newer comment by handing back again, which the thread now owes.
-	if again := approvalRequest(); again.Code != http.StatusCreated {
+	if again := approvalRequest(handler); again.Code != http.StatusCreated {
 		t.Fatalf("hand approval back again: status=%d body=%s", again.Code, again.Body.String())
 	}
 	if counts := askEventCounts(t, handler, issue.Key, askID); counts["ask.handed_back"] != 2 {
@@ -803,7 +814,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("approval events for %s: edits=%d resolved=%d, want one move and no resolution", doc.askID, edited, resolved)
 			}
 
-			deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+			deliveries := eventDeliveries(t, doc.database, "ask.edited", doc.askID)
 			if heard := slices.Contains(deliveries[0].Destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
 				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", deliveries[0].Destinations, heard, write.askerHears)
 			}
@@ -874,7 +885,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 		typeVersion("A fourth note.", 5)
 
-		deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+		deliveries := eventDeliveries(t, doc.database, "ask.edited", doc.askID)
 		if len(deliveries) != 4 {
 			t.Fatalf("ask.edited events = %#v, want one move to each of versions 2 to 5", deliveries)
 		}
@@ -910,14 +921,14 @@ type eventDelivery struct {
 
 // eventDeliveries runs the outbox until it has published every eventType event whose payload's id
 // is id (an ask's, or a comment's), and returns what each one reached, oldest first.
-func eventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, id string) []eventDelivery {
+func eventDeliveries(t *testing.T, database *store.Store, eventType, id string) []eventDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		outbox.New(outbox.Deps{
-			Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Listen: database.Pool.Listener, Docs: documentService,
+			Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Listen: database.Pool.Listener,
 		}).Run(ctx)
 	}()
 	defer func() {

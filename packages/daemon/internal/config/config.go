@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -152,7 +153,15 @@ type Config struct {
 	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
 	// after the close before its last look (`production_check_hours`, 14 days by default).
 	ProductionCheckBound time.Duration
-	ReviewRoundCap       int
+	// PodUpdateRetask is how long an open update round waits after it sent a worker the task
+	// before it asks that worker again (`pod_update_retask_hours`, an hour by default), and
+	// PodUpdateNotice how long after the round opened the controller is told the round is stalled
+	// (`pod_update_notice_hours`, four hours by default). Both are decimal numbers of hours, as
+	// `production_check_hours` is, so a live proof and the production check can drive each bound
+	// inside one run rather than wait out a day of real time.
+	PodUpdateRetask time.Duration
+	PodUpdateNotice time.Duration
+	ReviewRoundCap  int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
@@ -170,6 +179,11 @@ type Config struct {
 	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
 	// leaves out names those alone. Nil while the file names none.
 	RoleConfigFiles map[claim.Role][]string
+	// RepositoryRenames is `repository_renames`: the repository pairs this deployment treats as
+	// one repository wherever a name is compared, because a repository moved while Legion's
+	// records keep the name each was written under. The zero value, which answers as
+	// strings.EqualFold does, while the file configures none.
+	RepositoryRenames ghrepo.Renames
 }
 
 const (
@@ -274,6 +288,8 @@ type fileConfig struct {
 	GitHubApps             *GitHubApps
 	Linger                 *time.Duration
 	ProductionCheckBound   *time.Duration
+	PodUpdateRetask        *time.Duration
+	PodUpdateNotice        *time.Duration
 	ReviewRoundCap         *int
 	Controller             *string
 	Capabilities           *Capabilities
@@ -281,6 +297,7 @@ type fileConfig struct {
 	Counts                 map[string]int
 	WorkerBackends         map[claim.Role]runtime.Backend
 	RoleConfigFiles        map[claim.Role][]string
+	RepositoryRenames      []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -406,6 +423,10 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Linger, err = readHours(value, key)
 		case "production_check_hours":
 			file.ProductionCheckBound, err = readHours(value, key)
+		case "pod_update_retask_hours":
+			file.PodUpdateRetask, err = readHours(value, key)
+		case "pod_update_notice_hours":
+			file.PodUpdateNotice, err = readHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "controller":
@@ -416,6 +437,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.WorkerBackends, err = readWorkerBackends(value, key)
 		case "role_config_files":
 			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
+		case repositoryRenamesKey:
+			file.RepositoryRenames, err = readRepositoryRenames(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -766,11 +789,13 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
-// readHours is a key in hours (`linger_hours`, `production_check_hours`): a positive number of
-// hours, a decimal among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer
-// bound in whole hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is
-// refused, never read as zero: the engine arms the deadline it is given, so a zero would close a
-// finished tree at once and take its workspace with it, or bound a check before its first look.
+// readHours is a key in hours (`linger_hours`, `production_check_hours`,
+// `pod_update_retask_hours`, `pod_update_notice_hours`): a positive number of hours, a decimal
+// among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer bound in whole
+// hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read
+// as zero: the engine arms the deadline it is given, so a zero would close a finished tree at
+// once and take its workspace with it, bound a check before its first look, or ask an update
+// round's worker again at every tick.
 func readHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -865,6 +890,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Gates:                Gates{Design: DesignGateRootIssues},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
+		PodUpdateRetask:      time.Hour,
+		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
@@ -947,6 +974,12 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	cfg.WorkerBackends = file.WorkerBackends
 	cfg.RoleConfigFiles = file.RoleConfigFiles
 	if err := checkRoleConfigFiles(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkRepositoryRenames(file, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

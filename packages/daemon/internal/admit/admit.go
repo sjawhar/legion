@@ -996,9 +996,38 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 			return err
 		}
 	}
+	if err := a.keepStaleApproval(ctx, tx, stored.Key); err != nil {
+		return err
+	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate and handoffs go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
+}
+
+// keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
+// person's approval its gate holds of a version the spec has since moved past: the new
+// generation's architect registers its spec again on a cleared gate, and its start task
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. Under
+// gates.design off, which asks no person, nothing is kept and any pair an earlier re-admission kept
+// is dropped: no start names one there, so no delivery would forget it. Under an armed gate, a gate
+// that holds no stale approval drops an earlier pair, which this gate has since outgrown; a root
+// with no gate at all (an earlier re-admission cleared it and nothing has registered since) keeps
+// the earlier pair, which no start has delivered yet.
+func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
+	if a.engine.DesignGateOff() {
+		return a.store.DropReadmittedApproval(ctx, tx, key)
+	}
+	gate, err := a.store.Gate(ctx, tx, key)
+	if err != nil {
+		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
+	}
+	switch {
+	case gate == nil:
+		return nil
+	case gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion:
+		return a.store.DropReadmittedApproval(ctx, tx, key)
+	}
+	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
 }
 
 // releaseReturnedSlots gives back the slots of roots that no longer need one: a completed root or
@@ -1059,12 +1088,14 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // Before it assigns any, every admitted root that now waits only on a person gives its slot back
 // (workflow's ReconcileAwaiting, then releaseReturnedSlots), and every root in the workflow that
 // neither holds a slot nor waits for one leaves it (releaseUnslotted), so each pass of admission —
-// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. A
-// candidate a.pending still names is held back: the Dispatch consumer has not yet reached the
-// stream position Reconcile captured when it deferred that key. release, not promote, is what
-// clears pending — it empties the whole set at once, so this need only check membership. An
-// admitted candidate's architect start is queued behind a row creating its issue branch
-// (record.IssueBranch), which the start waits for.
+// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. The
+// pass stops at the first candidate either hold holds: one a.pending still names, since the
+// Dispatch consumer has not yet reached the stream position Reconcile captured when it deferred
+// that key, or one the boot's catch-up still holds (catchingUp). A pass after the hold's release
+// fills the free slots in line order. release, not promote, is what clears pending — it empties
+// the whole set at once, so this need only check membership. An admitted candidate's architect
+// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
+// waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -1137,14 +1168,15 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if respectHolds && a.held(candidate.Key) {
-			continue
-		}
-		// An answered root the boot's catch-up still holds has not applied everything Dispatch
-		// recorded while the daemon was down, so its resume task would miss it; it keeps its place
-		// at the front of the line, and nothing behind it takes the slot, until its catch-up
-		// releases it and decides it on the next pass.
-		if a.catchingUpFor(candidate.Key) {
+		// A hold stops the pass rather than skipping the root it holds: a held root's record may
+		// still miss what Dispatch recorded, so no pass decides it, and an answered root the boot's
+		// catch-up still holds would get a resume task that misses what Dispatch recorded while the
+		// daemon was down. The held root keeps its place in the waiting line and nothing behind it
+		// takes its slot until a pass after the hold's release fills the free slots in line order:
+		// release's own pass for the Dispatch consumer hold, and the next pass (normally the one
+		// intake.CatchUpApplied drives) for the catch-up hold. heldKeys is the same predicate
+		// ReconcileAwaiting was handed above.
+		if heldKeys(candidate.Key) {
 			break
 		}
 		answered := candidate.Answered()
@@ -1237,8 +1269,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
 				return admitted, returned, err
 			}
-			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
-				return admitted, returned, err
+			task, kept, err := a.engine.ParkedDecisionTask(ctx, tx, candidate)
+			if err != nil {
+				return admitted, returned, fmt.Errorf("name the decisions on %s while nobody in its tree could hear them: %w", candidate.Key, err)
+			}
+			if err := a.engine.EnqueueNaming(ctx, tx, candidate.Key, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree,
+				Role: claim.RoleArchitect, Generation: candidate.Generation, Task: task, Kept: kept}, kept, now); err != nil {
+				return admitted, returned, fmt.Errorf("enqueue the architect start of %s: %w", candidate.Key, err)
 			}
 			if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {
 				return admitted, returned, err

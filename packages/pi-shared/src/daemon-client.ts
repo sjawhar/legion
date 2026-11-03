@@ -13,6 +13,7 @@ import {
   LegionIssueStatusRequest,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  type LegionReadyForUpdateRequest,
   type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
@@ -55,6 +56,13 @@ export interface RegisterInput {
  * controller's ready carries none. */
 export type ReadyInput = z.input<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
+ * pushed everything it wants kept and the process holding this claim may be replaced. `round` is
+ * the round the update task named, which the daemon takes the answer for and no other. `head` is
+ * the commit it reports as the head of `legion/<issue>@origin`, left out when the branch is not
+ * there. */
+export type ReadyForUpdateInput = z.input<typeof LegionReadyForUpdateRequest>;
+
 /** `claim.ExitRequest`: the agent reporting its own end, and why. */
 export interface ExitInput {
   readonly claimToken: string;
@@ -74,6 +82,7 @@ export interface LegionDaemonClient {
    * controller start` fetched, and the answer is the controller's registration. */
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
   readonly ready: (input: ReadyInput) => Promise<void>;
+  readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
   /** `claim.TurnOutcomeRequest`: how one of the claim's turns ended, under the sequence the
    * reporting plugin counted itself (`packages/pi-legion/src/turn-outcome.ts`). The answer is the
@@ -468,6 +477,7 @@ export function createLegionDaemonClient(
     registerController: (input) =>
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     turnOutcome: (input) =>
       post(

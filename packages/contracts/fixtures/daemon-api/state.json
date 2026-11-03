@@ -126,7 +126,8 @@
                 }
               ]
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11"
           },
           "pass": 3,
           "rounds": 2
@@ -147,7 +148,9 @@
                 "generation": 2
               }
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "updateRound": "pod:7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+            "updateHead": "4c1b8e2a6f9d3047b5e1c8a2f6d940b3e7c5a128"
           },
           "handoffRecord": {
             "id": "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b",
@@ -551,6 +554,8 @@
     },
     "linger_hours": 1.5,
     "production_check_hours": 240,
+    "pod_update_retask_hours": 1,
+    "pod_update_notice_hours": 4,
     "review_round_cap": 4,
     "controller": "daemon",
     "capabilities": {
@@ -561,7 +566,13 @@
     "worker_backends": {
       "tester": "omp"
     },
-    "role_config_files": {}
+    "role_config_files": {},
+    "repository_renames": [
+      {
+        "from": "acme/widgets-legacy",
+        "to": "acme/widgets"
+      }
+    ]
   },
   "consumers": [
     {

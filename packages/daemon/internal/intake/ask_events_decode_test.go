@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -22,7 +23,7 @@ func decodeEvent(t *testing.T, eventType string, actor, payload map[string]any) 
 	if err != nil {
 		t.Fatalf("encode the event: %v", err)
 	}
-	decoded, err := decodeMessage("notifications.dispatch.issue.LEGION-7."+eventType, "LEGION", nil, nil, envelopeJSON(t, "dispatch-40", "dispatch", string(event)))
+	decoded, err := decodeMessage("notifications.dispatch.issue.LEGION-7."+eventType, "LEGION", nil, nil, ghrepo.Renames{}, envelopeJSON(t, "dispatch-40", "dispatch", string(event)))
 	if err != nil {
 		t.Fatalf("decode %s: %v, want no poison", eventType, err)
 	}
@@ -39,12 +40,12 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 	for _, eventType := range []string{"comment.created", "comment.answered"} {
 		decoded := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-1", "ask_id": "ask-approval", "ask_state": "open", "ask_waiting_on": "human"})
 		want := DispatchAskReply{Key: "LEGION-7", Ask: "ask-approval", WaitingOn: "human",
-			Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}, Mark: askEventMark}
+			Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}, Mark: askEventMark, Comment: "comment-1"}
 		if !reflect.DeepEqual(decoded.Fact, want) {
 			t.Fatalf("%s decoded to %#v, want %#v", eventType, decoded.Fact, want)
 		}
 		closed := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-3", "ask_id": "ask-approval", "ask_state": "answered"})
-		if want.WaitingOn = ""; !reflect.DeepEqual(closed.Fact, want) || len(closed.Unread) != 0 {
+		if want.WaitingOn, want.Comment = "", "comment-3"; !reflect.DeepEqual(closed.Fact, want) || len(closed.Unread) != 0 {
 			t.Fatalf("%s on a closed ask decoded to %#v, unread %q; want %#v", eventType, closed.Fact, closed.Unread, want)
 		}
 		if plain := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-2"}); plain.Fact != nil {
@@ -226,7 +227,7 @@ func TestADispatchIssueEventCarriesItsClaimHolder(t *testing.T) {
 		{name: "a claim naming no actor", claim: `,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"\"}}`, unread: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil,
+			decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{},
 				[]byte(strings.Replace(original, anchor, anchor+tc.claim, 1)))
 			if err != nil {
 				t.Fatalf("decode: %v, want no poison", err)

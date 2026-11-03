@@ -50,7 +50,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			"issue", issue.Key, "merged", recorded.Number, "opened", fact.Number)
 		return intake.Result{}, nil
 	}
-	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
+	if recorded != nil && e.sameRepository(recorded.Repo, fact.Repo) && recorded.Number == fact.Number {
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
 		// redelivery whatever its clock; a reopen's clock is left to the fence above. GitHub never
 		// reopens a merged pull request, so a reopen of one is older than the merge, which carries

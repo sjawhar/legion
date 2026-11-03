@@ -62,7 +62,7 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 	if err != nil {
 		return err
 	}
-	if existing != nil && existing.Repo == pr.Repo && existing.Number == pr.Number && (existing.MergeSHA == "" || pr.MergeSHA == "" || existing.MergeSHA == pr.MergeSHA) {
+	if existing != nil && e.sameRepository(existing.Repo, pr.Repo) && existing.Number == pr.Number && (existing.MergeSHA == "" || pr.MergeSHA == "" || existing.MergeSHA == pr.MergeSHA) {
 		state := "open"
 		if !existing.Open() {
 			state = "closed as " + string(existing.Outcome)
@@ -355,7 +355,7 @@ func (e *Engine) checkIssue(ctx context.Context, tx pgx.Tx, check record.Product
 // or a check of another pull request.
 func (e *Engine) issueDeployed(ctx context.Context, tx pgx.Tx, fact intake.IssueDeployed) (intake.Result, error) {
 	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
-	if err != nil || check == nil || !check.Open() || check.Repo != fact.Repo || check.Number != fact.Number {
+	if err != nil || check == nil || !check.Open() || !e.sameRepository(check.Repo, fact.Repo) || check.Number != fact.Number {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.wake(ctx, tx, check, wakeDeployed, fmt.Sprintf("run %d completed %s", fact.RunID, fact.CompletedAt.UTC().Format(time.RFC3339)))
@@ -448,11 +448,12 @@ var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // compareBuilds queues one check_compare row, carrying cause, the build's commit and the check
 // it is of, for every open check of this project in the repository the daemon is built from
-// (Config.BuiltFrom): the row's executor reads GitHub for whether the build carries the check's
-// merge and applies intake.CheckWake when it does. A check whose last look has started gets none,
-// since no look follows; no build, or no repository the daemon is built from, compares nothing,
-// and a build that is not a git SHA (buildShape) is refused, logged with its cause and length
-// and never its text.
+// (Config.BuiltFrom, compared as sameRepository compares two names, so a check recorded on the
+// repository as it was is still the build's): the row's executor reads GitHub for whether the
+// build carries the check's merge and applies intake.CheckWake when it does. A check whose last
+// look has started gets none, since no look follows; no build, or no repository the daemon is
+// built from, compares nothing, and a build that is not a git SHA (buildShape) is refused, logged
+// with its cause and length and never its text.
 func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
 	if build == "" || e.cfg.BuiltFrom == "" {
 		return nil
@@ -467,7 +468,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || check.Repo != e.cfg.BuiltFrom || check.Last {
+		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, e.cfg.BuiltFrom) || check.Last {
 			continue
 		}
 		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build, OpenedAt: check.OpenedAt}); err != nil {
@@ -492,7 +493,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 // than choosing what to read. A check whose last look has started gets none, since no look follows,
 // and a run of no deploy, or of another branch, queues nothing and costs no GitHub read.
 func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.WorkflowRunCompleted) (intake.Result, error) {
-	deploy, ok := intake.DeployOf(e.cfg.Deploys, fact.Repo, fact.Path)
+	deploy, ok := intake.DeployOf(e.cfg.Deploys, e.cfg.RepositoryRenames, fact.Repo, fact.Path)
 	if !ok {
 		return intake.Result{}, nil
 	}
@@ -502,7 +503,7 @@ func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.
 	}
 	compared := 0
 	for _, check := range open {
-		if check.Project != e.cfg.Project || !strings.EqualFold(check.Repo, fact.Repo) || check.Last {
+		if check.Project != e.cfg.Project || !e.sameRepository(check.Repo, fact.Repo) || check.Last {
 			continue
 		}
 		issue, err := e.store.Issue(ctx, tx, check.Issue)

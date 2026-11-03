@@ -193,7 +193,14 @@ test("a state from a daemon a release ahead parses without its unknown top-level
   await expect(client.state()).resolves.toEqual(state as never);
   await expect(
     executePhaseOp(
-      { daemon: client, claim, handoffReport: async () => ({ commit: "a".repeat(40) }) },
+      {
+        daemon: client,
+        claim,
+        handoffReport: async () => ({ commit: "a".repeat(40) }),
+        branchHead: async () => {
+          throw new Error("no branch-head lookup expected");
+        },
+      },
       { op: "read_record", issue: "LEGION-208" }
     )
   ).resolves.toEqual({ record });

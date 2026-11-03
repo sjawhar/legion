@@ -52,6 +52,11 @@ const implementer: ClaimCapability = {
   generation: 1,
 }
 
+/** The branch-head lookup of a tool that must never signal readiness for an update. */
+const noBranchHead = async (): Promise<never> => {
+  throw new Error("no branch-head lookup expected")
+}
+
 const grantRequest = {
   method: "POST",
   path: "/legion/v1/grants",
@@ -63,16 +68,19 @@ const grantRequest = {
   },
 }
 
-test("declares the three phase-worker operations under one op, and names the Envoy publish tool as Claude Code shows it", () => {
+test("declares the four phase-worker operations under one op, and names the Envoy publish tool as Claude Code shows it", () => {
   const definition = legionToolDefinition()
   expect(definition.name).toBe("legion")
   expect(definition.inputSchema).toMatchObject({
     properties: {
-      op: { enum: ["read_record", "handoff_complete", "request_backward_move"] },
+      op: {
+        enum: ["read_record", "handoff_complete", "request_backward_move", "ready_for_update"],
+      },
       issue: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
       reason: { type: "string" },
+      round: { type: "string" },
     },
     required: ["op"],
   })
@@ -80,7 +88,7 @@ test("declares the three phase-worker operations under one op, and names the Env
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
   )
   expect(definition.description).toContain(
-    "complete again. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
+    "complete again. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
   )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
@@ -100,6 +108,7 @@ test("handoff_complete finds the record and commit for the issue's phase and the
           handoffVersion: 2,
         }
       },
+      branchHead: noBranchHead,
     },
     { op: "handoff_complete", summary: "Implemented it.", verdict: "pass" },
   )
@@ -135,6 +144,7 @@ test("a handoff report the pane refuses posts nothing and mints nothing", async 
             "LEGION-208 has no implement handoff in Dispatch: write it with `dispatch handoff-write --issue LEGION-208 --phase implement --body-file <file>`, then complete again",
           )
         },
+        branchHead: noBranchHead,
       },
       { op: "handoff_complete", summary: "Done." },
     ),
@@ -163,6 +173,7 @@ test("the MCP request's cancellation ends a handoff_complete waiting out a daemo
         daemon: createLegionDaemonClient("http://daemon.test", refusing),
         claim: () => implementer,
         handoffReport: async () => ({ commit: "a".repeat(40) }),
+        branchHead: noBranchHead,
       },
       { op: "handoff_complete", summary: "Done." },
       cancelled.signal,
@@ -181,6 +192,7 @@ test("read_record answers the issue's record, and request_backward_move posts wi
     handoffReport: async (): Promise<never> => {
       throw new Error("no handoff report expected")
     },
+    branchHead: noBranchHead,
   }
   const state = (await daemonFixture("state.json")) as { issues: Record<string, unknown> }
   await expect(
@@ -213,14 +225,21 @@ test("refuses before the claim registered, an operation a phase worker has not, 
   const handoffReport = async () => ({ commit: "c" })
   await expect(
     executeLegionTool(
-      { daemon: client, claim: () => undefined, handoffReport },
+      { daemon: client, claim: () => undefined, handoffReport, branchHead: noBranchHead },
       { op: "read_record", issue: "LEGION-208" },
     ),
   ).rejects.toThrow("this session has no Legion claim yet")
-  const runtime = { daemon: client, claim: () => implementer, handoffReport }
+  const runtime = {
+    daemon: client,
+    claim: () => implementer,
+    handoffReport,
+    branchHead: noBranchHead,
+  }
   await expect(
     executeLegionTool(runtime, { op: "set_status", issue: "LEGION-208" }),
-  ).rejects.toThrow("op is one of read_record, handoff_complete, request_backward_move")
+  ).rejects.toThrow(
+    "op is one of read_record, handoff_complete, request_backward_move, ready_for_update",
+  )
   await expect(
     executeLegionTool(runtime, { op: "read_record", issue: "LEGION-208", summary: "x" }),
   ).rejects.toThrow('read_record does not accept field "summary"')

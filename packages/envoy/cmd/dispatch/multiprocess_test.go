@@ -2893,38 +2893,93 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 	return gate
 }
 
+// waitForPassBehind waits up to within for a session of this test's database whose current
+// statement carries fragment to queue behind a lock holder's transaction owns
+// (storetest.QueuedBehind), and answers whether one did. The passes it watches run in the two
+// processes under test, whose connections no pool of this test's can give, so the statement is
+// what names the pass: a count of the backends behind the gate would also take the
+// term-statistics refresh, which writes search_term_totals, and the block-index pass, which reads
+// document_block_versions, for the reference-excerpt pass - all three queue behind the gates this
+// test holds, and a count cannot tell them apart. It reads pg_stat_activity through the pool, a
+// fresh view on each read.
+func waitForPassBehind(
+	t *testing.T, database *store.Store, holder pgx.Tx, fragment string, within time.Duration,
+) bool {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	for {
+		rows, err := database.Pool.Query(ctx, `
+			select pid from pg_stat_activity
+			where datname = current_database() and pid <> pg_backend_pid() and position($1 in query) > 0
+		`, fragment)
+		if err != nil {
+			t.Fatalf("read the sessions running a statement carrying %q: %v", fragment, err)
+		}
+		pids, err := pgx.CollectRows(rows, pgx.RowTo[uint32])
+		if err != nil {
+			t.Fatalf("read the sessions running a statement carrying %q: %v", fragment, err)
+		}
+		for _, pid := range pids {
+			queued, err := storetest.QueuedBehind(ctx, holder, pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if queued {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The first statement of each pass this test waits for, as pg_stat_activity shows it: the
+// reference-excerpt pass's write (refs.MarkStaleExcerpts) and the block-index pass's read of the
+// documents owed an index (docs' owedDocuments).
+const (
+	referenceExcerptPassStatement = "update refs r set excerpt_version = null"
+	blockIndexPassStatement       = "from document_block_versions b"
+)
+
 // Every leased maintenance loop takes a named lease for the length of its pass, so the second
 // process's attempt finds it held and skips instead of doing the same work beside it. Each loop
 // observed here is held inside its own first statement while the other process's attempt fires -
 // by a table lock this test takes, or by the GitHub listing the fake holds - which is the only way
 // two processes' passes are made to overlap on purpose rather than by luck.
 //
-// Four of the eleven leases are observable here inside a window a test can wait out, and they
+// Five of the eleven leases are observable here inside a window a test can wait out, and they
 // keep different rules once the hold lets go. webhook-redelivery, block-index and
 // search-term-stats are timer loops whose first pass is immediate: each window is served once
-// across the two processes, by whichever took the lease. reference-excerpts is a woken loop
+// across the two processes, by whichever took the lease. document-compaction's first tick is at
+// start too, and it is not held inside its pass: its period is the aligned hour, so the process
+// whose tick comes second skips because the lease is held or because the hour is served, and
+// either way the pass runs once - provided both first ticks fall in one hour, which
+// waitOutABucketBoundary sees to. reference-excerpts is a woken loop
 // (docs.RunReferenceExcerptReconciliation) that runs a pass at start and again on the
 // pglisten.Hub wake after its first LISTEN: the process that found the lease held retries (every
 // two seconds, its MinGap) until it runs a pass of its own, because the other's pass may have
 // read before whatever woke it, so after the release each process runs at least one pass and no
-// count is held to one. The other seven are not observable, and this row says so rather than
-// pretending: document-compaction's interval is 24 h; issue-ask-repair's first leased pass is one
-// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; suggestion-outcomes is
-// held only by the keyed writes' maintenance sweep now (api.RunMaintenanceSweep, the suggestion
-// outcome sweep taking no lease), which no longer touches write_suggestions, the table this row
-// once held it by, and whose first leased pass is one MaintenanceSweepInterval (1 min) in on a
-// phase of each process's own (api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners
-// holds what its lease is for); architecture-import's and
-// delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
-// (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
-// test should turn into a flake; edit-notices is a woken loop whose passes here, with nothing
-// due, take milliseconds, so whether the two processes' boot passes meet is luck too
-// (docs.TestEditNoticeSweepRetriesAHeldLease holds its retry, and
+// count is held to one. The other six are not observable, and this row says so rather than
+// pretending: issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the
+// boot's repair taking no lease; suggestion-outcomes is held only by the keyed writes'
+// maintenance sweep now (api.RunMaintenanceSweep, the suggestion outcome sweep taking no lease),
+// which no longer touches write_suggestions, the table this row once held it by, and whose first
+// leased pass is one MaintenanceSweepInterval (1 min) in on a phase of each process's own
+// (api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners holds what its lease is for);
+// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
+// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
+// ever overlap is a coin toss no test should turn into a flake; edit-notices is a woken loop whose
+// passes here, with nothing due, take milliseconds, so whether the two processes' boot passes
+// meet is luck too (docs.TestEditNoticeSweepRetriesAHeldLease holds its retry, and
 // docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce what its lease is for); and
 // server-processes' prune is one delete on server_processes, the table every process's heartbeat
 // writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
+	waitOutABucketBoundary(t, time.Hour)
 	fake := startGitHubFake(t)
 	// The term-statistics refresh writes nothing for a database with no project, so one exists
 	// before either process starts.
@@ -2945,7 +3000,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
-	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
+	if !waitForPassBehind(t, pair.database, gate, referenceExcerptPassStatement, 60*time.Second) {
 		t.Fatalf("no reference-excerpt pass reached the refs lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
@@ -2958,7 +3013,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
-	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
+	if !waitForPassBehind(t, pair.database, blockGate, blockIndexPassStatement, 60*time.Second) {
 		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
@@ -2986,9 +3041,12 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	// room for the held pass to finish and for that retry to run a pass of its own.
 	waitForLeaseInEach(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
+	// Both processes' first compaction-sweep ticks came at their starts, long before the passes
+	// above were let go.
+	waitForLease(t, pair, leaseRan, "document-compaction", 60*time.Second)
+	requireLeasedOnce(t, pair, "document-compaction")
 	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"suggestion-outcomes", "only the keyed writes' maintenance sweep holds it, which no longer touches write_suggestions; api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners holds its lease"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},

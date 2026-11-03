@@ -393,6 +393,15 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, and absent when none is open: the pod's
+	// drift round (`pod:<pod uid>`), which every claim of that pod shares, or the claim's own
+	// plugin round (`plugin:<daemon contract>`). Once its worker has answered, the process holding
+	// this claim is waiting to be replaced and the daemon holds the claim's next task. UpdateHead
+	// is the commit the worker reported as the head of its issue branch at origin when it answered
+	// the round, and is absent until it answers and for a worker that reported none (a planner
+	// before its first push). It is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 	// LastTurnStart and LastTurnEnd are when the claim's agent last began a turn and last ended
 	// one, each absent until that happens: a claim that has worked since this release records
 	// them, and one that last ran before it records neither. They are what says whether a worker

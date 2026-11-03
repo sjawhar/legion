@@ -75,7 +75,7 @@ func readRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRunt
 // servedAcme is the repository mapping of a project that serves acme/widgets alone, the one a
 // read's own spelling of a repository is resolved against.
 func servedAcme() *repositories {
-	served := newRepositories("CAPTURE")
+	served := newRepositories("CAPTURE", ghrepo.Renames{})
 	served.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	return served
 }
