@@ -1060,12 +1060,13 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // (workflow's ReconcileAwaiting, then releaseReturnedSlots), and every root in the workflow that
 // neither holds a slot nor waits for one leaves it (releaseUnslotted), so each pass of admission —
 // a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. The
-// pass stops at a candidate a.pending still names, since the Dispatch consumer has not yet reached
-// the stream position Reconcile captured when it deferred that key, and the hold's release fills
-// the free slots in line order. release, not promote, is what clears pending — it empties the
-// whole set at once, so this need only check membership. An admitted candidate's architect start
-// is queued behind a row creating its issue branch (record.IssueBranch), which the start waits
-// for.
+// pass stops at the first candidate either hold holds: one a.pending still names, since the
+// Dispatch consumer has not yet reached the stream position Reconcile captured when it deferred
+// that key, or one the boot's catch-up still holds (catchingUp). A pass after the hold's release
+// fills the free slots in line order. release, not promote, is what clears pending — it empties
+// the whole set at once, so this need only check membership. An admitted candidate's architect
+// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
+// waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -1142,9 +1143,10 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		// still miss what Dispatch recorded, so no pass decides it, and an answered root the boot's
 		// catch-up still holds would get a resume task that misses what Dispatch recorded while the
 		// daemon was down. The held root keeps its place in the waiting line and nothing behind it
-		// takes its slot, until the hold's release runs a pass of its own, which fills the free
-		// slots in line order. heldKeys is the same predicate ReconcileAwaiting was handed above,
-		// so the line the pass stops at and the roots that reconcile leaves alone never disagree.
+		// takes its slot until a pass after the hold's release fills the free slots in line order:
+		// release's own pass for the Dispatch consumer hold, and the next pass (normally the one
+		// intake.CatchUpApplied drives) for the catch-up hold. heldKeys is the same predicate
+		// ReconcileAwaiting was handed above.
 		if heldKeys(candidate.Key) {
 			break
 		}

@@ -464,8 +464,10 @@ func TestAHeldRootKeepsItsPlaceAndNothingBehindItTakesTheSlot(t *testing.T) {
 			putIssue(t, pool, record.Issue{Key: "LEGION-HELD", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-HELD", Tree: "LEGION-HELD", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 			putIssue(t, pool, record.Issue{Key: "LEGION-NEXT", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-NEXT", Tree: "LEGION-NEXT", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1})
 			if tc.catchUp {
-				// The boot holds the roots its catch-up will read before it runs its own
-				// admission pass, as the daemon's own boot does.
+				// The hold is placed before the boot's own admission pass, as the daemon's boot
+				// places it. The daemon's catch-up holds only a root in awaiting_person or a
+				// slotted admitted one, never a todo root like this one, but the loop's check
+				// reads the hold alone and not why the root is held.
 				admission.HoldForCatchUp("LEGION-HELD")
 			}
 
