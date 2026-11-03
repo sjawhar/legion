@@ -86,7 +86,7 @@ them before anything is installed:
 ```sh
 (
   set -eu
-  asset=agent-secrets-amd64.tar.gz  # Linux arm64: agent-secrets-arm64.tar.gz; macOS: agent-secrets-darwin-arm64.tar.gz or agent-secrets-darwin-amd64.tar.gz
+  asset=agent-secrets-amd64.tar.gz
   tag=legion-envoy-$(curl -fsSL 'https://github.com/sjawhar/legion.git/info/refs?service=git-upload-pack' \
     | grep -aoE 'refs/tags/legion-envoy-v[0-9]+\.[0-9]+\.[0-9]+([^-0-9]|$)' | grep -aoE 'v[0-9.]+[0-9]' | sort -uV | tail -n 1)
   test "$tag" != legion-envoy-
@@ -168,29 +168,36 @@ approval page, which the approver's Dispatch Inbox links to. The docs site's
 table.
 
 ```sh
-agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh  # get a secret and run a command with it
-agent-secrets request DEMO_API_KEY --reason "Deploy" --ttl 1h                    # ask without running anything
-agent-secrets status <request_id>                                                # a request's state
-agent-secrets self                                                               # this session's enrollment and live grants
-agent-secrets revoke <grant_id>                                                  # end one of this session's grants
+agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+agent-secrets request DEMO_API_KEY --reason "Deploy" --ttl 1h
+agent-secrets status <request_id>
+agent-secrets self
+agent-secrets revoke <grant_id>
 ```
+
+In order: get a secret and run a command with it in its environment; ask without running
+anything; show a request's state; show this session's enrollment and live grants; end one of this
+session's grants.
 
 From your own shell (outside every agent session), under this machine's login:
 
 ```sh
-agent-secrets machine list            # your machines' logins
+agent-secrets machine list
 agent-secrets machine revoke <credential_id>
-agent-secrets grant list              # live grants of your sessions and those you approved
+agent-secrets grant list
 agent-secrets grant revoke <grant_id>
-agent-secrets-helper sessions         # the sessions this machine's helper holds
+agent-secrets-helper sessions
 ```
+
+`machine list` shows your machines' logins, `grant list` the live grants of your sessions and
+those you approved, and `agent-secrets-helper sessions` the sessions this machine's helper holds.
 
 Owners manage the secrets themselves under their own cloud sign-in, with no helper:
 
 ```sh
 agent-secrets secret list
 agent-secrets secret show NAME
-agent-secrets secret create NAME --owner me --tier agent   # reads the value at a hidden prompt or from stdin
+agent-secrets secret create NAME --owner me --tier agent
 agent-secrets secret set NAME
 agent-secrets secret retag NAME --tier human
 agent-secrets secret delete NAME
