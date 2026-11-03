@@ -1,0 +1,5 @@
+kind: Changed
+body: Dispatch does each piece of its reading work once. Searching a stored text for a quote is a single linear scan rather than a comparison of the whole quote at every position, so a mebibyte of text and a kibibyte of quote cost milliseconds instead of half a second. An image alt text with no ASCII punctuation in it is written as it stands, with no read-back. Writing marks onto a text of twenty thousand runs walks its delta once and applies every format together. Reading a quote-sized window out of a long text converts only the window.
+time: 2026-11-03T11:53:08.000552886Z
+custom:
+    Issue: pr2712
