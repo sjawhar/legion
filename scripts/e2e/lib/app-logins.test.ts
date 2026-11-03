@@ -1,5 +1,4 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { createVerify, generateKeyPairSync } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -13,63 +12,73 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appJWT, appKeySources } from "./app-logins";
+import { appTokenSources } from "./app-logins";
 
-// lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers GET /app
-// with the id, slug and permissions of the App whose key signed the JWT (no slug for an App that
-// has none, and another App's id for the one App whose answer names one), and refuses any other
-// request. The implement App holds checks: read alone, as the real one does.
+// lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers
+// GraphQL's viewer and GET /apps/<slug> under an installation token of one of its Apps, and
+// refuses every other request, the JWT routes (GET /app, the installation routes) among them. The
+// implement App holds checks: read alone, as the real one does.
 const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
 const script = join(import.meta.dir, "app-logins.ts");
 
-function appKey(): { publicKey: string; privateKey: string } {
-  return generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs1", format: "pem" },
-  });
-}
 interface StandInApp {
-  slug?: string;
-  /** The App id GET /app answers, when it is not the JWT's issuer. */
+  id: number;
+  slug: string;
+  /** The App id GET /apps/<slug> answers, when it is not `id`. */
   answers?: number;
+  /** The login GraphQL's viewer answers, when it is not `<slug>[bot]`. */
+  login?: string;
   permissions: Record<string, string>;
-  key: { publicKey: string; privateKey: string };
 }
 const implementPermissions = { contents: "write", checks: "read", pull_requests: "write" };
 const reviewPermissions = { contents: "write", checks: "write", pull_requests: "write" };
-const apps: Record<string, StandInApp> = {
-  "101": { slug: "example-implement", permissions: implementPermissions, key: appKey() },
-  "202": { slug: "example-review", permissions: reviewPermissions, key: appKey() },
-  "303": { permissions: reviewPermissions, key: appKey() },
-  "404": { slug: "example-other", answers: 405, permissions: reviewPermissions, key: appKey() },
+/** Each stand-in App by its installation token. */
+const tokens: Record<string, StandInApp> = {
+  ghs_implement_101_secret: { id: 101, slug: "example-implement", permissions: implementPermissions },
+  ghs_review_202_secret: { id: 202, slug: "example-review", permissions: reviewPermissions },
+  ghs_other_404_secret: {
+    id: 404,
+    slug: "example-other",
+    answers: 405,
+    permissions: reviewPermissions,
+  },
+  ghs_person_303_secret: {
+    id: 303,
+    slug: "example-person",
+    login: "a-person",
+    permissions: reviewPermissions,
+  },
 };
-for (const id of Object.keys(apps))
-  writeFileSync(join(dir, `key-${id}.pem`), apps[id].key.privateKey);
+const tokenOf = (id: number) =>
+  Object.keys(tokens).find((token) => tokens[token].id === id) ?? "";
+const allTokens = Object.keys(tokens);
 
-const seen: { path: string; iss: string; iat: number; exp: number }[] = [];
+const seen: string[] = [];
 const github = Bun.serve({
   port: 0,
-  fetch(request) {
+  async fetch(request) {
     const path = new URL(request.url).pathname;
-    const jwt = (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
-    const [header, claims, signature] = jwt.split(".");
-    const decoded = JSON.parse(Buffer.from(claims ?? "", "base64url").toString());
-    seen.push({ path, iss: decoded.iss, iat: decoded.iat, exp: decoded.exp });
-    const app = apps[decoded.iss];
-    const signed =
-      app !== undefined &&
-      createVerify("RSA-SHA256")
-        .update(`${header}.${claims}`)
-        .verify(app.key.publicKey, Buffer.from(signature ?? "", "base64url"));
-    if (path !== "/app" || !signed) {
-      return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
+    seen.push(`${request.method} ${path}`);
+    const token = (request.headers.get("authorization") ?? "").replace(/^token /, "");
+    const app = tokens[token];
+    if (app === undefined || path === "/app" || path.startsWith("/app/")) {
+      return Response.json({ message: `Bad credentials for ${token}` }, { status: 401 });
     }
-    return Response.json({
-      id: app.answers ?? Number(decoded.iss),
-      slug: app.slug,
-      permissions: app.permissions,
-    });
+    if (request.method === "POST" && path === "/graphql") {
+      const query = (await request.json()) as { query?: string };
+      if (query.query !== "{viewer{login}}") return Response.json({}, { status: 400 });
+      return Response.json({ data: { viewer: { login: app.login ?? `${app.slug}[bot]` } } });
+    }
+    const slug = /^\/apps\/([^/]+)$/.exec(path)?.[1];
+    const named = Object.values(tokens).find((candidate) => candidate.slug === slug);
+    if (request.method === "GET" && named !== undefined) {
+      return Response.json({
+        id: named.answers ?? named.id,
+        slug: named.slug,
+        permissions: named.permissions,
+      });
+    }
+    return Response.json({ message: "Not Found" }, { status: 404 });
   },
 });
 const standIn = `http://127.0.0.1:${github.port}/`;
@@ -82,6 +91,21 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** A release as the secrets broker gives one: one entry per installation, keyed by login. */
+function release(installations: Record<string, string>, expires = "2099-01-01T00:00:00Z") {
+  return JSON.stringify({
+    installations: Object.fromEntries(
+      Object.entries(installations).map(([owner, token], index) => [
+        owner,
+        { installation_id: 1000 + index, token, expires_at: expires },
+      ])
+    ),
+  });
+}
+for (const id of [101, 202, 303, 404]) {
+  writeFileSync(join(dir, `release-${id}.json`), release({ sjawhar: tokenOf(id) }));
+}
+
 let configs = 0;
 function config(implement: string, review: string): string {
   const path = join(dir, `legion-${++configs}.yaml`);
@@ -91,12 +115,12 @@ function config(implement: string, review: string): string {
   );
   return path;
 }
-const app = (id: string, command = `cat ${join(dir, `key-${id}.pem`)}`) =>
-  `    app_id: "${id}"\n    private_key_command: ${JSON.stringify(command)}`;
+const app = (id: string, command = `cat ${join(dir, `release-${id}.json`)}`) =>
+  `    app_id: "${id}"\n    token_command: ${JSON.stringify(command)}`;
 
 // The run is asynchronous: the stand-in GitHub answers from this test's own event loop. `env` is
-// added to this test's own environment. The helper is given stdin, so a key command that inherited
-// it would read `stdin-leak` where the closed-stdin case expects nothing.
+// added to this test's own environment. The helper is given stdin, so a token command that
+// inherited it would read `stdin-leak` where the closed-stdin case expects nothing.
 async function run(path: string, env: Record<string, string> = {}, api = standIn) {
   const child = Bun.spawn(["bun", script, path, api], {
     env: { ...process.env, ...env },
@@ -142,9 +166,12 @@ ${then}`;
 
 // A failure names the App it could not read by its role and app id, on one line of stderr.
 const namesApp = (role: string, id: string) => new RegExp(`\\b${role} App\\b.*\\bapp_id ${id}\\b`);
+const holdsNoToken = (text: string) => {
+  for (const token of allTokens) expect(text).not.toContain(token);
+};
 
 describe("app-logins.ts", () => {
-  test("prints each App's bot login from the slug GET /app answers under that App's own JWT", async () => {
+  test("prints each App's bot login from GraphQL's viewer, proved by GET /apps/<slug> under its own token", async () => {
     seen.length = 0;
     const { code, stdout, stderr } = await run(config(app("101"), app("202")));
     expect(stderr).toBe("");
@@ -153,25 +180,112 @@ describe("app-logins.ts", () => {
       implement: "example-implement[bot]",
       review: "example-review[bot]",
     });
-    expect(seen.map(({ path, iss }) => `${path} ${iss}`)).toEqual(["/app 101", "/app 202"]);
-    for (const { iat, exp } of seen) expect(exp - iat).toBe(600);
+    // No JWT route is asked: the proof holds no key.
+    expect(seen).toEqual([
+      "POST /graphql",
+      "GET /apps/example-implement",
+      "POST /graphql",
+      "GET /apps/example-review",
+    ]);
+    holdsNoToken(stdout);
   });
 
-  test("a key GitHub does not take is named by its role and GitHub's status", async () => {
-    const { code, stdout, stderr } = await run(
-      config(app("101", `cat ${join(dir, "key-202.pem")}`), app("202"))
+  test("an App whose id is not the configured one is refused, naming both ids and no token", async () => {
+    const { code, stdout, stderr } = await run(config(app("101"), app("404")));
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(namesApp("review", "404"));
+    expect(stderr).toContain("answered App id 405, want 404");
+    holdsNoToken(stderr);
+  });
+
+  test("an App without its role's write permission is refused, the two Apps swapped whole too", async () => {
+    const { code, stdout, stderr } = await run(config(app("202", `cat ${join(dir, "release-202.json")}`), app("101")));
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    // The implement role on the review App passes (contents: write); the review role on the
+    // implement App does not.
+    expect(stderr).toMatch(namesApp("review", "101"));
+    expect(stderr).toContain('answered permissions.checks "read", want write');
+    holdsNoToken(stderr);
+  });
+
+  test("a token command that fails is named by its field, exit code and stderr, its stdout never quoted", async () => {
+    const { code, stderr } = await run(
+      config(app("101", `echo ${tokenOf(101)}; echo grant denied >&2; exit 3`), app("202"))
     );
     expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toMatch(namesApp("implement", "101"));
-    expect(stderr).toContain("401");
+    // The stderr reaches the operator as it is written, then again in the failure.
+    expect(stderr).toBe(
+      "grant denied\napp-logins: the implement App (app_id 101): github_apps.implement.token_command failed (exit 3): grant denied"
+    );
+    holdsNoToken(stderr);
   });
 
-  test("an answer with no slug is named by the App's role and app id", async () => {
-    const { code, stdout, stderr } = await run(config(app("101"), app("303")));
+  test("a token command runs as the daemon runs it: no NATS seed, stdin closed, owner and read-only set empty", async () => {
+    // An unset variable prints `unset`, so a set-empty owner and read-only flag print nothing.
+    const probe =
+      'printf "%s|%s|%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "${LEGION_GITHUB_OWNER-unset}" "${LEGION_GITHUB_READ_ONLY-unset}" "$(cat)" >&2; exit 4';
+    const { code, stderr } = await run(config(app("101", probe), app("202")), {
+      NATS_NKEY_SEED: "pane-seed",
+      NATS_DAEMON_NKEY_SEED: "daemon-seed",
+      NATS_NKEY_SEED_FILE: "/seed-file",
+      LEGION_GITHUB_OWNER: "leaked-owner",
+      LEGION_GITHUB_READ_ONLY: "1",
+    });
     expect(code).toBe(1);
-    expect(stdout).toBe("");
+    expect(stderr).toBe(
+      "||/seed-file|||app-logins: the implement App (app_id 101): github_apps.implement.token_command failed (exit 4): ||/seed-file|||"
+    );
+  });
+
+  test("a token command's stderr reaches the operator on success too", async () => {
+    const pending = `printf 'request req-42 pending\\n' >&2; cat ${join(dir, "release-101.json")}`;
+    const { code, stdout, stderr } = await run(config(app("101", pending), app("202")));
+    expect(code).toBe(0);
+    expect(stderr).toBe("request req-42 pending");
+    expect(JSON.parse(stdout).implement).toBe("example-implement[bot]");
+  });
+
+  test("output that is no release, an expired token, or no installation is refused without quoting it", async () => {
+    const cases: [string, string][] = [
+      [`echo '{"token":"${tokenOf(101)}"'`, "printed no release"],
+      [`echo '${release({ sjawhar: tokenOf(101) }, "2000-01-01T00:00:00Z")}'`, "expired at"],
+      [`echo '{"installations":{}}'`, "released no installation"],
+    ];
+    for (const [command, want] of cases) {
+      const { code, stderr } = await run(config(app("101", command), app("202")));
+      expect(code).toBe(1);
+      expect(stderr).toMatch(namesApp("implement", "101"));
+      expect(stderr).toContain(want);
+      holdsNoToken(stderr);
+    }
+  });
+
+  test("the first installation by login is the one read, as the daemon's AppLogin reads it", async () => {
+    const two = join(dir, "release-two.json");
+    writeFileSync(two, release({ zeta: "ghs_unknown_token", Alpha: tokenOf(101) }));
+    const { code, stdout, stderr } = await run(config(app("101", `cat ${two}`), app("202")));
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout).implement).toBe("example-implement[bot]");
+  });
+
+  test("a token GitHub refuses is named by the App and GitHub's status, its echo of the token masked", async () => {
+    const unknown = join(dir, "release-unknown.json");
+    writeFileSync(unknown, release({ sjawhar: "ghs_unknown_token" }));
+    const { code, stderr } = await run(config(app("101", `cat ${unknown}`), app("202")));
+    expect(code).toBe(1);
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toContain("401");
+    expect(stderr).not.toContain("ghs_unknown_token");
+  });
+
+  test("a token that acts as a person, not an App's bot, is refused", async () => {
+    const { code, stderr } = await run(config(app("101"), app("303")));
+    expect(code).toBe(1);
     expect(stderr).toMatch(namesApp("review", "303"));
+    expect(stderr).toContain("acts as a-person, not an App's bot");
   });
 
   test("a GitHub that never answers is named by the App's role and app id", async () => {
@@ -181,57 +295,10 @@ describe("app-logins.ts", () => {
     expect(stderr).toMatch(namesApp("implement", "101"));
   });
 
-  test("a key command that fails is named by its field and exit code, its stdout never quoted", async () => {
-    const { code, stderr } = await run(config(app("101", "echo not-a-key; exit 3"), app("202")));
-    expect(code).toBe(1);
-    expect(stderr).toBe("app-logins: github_apps.implement.private_key_command failed (exit 3)");
-  });
-
-  test("a key command runs as the daemon runs it: no NATS seed, stdin closed, stderr in the failure", async () => {
-    // An unset variable prints empty, so the two seeds read `||` and the _FILE pointer stays.
-    const probe =
-      'printf "%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "$(cat)" >&2; exit 4';
-    const { code, stderr } = await run(config(app("101", probe), app("202")), {
-      NATS_NKEY_SEED: "pane-seed",
-      NATS_DAEMON_NKEY_SEED: "daemon-seed",
-      NATS_NKEY_SEED_FILE: "/seed-file",
-    });
-    expect(code).toBe(1);
-    // The command's stderr reaches the operator as it is written, then again in the failure.
-    expect(stderr).toBe(
-      "||/seed-file|app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
-    );
-  });
-
-  test("a key command's stderr reaches the operator on success too, and the key it prints still signs", async () => {
-    const pending = `printf 'request req-42 pending\\n' >&2; cat ${join(dir, "key-101.pem")}`;
-    const { code, stdout, stderr } = await run(config(app("101", pending), app("202")));
-    expect(code).toBe(0);
-    expect(stderr).toBe("request req-42 pending");
-    expect(stdout).not.toBe("");
-  });
-
   test("two roles on one App are refused, as the daemon refuses them at boot", async () => {
     const { code, stderr } = await run(config(app("202"), app("202")));
     expect(code).toBe(1);
     expect(stderr).toContain("both github_apps roles are the App example-review[bot]");
-  });
-
-  test("an answer naming another App id is refused, naming both ids and never the key", async () => {
-    const { code, stdout, stderr } = await run(config(app("101"), app("404")));
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toMatch(namesApp("review", "404"));
-    expect(stderr).toContain("answered App id 405, want 404");
-    expect(stderr).not.toContain("PRIVATE KEY");
-  });
-
-  test("an App without its role's write permission is refused, the two Apps swapped whole too", async () => {
-    const { code, stdout, stderr } = await run(config(app("202"), app("101")));
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toMatch(namesApp("review", "101"));
-    expect(stderr).toContain('answered permissions.checks "read", want write');
   });
 
   test("--roles reads only the roles it names, and refuses one it does not know", async () => {
@@ -256,29 +323,18 @@ describe("app-logins.ts", () => {
     }
   });
 
-  test("an App whose key is not a private_key_command is refused by name", () => {
+  test("an App configured with no token_command is refused by name", () => {
     expect(() =>
-      appKeySources(
-        'github_apps:\n  implement: { app_id: "1", private_key_secret: KEY }\n  review: { app_id: "2", private_key_command: "true" }\n'
+      appTokenSources(
+        'github_apps:\n  implement: { app_id: "1", private_key_command: "true" }\n  review: { app_id: "2", token_command: "true" }\n'
       )
-    ).toThrow("github_apps.implement names its key without a private_key_command");
-    expect(() => appKeySources("project: ACME\n")).toThrow("the config has no github_apps");
-  });
-
-  test("the JWT is the daemon's: RS256, issued a minute back, nine minutes of life", () => {
-    const jwt = appJWT("101", apps["101"].key.privateKey, new Date("2026-10-16T06:00:00Z"));
-    const [header, claims] = jwt
-      .split(".")
-      .slice(0, 2)
-      .map((part) => JSON.parse(Buffer.from(part, "base64url").toString()));
-    const at = Date.parse("2026-10-16T06:00:00Z") / 1000;
-    expect(header).toEqual({ alg: "RS256", typ: "JWT" });
-    expect(claims).toEqual({ iss: "101", iat: at - 60, exp: at + 540 });
+    ).toThrow("github_apps.implement names its credential without a token_command");
+    expect(() => appTokenSources("project: ACME\n")).toThrow("the config has no github_apps");
   });
 });
 
 describe("read_app_logins", () => {
-  test("gives each role its App's login as GET /app answered it, and GraphQL the bare slug", async () => {
+  test("gives each role its App's login as GitHub answered it, and GraphQL the bare slug", async () => {
     const roles = [
       "implementer",
       "merger",
@@ -321,45 +377,62 @@ describe("read_app_logins", () => {
 
 // lib/github-apps.sh as a stage proof uses it: sourced under the stage scripts' shell options with
 // their check helpers, the inputs in the environment, and `then` run after. The seams are bun,
-// handed the stand-in GitHub after the helper's own arguments, and a stand-in `agent-secrets` first on
-// PATH, which puts the store's value for the key it names (the App's PEM in the store's Node-style
-// base64: URL-safe alphabet, unpadded) into the environment of the command after `--`, as the real
-// CLI does.
+// handed the stand-in GitHub after the helper's own arguments, and a stand-in `agent-secrets` first
+// on PATH, which, as the real CLI does, puts the release the github-app secret it names gives
+// (STORE/<name>) into the environment of the command after `--` under that name. It appends its
+// argv to ARGV_LOG, fails with exit 3 when the `<owner>/<read-only>` it was asked for matches
+// FAIL_MINT, and releases nothing when EMPTY_MINT is set.
 const store = join(dir, "store");
 const fakeBin = join(dir, "bin");
 mkdirSync(store);
 mkdirSync(fakeBin);
-writeFileSync(
-  join(store, "IMPLEMENT_KEY"),
-  Buffer.from(apps["101"].key.privateKey).toString("base64url")
-);
-writeFileSync(
-  join(store, "REVIEW_KEY"),
-  Buffer.from(apps["202"].key.privateKey).toString("base64url")
-);
-writeFileSync(
-  join(store, "OTHER_KEY"),
-  Buffer.from(apps["404"].key.privateKey).toString("base64url")
-);
+writeFileSync(join(store, "IMPLEMENT_APP"), release({ sjawhar: tokenOf(101) }));
+writeFileSync(join(store, "REVIEW_APP"), release({ sjawhar: tokenOf(202) }));
+writeFileSync(join(store, "OTHER_APP"), release({ sjawhar: tokenOf(404) }));
 writeFileSync(
   join(fakeBin, "agent-secrets"),
-  `#!/bin/sh\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
+  `#!/bin/sh
+printf '%s\\n' "$*" >>"\${ARGV_LOG:-/dev/null}"
+name=$1
+shift
+owner=
+ro=
+while [ "$1" != -- ]; do
+  case $1 in --github-owner) owner=$2; shift ;; --github-read-only) ro=1 ;; esac
+  shift
+done
+shift
+if [ -n "\${FAIL_MINT:-}" ]; then
+  case "$owner/$ro" in $FAIL_MINT) echo "grant for $name denied" >&2; exit 3 ;; esac
+fi
+if [ -n "\${EMPTY_MINT:-}" ]; then export "$name="; exec "$@"; fi
+value=$(cat "\${STORE:-${store}}/$name") || exit 9
+export "$name=$value"
+exec "$@"
+`,
   { mode: 0o755 }
 );
 const appInputs = {
   LEGION_E2E_IMPLEMENT_APP_ID: "101",
-  LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY",
+  LEGION_E2E_IMPLEMENT_APP_SECRET: "IMPLEMENT_APP",
   LEGION_E2E_REVIEW_APP_ID: "202",
-  LEGION_E2E_REVIEW_APP_KEY_NAME: "REVIEW_KEY",
+  LEGION_E2E_REVIEW_APP_SECRET: "REVIEW_APP",
 };
+// The sh the bridge daemon's container runs a token command with is busybox's; where the host has
+// none, the host's POSIX sh stands in for it.
+const busyboxSh = Bun.which("busybox") === null ? ["sh"] : ["busybox", "sh"];
 
 async function githubApps(inputs: Record<string, string | undefined>, then: string) {
   const work = mkdtempSync(join(dir, "apps."));
   const ambient = { ...process.env };
-  // A devbox shell may export this deployment's own key variables; left in, `compgen -e` would
-  // strip them and hide whether the lib's own default entries do, so the child inherits none and
-  // only a case's own inputs put one back.
-  for (const name of Object.keys(ambient)) if (name.includes("PRIVATE_KEY")) delete ambient[name];
+  // A devbox shell may export this deployment's own credential variables; left in, `compgen -e`
+  // would strip them and hide whether the lib's own default entries do, so the child inherits none
+  // and only a case's own inputs put one back.
+  for (const name of Object.keys(ambient)) {
+    if (name.includes("PRIVATE_KEY") || name.startsWith("LEGION_E2E_") || name.startsWith("LEGION_GITHUB_")) {
+      delete ambient[name];
+    }
+  }
   const env: Record<string, string | undefined> = {
     ...ambient,
     PATH: `${fakeBin}:${process.env.PATH}`,
@@ -384,6 +457,10 @@ ${then}`;
   ]);
   return { code, stdout: stdout.trimEnd(), stderr: stderr.trim(), work };
 }
+const line = (stdout: string, prefix: string) =>
+  (stdout.split("\n").find((l) => l.startsWith(prefix)) ?? "").slice(prefix.length);
+const tokenCommand = (name: string) =>
+  `agent-secrets ${name} --reason=legion-live-proof-github-app-token \${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} \${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$${name}"'`;
 
 describe("lib/github-apps.sh", () => {
   const proveBoth = `require_app_inputs implement review
@@ -391,41 +468,34 @@ write_github_apps implement review
 check_github_apps implement review
 echo "logins $github_app_logins"`;
 
-  test("an input left unset takes this deployment's documented default, and sets no other role's", async () => {
+  test("the default pair is the lib's documented one, and an input left unset takes it", async () => {
     seen.length = 0;
     const { code, stdout, stderr, work } = await githubApps(
-      {
-        LEGION_E2E_IMPLEMENT_APP_ID: undefined,
-        LEGION_E2E_IMPLEMENT_APP_KEY_NAME: undefined,
-        LEGION_E2E_REVIEW_APP_ID: "202",
-        LEGION_E2E_REVIEW_APP_KEY_NAME: "REVIEW_KEY",
-      },
+      { LEGION_E2E_REVIEW_APP_ID: "202", LEGION_E2E_REVIEW_APP_SECRET: "REVIEW_APP" },
       `require_app_inputs implement review
 write_github_apps implement review
-echo "defaults $default_implement_app_id $default_implement_app_key_name"`
+echo "defaults $default_implement_app_id $default_implement_app_secret $default_review_app_id $default_review_app_secret"`
     );
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    // No input named the implement App, so the block must carry the lib's own default pair, which
-    // this test never spells out: the lib is the one place this deployment's values live.
-    const defaults = (stdout.split("\n").find((l) => l.startsWith("defaults ")) ?? "").split(" ");
-    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
-    expect(sources.implement?.appId).toBe(defaults[1]);
-    expect(sources.implement?.privateKeyCommand).toStartWith(
-      `agent-secrets ${defaults[2]} --reason=legion-live-proof-github-app-key -- sh -c '`
-    );
-    expect(sources.review?.appId).toBe("202");
+    expect(line(stdout, "defaults ")).toBe("5341240 LEGION_IMPLEMENT_APP 5341243 LEGION_REVIEW_APP");
+    const sources = appTokenSources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement).toEqual({
+      appId: "5341240",
+      tokenCommand: tokenCommand("LEGION_IMPLEMENT_APP"),
+    });
+    expect(sources.review).toEqual({ appId: "202", tokenCommand: tokenCommand("REVIEW_APP") });
     // The default pair is never asked of GitHub by this test: check_github_apps did not run.
     expect(seen).toEqual([]);
   });
 
   test("an input set to an empty value is refused, not read as a choice of the default", async () => {
     const { code, stderr } = await githubApps(
-      { ...appInputs, LEGION_E2E_REVIEW_APP_ID: "" },
+      { ...appInputs, LEGION_E2E_REVIEW_APP_SECRET: "" },
       proveBoth
     );
     expect(code).toBe(1);
-    expect(stderr).toContain("LEGION_E2E_REVIEW_APP_ID must be");
+    expect(stderr).toContain("LEGION_E2E_REVIEW_APP_SECRET must be");
   });
 
   test("write_github_apps refuses a role require_app_inputs did not read, and writes nothing", async () => {
@@ -443,15 +513,15 @@ echo "wrote the block"`
     expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
   });
 
-  test("app_key_unsets strips each role's key, this deployment's own two, and every PRIVATE_KEY variable", async () => {
+  test("app_key_unsets strips each role's secret, this deployment's own two, and every PRIVATE_KEY variable", async () => {
     // Each name is exported first, so the strip list has something to remove: without it the
     // child would print them all.
     const { code, stdout, stderr } = await githubApps(
       { ...appInputs, SOME_OTHER_APP_PRIVATE_KEY_B64: "irrelevant" },
-      `export IMPLEMENT_KEY=x REVIEW_KEY=x
+      `export IMPLEMENT_APP=x REVIEW_APP=x
 require_app_inputs implement review
-export "$default_implement_app_key_name=x" "$default_review_app_key_name=x"
-names="IMPLEMENT_KEY|REVIEW_KEY|SOME_OTHER_APP_PRIVATE_KEY_B64|$default_implement_app_key_name|$default_review_app_key_name"
+export "$default_implement_app_secret=x" "$default_review_app_secret=x"
+names="IMPLEMENT_APP|REVIEW_APP|SOME_OTHER_APP_PRIVATE_KEY_B64|$default_implement_app_secret|$default_review_app_secret"
 echo "set $(env | grep -c -E "^($names)=")"
 env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=' || true)\\""`
     );
@@ -461,12 +531,12 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     expect(stdout).toContain("left 0");
   });
 
-  test("an id that is not a number, a key name unsafe in a shell, or one App for both is refused", async () => {
+  test("an id that is not a number, a secret name unsafe in a shell, or one App for both is refused", async () => {
     const cases: [Record<string, string>, string][] = [
       [{ LEGION_E2E_IMPLEMENT_APP_ID: "12a" }, "LEGION_E2E_IMPLEMENT_APP_ID must be"],
-      [{ LEGION_E2E_REVIEW_APP_KEY_NAME: "KEY;true" }, "LEGION_E2E_REVIEW_APP_KEY_NAME must be"],
+      [{ LEGION_E2E_REVIEW_APP_SECRET: "APP;true" }, "LEGION_E2E_REVIEW_APP_SECRET must be"],
       [{ LEGION_E2E_REVIEW_APP_ID: "101" }, "are both 101: the workflow needs two Apps"],
-      [{ LEGION_E2E_REVIEW_APP_KEY_NAME: "IMPLEMENT_KEY" }, "are both IMPLEMENT_KEY"],
+      [{ LEGION_E2E_REVIEW_APP_SECRET: "IMPLEMENT_APP" }, "are both IMPLEMENT_APP"],
     ];
     for (const [inputs, want] of cases) {
       const { code, stderr, work } = await githubApps({ ...appInputs, ...inputs }, proveBoth);
@@ -476,13 +546,10 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     }
   });
 
-  test("a malformed input is refused without printing its value, a key-shaped one by its length", async () => {
-    const pasted = readFileSync(join(store, "IMPLEMENT_KEY"), "utf8")
-      .trim()
-      .replace(/[^A-Za-z0-9_]/g, "A");
-    expect(pasted.length).toBeGreaterThan(64);
+  test("a malformed input is refused without printing its value, a token-shaped one by its length", async () => {
+    const pasted = `ghs_${"A1b2C3d4".repeat(10)}`;
     for (const [name, value] of [
-      ["LEGION_E2E_IMPLEMENT_APP_KEY_NAME", pasted],
+      ["LEGION_E2E_IMPLEMENT_APP_SECRET", pasted],
       ["LEGION_E2E_REVIEW_APP_ID", "1234567890123"],
     ]) {
       const { code, stderr } = await githubApps({ ...appInputs, [name]: value }, proveBoth);
@@ -492,125 +559,77 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     }
   });
 
-  test("a key GitHub answers for another App id fails the check, naming both ids and never the key", async () => {
+  test("app_token_command prints the broker client's command, its owner and read-only words left to the daemon's sh", async () => {
     const { code, stdout, stderr } = await githubApps(
-      {
-        ...appInputs,
-        LEGION_E2E_REVIEW_APP_ID: "404",
-        LEGION_E2E_REVIEW_APP_KEY_NAME: "OTHER_KEY",
-      },
+      appInputs,
+      `require_app_inputs implement review
+printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(line(stdout, "command ")).toBe(tokenCommand("IMPLEMENT_APP"));
+  });
+
+  test("the token command asks agent-secrets for the owner and read-only flag the daemon names, and prints the release", async () => {
+    const argvLog = join(dir, "argv-command");
+    const cases: [Record<string, string>, string][] = [
+      [{}, "IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$IMPLEMENT_APP\""],
+      [
+        { LEGION_GITHUB_OWNER: "Acme-Org" },
+        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s \"$IMPLEMENT_APP\"",
+      ],
+      [
+        { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_READ_ONLY: "1" },
+        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s \"$IMPLEMENT_APP\"",
+      ],
+      [
+        { LEGION_GITHUB_OWNER: "", LEGION_GITHUB_READ_ONLY: "" },
+        "IMPLEMENT_APP --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$IMPLEMENT_APP\"",
+      ],
+    ];
+    for (const [daemonEnv, argv] of cases) {
+      rmSync(argvLog, { force: true });
+      const child = Bun.spawnSync(["sh", "-c", tokenCommand("IMPLEMENT_APP")], {
+        env: { PATH: `${fakeBin}:${process.env.PATH}`, ARGV_LOG: argvLog, ...daemonEnv },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.stderr.toString()).toBe("");
+      expect(child.exitCode).toBe(0);
+      expect(child.stdout.toString()).toBe(readFileSync(join(store, "IMPLEMENT_APP"), "utf8"));
+      expect(readFileSync(argvLog, "utf8")).toBe(`${argv}\n`);
+    }
+  });
+
+  test("matching Apps pass through their token commands, and the block written is the daemon's", async () => {
+    const { code, stdout, stderr, work } = await githubApps(appInputs, proveBoth);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(line(stdout, "logins "))).toEqual({
+      implement: "example-implement[bot]",
+      review: "example-review[bot]",
+    });
+    expect(readFileSync(join(work, "github-apps.yaml"), "utf8")).toBe(
+      `github_apps:\n  implement:\n    app_id: "101"\n    token_command: ${JSON.stringify(tokenCommand("IMPLEMENT_APP"))}\n  review:\n    app_id: "202"\n    token_command: ${JSON.stringify(tokenCommand("REVIEW_APP"))}\n`
+    );
+    holdsNoToken(stdout);
+  });
+
+  test("a secret that releases another App's tokens fails the check, naming both ids and no token", async () => {
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, LEGION_E2E_REVIEW_APP_ID: "404", LEGION_E2E_REVIEW_APP_SECRET: "OTHER_APP" },
       proveBoth
     );
     expect(code).toBe(1);
     expect(stdout).not.toContain("logins");
     expect(stderr).toContain("answered App id 405, want 404");
     expect(stderr).toMatch(/^FAIL prerequisites: lib\/app-logins.ts could not prove/m);
-    expect(stderr).not.toContain(readFileSync(join(store, "OTHER_KEY"), "utf8"));
-    expect(stderr).not.toContain("PRIVATE KEY");
-  });
-
-  test("a key of another App is refused by GitHub's 401, naming the App's role and id", async () => {
-    const { code, stderr } = await githubApps(
-      { ...appInputs, LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "OTHER_KEY" },
-      proveBoth
-    );
-    expect(code).toBe(1);
-    expect(stderr).toMatch(namesApp("implement", "101"));
-    expect(stderr).toContain("401");
-  });
-
-  test("matching Apps pass, and the block written is the daemon's: each id and its agent-secrets command", async () => {
-    const { code, stdout, stderr, work } = await githubApps(appInputs, proveBoth);
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-    const logins = stdout.split("\n").find((line) => line.startsWith("logins "));
-    expect(JSON.parse((logins ?? "").slice("logins ".length))).toEqual({
-      implement: "example-implement[bot]",
-      review: "example-review[bot]",
-    });
-    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
-    expect(sources.implement?.appId).toBe("101");
-    expect(sources.implement?.privateKeyCommand).toStartWith(
-      "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
-    );
-    expect(sources.review?.appId).toBe("202");
-    expect(sources.review?.privateKeyCommand).toStartWith(
-      "agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
-    );
-  });
-
-  test("a key runner input reads each key through that runner, and the check proves the Apps through it", async () => {
-    // A store whose runner is not the default `agent-secrets`: the stand-in `agent-secrets` would
-    // serve the same keys, so it is made to fail, and only the named runner can have produced the
-    // keys GitHub accepted.
-    const runnerBin = mkdtempSync(join(dir, "runner-bin."));
-    writeFileSync(
-      join(runnerBin, "other-store"),
-      `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
-      { mode: 0o755 }
-    );
-    writeFileSync(join(runnerBin, "agent-secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
-    const { code, stdout, stderr, work } = await githubApps(
-      {
-        ...appInputs,
-        LEGION_E2E_APP_KEY_RUNNER: join(runnerBin, "other-store"),
-        PATH: `${runnerBin}:${process.env.PATH}`,
-      },
-      proveBoth
-    );
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-    expect(stdout).toContain('"implement":"example-implement[bot]"');
-    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
-    expect(sources.implement?.privateKeyCommand).toStartWith(
-      `${join(runnerBin, "other-store")} IMPLEMENT_KEY -- sh -c '`
-    );
-    expect(sources.review?.privateKeyCommand).toStartWith(
-      `${join(runnerBin, "other-store")} REVIEW_KEY -- sh -c '`
-    );
-  });
-
-  test("a key runner that is not one command word is refused without printing it, and nothing is written", async () => {
-    for (const runner of ["", "secrets; true", "agent-secrets --account x"]) {
-      const { code, stderr, work } = await githubApps(
-        { ...appInputs, LEGION_E2E_APP_KEY_RUNNER: runner },
-        proveBoth
-      );
-      expect(code).toBe(1);
-      expect(stderr).toContain("LEGION_E2E_APP_KEY_RUNNER must be one command");
-      if (runner) expect(stderr).not.toContain(runner);
-      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
-    }
-  });
-
-  test("app_key_command prints the runner's command, with the broker's reason for an agent-secrets runner alone", async () => {
-    for (const [runner, prefix] of [
-      [
-        undefined,
-        "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '",
-      ],
-      [
-        "/x/agent-secrets",
-        "/x/agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '",
-      ],
-      ["secrets", "secrets IMPLEMENT_KEY -- sh -c '"],
-    ] as const) {
-      const { code, stdout, stderr } = await githubApps(
-        { ...appInputs, LEGION_E2E_APP_KEY_RUNNER: runner },
-        `require_app_inputs implement review
-printf 'command %s\\n' "$(app_key_command "$implement_app_key_name")"`
-      );
-      expect(stderr).toBe("");
-      expect(code).toBe(0);
-      const command = stdout.split("\n").find((line) => line.startsWith("command ")) ?? "";
-      expect(command.slice("command ".length)).toStartWith(prefix);
-      expect(command).toContain("${IMPLEMENT_KEY}");
-    }
+    holdsNoToken(stderr);
   });
 
   test("one role proves that App alone, as Stage 4a runs it", async () => {
     const { code, stdout, stderr } = await githubApps(
-      { LEGION_E2E_IMPLEMENT_APP_ID: "101", LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY" },
+      { LEGION_E2E_IMPLEMENT_APP_ID: "101", LEGION_E2E_IMPLEMENT_APP_SECRET: "IMPLEMENT_APP" },
       `require_app_inputs implement
 write_github_apps implement
 check_github_apps implement
@@ -621,198 +640,209 @@ echo "logins $github_app_logins"`
     expect(stdout).toContain('logins {"implement":"example-implement[bot]"}');
   });
 
-  // resolve_app_keys as the sandbox proof runs it under bridge: each key resolved once, here,
-  // through the runner, into an owner-only file of a directory the caller names, and the block's
-  // key commands then read those files alone.
-  const resolveBoth = `require_app_inputs implement review
-resolve_app_keys "$KEY_DIR" implement review
-write_github_apps --key-dir "$KEY_DIR" implement review
-echo "wrote the block"`;
-  // A runner for the failure cases: `body` runs with the key's name in $name and the command after
-  // `--` in "$@", the key in the store as ${store}/$name.
-  function failingRunner(body: string): string {
-    const bin = mkdtempSync(join(dir, "failing-bin."));
-    writeFileSync(
-      join(bin, "failing-store"),
-      `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\n${body}\n`,
-      { mode: 0o755 }
+  // The refresher as the sandbox proof runs it under bridge: each role's releases minted here, into
+  // owner-only files of a directory the caller names, and the block's token commands then read
+  // those files alone.
+  test("mint_app_tokens writes each release to an owner-only file atomically, one a role, owner and flag", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    const argvLog = join(dir, "argv-mint");
+    rmSync(argvLog, { force: true });
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, ARGV_LOG: argvLog },
+      `require_app_inputs implement review
+mint_app_tokens "$TOKEN_DIR" SJawhar acme-org
+echo minted`
     );
-    return join(bin, "failing-store");
-  }
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("minted");
+    const files = ["_all.json", "acme-org.json", "acme-org.read.json", "sjawhar.json", "sjawhar.read.json"];
+    for (const [role, secret] of [
+      ["implement", "IMPLEMENT_APP"],
+      ["review", "REVIEW_APP"],
+    ] as const) {
+      expect(statSync(join(tokenDir, role)).mode & 0o777).toBe(0o700);
+      // No temporary file is left beside them.
+      expect(readdirSync(join(tokenDir, role)).sort()).toEqual(files);
+      for (const file of files) {
+        const path = join(tokenDir, role, file);
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+        expect(readFileSync(path, "utf8")).toBe(readFileSync(join(store, secret), "utf8"));
+      }
+    }
+    const reason = "--reason=legion-live-proof-github-app-token";
+    const asked = readFileSync(argvLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((argv) => argv.replace(/ -- sh -c .*$/, ""));
+    expect(asked).toEqual(
+      ["IMPLEMENT_APP", "REVIEW_APP"].flatMap((secret) => [
+        `${secret} ${reason}`,
+        `${secret} ${reason} --github-owner sjawhar`,
+        `${secret} ${reason} --github-owner sjawhar --github-read-only`,
+        `${secret} ${reason} --github-owner acme-org`,
+        `${secret} ${reason} --github-owner acme-org --github-read-only`,
+      ])
+    );
+    holdsNoToken(stdout + stderr);
+  });
 
-  test("resolve_app_keys writes each key to an owner-only file, and the block proved reads those files alone", async () => {
-    const keyDir = mkdtempSync(join(dir, "keys."));
-    // After the keys are resolved the runner fails, so only the files can have given GitHub the
-    // keys it accepted.
+  test("a mint that fails fails the run naming the App, leaves no file of it and keeps the last good release", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    mkdirSync(join(tokenDir, "implement"), { mode: 0o700 });
+    writeFileSync(join(tokenDir, "implement", "sjawhar.read.json"), "last good", { mode: 0o600 });
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, FAIL_MINT: "sjawhar/1" },
+      `require_app_inputs implement review
+mint_app_tokens "$TOKEN_DIR" sjawhar
+echo minted`
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("minted");
+    expect(stderr).toContain("grant for IMPLEMENT_APP denied");
+    expect(stderr).toMatch(
+      /^FAIL prerequisites: the implement App \(App 101, github-app secret IMPLEMENT_APP\) gave no release for .*sjawhar\.read\.json: agent-secrets exited 3; no token is printed$/m
+    );
+    expect(readdirSync(join(tokenDir, "implement")).sort()).toEqual([
+      "_all.json",
+      "sjawhar.json",
+      "sjawhar.read.json",
+    ]);
+    expect(readFileSync(join(tokenDir, "implement", "sjawhar.read.json"), "utf8")).toBe("last good");
+    // The run stopped at the first failure: the review App was never minted.
+    expect(existsSync(join(tokenDir, "review"))).toBe(false);
+    holdsNoToken(stdout + stderr);
+  });
+
+  test("a mint that prints nothing is refused, leaving no file", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    const { code, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, EMPTY_MINT: "1" },
+      `require_app_inputs implement review
+mint_app_tokens "$TOKEN_DIR" sjawhar`
+    );
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/^FAIL prerequisites: the implement App \(App 101, .*_all\.json: agent-secrets printed nothing$/m);
+    expect(readdirSync(join(tokenDir, "implement"))).toEqual([]);
+  });
+
+  test("the refresher mints the files again on its period and stops when told", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    const refreshStore = mkdtempSync(join(dir, "store."));
+    for (const secret of ["IMPLEMENT_APP", "REVIEW_APP"]) {
+      copyFileSync(join(store, secret), join(refreshStore, secret));
+    }
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, STORE: refreshStore },
+      `require_app_inputs implement review
+mint_app_tokens "$TOKEN_DIR" sjawhar
+app_token_refresh_seconds=1
+start_app_token_refresher "$TOKEN_DIR"
+printf '%s' '${release({ sjawhar: "ghs_rotated" })}' >"$STORE/IMPLEMENT_APP"
+for _ in $(seq 50); do
+  grep -q ghs_rotated "$TOKEN_DIR/implement/sjawhar.read.json" && break
+  sleep 0.1
+done
+pid=$app_token_refresher
+stop_app_token_refresher
+kill -0 "$pid" 2>/dev/null && echo "still running" || echo "stopped"
+echo "read $(cat "$TOKEN_DIR/implement/sjawhar.read.json")"`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("stopped");
+    expect(line(stdout, "read ")).toBe(release({ sjawhar: "ghs_rotated" }));
+    expect(readdirSync(join(tokenDir, "implement")).sort()).toEqual([
+      "_all.json",
+      "sjawhar.json",
+      "sjawhar.read.json",
+    ]);
+  });
+
+  test("write_github_apps --token-dir writes commands that read the file of the owner and flag asked, in busybox sh", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    mkdirSync(join(tokenDir, "implement"));
+    for (const file of ["_all", "sjawhar", "sjawhar.read"]) {
+      writeFileSync(join(tokenDir, "implement", `${file}.json`), `file ${file}`);
+    }
+    const { code, stderr, work } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir },
+      `require_app_inputs implement review
+write_github_apps --token-dir "$TOKEN_DIR" implement review`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const sources = appTokenSources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement?.appId).toBe("101");
+    expect(sources.review?.tokenCommand).toContain(`'${tokenDir}/review/'`);
+    const command = sources.implement?.tokenCommand ?? "";
+    for (const [daemonEnv, want] of [
+      [{ LEGION_GITHUB_OWNER: "", LEGION_GITHUB_READ_ONLY: "" }, "file _all"],
+      [{ LEGION_GITHUB_OWNER: "SJawhar", LEGION_GITHUB_READ_ONLY: "" }, "file sjawhar"],
+      [{ LEGION_GITHUB_OWNER: "sjawhar", LEGION_GITHUB_READ_ONLY: "1" }, "file sjawhar.read"],
+    ] as const) {
+      const ran = Bun.spawnSync([...busyboxSh, "-c", command], {
+        env: { PATH: process.env.PATH, ...daemonEnv },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(ran.stderr.toString()).toBe("");
+      expect(ran.exitCode).toBe(0);
+      expect(ran.stdout.toString()).toBe(want);
+    }
+    // An owner the file layout could not name reads no file outside the directory.
+    const escape = Bun.spawnSync([...busyboxSh, "-c", command], {
+      env: { PATH: process.env.PATH, LEGION_GITHUB_OWNER: "../review/x" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(escape.exitCode).toBe(2);
+    expect(escape.stdout.toString()).toBe("");
+  });
+
+  test("the refresher's files and the --token-dir block are proved alone, agent-secrets broken after the mint", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
     const brokenBin = mkdtempSync(join(dir, "broken-bin."));
     writeFileSync(join(brokenBin, "agent-secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
-    const { code, stdout, stderr, work } = await githubApps(
-      { ...appInputs, KEY_DIR: keyDir, BROKEN_BIN: brokenBin },
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, BROKEN_BIN: brokenBin },
       `require_app_inputs implement review
-resolve_app_keys "$KEY_DIR" implement review
+mint_app_tokens "$TOKEN_DIR" sjawhar
 PATH="$BROKEN_BIN:$PATH"
-write_github_apps --key-dir "$KEY_DIR" implement review
+write_github_apps --token-dir "$TOKEN_DIR" implement review
 check_github_apps implement review
 echo "logins $github_app_logins"`
     );
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    const logins = stdout.split("\n").find((line) => line.startsWith("logins "));
-    expect(JSON.parse((logins ?? "").slice("logins ".length))).toEqual({
+    expect(JSON.parse(line(stdout, "logins "))).toEqual({
       implement: "example-implement[bot]",
       review: "example-review[bot]",
     });
-    expect(readdirSync(keyDir).sort()).toEqual(["IMPLEMENT_KEY.pem", "REVIEW_KEY.pem"]);
-    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
-    for (const [role, name, id] of [
-      ["implement", "IMPLEMENT_KEY", "101"],
-      ["review", "REVIEW_KEY", "202"],
-    ] as const) {
-      const file = join(keyDir, `${name}.pem`);
-      expect(sources[role]?.appId).toBe(id);
-      expect(sources[role]?.privateKeyCommand).toBe(`cat -- '${file}'`);
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(readFileSync(file, "utf8")).toBe(apps[id].key.privateKey);
-    }
-    expect(stdout).not.toContain("PRIVATE KEY");
   });
 
-  test("resolving the keys leaves app_key_command and a write with no key directory the runner's", async () => {
-    const keyDir = mkdtempSync(join(dir, "keys."));
-    const { code, stdout, stderr, work } = await githubApps(
-      { ...appInputs, KEY_DIR: keyDir },
-      `require_app_inputs implement review
-printf 'before %s\\n' "$(app_key_command "$implement_app_key_name")"
-resolve_app_keys "$KEY_DIR" implement review
-printf 'after %s\\n' "$(app_key_command "$implement_app_key_name")"
-write_github_apps implement review`
-    );
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-    const line = (prefix: string) =>
-      (stdout.split("\n").find((l) => l.startsWith(prefix)) ?? "").slice(prefix.length);
-    expect(line("before ")).toStartWith(
-      "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
-    );
-    expect(line("after ")).toBe(line("before "));
-    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
-    expect(sources.implement?.privateKeyCommand).toBe(line("before "));
-    expect(sources.review?.privateKeyCommand).toStartWith(
-      "agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
-    );
-  });
-
-  test("a runner that fails leaves no file of the key, naming the App by role and id and never the key", async () => {
-    const keyDir = mkdtempSync(join(dir, "keys."));
-    // The worst failure: the runner's command printed the whole key into the file, then the runner
-    // failed. The file must not outlive it.
-    const runner = failingRunner(`export "$name=$(cat "${store}/$name")"\n"$@"\nexit 3`);
-    const { code, stdout, stderr, work } = await githubApps(
-      { ...appInputs, KEY_DIR: keyDir, LEGION_E2E_APP_KEY_RUNNER: runner },
-      resolveBoth
-    );
-    expect(code).toBe(1);
-    expect(stdout).not.toContain("wrote the block");
-    expect(stderr).toMatch(/^FAIL prerequisites: the implement App's key \(App 101, .*exited 3/m);
-    expect(stderr).not.toContain("PRIVATE KEY");
-    expect(stdout).not.toContain("PRIVATE KEY");
-    expect(readdirSync(keyDir)).toEqual([]);
-    expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
-  });
-
-  test("a runner that prints nothing is refused, leaving no file", async () => {
-    const keyDir = mkdtempSync(join(dir, "keys."));
-    const runner = failingRunner(`export "$name="\nexec "$@"`);
-    const { code, stdout, stderr, work } = await githubApps(
-      { ...appInputs, KEY_DIR: keyDir, LEGION_E2E_APP_KEY_RUNNER: runner },
-      resolveBoth
-    );
-    expect(code).toBe(1);
-    expect(stdout).not.toContain("wrote the block");
-    expect(stderr).toMatch(
-      /^FAIL prerequisites: the implement App's key \(App 101, .*printed nothing/m
-    );
-    expect(readdirSync(keyDir)).toEqual([]);
-    expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
-  });
-
-  test("a key directory the key commands could not carry in their shell text is refused, and nothing is written", async () => {
-    for (const name of ["keys 'x", "keys$x", "keys;x"]) {
-      const keyDir = join(mkdtempSync(join(dir, "keys.")), name);
-      mkdirSync(keyDir);
-      // resolve_app_keys refuses it before any key is resolved, and write_github_apps --key-dir
-      // refuses it before the block is written.
-      for (const script of [
-        resolveBoth,
+  test("a token directory the token commands could not carry in their shell text is refused, and nothing is written", async () => {
+    for (const name of ["tokens 'x", "tokens$x", "tokens;x"]) {
+      const tokenDir = join(mkdtempSync(join(dir, "tokens.")), name);
+      mkdirSync(tokenDir);
+      for (const then of [
         `require_app_inputs implement review
-write_github_apps --key-dir "$KEY_DIR" implement review
-echo "wrote the block"`,
+mint_app_tokens "$TOKEN_DIR" sjawhar
+echo "wrote"`,
+        `require_app_inputs implement review
+write_github_apps --token-dir "$TOKEN_DIR" implement review
+echo "wrote"`,
       ]) {
         const { code, stdout, stderr, work } = await githubApps(
-          { ...appInputs, KEY_DIR: keyDir },
-          script
+          { ...appInputs, TOKEN_DIR: tokenDir },
+          then
         );
         expect(code).toBe(1);
-        expect(stdout).not.toContain("wrote the block");
+        expect(stdout).not.toContain("wrote");
         expect(stderr).toContain("holds a character other than letters, digits and _ . / -");
-        expect(readdirSync(keyDir)).toEqual([]);
+        expect(readdirSync(tokenDir)).toEqual([]);
         expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
       }
-    }
-  });
-});
-
-// lib/secrets-via-broker.sh is Stage 4a's `secrets` for the previous release's harness. A stand-in
-// `agent-secrets` records its argv and, as the real one does, runs the command after `--` with the
-// named secret in its environment.
-describe("lib/secrets-via-broker.sh", () => {
-  const shim = join(import.meta.dir, "secrets-via-broker.sh");
-  const bin = join(dir, "broker-shim-bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(
-    join(bin, "agent-secrets"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >"${join(dir, "broker-shim-argv")}"\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=from-broker"\nexec "$@"\n`,
-    { mode: 0o755 }
-  );
-  const shimRun = async (...args: string[]) => {
-    const child = Bun.spawn(["sh", shim, ...args], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { stdout, stderr, code };
-  };
-
-  test("the previous harness's `secrets NAME -- cmd` becomes `agent-secrets NAME --reason=… -- cmd`", async () => {
-    const { stdout, stderr, code } = await shimRun(
-      "IMPLEMENT_KEY",
-      "--",
-      "sh",
-      "-c",
-      'printf %s "$IMPLEMENT_KEY"'
-    );
-    expect(stderr).toBe("");
-    expect(code).toBe(0);
-    expect(stdout).toBe("from-broker");
-    expect(readFileSync(join(dir, "broker-shim-argv"), "utf8")).toBe(
-      'IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c printf %s "$IMPLEMENT_KEY"\n'
-    );
-  });
-
-  test("any other `secrets` call shape is refused, never sent to the broker", async () => {
-    for (const args of [
-      ["get", "IMPLEMENT_KEY", "--no-request"],
-      ["IMPLEMENT_KEY", "sh"],
-      ["-x", "--", "true"],
-    ]) {
-      const { code, stderr } = await shimRun(...args);
-      expect(code).toBe(2);
-      expect(stderr).toStartWith("secrets-via-broker: ");
     }
   });
 });

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,6 +98,8 @@ type Tokens interface {
 	Token(ctx context.Context, role AppRole, owner string) (Lease, error)
 	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
 	// requests and metadata read. A pane holds one for every owner of the project but its issue's.
+	// An App on token_command gets what its command's read-only release holds instead: the secrets
+	// broker's is contents and metadata read, without pull requests.
 	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
 
@@ -107,19 +110,23 @@ type Tokens interface {
 var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "metadata": "read"}
 
 // Options makes a token manager testable. The zero value uses api.github.com, http.DefaultClient,
-// and the wall clock.
+// the wall clock, and the daemon's own stderr for what a token_command writes there.
 type Options struct {
 	BaseURL    string
 	HTTPClient *http.Client
 	Now        func() time.Time
+	Stderr     io.Writer
 }
 
-// Manager caches installation tokens by App and owner, and bot identities by App id.
+// Manager caches installation tokens by App and owner, and bot identities by App id. An App
+// configured with a token_command is in token mode (tokencommand.go): the Manager holds no key and
+// signs no JWT for it, and every lease comes from the command's release.
 type Manager struct {
 	apps    config.GitHubApps
 	baseURL string
 	client  *http.Client
 	now     func() time.Time
+	stderr  io.Writer
 
 	mu                sync.Mutex
 	leases            map[string]Lease
@@ -158,11 +165,16 @@ func New(apps config.GitHubApps, options Options) *Manager {
 	if now == nil {
 		now = time.Now
 	}
+	stderr := options.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	return &Manager{
 		apps:              apps,
 		baseURL:           baseURL,
 		client:            client,
 		now:               now,
+		stderr:            stderr,
 		leases:            map[string]Lease{},
 		pending:           map[string]*pendingLease{},
 		installations:     map[AppRole]map[string]string{},
@@ -179,7 +191,9 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 }
 
 // ReadToken is Token for a token narrowed to readPermissions, cached under a key of its own, so an
-// owner's write and read tokens never stand in for each other.
+// owner's write and read tokens never stand in for each other. In token mode it is the command's
+// read-only release (TokenCommandReadOnly), which for the secrets broker holds contents and
+// metadata read and no pull requests read.
 func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }
@@ -254,6 +268,9 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 	if err != nil {
 		return Lease{}, err
 	}
+	if app.TokenCommand != "" {
+		return m.mintFromCommand(ctx, role, app, owner, permissions != nil)
+	}
 	installation, err := m.installation(ctx, role, app, owner)
 	if err != nil {
 		return Lease{}, err
@@ -277,7 +294,9 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 	if err != nil {
 		return Lease{}, err
 	}
-	identity, err := m.identity(ctx, app.AppID, jwt, lease.Token)
+	identity, err := m.identity(ctx, app.AppID, func(ctx context.Context) (GitIdentity, error) {
+		return m.fetchIdentity(ctx, jwt, lease.Token)
+	})
 	if err != nil {
 		return Lease{}, err
 	}
@@ -467,7 +486,9 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 	return Lease{Token: payload.Token, ExpiresAt: expiresAt, Minted: m.now()}, nil
 }
 
-func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken string) (GitIdentity, error) {
+// identity is the bot identity of the App appID, read once by fetch and cached; concurrent callers
+// share the one read.
+func (m *Manager) identity(ctx context.Context, appID string, fetch func(context.Context) (GitIdentity, error)) (GitIdentity, error) {
 	m.mu.Lock()
 	if identity, ok := m.identities[appID]; ok {
 		m.mu.Unlock()
@@ -486,7 +507,7 @@ func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken st
 	m.pendingIdentities[appID] = waiting
 	m.mu.Unlock()
 
-	identity, err := m.fetchIdentity(ctx, jwt, installationToken)
+	identity, err := fetch(ctx)
 	m.mu.Lock()
 	if err == nil {
 		m.identities[appID] = identity
@@ -503,7 +524,12 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 	if err != nil {
 		return GitIdentity{}, err
 	}
-	login := slug + "[bot]"
+	return m.botIdentity(ctx, slug+"[bot]", installationToken)
+}
+
+// botIdentity is the git identity of the App bot login, its noreply email naming the bot user's
+// id, read from GET /users/<login> under installationToken.
+func (m *Manager) botIdentity(ctx context.Context, login, installationToken string) (GitIdentity, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
 	if err != nil {
 		return GitIdentity{}, err

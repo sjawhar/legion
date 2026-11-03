@@ -12,9 +12,12 @@ reads its agent tier from local sops files and its human tier through the local 
 which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
 that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
 values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
-names none today. This page is mostly about `secrets`; the keys of the `legion-implementer` (App ID
-5341240) and `legion-reviewer` (App ID 5341243) Apps are in the broker, and
+names none today. This page is mostly about `secrets`; the `legion-implementer` (App ID 5341240)
+and `legion-reviewer` (App ID 5341243) Apps are `github-app` secrets in the broker, which release
+installation tokens and no key, and
 [their own section](#the-legion-implementer-and-legion-reviewer-apps) says how a daemon reads them.
+The key names below (`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64`, `GH_REVIEW_APP_PRIVATE_KEY_B64`) are
+secretsd's, for a shared-box deployment that holds its App keys itself.
 
 ## Current decision for the LEGION deployment
 
@@ -76,29 +79,50 @@ the daemon refuses to start, quoting it.
 
 ## The `legion-implementer` and `legion-reviewer` Apps
 
-The `sjawhar` account owns both Apps. Their keys are in the secrets broker, not in secretsd:
-`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier) and `GH_REVIEW_APP_PRIVATE_KEY_B64` (human tier:
-each read waits for a person's grant in Dispatch). `private_key_secret` reads secretsd only, so a
-daemon uses these Apps through `private_key_command`, as the live proofs do
-(`scripts/e2e/lib/github-apps.sh`, `app_key_command`):
+The `sjawhar` account owns both Apps. The secrets broker holds them as `github-app` secrets, which
+release installation tokens and never the App's private key: `LEGION_IMPLEMENT_APP` (agent tier)
+and `LEGION_REVIEW_APP` (human tier: each new grant waits for a person's approval in Dispatch, and
+a later release under the same live grant reuses it). A daemon that holds no App key uses them
+through `token_command`, as the live proofs do (`scripts/e2e/lib/github-apps.sh`,
+`app_token_command`):
 
 ```yaml
 github_apps:
   implement:
     app_id: "5341240"
-    private_key_command: "agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    token_command: "agent-secrets LEGION_IMPLEMENT_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_IMPLEMENT_APP\"'"
   review:
     app_id: "5341243"
-    private_key_command: "agent-secrets GH_REVIEW_APP_PRIVATE_KEY_B64 --reason=legion-daemon-github-app-key -- sh -c 'printf %s \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 -d'"
+    token_command: "agent-secrets LEGION_REVIEW_APP --reason=legion-daemon-github-app-token ${LEGION_GITHUB_OWNER:+--github-owner \"$LEGION_GITHUB_OWNER\"} ${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s \"$LEGION_REVIEW_APP\"'"
 ```
 
+The daemon runs the command with `sh -c` whenever it needs a lease: at boot, and again once fewer
+than 20 minutes remain on a lease it holds.
+Its environment is the daemon's, less the NATS seeds, with two variables the daemon sets:
+`LEGION_GITHUB_OWNER`, the account whose installation token the daemon wants (empty for every
+installation the command may release, which the boot's read of the App's login asks for), and
+`LEGION_GITHUB_READ_ONLY`, `1` for a read-only token and empty otherwise.
+Its stdout must be the broker's release,
+`{"installations":{"<account login>":{"installation_id":<id>,"token":"ghs_…","expires_at":"<RFC 3339>"}}}`,
+and the daemon takes the owner's entry, matched without regard to case.
+An owner the command releases nothing for is an App not installed there.
+With no key, the daemon reads each App's bot login from GraphQL's `viewer` under one of its
+tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`, and reads whether
+the App is installed on a repository from that owner's installation's repository list.
+A read-only token holds what the command's read-only release gives: the broker's holds
+`contents: read` and `metadata: read` and not `pull_requests: read`, which the key forms' read-only
+token also holds, so on another owner's repository a role on `token_command` can clone and read
+files but not read pull requests.
 The daemon passes the command's stderr through as it runs, so `agent-secrets`' line naming the
-pending request appears in the daemon's log while the review key waits for its grant.
+pending request appears in the daemon's log while the review App waits for its grant.
+`legion start --check-config` never runs it, and `installations` cannot be set beside it, since
+the release names every installation.
 
-To rotate either key: in the App's GitHub settings, generate a new private key; store it with
-`base64 -w0 < key.pem | agent-secrets secret set <NAME>`; restart the daemon and confirm a fresh
-worker pane's `gh auth status` shows account `x-access-token`; only then revoke the old key in
-GitHub, for the reason step 7 below gives.
+A deployment that holds its App keys itself keeps any of the three key forms below.
+To rotate a key the broker holds: in the App's GitHub settings, generate a new private key; set it
+on the broker's `github-app` secret; confirm a fresh worker pane's `gh auth status` shows account
+`x-access-token`; only then revoke the old key in GitHub, for the reason step 7 below gives.
+A daemon on `token_command` needs no restart for it.
 
 ## The `private_key_secret` form
 
@@ -113,10 +137,10 @@ github_apps:
 ```
 
 `private_key_secret` names a secretsd key whose value is the App's PEM, base64-encoded (the same
-encoding the `_B64` keys already use). It is one of exactly three private-key sources per App —
-`private_key` (inline PEM), `private_key_command` (a shell command whose stdout is the PEM), and
-`private_key_secret` — and naming two of them refuses start-up with
-`github_apps.<role> requires exactly one of private_key, private_key_command, or private_key_secret`.
+encoding the `_B64` keys already use). It is one of exactly four credential sources per App —
+`private_key` (inline PEM), `private_key_command` (a shell command whose stdout is the PEM),
+`private_key_secret`, and `token_command` (above) — and naming two of them refuses start-up with
+`github_apps.<role> requires exactly one of private_key, private_key_command, private_key_secret, or token_command`.
 On a box where panes share the daemon's user, `private_key_secret` is the only form the daemon can
 verify: a shell string cannot be checked for what it reads, a key name can.
 

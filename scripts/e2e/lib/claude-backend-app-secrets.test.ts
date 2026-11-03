@@ -12,10 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// claude-backend-tmux.sh's prerequisites with LEGION_E2E_APP_KEY_RUNNER naming the runner the App
-// keys come through, on a box whose own `secrets` store holds neither key (the devbox once its
-// local copies of another deployment's keys were removed): the run must reach its App keys through
-// that runner alone and never ask the local store, or it can never pass there. Every tool the
+// claude-backend-tmux.sh's prerequisites on a box whose own `secrets` store holds no App credential
+// (the devbox once its local copies of another deployment's keys were removed): the run must reach
+// its Apps' tokens through the secrets broker's client, `agent-secrets`, alone and never ask the
+// local store, or it can never pass there. Every tool the
 // prerequisites ask for is a stand-in, so the run stops at the first step that needs a real one
 // and touches nothing outside this test's directory.
 const script = join(import.meta.dir, "..", "claude-backend-tmux.sh");
@@ -35,11 +35,11 @@ for (const name of ["go", "docker", "ss", "tmux", "bun", "mise", "gh", "jj", "pg
 }
 // Anthropic accepts the model key.
 stub("curl", "printf 200");
-// The box's own store holds neither App key, and records that it was asked.
+// The box's own store holds no App credential, and records that it was asked.
 const asked = join(dir, "secrets-asked");
 stub("secrets", `printf '%s\\n' "$*" >> '${asked}'\necho "no secret named $2" >&2\nexit 1`);
-// The runner the keys come through: runs its command with the key in its environment.
-stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name=a2V5"; exec "$@"');
+// The broker's client the tokens come through: runs its command with a release in its environment.
+stub("agent-secrets", 'name=$1; shift; [ "$1" = -- ] && shift; export "$name={}"; exec "$@"');
 for (const name of [
   "bash",
   "sh",
@@ -92,7 +92,7 @@ for (const name of [
 const keyFile = join(dir, "anthropic-key");
 writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
 
-test("with LEGION_E2E_APP_KEY_RUNNER set, the prerequisites never ask the box's own secrets store for an App key", () => {
+test("the prerequisites never ask the box's own secrets store for an App credential", () => {
   const run = Bun.spawnSync(["bash", script], {
     env: {
       HOME: dir,
@@ -100,7 +100,6 @@ test("with LEGION_E2E_APP_KEY_RUNNER set, the prerequisites never ask the box's 
       TMPDIR: scratch,
       LEGION_E2E_MODEL_ROUTE: "key-file",
       LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile,
-      LEGION_E2E_APP_KEY_RUNNER: "agent-secrets",
     },
     stdout: "pipe",
     stderr: "pipe",

@@ -19,18 +19,34 @@ var _ Installations = (*Manager)(nil)
 
 // Logins answers each GitHub App's bot login under the App's own JWT, which needs no installation
 // on any repository: the review App's is the login the workflow judges a push's pusher and a
-// review's author by, known even while the daemon serves no repository.
+// review's author by, known even while the daemon serves no repository. An App on token_command
+// has no JWT: its login is read under a token of any installation its command releases.
 type Logins interface {
 	AppLogin(ctx context.Context, role AppRole) (string, error)
 }
 
 var _ Logins = (*Manager)(nil)
 
-// AppLogin is role's App's bot login, "<slug>[bot]", read from GET /app under the App's JWT.
+// AppLogin is role's App's bot login, "<slug>[bot]", read from GET /app under the App's JWT, or in
+// token mode from GraphQL's viewer under a token of any installation, checked against the
+// configured app_id (tokenIdentity).
 func (m *Manager) AppLogin(ctx context.Context, role AppRole) (string, error) {
 	app, err := m.app(role)
 	if err != nil {
 		return "", err
+	}
+	if app.TokenCommand != "" {
+		installation, err := m.anyInstallation(ctx, role, app)
+		if err != nil {
+			return "", fmt.Errorf("read the %s App's login: %w", role, err)
+		}
+		identity, err := m.identity(ctx, app.AppID, func(ctx context.Context) (GitIdentity, error) {
+			return m.tokenIdentity(ctx, role, app.AppID, installation.token)
+		})
+		if err != nil {
+			return "", fmt.Errorf("read the %s App's login: %w", role, err)
+		}
+		return identity.Name, nil
 	}
 	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
@@ -47,11 +63,15 @@ func (m *Manager) AppLogin(ctx context.Context, role AppRole) (string, error) {
 // the installation that covers the repository, 2xx, or 404 when the App has none there. An owner's
 // installation may cover only some of its repositories, so the read is per repository. Any other
 // answer is an error naming the repository and the App, a TransientError when it is GitHub's
-// trouble.
+// trouble. In token mode it reads the owner's installation's repositories instead
+// (installedFromCommand).
 func (m *Manager) InstalledOn(ctx context.Context, role AppRole, repo ghrepo.Repository) (bool, error) {
 	app, err := m.app(role)
 	if err != nil {
 		return false, err
+	}
+	if app.TokenCommand != "" {
+		return m.installedFromCommand(ctx, role, repo)
 	}
 	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
 	if err != nil {
