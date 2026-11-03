@@ -31,7 +31,16 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 // A short table row is padded to the header's width, and a padded cell takes its column's
 // alignment: the rendering writes it as a cell of that column, which reads back with the column's
 // alignment, so a padded cell holding another would store a table that reads back otherwise.
-func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
+//
+// The padding is a normalisation the document write makes, not a reading of the markdown the
+// browser editor's parser shares: that parser reads a short row as the cells it writes, and
+// prosemirror-tables' fixTables pads it as this reader does the moment the document reaches an
+// editor (packages/envoy/AGENTS.md, "Milkdown's gfm preset"). What is stored is what both read
+// alike, which is what this pins: the row is written out padded, and that markdown reads back as
+// the tree it was stored from. Measured against the engine over the 99 documents of this class
+// found in a 50,000-document sample: 99 of 99 of their stored renderings read alike in both
+// parsers (INFRA-722's implement handoff).
+func TestParsePadsAShortRowAndStoresWhatReadsBackAlike(t *testing.T) {
 	markdown := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |\n"
 	doc, err := Parse(markdown)
 	if err != nil {
@@ -45,8 +54,23 @@ func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
 	if want := []any{"left", "center", "right", nil}; !slices.Equal(got, want) {
 		t.Errorf("Parse(%q) pads the short row with alignments %v, want %v", markdown, got, want)
 	}
-	if _, err := ParseForWrite(markdown, nil); err != nil {
-		t.Errorf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
+	stored, err := ParseForWrite(markdown, nil)
+	if err != nil {
+		t.Fatalf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
+	}
+	rendered, err := Render(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |  |  |  |\n"; rendered != want {
+		t.Errorf("the write stored %q, want the row written out padded, %q", rendered, want)
+	}
+	back, err := ParseRendering(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Equal(back) {
+		t.Errorf("the stored markdown %q reads back otherwise", rendered)
 	}
 }
 
