@@ -12,11 +12,18 @@ A design a person sends back usually skipped practices that everyone who builds 
 
 ## 1. Before you design
 
-Before you write a design, a recommendation or options, research and write down your answers to these three questions in a message, file or Dispatch comment of their own. Answer from the problem, and write that before any text that states or leans to a design, so a design you already have in mind does not choose the answers.
+Before you write a design, a recommendation or options, start a fresh subagent and send it only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Leave out every design, option or leaning you have, so a design you already have in mind does not choose the answers.
 
-1. What is best practice here? List every practice that applies to this kind of problem, each with a source you read (the tools' own documentation, two or three well-regarded projects) and why it applies here.
-2. What is the world-class answer? Name the criteria that make it the best answer for this problem.
+```text
+<The problem only.>
+
+From this problem alone, research and answer three questions. Do not ask for or propose a design.
+1. What is best practice here? Every practice that applies to this kind of problem, each with a source you read (the tools' own documentation, two or three well-regarded projects) and why it applies here.
+2. What is the world-class answer? The criteria that make it the best answer for this problem.
 3. Which fact of this setup, if any, rules out a practice or the world-class answer? A cost in time, money or effort is not such a fact.
+```
+
+Record its answers in a file or a Dispatch comment before any text that states or leans to a design. Recording them does not end your turn: go on with the work.
 
 Then:
 
@@ -27,7 +34,7 @@ Then:
 
 ## 2. Before each approval request
 
-Start two fresh subagents, one per brief. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, send that same subagent the whole proposal, never a path, and ask it to compare. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
+Start two fresh subagents, one per brief. A fresh subagent starts with no history and gets only the text you send it. In each first-round reviewer's first message, give only the problem: what must work, for whom, the constraints and numbers, the person's words that describe the problem, and the setup. Do not include the proposal's title, design, options, decisions, recommendation or conclusion, or a person's words that state a proposal: a reviewer that reads the design first tends to accept it. After it answers, paste the whole proposal's text into your next message to that same subagent and ask it to compare. A path or a file name is not the proposal, even when the reviewer can read files. If your harness cannot message a finished subagent, give a second fresh subagent the first reviewer's answer and the whole proposal's text, and ask it only to make that comparison. Where your harness offers a subagent on a different model family, use it for these reviews, because a reviewer on the author's model shares its blind spots.
 
 Best practice:
 
@@ -38,7 +45,7 @@ First message:
 From this problem alone, list every best practice for this kind of problem: each practice that people who build such things know they should follow and often skip, with a source you read. Do not inspect or ask for a design.
 
 Follow-up:
-<The whole proposal.>
+<The whole proposal's text, pasted.>
 
 List each best practice the proposal does not follow, and whether it states a fact of this case that rules the practice out. Skipping a practice to save work, time, money or a credential is a finding. End with FOLLOWS BEST PRACTICE, or the findings.
 ```
@@ -52,13 +59,13 @@ First message:
 Assume time and money are no object. World-class is not over-engineering and is not built for a scale the work does not have; it runs its own infrastructure when that is the better answer, takes on complexity where the problem earns it, and takes on hard engineering gladly. From this problem alone, write what a world-class solution would look like. Do not inspect or ask for a design.
 
 Follow-up:
-<The whole proposal.>
+<The whole proposal's text, pasted.>
 
 List each place it accepts less than that answer (a manual step, a workaround, a second system, a narrower scope, a temporary fix), and whether the proposal gives a fact of this case that requires it. End with WORLD-CLASS, or the findings.
 ```
 
 - Fix each finding from either review, or record it in the `### Best practice and world-class` entry with the fact or the cost that requires it. Never request approval while a finding is neither. A NOT WORLD-CLASS verdict whose findings are all fixed or recorded does not block the request.
-- Write both reviewers' final verdicts in that entry, not another section, with each reviewer's model and the clock time (UTC) it answered, and name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
+- Write the final round's verdicts of both reviewers in that entry, not in another section: each verdict, the reviewer's model (such as `anthropic/claude-opus-5`, never its role or agent name) and the clock time (UTC) it answered. Name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
 - Run step 2 again before a later approval request when the design, the problem, its constraints or the evidence changed since the last review.
 - Stop after three rounds of step 2 on one proposal: list each change made after the last round and each finding still open, with its cost, in the entry. Review loops between agents do not end by themselves.
 - When a reviewer names a practice or an answer you did not consider, go back to step 1 with it instead of defending the design.
