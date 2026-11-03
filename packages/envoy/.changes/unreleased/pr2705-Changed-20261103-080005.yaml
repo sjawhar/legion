@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The broker now refuses `BROKER_LEASE_SECONDS` that is too short for `BROKER_SWEEP_SECONDS` by walking each of its two renewers'' own retry schedules, in place of the old rule that counted only two thirds of a lease. The refusal names the shortest lease that survives both renewers at that sweep: 91 s at a one-second sweep, 91 s at the default five-second sweep and 320 s at a sixty-second sweep. The defaults (a 900-second lease) pass at every sweep, so no deployment that boots today stops booting.'
+time: 2026-11-03T08:00:05.69766145Z
+custom:
+    Issue: pr2705

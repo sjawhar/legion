@@ -70,13 +70,13 @@ type Deps struct {
 	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
-	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
-	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
-	// against the bucket this process actually has rather than against a constant derived from a
-	// bucket it may never mount.
+	// RereadLimitFor of the shared bucket this process mounts - RereadOverallLimit, or what
+	// RereadRate derives, or DefaultRereadOverallLimit when neither is set - so that an
+	// address's own rate is ordered against the bucket this process actually has rather than
+	// against a constant derived from a bucket it may never mount.
 	RereadLimit *ratelimit.Limit
-	// RereadOverallLimit bounds that route across every caller at once; nil means
-	// DefaultRereadOverallLimit.
+	// RereadOverallLimit bounds that route across every caller at once; nil means what
+	// RereadRate derives, and DefaultRereadOverallLimit when there is no RereadRate either.
 	RereadOverallLimit *ratelimit.Limit
 	// RereadRate derives both reread limits above from the replica count this process counts,
 	// and moves the live buckets whenever that count changes; nil is every rate fixed at
@@ -135,7 +135,8 @@ type server struct {
 	launcherLimiter *launcherLimiter
 	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadOverall
 	// RereadOverallLimit over one bucket every caller shares; refuseReread takes from both or
-	// neither.
+	// neither. RereadRate.Mount holds both, so a change of the replica count moves the rates
+	// this route really runs at.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
 	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own

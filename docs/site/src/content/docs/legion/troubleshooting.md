@@ -884,7 +884,8 @@ notice comes once per handoff commit, from whichever pass finds it first.
   on a quiet project the consumer may have handled every event between `start` and `stream_first`
   before it went missing. Any it had not reached may have been missed: the daemon applied none of
   them, and the two-minute pass heals the pull requests of the GitHub events among them.
-- **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
+- **`agent-secrets: the token login failed; retrying`** (an error line with the cause, the class
+  it was sorted into and the retry schedule that class takes).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
   every start and again before each credential expires; pods wait to be enrolled until a login
@@ -897,10 +898,14 @@ notice comes once per handoff commit, from whichever pass finds it first.
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
   reads `"state": "failed"` until a login succeeds. Nothing needs restarting, and no person is ever
-  asked. When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
+  asked. The line names the class the failure was sorted into (`class`), the retry schedule that
+  class takes (`schedule`), the wait before the next login (`retry_in`) and the cause (`error`).
+  When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
   broker is down, out of reach, or cannot reach its database), the daemon retries 2 s later,
   doubling to at most 10 s, so it logs in within about 10 s of the broker serving again. After
-  any other failure it retries 30 s later, doubling to at most 5 minutes.
+  any other failure it retries 30 s later, doubling to at most 5 minutes: a refusal the broker
+  decided, a token file it could not read, and a fault on the daemon's own side — a TLS
+  handshake that failed, or a host name that does not resolve — which no wait of seconds fixes.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

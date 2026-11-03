@@ -102,10 +102,15 @@ the gap gives the gap back to every such lease that was not revoked, at most
 (`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
 renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
 broker was serving. A renewal with another pod's or service account's token is still refused
-`POD_IDENTITY_MISMATCH`. A live session renews with at least two thirds of its lease left, so the
-broker refuses to start unless `BROKER_LEASE_SECONDS` is more than four and a half times
-`BROKER_SWEEP_SECONDS`: a lease that runs out inside a gap of three sweeps, which still counts as
-serving, would otherwise be ended. This covers only an outage of the broker itself:
+`POD_IDENTITY_MISMATCH`. A gap of three sweeps is given back to nobody, so a lease has to
+outlive one and then the retries its renewer takes to renew once a broker serves again. The
+broker refuses to start on a `BROKER_LEASE_SECONDS` too short for its `BROKER_SWEEP_SECONDS`,
+and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 320
+at a sweep of 60. It walks both renewers' own retry schedules
+(`packages/envoy/internal/broker/leasetime`); `agent-secrets-helper`, which waits at least 30
+seconds after any failed renewal, is the stricter of the two at every sweep. The default lease
+of 900 seconds passes at every sweep the broker takes. This covers only an outage of the broker
+itself:
 
 - A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
   `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.

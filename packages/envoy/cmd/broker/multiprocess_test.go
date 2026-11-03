@@ -900,9 +900,9 @@ func TestTwoBrokers(t *testing.T) {
 
 	// The fan-out spends no rate-limit token on the pod it reaches. Every reread takes the
 	// policy's writer lock for one store read, so the public route is capped broker-wide as well
-	// as per address (api.DefaultRereadOverallLimit: a burst of ten, one back every second),
-	// and that cap's rate is sized as the fleet's whole store budget divided by the replica count
-	// squared, since one accepted reread costs a store read on every pod — the sizing row 7
+	// as per address. Each pod divides its store's whole fleet budget by the pods it counts
+	// (api.RereadOverallFor), which at the two this pair runs is a burst of ten with one back
+	// every second, since one accepted reread costs a store read on every pod — the sizing row 7
 	// below measures. That arithmetic holds only if a reread another pod's notification drives
 	// takes nothing from the receiving pod's bucket: otherwise one caller hammering one pod would
 	// refuse every other pod's callers too, and the fleet would spend twice what the figure says.
@@ -912,9 +912,9 @@ func TestTwoBrokers(t *testing.T) {
 	// straight away.
 	//
 	// The burst is bounded well below the per-address bucket's own burst (thirty, one back every
-	// two seconds, of which the row above spent one), so the 429 this row stops on can only be
-	// the broker-wide bucket's. The two buckets are refused with the same body, and nothing in
-	// the answer would otherwise tell them apart.
+	// two seconds at two pods, of which the row above spent one), so the 429 this row stops on
+	// can only be the broker-wide bucket's. The two buckets are refused with the same body, and
+	// nothing in the answer would otherwise tell them apart.
 	t.Run("5_ANotificationSpendsNoRereadTokenOnTheReceivingPod", func(t *testing.T) {
 		const burstBound = 20
 		a, b := pair.Clients[0], pair.Clients[1]
@@ -1111,8 +1111,8 @@ func TestTwoBrokers(t *testing.T) {
 	//
 	// The budget it holds them to is the one the issue states: "two pods together cannot send
 	// more metadata traffic than one pod was allowed to". One pod was allowed four rereads a
-	// second against a store where a reread is one read (api.DefaultRereadOverallLimit before
-	// this fan-out: Every 250ms), and one a second against Google Secret Manager, where
+	// second against a store where a reread is one read (api.DefaultRereadFleetBudget, Every
+	// 250ms), and one a second against Google Secret Manager (api.GCPRereadFleetBudget), where
 	// api.GCPRereadOverallLimit's own comment turns that figure into the 120 metadata reads a
 	// minute the public route may spend of the project's shared 600. Those two figures are the
 	// product budget — the share of someone else's quota this route is allowed — not an
@@ -1346,8 +1346,8 @@ func TestTwoBrokers(t *testing.T) {
 	// pods' own log lines rather than on a clock.
 	t.Run("10_TheRereadRefusalFollowsThePodCountUpAndBackDown", func(t *testing.T) {
 		const (
-			// atThreePods is 2.25 s rounded up, and atTwoPods the one second today's constant
-			// (api.DefaultRereadOverallLimit) refills at.
+			// atThreePods is 2.25 s rounded up, and atTwoPods the one second
+			// api.DefaultRereadOverallLimit, the default store's sizing at two pods, refills at.
 			atThreePods = 3
 			atTwoPods   = 1
 		)
