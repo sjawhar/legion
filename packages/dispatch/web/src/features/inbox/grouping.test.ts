@@ -1,100 +1,157 @@
 import { expect, test } from "bun:test";
 
-import type { InboxRow } from "../../api/types";
-import { crossBandCounts, groupRows, type InboxBand } from "./grouping";
+import type { InboxRow, MyReplyRow } from "../../api/types";
+import { replyRow } from "../replies/replies-fixture";
+import { dimensionValue, filterCounts, group, inFieldFilter, sortRows } from "./grouping";
 import { issueAsk } from "./inbox-fixture";
+import type { InboxListRow } from "./list-row";
 
-function onIssue(id: string, key: string): InboxRow {
-  return issueAsk({
-    id,
-    issue: { assignee: "alice", key, title: `Title for ${key}` },
-    issue_key: key,
-  });
+const viewer = "alice";
+const titles = { agent: "Waiting on agents", human: "Waiting on you", later: "Later" };
+/** Every test here reads the clock once, so a snooze is either ahead of it or behind it. */
+const now = Date.parse("2026-10-12T12:00:00Z");
+
+function ask(overrides: Partial<InboxRow>): InboxListRow {
+  return { ask: issueAsk(overrides), kind: "ask" };
 }
 
-function onDocument(id: string, project: string, slug: string): InboxRow {
-  return issueAsk({
-    document: { name: `Document ${slug}`, project, slug },
-    id,
+function thread(overrides: Partial<MyReplyRow>): InboxListRow {
+  return { kind: "thread", thread: replyRow(overrides.thread_id ?? "t", overrides) };
+}
+
+const keysOf = (rows: readonly InboxListRow[], by: Parameters<typeof group>[1]) =>
+  group(rows, by, { now, titles, viewer }).map(({ key }) => key);
+
+test("every dimension reads the same word off an ask and off a thread", () => {
+  const p1 = ask({ id: "a", issue_key: "CORE-1", priority: 1, urgency: "high" });
+  const agentThread = thread({
     issue: undefined,
-    issue_key: null,
+    kind: "agent",
+    project: undefined,
+    thread_id: "t1",
   });
-}
 
-function withoutOwner(id: string): InboxRow {
-  return issueAsk({ id, issue: undefined, issue_key: null });
-}
+  expect(dimensionValue(p1, "priority", viewer)).toBe("P1");
+  expect(dimensionValue(p1, "urgency", viewer)).toBe("high");
+  expect(dimensionValue(p1, "type", viewer)).toBe("question");
+  expect(dimensionValue(p1, "project", viewer)).toBe("CORE");
+  expect(dimensionValue(p1, "assignee", viewer)).toBe("alice");
 
-test("groupRows puts an owner's group at its first row and preserves server order", () => {
-  const first = onIssue("first", "CORE-1");
-  const other = onIssue("other", "CORE-2");
-  const second = onIssue("second", "CORE-1");
-  const third = onIssue("third", "CORE-1");
-
-  const groups = groupRows([first, other, second, third]);
-
-  expect(groups.map((group) => group.owner.key)).toEqual(["issue:CORE-1", "issue:CORE-2"]);
-  expect(groups[0]?.rows.map((row) => row.id)).toEqual(["first", "second", "third"]);
-  expect(groups[1]?.rows.map((row) => row.id)).toEqual(["other"]);
+  expect(dimensionValue(agentThread, "priority", viewer)).toBe("none");
+  expect(dimensionValue(agentThread, "urgency", viewer)).toBe("none");
+  expect(dimensionValue(agentThread, "type", viewer)).toBe("agent");
+  expect(dimensionValue(agentThread, "project", viewer)).toBe("none");
+  // Every thread is the reader's own, so the Assignee field puts them all under the reader.
+  expect(dimensionValue(agentThread, "assignee", viewer)).toBe("alice");
 });
 
-test("groupRows groups document asks by project and slug", () => {
-  const first = onDocument("first", "CORE", "roadmap");
-  const other = onDocument("other", "CORE", "runbook");
-  const second = onDocument("second", "CORE", "roadmap");
+test("a sort puts its field first, none last, and orders a tie newest first", () => {
+  const p0 = ask({ created_at: "2026-10-01T00:00:00Z", id: "p0", priority: 0 });
+  const p2old = ask({ created_at: "2026-10-02T00:00:00Z", id: "p2-old", priority: 2 });
+  const p2new = ask({ created_at: "2026-10-03T00:00:00Z", id: "p2-new", priority: 2 });
+  const none = ask({ created_at: "2026-10-09T00:00:00Z", id: "none", priority: null });
 
-  const groups = groupRows([first, other, second]);
-
-  expect(groups.map((group) => group.owner.key)).toEqual([
-    "document:CORE/roadmap",
-    "document:CORE/runbook",
+  expect(sortRows([none, p2old, p0, p2new], "priority", viewer).map((row) => rowKey(row))).toEqual([
+    "p0",
+    "p2-new",
+    "p2-old",
+    "none",
   ]);
-  expect(groups[0]?.rows.map((row) => row.id)).toEqual(["first", "second"]);
+  // `newest` is the last write in each row, whatever its priority.
+  expect(sortRows([p0, p2old, none, p2new], "newest", viewer).map((row) => rowKey(row))).toEqual([
+    "none",
+    "p2-new",
+    "p2-old",
+    "p0",
+  ]);
 });
 
-test("groupRows leaves one ask as a one-row group and never merges unowned rows", () => {
-  const alone = onIssue("alone", "CORE-1");
-  const first = withoutOwner("first");
-  const second = withoutOwner("second");
+function rowKey(row: InboxListRow): string {
+  return row.kind === "ask" ? row.ask.id : row.thread.thread_id;
+}
 
-  const groups = groupRows([alone, first, second]);
-
-  expect(groups).toHaveLength(3);
-  expect(groups[0]?.rows).toEqual([alone]);
-  expect(groups[1]?.rows).toEqual([first]);
-  expect(groups[2]?.rows).toEqual([second]);
-});
-
-test("crossBandCounts gives each displayed owner the counts in every other band", () => {
-  const bands: InboxBand[] = [
-    {
-      section: "human",
-      rows: [
-        onIssue("a-human", "CORE-1"),
-        onIssue("b-human", "CORE-1"),
-        onIssue("c-human", "CORE-2"),
-      ],
-    },
-    {
-      section: "agent",
-      rows: [
-        onIssue("a-agent", "CORE-1"),
-        onIssue("b-agent", "CORE-2"),
-        onIssue("c-agent", "CORE-2"),
-      ],
-    },
-    { section: "later", rows: [onIssue("a-later", "CORE-1")] },
+test("grouping bands by the chosen field, each field in its own order", () => {
+  const rows = [
+    ask({ id: "p2", priority: 2 }),
+    ask({ id: "none", priority: null }),
+    ask({ id: "p0", priority: 0 }),
   ];
+  expect(keysOf(rows, "priority")).toEqual(["P0", "P2", "none"]);
 
-  const notes = crossBandCounts(bands);
+  const typed = [
+    thread({ kind: "agent", thread_id: "agent" }),
+    ask({ id: "question" }),
+    ask({ id: "approval", kind: "approval" }),
+    thread({ thread_id: "reply" }),
+  ];
+  expect(keysOf(typed, "type")).toEqual(["question", "approval", "reply", "agent"]);
 
-  expect(notes.get("human")?.get("issue:CORE-1")).toEqual([
-    { count: 1, section: "agent" },
-    { count: 1, section: "later" },
+  const projects = [
+    ask({
+      id: "ops",
+      issue: { assignee: "alice", key: "OPS-1", title: "Ops" },
+      issue_key: "OPS-1",
+    }),
+    ask({ id: "core", issue_key: "CORE-1" }),
+    ask({ id: "unowned", issue: undefined, issue_key: null }),
+  ];
+  expect(keysOf(projects, "project")).toEqual(["CORE", "OPS", "none"]);
+});
+
+test("Waiting on bands by whose turn it is, and a thread waits on the reader", () => {
+  const rows = [
+    ask({ id: "agent", waiting_on: "agent" }),
+    thread({ thread_id: "t1" }),
+    ask({ id: "human", waiting_on: "human" }),
+  ];
+  const bands = group(rows, "waiting-on", { now, titles, viewer });
+  expect(bands.map(({ key, label }) => [key, label])).toEqual([
+    ["human", "Waiting on you"],
+    ["agent", "Waiting on agents"],
   ]);
-  expect(notes.get("human")?.get("issue:CORE-2")).toEqual([{ count: 2, section: "agent" }]);
-  expect(notes.get("agent")?.get("issue:CORE-1")).toEqual([
-    { count: 2, section: "human" },
-    { count: 1, section: "later" },
-  ]);
+  expect(bands[0]?.rows.map(rowKey)).toEqual(["t1", "human"]);
+});
+
+test("None is one unheaded band, and a snoozed ask folds into Later under every grouping", () => {
+  const rows = [
+    ask({ id: "open" }),
+    ask({ id: "deferred", snoozed_until: "2026-10-13T00:00:00Z" }),
+    thread({ thread_id: "t1" }),
+  ];
+  for (const by of ["none", "priority", "waiting-on", "type"] as const) {
+    const bands = group(rows, by, { now, titles, viewer });
+    const later = bands.at(-1);
+    expect(later?.key).toBe("later");
+    expect(later?.label).toBe("Later");
+    expect(later?.rows.map(rowKey)).toEqual(["deferred"]);
+  }
+  const ungrouped = group(rows, "none", { now, titles, viewer });
+  expect(ungrouped[0]?.key).toBe("all");
+  expect(ungrouped[0]?.label).toBeUndefined();
+  expect(ungrouped[0]?.rows.map(rowKey)).toEqual(["open", "t1"]);
+  // A snooze whose moment has passed is an ordinary row again.
+  const returned = group([ask({ id: "back", snoozed_until: "2026-10-11T00:00:00Z" })], "none", {
+    now,
+    titles,
+    viewer,
+  });
+  expect(returned.map(({ key }) => key)).toEqual(["all"]);
+});
+
+test("a field's counts are taken under the other fields' filters, not its own", () => {
+  const rows = [
+    ask({ id: "a", priority: 0, urgency: "blocking" }),
+    ask({ id: "b", priority: 1, urgency: "blocking" }),
+    ask({ id: "c", priority: 1, urgency: "low" }),
+  ];
+  const chosen = { priority: ["P1"] };
+  const counts = filterCounts(
+    rows,
+    "urgency",
+    (row) => inFieldFilter(row, "priority", chosen.priority, viewer),
+    viewer
+  );
+  // Only the P1 rows are counted, and both urgencies of them are, so neither reads 0.
+  expect(counts.get("blocking")).toBe(1);
+  expect(counts.get("low")).toBe(1);
 });

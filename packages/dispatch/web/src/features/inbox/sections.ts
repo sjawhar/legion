@@ -1,14 +1,16 @@
-import type { AskTurn, InboxRow } from "../../api/types";
+import type { AskTurn } from "../../api/types";
+import type { InboxListRow } from "./list-row";
 import { isSnoozed } from "./snooze";
 
 /** Where a row sits: whose turn it is, or the Later band the reader deferred it into. */
 export type InboxSection = AskTurn | "later";
 
 /**
- * The Inbox's bands, top to bottom. This list and `sectionOf` below are the whole grouping
- * rule; the order WITHIN a band is the server's and the SPA re-sorts nothing, so how rows are
- * ordered is one `order by` in `listInbox` (`packages/envoy/internal/dispatch/api/inbox.go`):
- * the owning issue's priority, then whose turn it is, then the most recent activity.
+ * The **Waiting on** grouping's bands, top to bottom, and `sectionOf` below is its whole rule.
+ * It is one grouping among seven now (`grouping.ts`), not the list's only banding, and the
+ * order WITHIN a band is the list's own sort (`sortRows`), not the server's: the SPA re-sorts
+ * every read it draws, so `listInbox`'s `order by`
+ * (`packages/envoy/internal/dispatch/api/inbox.go`) decides only what a tie falls back to.
  */
 export const INBOX_SECTIONS = ["human", "agent", "later"] as const;
 
@@ -24,15 +26,17 @@ const SECTION_TITLES: Record<InboxSection, string> = {
  *  by deferring. Their heading carries the count so the fold never hides how much is in there. */
 export const COLLAPSED_SECTIONS: Partial<Record<InboxSection, true>> = { later: true };
 
-/** The viewer's own rows: asks on issues assigned to their lowercase login. */
-export function isMine(row: InboxRow, viewer: string): boolean {
-  return row.issue?.assignee === viewer;
+/** The viewer's own rows: asks on issues assigned to their lowercase login, and every thread
+ *  row, which the route answers for the reader alone. */
+export function isMine(row: InboxListRow, viewer: string): boolean {
+  return row.kind === "thread" || row.ask.issue?.assignee === viewer;
 }
 
 /** Rows nobody holds: asks on unassigned issues, and every document ask (a document has no
- *  assignee). Also what decides whether a row offers "Assign to me". */
-export function isUnassigned(row: InboxRow): boolean {
-  return (row.issue?.assignee ?? null) === null;
+ *  assignee). Also what decides whether a row offers "Assign to me". A thread row is the
+ *  reader's own, so nobody is never its holder. */
+export function isUnassigned(row: InboxListRow): boolean {
+  return row.kind === "ask" && (row.ask.issue?.assignee ?? null) === null;
 }
 
 /** The two words the `?assignee=` vocabulary reserves beside a person's login: `unassigned`,
@@ -45,13 +49,21 @@ export const EVERYONE_FILTER_VALUE = "everyone";
 
 /**
  * Whether a row survives the assignee filter, the one place that decides what a filtered list
- * holds. An empty selection is the cleared filter and keeps everything; otherwise a row is kept
- * when its issue's assignee is one of the selected people, or when nobody holds it
+ * holds. An empty selection is the cleared filter and keeps everything; otherwise an ask is
+ * kept when its issue's assignee is one of the selected people, or when nobody holds it
  * (`isUnassigned`, every document ask included) and `unassigned` is selected.
+ *
+ * A thread row is the reader's own and nobody else's, so it survives a selection naming them
+ * and no other: `unassigned` names nobody, so it drops the threads too.
  */
-export function inAssigneeFilter(row: InboxRow, selection: readonly string[]): boolean {
+export function inAssigneeFilter(
+  row: InboxListRow,
+  selection: readonly string[],
+  viewer: string
+): boolean {
   if (selection.length === 0) return true;
-  const assignee = row.issue?.assignee ?? null;
+  if (row.kind === "thread") return selection.includes(viewer);
+  const assignee = row.ask.issue?.assignee ?? null;
   if (assignee === null) return selection.includes(UNASSIGNED_FILTER_VALUE);
   return selection.includes(assignee);
 }
@@ -83,13 +95,17 @@ export function isTurnSection(section: InboxSection): section is AskTurn {
 }
 
 /**
- * Which band a row belongs to. A snooze the reader set wins over everything: the whole point of
- * deferring an ask is that the agent answering it does not pull it back onto the list, so a row
- * inside its snooze window is in Later whatever its turn, its assignee, or how recently anyone
- * replied. Everything else sits under whose turn it is, whoever the filter listed it for; a row
- * the inbox lists without a turn belongs to no section.
+ * Which **Waiting on** band a row belongs to. A snooze the reader set wins over everything: the
+ * whole point of deferring an ask is that the agent answering it does not pull it back onto the
+ * list, so a row inside its snooze window is in Later whatever its turn, its assignee, or how
+ * recently anyone replied. Every other ask sits under whose turn it is, whoever the filter
+ * listed it for; an ask the inbox lists without a turn belongs to no band.
+ *
+ * A thread row is a write nobody but the reader can deal with, so it waits on them: `human`.
+ * Nothing snoozes a thread, so none of them is ever in Later.
  */
-export function sectionOf(row: InboxRow, now: number): InboxSection | undefined {
-  if (isSnoozed(row, now)) return "later";
-  return row.waiting_on;
+export function sectionOf(row: InboxListRow, now: number): InboxSection | undefined {
+  if (row.kind === "thread") return "human";
+  if (isSnoozed(row.ask, now)) return "later";
+  return row.ask.waiting_on;
 }

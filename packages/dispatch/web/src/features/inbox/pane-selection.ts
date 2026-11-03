@@ -1,16 +1,19 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import type { InboxRow } from "../../api/types";
 import { buildInboxPath, type InboxRoute } from "../refs/routes";
 import { answerDraft } from "./answer-drafts";
 import { ROW_ATTRIBUTE } from "./inbox-row";
+import { type InboxListRow, rowId } from "./list-row";
 import { answerOutstanding } from "./outstanding-answers";
 import type { InboxSection } from "./sections";
 
-/** A row as the reader last saw it: the section it sat in, whatever the server says now. */
+/** A row as the reader last saw it: the band it was drawn under and the turn band it sat in,
+ *  whatever the server says now. */
 export interface PlacedRow {
-  ask: InboxRow;
+  /** The grouping band the row was drawn under, whichever Group by the list is on. */
+  group: string;
+  row: InboxListRow;
   section: InboxSection;
 }
 
@@ -42,10 +45,10 @@ export interface PaneSelectionOptions {
 }
 
 export interface PaneSelection {
-  /** The row the column is showing, or undefined while it shows none. */
+  /** The row the column is showing, by its `rowId`, or undefined while it shows none. */
   id: string | undefined;
   /** Selects a row, or nothing, and writes it to the address. */
-  select: (askId: string | undefined) => void;
+  select: (id: string | undefined) => void;
   /** The selection as it stands now, for a callback whose closure is older than it: an answer's
    *  own card holds the `onAnswered` of the render its write began in, and by the time the
    *  server records that answer the row has left the list and the selection has moved on. */
@@ -57,18 +60,18 @@ export interface PaneSelection {
   step: (delta: 1 | -1) => void;
   /**
    * Every row the list holds this commit, a folded band's included, and, from the rows the
-   * reader can see, the question the column shows. Called once per commit, after `presented`
+   * reader can see, the row the column shows. Called once per commit, after `presented`
    * is written: where the selection would go next is read there, off the rows as they stand,
    * rather than when it is wanted.
    */
-  showing: (listed: readonly PlacedRow[]) => InboxRow | undefined;
+  showing: (listed: readonly PlacedRow[]) => InboxListRow | undefined;
   /** Where the selection goes when the row it is on leaves the bands: the row below where that
    *  one stood, else the row above it, read off the list as it stood while it still held it. */
   nextAfterSelected: () => string | undefined;
 }
 
 /**
- * The Inbox reading column's selection: which question the column shows, how the keys and the
+ * The Inbox reading column's selection: which row the column shows, how the keys and the
  * address move it, and what keeps it on a question whose row has gone.
  *
  * The address holds the selection (`?item=`), so a reload or a link keeps the reader's place;
@@ -94,9 +97,9 @@ export function usePaneSelection({
 
   /** Every row this list holds, a folded band's included: what `?item=` is answered against. */
   const listedRows = useRef<readonly PlacedRow[]>([]);
-  /** The question the column is showing, as the list last held it, and whether it is being kept
+  /** The row the column is showing, as the list last held it, and whether it is being kept
    *  there past its row. */
-  const paneSubject = useRef<{ ask: InboxRow; kept: boolean } | undefined>(undefined);
+  const paneSubject = useRef<{ row: InboxListRow; kept: boolean } | undefined>(undefined);
   // The rows the selected one stood between when the list last held it, either of them
   // undefined where it stood at that end: where it stood, rather than the one row the
   // selection would move to, because that one row cannot say where it stood. For the last row
@@ -113,31 +116,31 @@ export function usePaneSelection({
   // is about to read this for.
   const stoodBetween = useRef<Neighbours>({ above: undefined, below: undefined });
   /** Where the selection goes when the row it is on leaves the bands: the next row the reader
-   *  can see after it, else the nearest above it, so the column always shows a question they
-   *  can answer. */
+   *  can see after it, else the nearest above it, so the column always shows something they
+   *  can act on. */
   const nextAfterSelected = (): string | undefined =>
     stoodBetween.current.below ?? stoodBetween.current.above;
 
-  const select = (askId: string | undefined): void => {
-    setSelectedId(askId);
-    selectedNow.current = askId;
-    shownItem.current = askId;
-    if (askId !== filter.item) {
+  const select = (id: string | undefined): void => {
+    setSelectedId(id);
+    selectedNow.current = id;
+    shownItem.current = id;
+    if (id !== filter.item) {
       // Replace, never push: a reader walking the list with `j` would otherwise have to press
       // Back once per row to leave the page, the rule the assignee filter already holds to.
       // Selecting nothing clears `?item=` rather than leaving it on the row that has just
       // left: a reload reads the address, and an address naming a row the reader deferred
       // would open the folded band and put that question back in front of them.
-      navigate(buildInboxPath({ ...filter, item: askId }), { replace: true });
+      navigate(buildInboxPath({ ...filter, item: id }), { replace: true });
     }
   };
 
   const step = (delta: 1 | -1): void => {
     const visible = presented.current;
-    const at = visible.findIndex((placed) => placed.ask.id === selectedId);
+    const at = visible.findIndex((placed) => rowId(placed.row) === selectedId);
     if (at !== -1) {
       const next = visible[at + delta];
-      if (next !== undefined) select(next.ask.id);
+      if (next !== undefined) select(rowId(next.row));
       return;
     }
     // The column is holding a question past its row (their unsent answer, or one the server has
@@ -146,14 +149,14 @@ export function usePaneSelection({
     // list. The row it stood above took its place; where it stood last there is no such row,
     // and the row it stood below is the one before the place it held.
     const { above, below } = stoodBetween.current;
-    const belowAt = visible.findIndex((placed) => placed.ask.id === below);
-    const aboveAt = visible.findIndex((placed) => placed.ask.id === above);
+    const belowAt = visible.findIndex((placed) => rowId(placed.row) === below);
+    const aboveAt = visible.findIndex((placed) => rowId(placed.row) === above);
     const stood = belowAt !== -1 ? belowAt : aboveAt !== -1 ? aboveAt + 1 : -1;
     const next =
       stood === -1
         ? visible[delta === 1 ? 0 : visible.length - 1]
         : visible[delta === 1 ? stood : stood - 1];
-    if (next !== undefined) select(next.ask.id);
+    if (next !== undefined) select(rowId(next.row));
   };
 
   /** The row the column is showing, or null while it is showing none. Held to the selection,
@@ -162,16 +165,17 @@ export function usePaneSelection({
     () =>
       selectedId === undefined
         ? null
-        : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${selectedId}"]`) ??
-          null),
+        : (listRef.current?.querySelector<HTMLElement>(
+            `[${ROW_ATTRIBUTE}="${CSS.escape(selectedId)}"]`
+          ) ?? null),
     [listRef, selectedId]
   );
 
   /**
    * What the column shows this commit, given the selected row among the ones the list renders
-   * (none, where it renders none at all). Normally that row's question, which leaves the column
-   * as its row leaves the list. Two things outlive the row, both of them the reader's own answer
-   * to that question:
+   * (none, where it renders none at all). Normally that row, which leaves the column as it
+   * leaves the list. Two things outlive the row, both of them the reader's own answer to a
+   * question:
    *
    * Their unsent answer. A question whose row the server dropped while they had typed one into
    * its box stays in the column - the card draws its closed state, with that text under it -
@@ -187,29 +191,30 @@ export function usePaneSelection({
    * a deferred row, for the one write whose own optimistic update takes the row out of the Inbox
    * read rather than merely out of this view.
    *
-   * A question the reader has neither typed nor sent an answer to is held by nothing, the first
-   * row this list selected for them included.
+   * A row the reader has neither typed nor sent an answer to is held by nothing - every thread
+   * row included, which has no answer of any kind - the first row this list selected for them
+   * included.
    */
-  const paneAsk = (listed: InboxRow | undefined): InboxRow | undefined => {
+  const paneRow = (listed: InboxListRow | undefined): InboxListRow | undefined => {
     const subject = paneSubject.current;
     if (!paneShown || selectedId === undefined) {
       paneSubject.current = undefined;
       return undefined;
     }
     if (listed !== undefined) {
-      paneSubject.current = { ask: listed, kept: false };
+      paneSubject.current = { kept: false, row: listed };
       return listed;
     }
-    if (subject === undefined || subject.ask.id !== selectedId) {
+    if (subject === undefined || rowId(subject.row) !== selectedId) {
       paneSubject.current = undefined;
       return undefined;
     }
     const kept = subject.kept || answerOutstanding(selectedId) || answerDraft(selectedId) !== "";
-    paneSubject.current = kept ? { ask: subject.ask, kept: true } : undefined;
-    return kept ? subject.ask : undefined;
+    paneSubject.current = kept ? { kept: true, row: subject.row } : undefined;
+    return kept ? subject.row : undefined;
   };
 
-  const showing = (listed: readonly PlacedRow[]): InboxRow | undefined => {
+  const showing = (listed: readonly PlacedRow[]): InboxListRow | undefined => {
     listedRows.current = listed;
     const visible = presented.current;
     // Read here, where the rows stand as the reader sees them, and held while a snooze of the
@@ -221,19 +226,22 @@ export function usePaneSelection({
     if (selectedId === undefined) {
       stoodBetween.current = { above: undefined, below: undefined };
     } else if (!snoozing.has(selectedId) && bulkSnoozing === 0) {
-      const at = visible.findIndex(({ ask }) => ask.id === selectedId);
+      const at = visible.findIndex(({ row }) => rowId(row) === selectedId);
       if (at !== -1) {
-        stoodBetween.current = { above: visible[at - 1]?.ask.id, below: visible[at + 1]?.ask.id };
+        stoodBetween.current = {
+          above: visible[at - 1] === undefined ? undefined : rowId(visible[at - 1].row),
+          below: visible[at + 1] === undefined ? undefined : rowId(visible[at + 1].row),
+        };
       }
     }
-    return paneAsk(visible.find(({ ask }) => ask.id === selectedId)?.ask);
+    return paneRow(visible.find(({ row }) => rowId(row) === selectedId)?.row);
   };
 
   // What the selection is, settled after each commit against the rows this list holds.
   //
   // The address names it, and is read as the reader's own move - the first visit, a link, a
-  // reload - exactly while it says something this list has not already answered: an ask it holds
-  // is selected (its band opened first, if the reader linked into the folded one: following the
+  // reload - exactly while it says something this list has not already answered: a row it holds
+  // is selected (its band opened first, if the reader linked into a folded one: following the
   // link is what they asked for), and one it does not hold leaves the first visible row
   // selected and the address rewritten. Otherwise the selection is the reader's, and the address
   // follows it.
@@ -246,14 +254,15 @@ export function usePaneSelection({
     const visible = presented.current;
     if (filter.item !== shownItem.current) {
       shownItem.current = filter.item;
-      const wanted = listedRows.current.find((placed) => placed.ask.id === filter.item);
+      const wanted = listedRows.current.find((placed) => rowId(placed.row) === filter.item);
       if (wanted !== undefined) {
-        setSelectedId(wanted.ask.id);
-        if (!visible.some((placed) => placed.ask.id === wanted.ask.id)) openFoldedBand();
+        const id = rowId(wanted.row);
+        setSelectedId(id);
+        if (!visible.some((placed) => rowId(placed.row) === id)) openFoldedBand();
         return;
       }
     }
-    if (visible.some((placed) => placed.ask.id === selectedId)) {
+    if (visible.some((placed) => rowId(placed.row) === selectedId)) {
       if (selectedId !== filter.item) select(selectedId);
       return;
     }
@@ -266,7 +275,14 @@ export function usePaneSelection({
     // took it away - so the selection goes where that row was heading and the address follows
     // it, down to naming no row at all when the list has none left to show.
     const next = nextAfterSelected();
-    select(visible.some((placed) => placed.ask.id === next) ? next : visible[0]?.ask.id);
+    const first = visible[0];
+    select(
+      visible.some((placed) => rowId(placed.row) === next)
+        ? next
+        : first === undefined
+          ? undefined
+          : rowId(first.row)
+    );
   });
 
   // The selected row is kept on screen as the reader walks the list: the column beside it shows

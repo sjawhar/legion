@@ -1043,16 +1043,27 @@ export class DispatchApiClient {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
-  /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
-   *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
-   *  owner. Human-only. */
+  /** `GET /api/v1/me/replies`: the threads the signed-in person is reading, newest write first.
+   *  `kind` is the comma list the route takes (`reply` alone by default, `reply,agent` for the
+   *  Inbox's own rows), `state` is `unread` (the default) or `all`, `issue` or `artifact`
+   *  narrows to one owner, and an absent `limit` asks for every matching row. Human-only. */
   listMyReplies(page: {
     artifact?: string;
     issue?: string;
-    limit: number;
+    kind?: readonly ("agent" | "reply")[];
+    limit?: number;
     offset?: number;
+    state?: "all" | "unread";
   }): Promise<MyRepliesResponse> {
-    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+    // The route reads `kind` as one comma list, not as a repeated parameter, so it is folded
+    // here rather than by `pathWithQuery`, whose other callers do repeat theirs (`?label=`).
+    // The caller's own key order is kept, so the request reads as the route documents it.
+    const query: Record<string, number | string> = {};
+    for (const [key, value] of Object.entries(page)) {
+      if (value === undefined) continue;
+      query[key] = Array.isArray(value) ? value.join(",") : (value as number | string);
+    }
+    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", query));
   }
 
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread

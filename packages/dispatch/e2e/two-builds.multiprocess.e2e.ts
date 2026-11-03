@@ -309,14 +309,6 @@ function visits(seed: Seeded): readonly Visit[] {
       ],
       url: "/answers",
     },
-    {
-      route: "/replies",
-      shows: (page) => [
-        heading(page, "Replies"),
-        page.getByRole("region", { name: "Replies empty state" }),
-      ],
-      url: "/replies",
-    },
     { route: "/agents", shows: (page) => [heading(page, "Agents")], url: "/agents" },
     {
       // The preview is the headless renderer's: without it the bold is literal asterisks.

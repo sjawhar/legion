@@ -4,7 +4,7 @@ import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
 import type { MyReplyRow } from "../../api/types";
 import type { RepliesOwner } from "./useMarkThreadRead";
 
-/** One unread row on the Replies page for `threadId`, as `GET /api/v1/me/replies` answers it. */
+/** One unread thread row for `threadId`, as `GET /api/v1/me/replies` answers it. */
 export function replyRow(threadId: string, overrides: Partial<MyReplyRow> = {}): MyReplyRow {
   return {
     issue: { key: "CORE-1", title: "Core" },
@@ -19,6 +19,8 @@ export function replyRow(threadId: string, overrides: Partial<MyReplyRow> = {}):
     },
     subject: "Root",
     thread_id: threadId,
+    unread: true,
+    unread_count: 1,
     ...overrides,
   };
 }
@@ -36,6 +38,7 @@ export function seedUnread(
     login: "alice",
   });
   queryClient.setQueryData(myRepliesOwnerQuery(owner).queryKey, {
+    as_of: "2026-10-12T00:00:00Z",
     limit: 200,
     offset: 0,
     rows: threadIds.map((id) => replyRow(id)),

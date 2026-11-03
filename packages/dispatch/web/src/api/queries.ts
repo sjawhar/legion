@@ -99,16 +99,42 @@ export const userAgentStateQuery = () =>
     queryFn: () => api.getMyAgentState(),
   });
 
-/** The prefix every Replies query shares: the page, its count, and each owner's unread set. One
- *  invalidation of it refreshes them all. */
+/** The prefix every thread query shares: the Inbox's own rows, the unread count, and each
+ *  owner's unread set. One invalidation of it refreshes them all. */
 export const myRepliesKey = ["me", "replies"] as const;
 
-/** The viewer's count of unread threads, from the one-row page's `total`: the header's and the
- *  sidebar's `Replies N`. */
+/** The kinds of thread the Inbox lists: a reply somebody wrote where the viewer wrote, and an
+ *  agent's answer to a message the viewer sent. */
+const INBOX_THREAD_KINDS = ["reply", "agent"] as const;
+
+/** The viewer's count of unread threads, from the one-row page's `total`: the sidebar's and the
+ *  compact header's one Inbox number counts it beside the work waiting on them. One request per
+ *  page load, never the unpaged read below. */
 export const myRepliesCountQuery = () =>
   queryOptions({
     queryKey: [...myRepliesKey, "count"],
-    queryFn: async () => (await api.listMyReplies({ limit: 1 })).total,
+    queryFn: async () => (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1 })).total,
+  });
+
+/** Every thread row the Inbox lists, in one unpaged read: the Reply and Agent rows of the list,
+ *  under **Unread** or, with the switch on, every one of them. The Inbox page and its drawer
+ *  read this and nothing else does - a surface that wants one owner's unread set reads
+ *  `myRepliesOwnerQuery` below. */
+export const inboxThreadsQuery = (state: "all" | "unread") =>
+  queryOptions({
+    queryKey: [...myRepliesKey, "inbox", state],
+    queryFn: () => api.listMyReplies({ kind: INBOX_THREAD_KINDS, state }),
+  });
+
+/** How many thread rows the Inbox would hold with **Show read threads** on, from a one-row
+ *  page's `total`. The unpaged read below answers only for the state the switch is on, so the
+ *  View menu's other count is this count-only read: one extra request on the Inbox page, and
+ *  nothing of the rows it counts. */
+export const inboxAllThreadCountQuery = () =>
+  queryOptions({
+    queryKey: [...myRepliesKey, "count", "all"],
+    queryFn: async () =>
+      (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1, state: "all" })).total,
   });
 
 /** One owner's unread threads, which every thread mounted on that owner's page reads to learn

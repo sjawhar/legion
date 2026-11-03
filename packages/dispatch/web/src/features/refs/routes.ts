@@ -1,4 +1,5 @@
 import {
+  ASK_URGENCIES,
   decodeBlockId,
   hasControlCharacter,
   isSessionId,
@@ -10,6 +11,7 @@ import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { INBOX_ROW_TYPES } from "../inbox/list-row";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
 import {
   type BlockTarget,
@@ -60,18 +62,61 @@ export type AgentArtifactRoute = {
   version?: number;
 };
 export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute | AgentArtifactRoute;
+/**
+ * The five fields the Inbox filters, sorts and groups by. Assignee is one of them, but it keeps
+ * a vocabulary of its own in the address - repeated `?assignee=`, with `everyone` and
+ * `unassigned` - because a person's email is not a word this page invented, so it rides in
+ * `InboxRoute.assignees` rather than in `filters` below.
+ */
+export const INBOX_DIMENSIONS = ["priority", "urgency", "type", "project", "assignee"] as const;
+export type InboxDimension = (typeof INBOX_DIMENSIONS)[number];
+
+/** The four dimensions whose chosen values are comma lists in the address. */
+export const INBOX_FILTER_FIELDS = ["priority", "urgency", "type", "project"] as const;
+export type InboxFilterField = (typeof INBOX_FILTER_FIELDS)[number];
+
+/** How the list is ordered, `?sort=`; `newest` is the default and is left out of the address. */
+export const INBOX_SORTS = ["newest", ...INBOX_DIMENSIONS] as const;
+export type InboxSort = (typeof INBOX_SORTS)[number];
+
+/** How the list is banded, `?group=`; `priority` is the default and is left out of the address.
+ *  `waiting-on` is the turn banding the Inbox had before it had any other, the one
+ *  `?section=needs-you` narrows to: the address keeps that older name for the link that was
+ *  already written, and Group by says `waiting-on` for the same idea. */
+export const INBOX_GROUP_BYS = [...INBOX_DIMENSIONS, "waiting-on", "none"] as const;
+export type InboxGroupBy = (typeof INBOX_GROUP_BYS)[number];
+
+/** The value every filter uses for a row the field says nothing about: an issue with no
+ *  priority, a thread with no urgency, a row belonging to no project. */
+export const NO_FILTER_VALUE = "none";
+
+/** The values each filter field offers, in the order the control lists them. A project key is
+ *  whatever the workspace holds, so that field takes any non-empty word and `none`. */
+export const INBOX_PRIORITY_VALUES = ["P0", "P1", "P2", "P3", NO_FILTER_VALUE] as const;
+export const INBOX_URGENCY_VALUES = [...ASK_URGENCIES, NO_FILTER_VALUE] as const;
+export const INBOX_TYPE_VALUES = INBOX_ROW_TYPES;
+
 /** The Inbox at `/`, optionally narrowed to one agent's asks (`?agent=<session id>`); with
- *  `section=needs-you` only the asks waiting on the viewer are shown. */
+ *  `section=needs-you` only the asks waiting on the viewer are shown. Every field below is
+ *  absent while it holds its default, so a plain `/` is the Inbox as it opens. */
 export interface InboxRoute {
   agent?: string;
-  /** The ask the Inbox has selected, the one its reading pane shows: an ask id. The address is
-   *  the whole memory of that selection, so a link carries the reader's place in the list. */
+  /** The row the Inbox has selected, the one its reading pane shows: an ask's id, or a thread's
+   *  `reply:<thread id>` / `agent:<message id>` (`rowId`, `features/inbox/list-row.ts`). The
+   *  address is the whole memory of that selection, so a link carries the reader's place. */
   item?: string;
   section?: "needs-you";
   /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
    *  array is the cleared filter, every question; a value is a person's lowercase email or the
    *  literal `unassigned`. */
   assignees?: readonly string[];
+  /** `?threads=all`, the **Show read threads** switch on. Absent is Unread, the default. */
+  threads?: "all";
+  sort?: InboxSort;
+  group?: InboxGroupBy;
+  /** The chosen values of each filter field, one comma list per field in the address. A field
+   *  with nothing chosen is absent, never an empty array. */
+  filters?: Partial<Record<InboxFilterField, readonly string[]>>;
 }
 export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
 
@@ -859,12 +904,25 @@ export function buildProjectPath(route: ProjectRoute): string {
   return search === "" ? document : `${document}?${search}`;
 }
 
+/** The values a filter field accepts, or undefined for the one field whose vocabulary is the
+ *  workspace's own: a project key is whatever somebody created, so only `none` is reserved. */
+function filterVocabulary(field: InboxFilterField): readonly string[] | undefined {
+  if (field === "priority") return INBOX_PRIORITY_VALUES;
+  if (field === "urgency") return INBOX_URGENCY_VALUES;
+  return field === "type" ? INBOX_TYPE_VALUES : undefined;
+}
+
 /**
  * The page's `?assignee=` deliberately spells its default the opposite way round from the
  * server's own `?assignee=` on `GET /api/v1/inbox`
  * (`packages/envoy/internal/dispatch/api/inbox.go`), where an absent parameter means everybody:
  * here absent means the reader alone and `assignee=everyone` means everybody, so the same name
  * now means different things on the two sides and neither reads the other's URL.
+ *
+ * Every other field is absent while it holds its default, so the Inbox as it opens is `/` and a
+ * link says only what the reader changed. A value this build does not know - an older link, a
+ * typo - is dropped rather than refused: the list is a client-side split of what the two reads
+ * answered, so an unknown word would match no row anyway.
  */
 export function parseInboxSearch(search: string): InboxRoute {
   const params = new URLSearchParams(search);
@@ -896,6 +954,38 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (assignees.length > 0 || everyone) {
     route.assignees = assignees;
   }
+  if (params.get("threads") === "all") {
+    route.threads = "all";
+  }
+  const sort = params.get("sort");
+  if (sort !== null && sort !== "newest" && (INBOX_SORTS as readonly string[]).includes(sort)) {
+    route.sort = sort as InboxSort;
+  }
+  const group = params.get("group");
+  if (
+    group !== null &&
+    group !== "priority" &&
+    (INBOX_GROUP_BYS as readonly string[]).includes(group)
+  ) {
+    route.group = group as InboxGroupBy;
+  }
+  const filters: Partial<Record<InboxFilterField, readonly string[]>> = {};
+  for (const field of INBOX_FILTER_FIELDS) {
+    const vocabulary = filterVocabulary(field);
+    const chosen: string[] = [];
+    for (const raw of params.getAll(field)) {
+      for (const part of raw.split(",")) {
+        const value = part.trim();
+        if (value === "" || chosen.includes(value)) continue;
+        if (vocabulary !== undefined && !vocabulary.includes(value)) continue;
+        chosen.push(value);
+      }
+    }
+    if (chosen.length > 0) filters[field] = chosen;
+  }
+  if (Object.keys(filters).length > 0) {
+    route.filters = filters;
+  }
   return route;
 }
 
@@ -917,6 +1007,19 @@ export function buildInboxPath(route: InboxRoute = {}): string {
     for (const assignee of route.assignees) {
       query.append("assignee", assignee);
     }
+  }
+  if (route.threads !== undefined) {
+    query.set("threads", route.threads);
+  }
+  if (route.sort !== undefined && route.sort !== "newest") {
+    query.set("sort", route.sort);
+  }
+  if (route.group !== undefined && route.group !== "priority") {
+    query.set("group", route.group);
+  }
+  for (const field of INBOX_FILTER_FIELDS) {
+    const chosen = route.filters?.[field];
+    if (chosen !== undefined && chosen.length > 0) query.set(field, chosen.join(","));
   }
   const search = query.toString();
   return search === "" ? "/" : `/?${search}`;
@@ -950,10 +1053,6 @@ export function routeIsInbox(pathname: string): boolean {
 
 /** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */
 export const ANSWERS_PATH = "/answers";
-
-/** The threads the signed-in person wrote in where someone else has written since they last read
- *  them (`RepliesPage`), linked from the sidebar and the compact header's `Replies N`. */
-export const REPLIES_PATH = "/replies";
 
 /** The live agent view's route pattern, shared by the router and `routeFillsViewport`. */
 export const AGENT_LIVE_PATH = "/agents/:sessionId/live";

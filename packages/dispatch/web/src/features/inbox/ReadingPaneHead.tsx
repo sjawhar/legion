@@ -110,7 +110,9 @@ export function ReadingPaneHead({
       {ask.issue_key === null ? null : (
         <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
       )}
-      {ask.issue_key !== null && viewer !== undefined && (isUnassigned(ask) || assignLive) ? (
+      {ask.issue_key !== null &&
+      viewer !== undefined &&
+      (isUnassigned({ ask, kind: "ask" }) || assignLive) ? (
         <AssignToMe askId={ask.id} issueKey={ask.issue_key} onLive={onAssignLive} viewer={viewer} />
       ) : null}
       <SnoozeControl

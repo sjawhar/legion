@@ -82,9 +82,7 @@ header that names the issue or document and how many asks it has, for example
 `CORE-12 Release train · 3 asks`. The group sits where that issue's first ask in the section would,
 so the order between issues is unchanged. An issue with one ask in a section has no header.
 
-When the same issue also has asks in another section, the header ends with a link such as
-`2 more waiting on agents` or `1 more later`. Choose it to jump to those asks, opening **Later**
-first if it is folded. The headers are labels only: `j` and `k` move from ask to ask.
+The headers are labels only: `j` and `k` move from row to row.
 
 The list does not move under a moving pointer. If the Inbox refreshes while your pointer travels
 across it, the rows stay put until the pointer rests, leaves the list, or you click.

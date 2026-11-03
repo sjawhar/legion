@@ -18,28 +18,27 @@ import { Inbox } from "./Inbox";
  * underneath never unmounts the page beneath it - the drawer itself closes instead
  * (`useCloseOnNavigation`), which is also what "open the item" from inside it does.
  *
- * Its assignee filter is its own `useState`, never the URL: `Inbox`'s `filter`/`onAssigneesChange`
- * exist exactly so a peek embedded on, say, the Agents page does not navigate it to `/` the
- * moment someone picks a person. `keymapScope={DIALOG_SCOPE}` puts its j/k/Enter/Escape
- * bindings on the scope a dialog anywhere on the stack exclusively consults, instead of the
- * standalone page's `inbox` scope, which a dialog's keydown handling never reaches. `pane={false}`
- * is the third: a peek is a strip beside the page it covers, not a two-column reader, so it keeps
- * the card in the row at every width - the Inbox the page itself shows below 1280 px.
+ * Its filters, sort, grouping and read-thread switch are its own `useState`, never the URL:
+ * `Inbox`'s `filter`/`onFilterChange` exist exactly so a peek embedded on, say, the Agents page
+ * does not navigate it to `/` the moment someone picks a person. `keymapScope={DIALOG_SCOPE}`
+ * puts its j/k/Enter/Escape bindings on the scope a dialog anywhere on the stack exclusively
+ * consults, instead of the standalone page's `inbox` scope, which a dialog's keydown handling
+ * never reaches. `pane={false}` is the third: a peek is a strip beside the page it covers, not
+ * a two-column reader, so it keeps the card in the row at every width - the Inbox the page
+ * itself shows below 1280 px. What the reader's browser keeps - the thread order, and which
+ * bands they folded - is theirs rather than the address's, so the drawer and the page agree.
  */
 export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  // `undefined` is the reader alone, the same default the page reads from an address without
-  // `?assignee=`.
-  const [assignees, setAssignees] = useState<readonly string[] | undefined>(undefined);
+  // An empty route is the Inbox as it opens: the reader's own work, newest first, banded by
+  // priority, unread threads only.
+  const [filter, setFilter] = useState<InboxRoute>({});
   const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open });
   useCloseOnNavigation(open, onClose);
 
   if (!open) {
     return null;
   }
-
-  const filter: InboxRoute = { assignees };
-
   return (
     <>
       <div aria-hidden="true" className={`fixed inset-0 z-30 ${backdrop50}`} onClick={onClose} />
@@ -62,12 +61,7 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox
-          filter={filter}
-          keymapScope={DIALOG_SCOPE}
-          onAssigneesChange={setAssignees}
-          pane={false}
-        />
+        <Inbox filter={filter} keymapScope={DIALOG_SCOPE} onFilterChange={setFilter} pane={false} />
       </aside>
     </>
   );

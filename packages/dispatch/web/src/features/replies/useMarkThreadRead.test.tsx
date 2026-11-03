@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 function unreadSet(rows: MyReplyRow[], total = rows.length): MyRepliesResponse {
-  return { limit: 200, offset: 0, rows, total };
+  return { as_of: "2026-10-12T00:00:00Z", limit: 200, offset: 0, rows, total };
 }
 
 function Thread({ at, threadId }: { at: string | undefined; threadId: string }): ReactNode {
