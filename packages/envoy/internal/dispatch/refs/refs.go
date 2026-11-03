@@ -131,6 +131,10 @@ func ReplaceDocumentCounted(
 // an edge that persists keeps its created_at and source_seq. It returns the targets whose inbound
 // edges moved — deleted or inserted, oldest state first — so ReplaceCounted and its variants can
 // resolve the ones a reader refreshes by name (CountedChanges).
+//
+// It settles what the source owes the re-index queue (settleOwed): this text has now been read
+// with the whole grammar, so a write this build makes costs the drain nothing and only an older
+// build's write stays owed.
 func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found []text.Ref, insertedAt *time.Time) ([]Target, error) {
 	kinds, ids := refTargets(found)
 	changed, err := scanTargets(tx.Query(ctx, `
@@ -145,20 +149,41 @@ func replaceRefs(ctx context.Context, tx pgx.Tx, fromKind, fromID string, found 
 	if err != nil {
 		return nil, fmt.Errorf("clear references: %w", err)
 	}
-	if len(kinds) == 0 {
-		return changed, nil
+	if len(kinds) > 0 {
+		added, err := scanTargets(tx.Query(ctx, `
+			insert into refs (from_kind, from_id, to_kind, to_id, created_at)
+			select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
+			from unnest($3::text[], $4::text[]) as target(kind, id)
+			on conflict (from_kind, from_id, to_kind, to_id) do nothing
+			returning to_kind, to_id
+		`, fromKind, fromID, kinds, ids, insertedAt))
+		if err != nil {
+			return nil, fmt.Errorf("write reference: %w", err)
+		}
+		changed = append(changed, added...)
 	}
-	added, err := scanTargets(tx.Query(ctx, `
-		insert into refs (from_kind, from_id, to_kind, to_id, created_at)
-		select $1, $2, target.kind, target.id, coalesce($5::timestamptz, now())
-		from unnest($3::text[], $4::text[]) as target(kind, id)
-		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-		returning to_kind, to_id
-	`, fromKind, fromID, kinds, ids, insertedAt))
-	if err != nil {
-		return nil, fmt.Errorf("write reference: %w", err)
+	if err := settleOwed(ctx, tx, fromKind, fromID); err != nil {
+		return nil, err
 	}
-	return append(changed, added...), nil
+	return changed, nil
+}
+
+// settleOwed deletes the row one source owes the re-index queue (refs_grammar_owed), in the write's
+// own transaction, which holds that source's row: every write of the text was committed before
+// this transaction read it, so whatever enqueued_at the row holds, the text this write indexed is
+// the text the row is owed for. It is the queue's four source kinds that are settled this way -
+// artifact, ask, comment and message, which are the from_kind of every refs row too, so one delete
+// serves them all. The fifth kind, `scope`, names a document whose sources are owed a re-index,
+// not a source whose refs this writes, and only the scope drain settles it. A from_id that is no
+// uuid (a test's synthetic source) owes nothing, since the queue keys its id as one.
+func settleOwed(ctx context.Context, tx pgx.Tx, fromKind, fromID string) error {
+	if !isUUID(fromID) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `delete from refs_grammar_owed where kind = $1 and id = $2::uuid`, fromKind, fromID); err != nil {
+		return fmt.Errorf("settle the index owed by %s %s: %w", fromKind, fromID, err)
+	}
+	return nil
 }
 
 func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
