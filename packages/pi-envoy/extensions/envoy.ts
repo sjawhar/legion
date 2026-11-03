@@ -1809,9 +1809,11 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // How long the background confirmation goes on asking a connection that answers nowhere; it
-  // asks again every RESUBSCRIBE_DELAY_MS until then. Reaching it ends the loop, which clears the
-  // connection's mark on its way out as every other exit does, so the next open pays a bound of
-  // its own rather than going on unconfirmed for the life of a connection that never answers.
+  // waits RESUBSCRIBE_DELAY_MS after each unanswered ask, and each ask waits up to
+  // SUBSCRIBE_FLUSH_TIMEOUT_MS for its answer, so with the defaults one ask comes up to 15 s after
+  // the one before. Reaching the cap ends the loop, which clears the connection's mark on its way
+  // out as every other exit does, so the next open pays a bound of its own rather than going on
+  // unconfirmed for the life of a connection that never answers.
   const BACKGROUND_CONFIRM_CAP_MS = 10 * 60_000;
 
   // The round trip that makes a subject this session asked for live rather than merely written:

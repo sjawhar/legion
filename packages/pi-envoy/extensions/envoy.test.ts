@@ -5754,6 +5754,8 @@ console.log(JSON.stringify(args));
     // a controller's claim, and nothing reopens a notice subject — so a rejected round trip does
     // not fail the open; the claim stands and the confirmation runs on in the background.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const context = sessionContext("ses_flush_blip");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       const role = "legion-controller";
       const notice = "notifications.legion.ACME.controller";
@@ -5778,7 +5780,7 @@ console.log(JSON.stringify(args));
       const fixture = createPi();
 
       envoyExtension(fixture.pi);
-      const context = sessionContext("ses_flush_blip");
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
       await fixture.handlers.get("session_start")?.({}, context);
       await claimEnvoyRole("ses_flush_blip", role, context);
 
@@ -5800,6 +5802,8 @@ console.log(JSON.stringify(args));
       }
       expect(natsState.flushes.length).toBeGreaterThan(asked);
     } finally {
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
   });
@@ -5815,6 +5819,8 @@ console.log(JSON.stringify(args));
     // away. Asking the server again is the point of the background confirmation; holding the HTTP
     // half of the pass behind that asking is not.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const context = sessionContext("ses_outage");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       const paths: string[] = [];
       globalThis.fetch = async (input, init) => {
@@ -5824,12 +5830,13 @@ console.log(JSON.stringify(args));
       const { default: envoyExtension } = await import("./envoy.ts?outage-still-registers");
       const fixture = createPi();
       envoyExtension(fixture.pi);
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
 
       const reconnecting = Promise.reject(new Error("the connection is reconnecting"));
       reconnecting.catch(() => undefined);
       natsState.heldFlush = reconnecting as unknown as Promise<void>;
 
-      const started = fixture.handlers.get("session_start")?.({}, sessionContext("ses_outage"));
+      const started = fixture.handlers.get("session_start")?.({}, context);
       started?.catch(() => undefined);
       // Three seconds of a reconnecting connection, against a registration the pass sends over
       // HTTP the moment its NATS half is settled or given up on.
@@ -5841,6 +5848,11 @@ console.log(JSON.stringify(args));
       natsState.heldFlush = undefined;
       await started;
     } finally {
+      // The assertions above are the tester's, unchanged. What this adds is the end of the
+      // session: its background confirmation asks again every 10 ms, so a session left open here
+      // asks once more inside the next row and adds to the shared `natsState.flushes`.
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
   }, 30_000);
@@ -5850,17 +5862,20 @@ console.log(JSON.stringify(args));
     // the connection could not confirm is confirmed once it can, without the open that wrote it
     // waiting. The asking stops the moment an answer comes.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const context = sessionContext("ses_background");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
       const { default: envoyExtension } = await import("./envoy.ts?background-confirm");
       const fixture = createPi();
       envoyExtension(fixture.pi);
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
 
       const reconnecting = Promise.reject(new Error("the connection is reconnecting"));
       reconnecting.catch(() => undefined);
       natsState.heldFlush = reconnecting as unknown as Promise<void>;
 
-      const started = fixture.handlers.get("session_start")?.({}, sessionContext("ses_background"));
+      const started = fixture.handlers.get("session_start")?.({}, context);
       started?.catch(() => undefined);
       await started;
 
@@ -5882,6 +5897,8 @@ console.log(JSON.stringify(args));
       }
       expect(natsState.flushes.length).toBe(settled);
     } finally {
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
   }, 30_000);
@@ -6004,14 +6021,17 @@ console.log(JSON.stringify(args));
     // confirmed again rather than going on unconfirmed for the life of the connection.
     process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    const context = sessionContext("ses_background_mark");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
       const { default: envoyExtension } = await import("./envoy.ts?background-clears-mark");
       const fixture = createPi();
       envoyExtension(fixture.pi);
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
 
       natsState.heldFlush = new Promise<void>(() => undefined);
-      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_background_mark"));
+      await fixture.handlers.get("session_start")?.({}, context);
       const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
       if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
@@ -6028,6 +6048,8 @@ console.log(JSON.stringify(args));
       await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.42"] });
       expect(natsState.flushes.length).toBeGreaterThan(0);
     } finally {
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
@@ -6042,11 +6064,13 @@ console.log(JSON.stringify(args));
     process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "50";
     const context = sessionContext("ses_shutdown_stops_asking");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
       const { default: envoyExtension } = await import("./envoy.ts?shutdown-stops-asking");
       const fixture = createPi();
       envoyExtension(fixture.pi);
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
 
       natsState.heldFlush = new Promise<void>(() => undefined);
       await fixture.handlers.get("session_start")?.({}, context);
@@ -6059,7 +6083,8 @@ console.log(JSON.stringify(args));
       expect(natsState.flushes.length).toBeGreaterThan(0);
 
       natsState.heldFlush = undefined;
-      await fixture.handlers.get("session_shutdown")?.({}, context);
+      await stop();
+      stop = undefined;
 
       // Ten delays after the session ended, nothing of it has asked again.
       natsState.flushes.length = 0;
@@ -6067,6 +6092,9 @@ console.log(JSON.stringify(args));
       expect(natsState.flushes).toEqual([]);
     } finally {
       natsState.heldFlush = undefined;
+      // The shutdown is this row's subject, so it runs inside the row; the `finally` is here for
+      // the path where an assertion above it fails, which must leave no asking behind either.
+      await stop?.();
       delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
@@ -6080,38 +6108,44 @@ console.log(JSON.stringify(args));
     const { default: envoyExtension } = await import("./envoy.ts?inflight-confirmation");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_inflight"));
-    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const context = sessionContext("ses_inflight");
+    await fixture.handlers.get("session_start")?.({}, context);
+    try {
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
-    const topic = "notifications.github.acme.widgets.pr.21";
-    const held = Promise.withResolvers<void>();
-    natsState.heldFlush = held.promise;
-    const written = natsState.flushes.length;
-    const first = subscribeTool.execute("", { topics: [topic] });
-    first.catch(() => undefined);
-    for (let tick = 0; tick < 100 && natsState.flushes.length === written; tick += 1) {
+      const topic = "notifications.github.acme.widgets.pr.21";
+      const held = Promise.withResolvers<void>();
+      natsState.heldFlush = held.promise;
+      const written = natsState.flushes.length;
+      const first = subscribeTool.execute("", { topics: [topic] });
+      first.catch(() => undefined);
+      for (let tick = 0; tick < 100 && natsState.flushes.length === written; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(natsState.subscriptions.has(topic)).toBe(true);
+
+      // The second open starts while that round trip is still out.
+      const second = subscribeTool.execute("", { topics: [topic] });
       await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The first open's round trip comes back on a connection closed for good, so it closes the
+      // subject it wrote and throws.
+      natsState.failFlushClosesConnection = true;
+      natsState.failFlushOnSubject = topic;
+      natsState.heldFlush = undefined;
+      held.resolve();
+      await first;
+      natsState.failFlushClosesConnection = false;
+
+      // The second open waited for that, found the subject gone, and opened it afresh.
+      const answer = await second;
+      expect(answer.details).toMatchObject({ added: [topic] });
+      expect(natsState.controls.get(topic)?.active()).toBe(true);
+    } finally {
+      natsState.heldFlush = undefined;
+      await fixture.handlers.get("session_shutdown")?.({}, context);
     }
-    expect(natsState.subscriptions.has(topic)).toBe(true);
-
-    // The second open starts while that round trip is still out.
-    const second = subscribeTool.execute("", { topics: [topic] });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // The first open's round trip comes back on a connection closed for good, so it closes the
-    // subject it wrote and throws.
-    natsState.failFlushClosesConnection = true;
-    natsState.failFlushOnSubject = topic;
-    natsState.heldFlush = undefined;
-    held.resolve();
-    await first;
-    natsState.failFlushClosesConnection = false;
-
-    // The second open waited for that, found the subject gone, and opened it afresh.
-    const answer = await second;
-    expect(answer.details).toMatchObject({ added: [topic] });
-    expect(natsState.controls.get(topic)?.active()).toBe(true);
   }, 30_000);
 
   test("a role-bound notice subject whose connection closes under its round trip is closed, and no registration carries it", async () => {
@@ -6147,26 +6181,29 @@ console.log(JSON.stringify(args));
     const context = sessionContext("ses_flush_role");
     await fixture.handlers.get("session_start")?.({}, context);
     await claimEnvoyRole("ses_flush_role", role, context);
+    try {
+      natsState.failFlushClosesConnection = true;
+      natsState.failFlushOnSubject = notice;
+      await expect(subscribeLegionNotice("ses_flush_role", notice, context, role)).rejects.toThrow(
+        `FLUSH_FAILED ${notice}`
+      );
+      expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
 
-    natsState.failFlushClosesConnection = true;
-    natsState.failFlushOnSubject = notice;
-    await expect(subscribeLegionNotice("ses_flush_role", notice, context, role)).rejects.toThrow(
-      `FLUSH_FAILED ${notice}`
-    );
-    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+      // Any later registration is the one that would have carried it.
+      natsState.failFlushClosesConnection = false;
+      registered.length = 0;
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+      await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.9"] });
+      expect(registered.length).toBeGreaterThan(0);
+      expect(registered.flat()).not.toContain(notice);
 
-    // Any later registration is the one that would have carried it.
-    natsState.failFlushClosesConnection = false;
-    registered.length = 0;
-    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
-    await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.9"] });
-    expect(registered.length).toBeGreaterThan(0);
-    expect(registered.flat()).not.toContain(notice);
-
-    // The role's own move finds nothing of it to close, and the next open takes it afresh.
-    await subscribeLegionNotice("ses_flush_role", notice, context, role);
-    expect(natsState.controls.get(notice)?.active()).toBe(true);
+      // The role's own move finds nothing of it to close, and the next open takes it afresh.
+      await subscribeLegionNotice("ses_flush_role", notice, context, role);
+      expect(natsState.controls.get(notice)?.active()).toBe(true);
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }
   });
 
   // A fixture holding `legion-controller`. Once `gate(role)` is called, the listener holds the
@@ -10886,21 +10923,22 @@ console.log(JSON.stringify(args));
     const control = "agentstream.ses_control_flush.control";
 
     envoyExtension(fixture.pi);
+    const context = sessionContext("ses_control_flush");
     natsState.failFlushClosesConnection = true;
     natsState.failFlushOnSubject = control;
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_control_flush"));
+    await fixture.handlers.get("session_start")?.({}, context);
+    try {
+      // The agent subject's own round trip answered, so the pass reached the control subject.
+      expect(natsState.controls.get("notifications.agent.ses_control_flush")?.active()).toBe(true);
+      expect(natsState.controls.get(control)?.active() ?? false).toBe(false);
 
-    // The agent subject's own round trip answered, so the pass reached the control subject.
-    expect(natsState.controls.get("notifications.agent.ses_control_flush")?.active()).toBe(true);
-    expect(natsState.controls.get(control)?.active() ?? false).toBe(false);
-
-    // Nothing of it is held, so the next pass opens it.
-    natsState.failFlushClosesConnection = false;
-    await fixture.handlers.get("session_switch")?.(
-      { reason: "resume" },
-      sessionContext("ses_control_flush")
-    );
-    expect(natsState.controls.get(control)?.active()).toBe(true);
+      // Nothing of it is held, so the next pass opens it.
+      natsState.failFlushClosesConnection = false;
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+      expect(natsState.controls.get(control)?.active()).toBe(true);
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }
   });
 
   // A pass abandoned while its NATS dial is in flight must not put that dial in the shared
@@ -15111,30 +15149,36 @@ console.log(JSON.stringify(args));
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_flush"));
-    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const context = sessionContext("ses_flush");
+    await fixture.handlers.get("session_start")?.({}, context);
+    try {
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
-    const topic = "team.confirmed";
-    const confirmed = Promise.withResolvers<void>();
-    natsState.heldFlush = confirmed.promise;
-    natsState.flushes.length = 0;
-    paths.length = 0;
-    const subscribing = subscribeTool.execute("", { topics: [topic] });
-    for (let tick = 0; tick < 50 && natsState.flushes.length === 0; tick += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      const topic = "team.confirmed";
+      const confirmed = Promise.withResolvers<void>();
+      natsState.heldFlush = confirmed.promise;
+      natsState.flushes.length = 0;
+      paths.length = 0;
+      const subscribing = subscribeTool.execute("", { topics: [topic] });
+      for (let tick = 0; tick < 50 && natsState.flushes.length === 0; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      // The SUB is written and its round trip is in flight; the listener has been told nothing.
+      expect(natsState.subscriptions.has(topic)).toBe(true);
+      expect(natsState.flushes[0]).toContain(topic);
+      expect(paths).not.toContain("/v1/interests/subscribe");
+
+      natsState.heldFlush = undefined;
+      confirmed.resolve();
+      await subscribing;
+
+      expect(paths).toContain("/v1/interests/subscribe");
+    } finally {
+      natsState.heldFlush = undefined;
+      await fixture.handlers.get("session_shutdown")?.({}, context);
     }
-
-    // The SUB is written and its round trip is in flight; the listener has been told nothing.
-    expect(natsState.subscriptions.has(topic)).toBe(true);
-    expect(natsState.flushes[0]).toContain(topic);
-    expect(paths).not.toContain("/v1/interests/subscribe");
-
-    natsState.heldFlush = undefined;
-    confirmed.resolve();
-    await subscribing;
-
-    expect(paths).toContain("/v1/interests/subscribe");
   });
 
   test("a multi-topic subscribe whose later topic gives up still registers the topics that opened", async () => {
@@ -15154,25 +15198,30 @@ console.log(JSON.stringify(args));
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_partial"));
-    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const context = sessionContext("ses_partial");
+    await fixture.handlers.get("session_start")?.({}, context);
+    try {
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
-    const first = "notifications.github.acme.widgets.pr.11";
-    const second = "notifications.github.acme.widgets.pr.12";
-    registered.length = 0;
-    natsState.failFlushClosesConnection = true;
-    natsState.failFlushOnSubject = second;
-    const answer = await subscribeTool.execute("", { topics: [first, second] });
-    natsState.failFlushClosesConnection = false;
+      const first = "notifications.github.acme.widgets.pr.11";
+      const second = "notifications.github.acme.widgets.pr.12";
+      registered.length = 0;
+      natsState.failFlushClosesConnection = true;
+      natsState.failFlushOnSubject = second;
+      const answer = await subscribeTool.execute("", { topics: [first, second] });
+      natsState.failFlushClosesConnection = false;
 
-    // The failure is reported, and the topic that opened before it is live and registered.
-    expect(answer.isError).toBe(true);
-    expect(answer.content[0]?.text ?? "").toContain("FLUSH_FAILED");
-    expect(natsState.controls.get(first)?.active()).toBe(true);
-    expect(natsState.controls.get(second)?.active() ?? false).toBe(false);
-    expect(registered.flat()).toContain(first);
-    expect(registered.flat()).not.toContain(second);
+      // The failure is reported, and the topic that opened before it is live and registered.
+      expect(answer.isError).toBe(true);
+      expect(answer.content[0]?.text ?? "").toContain("FLUSH_FAILED");
+      expect(natsState.controls.get(first)?.active()).toBe(true);
+      expect(natsState.controls.get(second)?.active() ?? false).toBe(false);
+      expect(registered.flat()).toContain(first);
+      expect(registered.flat()).not.toContain(second);
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }
   });
 
   test("an open that lost its subject to a newer open closes nothing on its way out", async () => {
@@ -15186,30 +15235,36 @@ console.log(JSON.stringify(args));
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_close_owner"));
-    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
-    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const context = sessionContext("ses_close_owner");
+    await fixture.handlers.get("session_start")?.({}, context);
+    try {
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
-    // Both calls are made in one tick, so both read `confirming` before either writes to it. The
-    // held round trip then answers the first as a connection closed for good - the one case an
-    // open gives up on - and the second, which owns the entry by then, as confirmed.
-    const topic = "notifications.github.acme.widgets.pr.21";
-    const held = Promise.withResolvers<void>();
-    natsState.heldFlush = held.promise;
-    natsState.failFlushClosesConnection = true;
-    natsState.failFlushOnSubject = topic;
-    const first = subscribeTool.execute("", { topics: [topic] });
-    const second = subscribeTool.execute("", { topics: [topic] });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    held.resolve();
-    const [failed, kept] = await Promise.all([first, second]);
-    natsState.heldFlush = undefined;
-    natsState.failFlushClosesConnection = false;
-    natsState.failFlushOnSubject = undefined;
+      // Both calls are made in one tick, so both read `confirming` before either writes to it. The
+      // held round trip then answers the first as a connection closed for good - the one case an
+      // open gives up on - and the second, which owns the entry by then, as confirmed.
+      const topic = "notifications.github.acme.widgets.pr.21";
+      const held = Promise.withResolvers<void>();
+      natsState.heldFlush = held.promise;
+      natsState.failFlushClosesConnection = true;
+      natsState.failFlushOnSubject = topic;
+      const first = subscribeTool.execute("", { topics: [topic] });
+      const second = subscribeTool.execute("", { topics: [topic] });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      held.resolve();
+      const [failed, kept] = await Promise.all([first, second]);
+      natsState.heldFlush = undefined;
+      natsState.failFlushClosesConnection = false;
+      natsState.failFlushOnSubject = undefined;
 
-    expect(failed.isError).toBe(true);
-    expect(kept.isError ?? false).toBe(false);
-    expect(natsState.controls.get(topic)?.active()).toBe(true);
+      expect(failed.isError).toBe(true);
+      expect(kept.isError ?? false).toBe(false);
+      expect(natsState.controls.get(topic)?.active()).toBe(true);
+    } finally {
+      natsState.heldFlush = undefined;
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }
   });
 
   test("rebinds the direct subscription after an in-process session switch", async () => {
@@ -18601,13 +18656,18 @@ describe("consumer delivery", () => {
     natsState.failFlushOnSubject = RELAY;
     const session = await bootConsumer("relay-flush-fails");
     natsState.failFlushClosesConnection = false;
+    try {
+      expect(natsState.controls.get(RELAY)?.active() ?? false).toBe(false);
+      expect(session.registrations.at(-1)?.relaySubscribed).toBe(false);
 
-    expect(natsState.controls.get(RELAY)?.active() ?? false).toBe(false);
-    expect(session.registrations.at(-1)?.relaySubscribed).toBe(false);
-
-    await session.tick();
-    expect(natsState.controls.get(RELAY)?.active()).toBe(true);
-    expect(session.registrations.at(-1)?.delivery?.consumer).toBe(true);
+      await session.tick();
+      expect(natsState.controls.get(RELAY)?.active()).toBe(true);
+      expect(session.registrations.at(-1)?.delivery?.consumer).toBe(true);
+    } finally {
+      // Every row this change adds ends its session: a pump retry or a background confirmation
+      // left running would wake inside a later row and write to the shared mock.
+      await session.stop();
+    }
   });
 
   test("answers received before any host work and done only once each card is written, in stream order", async () => {
