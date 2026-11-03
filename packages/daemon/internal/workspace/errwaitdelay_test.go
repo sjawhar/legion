@@ -59,7 +59,7 @@ func TestRunReportsTheCommandsOwnFailureNotATimeoutWhenAChildHoldsItsOutputPastT
 	run := NewRunner(timeout, map[string]string{"git": fakeGit})
 
 	started := time.Now()
-	result, err := run.Run(context.Background(), Command{Argv: []string{"git"}, Timeout: timeout})
+	result, err := run.Run(context.Background(), Command{Dir: dir, Argv: []string{"git"}, Timeout: timeout})
 	elapsed := time.Since(started)
 
 	if err != nil {
@@ -89,7 +89,7 @@ func TestRunDoesNotReportACommandItsCallerStoppedAsTimedOut(t *testing.T) {
 	defer cancel()
 	go cancelOnceExists(ctx, cancel, started)
 
-	result, err := run.Run(ctx, Command{Argv: []string{"git"}, Timeout: time.Minute})
+	result, err := run.Run(ctx, Command{Dir: dir, Argv: []string{"git"}, Timeout: time.Minute})
 
 	if err != nil {
 		t.Fatalf("Run = %v, want the killed command's own exit", err)
