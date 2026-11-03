@@ -133,10 +133,10 @@ const natsState = {
   /** The subject whose round trip rejects: the next `flush()` taken once that subject's SUB has
    *  been written fails and clears this, as nats.js rejects every pending flush when the
    *  connection drops (`nats@2.29.3` `protocol.js`, `resetOutbound`). Named rather than counted,
-   *  because one pass takes a round trip per open and only one of them is a case's subject. */
+   *  because a pass takes one round trip per connection and only one case's subject carries it. */
   failFlushOnSubject: undefined as string | undefined,
-  /** Whether that rejection also closes its connection: a round trip the connection can still
-   *  answer later is waited out, and only one it never will is given up on. */
+  /** Whether that rejection also closes its connection: a rejection on a connection that is not
+   *  closed leaves the open to go on, and only a connection closed for good makes it give up. */
   failFlushClosesConnection: false,
 };
 
@@ -5809,8 +5809,8 @@ console.log(JSON.stringify(args));
     // (`maxReconnectAttempts: -1`), so an open that waits such a rejection out waits for the whole
     // outage, and the pass that owns it never reaches its registration: the listener does not know
     // this session, no role is claimed and nothing is delivered to it, for as long as NATS is
-    // away. Waiting out a blip is the point of the retry; holding the HTTP half of the pass behind
-    // it is not.
+    // away. Asking the server again is the point of the background confirmation; holding the HTTP
+    // half of the pass behind that asking is not.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
     try {
       const paths: string[] = [];
@@ -5883,6 +5883,138 @@ console.log(JSON.stringify(args));
     }
   }, 30_000);
 
+  test("a pass that opens many subjects over a connection that answers none waits one bound", async () => {
+    // The bound belongs to the connection, not to the open. A reconcile pass opens the agent
+    // subject, the relay, the control subject and every recovered topic one after another before
+    // it registers, so a bound paid per open would hold the registration for the bound times the
+    // subjects it opened: on a resume with six recovered topics, ten seconds becomes ninety and
+    // the pass misses its own deadline, registering only through the heartbeat's stall backstop.
+    // The first open that goes unanswered marks the connection, and the rest go on at once.
+    process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
+    // Long enough that the background confirmation takes no round trip while this row counts them.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "60000";
+    try {
+      const recovered = [1, 2, 3, 4, 5, 6].map(
+        (n) => `notifications.github.acme.widgets.issue.${n}`
+      );
+      const paths: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        paths.push(url.pathname);
+        if (url.pathname === "/v1/interests/ses_many_subjects")
+          return response({
+            session_id: "ses_many_subjects",
+            machine_id: "test",
+            dir: "/tmp",
+            topics: recovered,
+          });
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?one-bound-per-pass");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      // A connection that answers no round trip at all, rather than rejecting one: every flush
+      // this pass takes waits its bound out.
+      natsState.heldFlush = new Promise<void>(() => undefined);
+      const base = sessionContext("ses_many_subjects");
+      const resumed = {
+        ...base,
+        sessionManager: { ...base.sessionManager, getBranch: () => [{}] },
+      };
+      const started = fixture.handlers.get("session_start")?.({}, resumed);
+      started?.catch(() => undefined);
+      for (let tick = 0; tick < 300 && !paths.includes("/v1/interests/subscribe"); tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      // Nine subjects are open - the agent subject, the relay, the control subject and the six
+      // recovered topics - and one round trip was asked for, for all of them.
+      expect(paths).toContain("/v1/interests/subscribe");
+      expect(natsState.flushes.length).toBe(1);
+      expect(natsState.controls.get(recovered[5] ?? "")?.active()).toBe(true);
+
+      natsState.heldFlush = undefined;
+      await started;
+    } finally {
+      delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  }, 30_000);
+
+  test("an open after a reconnect takes a round trip of its own again", async () => {
+    // The mark is what lets an open go on unconfirmed, so it must not outlive the connection's
+    // silence: a reconnected connection answers again, and nats.js has sent every live
+    // subscription on it afresh, so the next open is confirmed rather than registered on trust.
+    process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
+    // Long enough that the background confirmation does not clear the mark for this row: the
+    // reconnect is what clears it here.
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "60000";
+    try {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+      const { default: envoyExtension } = await import("./envoy.ts?reconnect-clears-mark");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      natsState.heldFlush = new Promise<void>(() => undefined);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_reconnect_mark"));
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+      // The connection is marked: this open pays nothing.
+      natsState.flushes.length = 0;
+      await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.31"] });
+      expect(natsState.flushes.length).toBe(0);
+
+      natsState.heldFlush = undefined;
+      pushNatsStatus("reconnect");
+      for (let tick = 0; tick < 50 && natsState.flushes.length === 0; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      natsState.flushes.length = 0;
+      await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.32"] });
+      expect(natsState.flushes.length).toBeGreaterThan(0);
+    } finally {
+      delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  }, 30_000);
+
+  test("the background confirmation's answer puts the next open back on a round trip", async () => {
+    // This is what the background confirmation is for: nothing waits on its result, and what it
+    // does with it is clear the connection's mark, so an open after the server came back is
+    // confirmed again rather than going on unconfirmed for the life of the connection.
+    process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    try {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+      const { default: envoyExtension } = await import("./envoy.ts?background-clears-mark");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      natsState.heldFlush = new Promise<void>(() => undefined);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_background_mark"));
+      const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+      natsState.flushes.length = 0;
+      await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.41"] });
+      expect(natsState.flushes.length).toBe(0);
+
+      // The server answers again. The background confirmation, and nothing else, notices.
+      natsState.heldFlush = undefined;
+      for (let tick = 0; tick < 100 && natsState.flushes.length === 0; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      natsState.flushes.length = 0;
+      await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.42"] });
+      expect(natsState.flushes.length).toBeGreaterThan(0);
+    } finally {
+      delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  }, 30_000);
+
   test("a second open of a subject whose round trip is still out waits for it rather than calling it open", async () => {
     // The first open has written the SUB and is waiting for the server. A second open that read
     // `subscriptions` then would answer "already open" over a subject the first may yet close, and
@@ -5930,8 +6062,8 @@ console.log(JSON.stringify(args));
     // open throws, because a caller reads a throw as "nothing opened". So the subject must be gone
     // too: left open and unmarked it would ride the next registration as a plain interest, which
     // `endRole` never closes, and a controller another session replaced would keep taking the
-    // role's wakes. Only a connection closed for good gets here, since the confirmation waits out
-    // every rejection the connection can still answer past.
+    // role's wakes. Only a connection closed for good gets here: a rejection on a connection that
+    // is not closed leaves the open to go on, with the confirmation asked for in the background.
     const role = "legion-controller";
     const notice = "notifications.legion.ACME.controller";
     const registered: string[][] = [];
@@ -10688,7 +10820,7 @@ console.log(JSON.stringify(args));
     // control subject left open after an open that gave up would never be opened again and never
     // be registered: a viewer's replay request and its watch pings would reach nothing, for the
     // life of the session. Only a connection closed for good makes the open give up; a rejection
-    // the connection can still answer past is waited out.
+    // on a connection that is not closed leaves it to go on, confirmed in the background.
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?control-flush-fails");
     const fixture = createPi();
@@ -14984,6 +15116,43 @@ console.log(JSON.stringify(args));
     expect(registered.flat()).not.toContain(second);
   });
 
+  test("an open that lost its subject to a newer open closes nothing on its way out", async () => {
+    // Two opens of one fresh subject can both pass the in-flight check: that check reads
+    // `confirming`, which neither call sets until after it has awaited `connect()`. The second
+    // write owns the map entry from then on, so the first open's failure must close nothing -
+    // closing what it reads there would take down a subject its own caller never opened, and
+    // suppress that subject's pump retry with it.
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?close-owner");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_close_owner"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+
+    // Both calls are made in one tick, so both read `confirming` before either writes to it. The
+    // held round trip then answers the first as a connection closed for good - the one case an
+    // open gives up on - and the second, which owns the entry by then, as confirmed.
+    const topic = "notifications.github.acme.widgets.pr.21";
+    const held = Promise.withResolvers<void>();
+    natsState.heldFlush = held.promise;
+    natsState.failFlushClosesConnection = true;
+    natsState.failFlushOnSubject = topic;
+    const first = subscribeTool.execute("", { topics: [topic] });
+    const second = subscribeTool.execute("", { topics: [topic] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    held.resolve();
+    const [failed, kept] = await Promise.all([first, second]);
+    natsState.heldFlush = undefined;
+    natsState.failFlushClosesConnection = false;
+    natsState.failFlushOnSubject = undefined;
+
+    expect(failed.isError).toBe(true);
+    expect(kept.isError ?? false).toBe(false);
+    expect(natsState.controls.get(topic)?.active()).toBe(true);
+  });
+
   test("rebinds the direct subscription after an in-process session switch", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?session-switch");
@@ -18366,7 +18535,7 @@ describe("consumer delivery", () => {
     // `retryRelay` bails while `owner.subscription` is set and `pumpRelay` starts no retry for a
     // subscription whose owner no longer names it, so a relay subject left open after an open
     // that gave up would stay open, unregistered and unrelayed. Only a connection closed for good
-    // makes the open give up; a rejection the connection can still answer past is waited out.
+    // makes the open give up; a rejection on a connection that is not closed leaves it to go on.
     natsState.failFlushClosesConnection = true;
     natsState.failFlushOnSubject = RELAY;
     const session = await bootConsumer("relay-flush-fails");

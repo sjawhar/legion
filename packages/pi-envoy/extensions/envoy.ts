@@ -1032,6 +1032,9 @@ export default function envoyExtension(pi: PiApi): void {
       for await (const status of watched.status()) {
         if (connection !== watched) return;
         if (status.type !== Events.Reconnect) continue;
+        // The connection answers again, and nats.js has sent every live subscription on it afresh,
+        // so the next open pays its own bound rather than going on unconfirmed.
+        unanswered.delete(watched);
         renewRelayEpoch();
         triggerReplay();
       }
@@ -1663,11 +1666,22 @@ export default function envoyExtension(pi: PiApi): void {
   // still has something to suppress.
   const awaitingRetry = new Set<string>();
 
-  // How long an open waits for the server to confirm it (the bound claude-envoy's handoff flush
-  // uses for the same round trip). A connection that has not answered by then is treated as an
-  // open that failed: the caller retries it rather than registering a subject the server may not
-  // have.
-  const SUBSCRIBE_FLUSH_TIMEOUT_MS = 10_000;
+  // How long one open waits for the server to confirm it (the bound claude-envoy's handoff flush
+  // uses for the same round trip), and the whole wait a pass pays: the first open that is not
+  // answered within it marks the connection unanswered, and every later open on that connection
+  // goes on without waiting (`unanswered`).
+  const SUBSCRIBE_FLUSH_TIMEOUT_MS =
+    Number(process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS ?? "") || 10_000;
+
+  // The connections that have not answered a round trip since they last did. A background
+  // confirmation asks each of them for that answer and clears the mark when it comes; a reconnect
+  // clears it too (`watchReconnects`), since a reconnected connection answers again and nats.js
+  // has sent every live subscription on it afresh. While a mark stands, an open on that connection
+  // pays no bound at all: the reconcile pass opens the agent subject, the relay, the control
+  // subject and every recovered topic one after another before it registers, so a bound paid per
+  // open would hold the session's registration for ten seconds times the subjects it opened - on a
+  // resume with six recovered topics, past the pass's own deadline.
+  const unanswered = new Set<NatsConnection>();
 
   // Drop a topic we no longer want. Every marker set here is consumed again by
   // the pump end-path, the retry callback, or the next subscribe(), so the set
@@ -1807,8 +1821,8 @@ export default function envoyExtension(pi: PiApi): void {
   // `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's channel
   // flushes before every registration for the same reason.
   //
-  // It is bounded, and it never holds the caller past that bound. A connection that is
-  // reconnecting rejects every pending round trip (`resetOutbound`,
+  // It is bounded, and the bound is paid once per connection, not once per open. A connection that
+  // is reconnecting rejects every pending round trip (`resetOutbound`,
   // `nats/lib/nats-base-client/protocol.js`) and answers none until it is back, and with
   // `maxReconnectAttempts: -1` it is never closed, so a confirmation that waited such a rejection
   // out would wait for the whole outage — and the reconcile pass's own contract (above its
@@ -1818,35 +1832,49 @@ export default function envoyExtension(pi: PiApi): void {
   // exists for; unanswered, the subjects stay open — nats.js sends every live subscription again
   // on each connect (`sendSubscriptions`, before `flushPending`) — the caller goes on exactly as
   // it did before this file took a round trip at all, and the confirmation runs on in the
-  // background so the server's answer is still asked for, with nothing waiting on it. A notice
-  // published during the outage is lost, as it is without this file's round trip at all.
+  // background so the server's answer is still asked for, with nothing waiting on it. The
+  // connection is marked unanswered meanwhile (`unanswered`), so a pass that opens many subjects
+  // waits once rather than once per subject. A notice published during the outage is lost, as it
+  // is without this file's round trip at all.
   //
   // It throws only on a connection closed for good, or a session shutting down: either way this
   // connection carries nothing more, and the subjects it opened are the caller's to close.
   const confirmSubscribed = async (connection: NatsConnection, what: string): Promise<void> => {
+    // This connection has not answered its last round trip, and the background confirmation is
+    // already asking: waiting again would pay the bound once per open, where a pass pays it once.
+    if (unanswered.has(connection)) return;
     try {
       await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
     } catch (error) {
       if (shuttingDown || connection.isClosed()) throw error;
+      // Marked before the asking starts, since a background confirmation that gives up at once
+      // clears the mark on its way out and must not clear one set after it.
+      unanswered.add(connection);
       void confirmInBackground(connection, what);
     }
   };
 
   // Asks for the server's answer again, on a connection that has not given one, until it answers,
   // the connection is closed for good, the session shuts down, or BACKGROUND_CONFIRM_CAP_MS pass.
-  // Nothing waits on it: it exists so a subject whose round trip the connection could not answer
-  // is still confirmed once it can, without the open that wrote it holding its caller.
+  // Nothing waits on it; what it is for is the entry in `unanswered` it clears, which is what lets
+  // the open that failed, and every open after it, go on without paying the bound again. Once it
+  // clears the entry the next open pays one bound of its own, which is how a connection that
+  // started answering again is noticed.
   const confirmInBackground = async (connection: NatsConnection, what: string): Promise<void> => {
     const until = Date.now() + BACKGROUND_CONFIRM_CAP_MS;
-    while (!shuttingDown && !connection.isClosed() && Date.now() < until) {
-      await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_DELAY_MS));
-      if (shuttingDown || connection.isClosed()) return;
-      try {
-        await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
-        return;
-      } catch {
-        // Still no answer: ask again, until this connection is gone or the cap is reached.
+    try {
+      while (!shuttingDown && !connection.isClosed() && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, RESUBSCRIBE_DELAY_MS));
+        if (shuttingDown || connection.isClosed()) return;
+        try {
+          await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
+          return;
+        } catch {
+          // Still no answer: ask again, until this connection is gone or the cap is reached.
+        }
       }
+    } finally {
+      unanswered.delete(connection);
     }
   };
 
@@ -2142,10 +2170,10 @@ export default function envoyExtension(pi: PiApi): void {
     // and the listener publishes to it at once, so a SUB still in the out buffer costs the first
     // frames. A round trip this connection can still answer later does not fail the open, so only
     // a connection closed for good gets past the confirmation, and then this subject goes with it:
-    // `retryRelay` bails while `owner.subscription`
-    // is set, and `pumpRelay` starts no retry of its own for a subscription whose owner no longer
-    // names it, so the caller - the reconcile pass, or `retryRelay` behind a later pump end -
-    // opens the relay again only because this throws with the field cleared.
+    // `retryRelay` bails while `owner.subscription` is set, and `pumpRelay` starts no retry of its
+    // own for a subscription whose owner no longer names it, so the caller - the reconcile pass,
+    // or `retryRelay` behind a later pump end - opens the relay again only because this throws
+    // with the field cleared.
     try {
       await confirmSubscribed(connected, `the relay subscription for ${owner.sessionID}`);
     } catch (error) {
@@ -2417,10 +2445,10 @@ export default function envoyExtension(pi: PiApi): void {
     // A viewer's first ping is published as soon as the registration names this session, and one
     // sent before the server took this SUB would be dropped, leaving the viewer to retry. A round
     // trip this connection can still answer later does not fail the open, so only a connection
-    // closed for good gets past the confirmation, and
-    // then this subject goes with it: this function returns at once while `agentStreamControl`
-    // names the session, so clearing the field is what lets the next pass - or
-    // `pumpAgentStreamControl`'s own end path, one resubscribe delay later - open it again.
+    // closed for good gets past the confirmation, and then this subject goes with it: this
+    // function returns at once while `agentStreamControl` names the session, so clearing the field
+    // is what lets the next pass - or `pumpAgentStreamControl`'s own end path, one resubscribe
+    // delay later - open it again.
     try {
       await confirmSubscribed(connected, `the agent stream control subscription for ${session}`);
     } catch (error) {
@@ -3399,6 +3427,7 @@ export default function envoyExtension(pi: PiApi): void {
       subscriptions.clear();
       intentionallyClosed.clear();
       awaitingRetry.clear();
+      unanswered.clear();
       agentStreamControl = undefined;
       agentStreamControlSession = "";
       // This process serves the session no longer, so what it was shown goes with it: the id this
