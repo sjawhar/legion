@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/procgroup"
 )
 
 // The plumbing a release's two halves share: the shim's save of an issue workspace's unpushed work
@@ -83,8 +85,9 @@ func OutputLines(out string) []string {
 	return kept
 }
 
-// commandWaitDelay bounds the wait for a jj or git child's output once it has been killed at its
-// budget: a child that holds the pipe open past it is left behind rather than kept waited on.
+// commandWaitDelay bounds the wait for a jj or git child's output once that child has exited or
+// been killed at its budget: a process of its own that holds the pipe open past it is left behind
+// rather than kept waited on.
 const commandWaitDelay = time.Second
 
 // RunCommand runs one jj or git command of the workspace within the caller's budget and returns
@@ -94,7 +97,12 @@ const commandWaitDelay = time.Second
 // wherever the caller's process stands would read a repository nobody named (docs/testing.md).
 // stdin is fed to the command, and nil is an empty standard input. started is when the caller's
 // budget began, which a timeout's report names. A failure's report ends with a note on each
-// stale git lock it names (staleGitLockNote).
+// stale git lock it names (staleGitLockNote). The command timed out only when the budget ended
+// it: once the command has exited on its own, commandWaitDelay can hold Run open past the budget
+// for a child still holding the command's pipes, and the command's own exit is then its answer. A
+// command that never started because an earlier one on the same budget spent it timed out too,
+// while a command the caller's own context stopped — the restore runs under the launcher's
+// (internal/launcher), not under a budget of its own — reports its exit, not a timeout.
 //
 // The save (internal/shim) and the restore (internal/launcher) both run here: they run the same
 // two tools over the same workspace, and a restore wedged on a stale index.lock or on a git
@@ -110,16 +118,25 @@ func RunCommand(ctx context.Context, budget time.Duration, started time.Time, en
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.WaitDelay = commandWaitDelay
+	killed := procgroup.KilledByContext(cmd)
 	err := cmd.Run()
-	if err == nil {
+	command := strings.Join(args, " ")
+	// The budget ended the command only when its kill is what ended it (procgroup.KilledByContext,
+	// never the deadline having passed by the time Run returned) and the budget is what ended ctx,
+	// which is how execRunner reads its own TimedOut (config.go).
+	timedOut := (killed() && errors.Is(ctx.Err(), context.DeadlineExceeded)) ||
+		(cmd.Process == nil && errors.Is(err, context.DeadlineExceeded))
+	if runErr := procgroup.Err(err); runErr != nil && !timedOut {
+		return "", fmt.Errorf("run %s: %w", command, runErr)
+	}
+	if !timedOut && cmd.ProcessState.ExitCode() == 0 {
 		return strings.TrimSpace(stdout.String()), nil
 	}
-	command := strings.Join(args, " ")
 	report := strings.TrimSpace(stderr.String())
 	if note := staleGitLockNote(report, time.Now()); note != "" {
 		report += "\n" + note
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if timedOut {
 		message := fmt.Sprintf("Command timed out after %s s (ran %.1f s): %s",
 			strconv.FormatFloat(budget.Seconds(), 'f', -1, 64), time.Since(started).Seconds(), command)
 		if report != "" {
@@ -127,11 +144,7 @@ func RunCommand(ctx context.Context, budget time.Duration, started time.Time, en
 		}
 		return "", errors.New(message)
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return "", fmt.Errorf("Command failed (exit %d): %s\n%s", exit.ExitCode(), command, report)
-	}
-	return "", fmt.Errorf("run %s: %w", command, err)
+	return "", fmt.Errorf("Command failed (exit %d): %s\n%s", cmd.ProcessState.ExitCode(), command, report)
 }
 
 // gitLockReports are the ways a git or jj failure names the lock file it could not take: jj's git
