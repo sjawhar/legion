@@ -35,7 +35,7 @@ func TestRunAdoptionCommandReportsTheCommandsOwnExitWhenAChildHoldsItsPipesPastI
 			script := `echo answered; echo refused >&2; sleep 30 & echo $! >"$1"; exit ` + strconv.Itoa(testCase.exit)
 
 			started := time.Now()
-			out, err := runAdoptionCommand(ctx, testCase.budget, started, []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", script, "sh", pidFile})
+			out, err := runAdoptionCommand(ctx, testCase.budget, started, t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", script, "sh", pidFile})
 			elapsed := time.Since(started)
 
 			if elapsed < adoptionWaitDelay {
@@ -61,7 +61,7 @@ func TestRunAdoptionCommandReportsABudgetSpentBeforeItStartedAsATimeout(t *testi
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
-	_, err := runAdoptionCommand(ctx, time.Second, time.Now(), []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", "exit 0"})
+	_, err := runAdoptionCommand(ctx, time.Second, time.Now(), t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", "exit 0"})
 
 	if err == nil || !strings.HasPrefix(err.Error(), "Command timed out after 1 s") {
 		t.Errorf("runAdoptionCommand under a spent budget = %v, want \"Command timed out after 1 s …\"", err)
