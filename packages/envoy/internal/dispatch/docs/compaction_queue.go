@@ -241,9 +241,15 @@ type compactionQueue struct {
 	wake chan struct{}
 	// done is closed when the worker has returned.
 	done chan struct{}
-	// afterStep runs on the worker after each step with what the step decided and the backoff it
-	// ran under, zero for a check. Nil outside tests; tests use it to see the steps a room takes.
-	afterStep func(room string, retry time.Duration, next compactionNext)
+	// beforeStep runs on the worker before each step, and afterStep after it with what the step
+	// decided and the backoff it ran under, zero for a check. Nil outside tests; tests use
+	// afterStep to see the steps a room takes, and beforeStep to change what the step will read
+	// at a point no step is inside. A step reads the room's rows twice - its check, then the
+	// compaction the check sent it to - so a test that changes those rows between the two leaves
+	// the step a check that says there is something to fold and a compaction that finds nothing,
+	// which drops the room from the queue (dispatch://INFRA-1075).
+	beforeStep func(room string)
+	afterStep  func(room string, retry time.Duration, next compactionNext)
 
 	mu     sync.Mutex
 	timing compactionTiming
@@ -354,6 +360,9 @@ func (q *compactionQueue) run(ctx context.Context) {
 			}
 			timer.Stop()
 			continue
+		}
+		if q.beforeStep != nil {
+			q.beforeStep(entry.room)
 		}
 		next := q.step(ctx, entry.room, entry.retry > 0)
 		if q.afterStep != nil {

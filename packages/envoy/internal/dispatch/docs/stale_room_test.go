@@ -164,6 +164,7 @@ func requireRoomStillWrites(t *testing.T, service *Service, artifactID string, c
 // still owed: task B's words are then past no cursor any later settlement looks behind, and
 // nothing is left to version them (corruptions 1 and 2 of INFRA-66).
 func TestASettlementFromARoomBehindTheHeadIsRefusedAndLosesNothing(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
@@ -209,6 +210,7 @@ func TestASettlementFromARoomBehindTheHeadIsRefusedAndLosesNothing(t *testing.T)
 // timer, which reads the reloaded room and versions both processes' text at the head, clearing the
 // document's pending-settlement row, and the room never fails.
 func TestASettlementFromARoomBehindTheHeadReloadsItAndTheNextSettlesBoth(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
@@ -251,6 +253,7 @@ func TestASettlementFromARoomBehindTheHeadReloadsItAndTheNextSettlesBoth(t *test
 // settlement is armed again, and a shutdown, which leaves the settlement to the next process. The
 // first two then settle both processes' text once the work is done.
 func TestARefusedSettlementLeavesItsRoomOpenWhileWorkIsInFlightOnIt(t *testing.T) {
+	t.Parallel()
 	for _, inFlight := range []struct {
 		name string
 		// hold puts the work in flight before the settlement and returns what ends it, or nil
@@ -345,6 +348,7 @@ func TestARefusedSettlementLeavesItsRoomOpenWhileWorkIsInFlightOnIt(t *testing.T
 // at a cursor claiming to hold it. The write answers 503, and once the room has reloaded the same
 // write is made and stored.
 func TestAWriteOpeningWhileARoomBehindTheHeadClosesIsRefused(t *testing.T) {
+	t.Parallel()
 	for _, closer := range []struct {
 		name  string
 		close func(t *testing.T, pair processPair)
@@ -406,6 +410,7 @@ func TestAWriteOpeningWhileARoomBehindTheHeadClosesIsRefused(t *testing.T) {
 // the document holds loaded at the head, and closing it by name would drop its browsers for
 // nothing and take a write opening on it with it.
 func TestTheEvictorClosesOnlyTheRoomItFoundBehindTheHead(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
 	stale := pair.taskA.srv.GetDoc(pair.artifactID)
@@ -435,6 +440,7 @@ func TestTheEvictorClosesOnlyTheRoomItFoundBehindTheHead(t *testing.T) {
 // browsers, and the reservation stayed on the state the replacement loaded onto, refusing every
 // write on it as reloading. The replacement stays open and writable, and the document settles.
 func TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt(t *testing.T) {
+	t.Parallel()
 	for _, closer := range []struct {
 		name  string
 		close func(t *testing.T, pair processPair)
@@ -523,6 +529,7 @@ func TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt(t *testing.T) {
 // close's own transaction leaves it for the moment before SetIssueClosed runs, and as a room this
 // process holds sees an issue the other process closed.
 func TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
 	stale := pair.taskA.srv.GetDoc(pair.artifactID)
@@ -548,6 +555,7 @@ func TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue(t *testing.T) {
 // is made to fail here as a rebuild makes it fail: a rebuild holds the document and refuses every
 // injection into its room, the one refusal the close's own mark does not pass (refuseIfRebuilding).
 func TestACloseOfARoomBehindTheHeadThatFailsLiftsItsReservation(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
 	stale := pair.taskA.srv.GetDoc(pair.artifactID)
@@ -598,6 +606,7 @@ func TestACloseOfARoomBehindTheHeadThatFailsLiftsItsReservation(t *testing.T) {
 // cursor corruption the reservation exists to prevent. The room is left exactly as stale as it
 // was found, and the evictor keeps a window of its own for it.
 func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob types once.\n")
@@ -648,6 +657,7 @@ func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T
 // close of a room the evictor's confirmation found behind (the INFRA-396 race) leaves a window
 // armed beside that close.
 func TestARoomBehindTheHeadThatIsAnotherClosesIsAVerdictForTheEvictor(t *testing.T) {
+	t.Parallel()
 	for _, other := range []struct {
 		name string
 		take func(t *testing.T, pair processPair, live *crdt.Doc) (finish func())
@@ -755,6 +765,7 @@ func TestARoomBehindTheHeadThatIsAnotherClosesIsAVerdictForTheEvictor(t *testing
 // re-arms, which does nothing once the document's issue has closed, and so to its reader leaving
 // and the idle minute. The evictor tries it again instead, and closes it once that close returns.
 func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	ctx := context.Background()
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -821,6 +832,7 @@ func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
 // sweep pass has run with the held room idle for longer than the timeout as well, and it is still
 // the room the document holds when the close closes it.
 func TestACloseOfARoomBehindTheHeadHoldsItAgainstTheIdleSweep(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	// ygo's sweeper reads the timeout when the first room starts it, so it is set before any room:
@@ -892,6 +904,7 @@ func TestACloseOfARoomBehindTheHeadHoldsItAgainstTheIdleSweep(t *testing.T) {
 // the control, which the refusal's own handoff to an open write passed before the take-over; the
 // second is the take-over of a settlement already running (settling).
 func TestAWriteOpenedWhileASettlementRunsArmsItWhenItEnds(t *testing.T) {
+	t.Parallel()
 	for _, writer := range []struct {
 		name string
 		// open runs inside the settlement, after it read its generation and before its gate, and
@@ -963,6 +976,7 @@ func TestAWriteOpenedWhileASettlementRunsArmsItWhenItEnds(t *testing.T) {
 // from the moment it takes the timer. Taking over only the timer it stopped, the write that changed
 // nothing armed nothing, and the document stayed owed until the minute-old resumption.
 func TestAWriteOpenedAsASettlementStartsArmsItWhenItEnds(t *testing.T) {
+	t.Parallel()
 	for _, start := range []struct {
 		name string
 		// fire starts the settlement the write meets, its timer armed an hour out.
@@ -1038,6 +1052,7 @@ func TestAWriteOpenedAsASettlementStartsArmsItWhenItEnds(t *testing.T) {
 // recorded text missing Bob's paragraph at a cursor saying it held it, so no later settlement saw
 // those words past that cursor (INFRA-218; corruption 1 of INFRA-66, on the version path).
 func TestANamedVersionFromARoomBehindTheHeadRecordsTheStoredDocument(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
@@ -1062,6 +1077,7 @@ func TestANamedVersionFromARoomBehindTheHeadRecordsTheStoredDocument(t *testing.
 // reloaded room and it is credited again there. Listed from the room's in-flight credits, alice was
 // listed on that version and again on the one holding her resent edit (INFRA-218).
 func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
@@ -1102,6 +1118,7 @@ func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing
 // is credited again. Listed from the room's in-flight credits, alice was listed on the
 // transaction's version and again on the one holding her resent edit (INFRA-218).
 func TestAColdWritesVersionListsNoneOfItsRoomsEditsInFlight(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
@@ -1145,6 +1162,7 @@ func TestAColdWritesVersionListsNoneOfItsRoomsEditsInFlight(t *testing.T) {
 // tree holds no such block, and reconcileAskBlocks retracts the ask and publishes its
 // `ask.resolved` event, over a question nobody answered (corruption 3 of INFRA-66).
 func TestAnOpenAskIsNotRetractedByASettlementFromARoomBehindTheHead(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
@@ -1185,6 +1203,7 @@ func askState(t *testing.T, database *store.Store, artifactID, blockID string) s
 // paragraph survives the merge, so the stored document holds text the version does not
 // (corruption 6 of INFRA-66).
 func TestAnUploadFromARoomBehindTheHeadReplacesTheStoredDocument(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
@@ -1205,6 +1224,7 @@ func TestAnUploadFromARoomBehindTheHeadReplacesTheStoredDocument(t *testing.T) {
 // correctly. The edit lands beside task B's paragraph, which the room it would otherwise have
 // forked never held (corruption 7 of INFRA-66: a write made over text its writer never saw).
 func TestAnEditFromARoomBehindTheHeadTakesTheColdPathAndSucceeds(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
@@ -1226,6 +1246,7 @@ func TestAnEditFromARoomBehindTheHeadTakesTheColdPathAndSucceeds(t *testing.T) {
 // update the other process appended before it. A load that recorded anything else would refuse
 // this room's first write.
 func TestARoomLoadedAfterAnotherProcessesAppendStandsAtTheHead(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	// The room the seed left on task A would be the one behind the head; this test is about the
@@ -1248,6 +1269,7 @@ func TestARoomLoadedAfterAnotherProcessesAppendStandsAtTheHead(t *testing.T) {
 // too. Without that advance the room's second edit is refused, the room fails, and every edit
 // after a reload meets the same refusal.
 func TestARoomWritesAgainAfterItsOwnBrowserAppend(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1260,6 +1282,7 @@ func TestARoomWritesAgainAfterItsOwnBrowserAppend(t *testing.T) {
 // what takes its version in (publishLiveUpdate). Without that advance a room left behind by its
 // own process's write refuses the next browser edit.
 func TestARoomWritesAgainAfterACommittedWritePublishesIntoIt(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1278,6 +1301,7 @@ func TestARoomWritesAgainAfterACommittedWritePublishesIntoIt(t *testing.T) {
 // transaction, so the room takes the version it is stored at there (settleRoomWithin). Without
 // that advance every settlement that repairs anything would leave its own room unable to write.
 func TestARoomWritesAgainAfterItsSettlementAppendsARepair(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1294,6 +1318,7 @@ func TestARoomWritesAgainAfterItsSettlementAppendsARepair(t *testing.T) {
 // A settlement superseded after it wrote its repair commits that repair alone, on its own path,
 // and the room takes that version in there too.
 func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1336,6 +1361,7 @@ func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T
 // the room that holds the document after the publish holds both edits. Gated on that room, the
 // write would answer 503 for a conflict Yjs resolves (coldFork, appendingCursor).
 func TestAColdWriteAppendsUnderABrowserThatOpenedBehindItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1381,6 +1407,7 @@ func TestAColdWriteAppendsUnderABrowserThatOpenedBehindItsRead(t *testing.T) {
 // (ErrRoomBehindHead), which failed the room under the browser whose edit it was and dropped
 // every update the room still owed the store with it.
 func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1427,6 +1454,7 @@ func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) 
 // second browser edit the store has not taken, so a fork of the store is one the write can see is
 // not the whole document.
 func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1627,6 +1655,7 @@ func keptAndFreshRendering(t *testing.T, service *Service, artifactID string) (k
 // browser update against the stale rendering: a browser's margin note alone would count as a
 // content change, credited to that browser's person and settled as their edit.
 func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
@@ -1713,6 +1742,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 // record the edit as no change and keep "Second." in the rendering every later browser update is
 // measured against.
 func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
@@ -1768,6 +1798,7 @@ func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *t
 // room the load starts stands at the head. Born one behind, that room is refused its browser's
 // every append, and the reload each refusal forces can lose the same race again.
 func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1856,6 +1887,7 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 // A room of the OTHER process does stand behind the head across such an append, and recovers
 // through the refusal: TestARoomBehindTheHeadIsReloadedAndWritesAgain pins that case.
 func TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
@@ -1948,6 +1980,7 @@ func TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt(t *testing.T) {
 // and refused again is the loop INFRA-66's reproduction fell into, and a room that cannot be born
 // behind (roomLoad) is what keeps the reload out of it.
 func TestARoomBehindTheHeadIsReloadedAndWritesAgain(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
 	editAsBrowserPeer(t, pair.taskA, pair.artifactID, 2, model.Actor{Kind: "user", ID: "alice"},

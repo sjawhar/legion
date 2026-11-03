@@ -3,7 +3,6 @@ package docs
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -27,7 +26,7 @@ const settlementResumeAge = time.Minute
 func (s *Service) RunSettlementResumption(ctx context.Context) {
 	for {
 		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
-			slog.Error("dispatch: resume owed document settlements", "error", err)
+			s.log().Error("dispatch: resume owed document settlements", "error", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -71,7 +70,7 @@ func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) 
 		s.scheduleSettle(room)
 	}
 	if len(rooms) > 0 {
-		slog.Info("dispatch: resumed owed document settlements", "documents", len(rooms))
+		s.log().Info("dispatch: resumed owed document settlements", "documents", len(rooms))
 	}
 	return nil
 }

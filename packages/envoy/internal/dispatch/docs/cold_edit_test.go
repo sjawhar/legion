@@ -17,6 +17,7 @@ import (
 // a room beside the fork would hold a second copy of a heavy document until the write commits
 // (LEGION-504). Once committed and published, the room holds the write and the write keeps no fork.
 func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
+	t.Parallel()
 	for _, conditional := range []bool{false, true} {
 		name := "unconditional"
 		if conditional {
@@ -101,6 +102,7 @@ func (s *roomDuringColdReadStore) Load(ctx context.Context, room string) (persis
 // no copy of the document beside the room's own; one that loads after the read meets the write at
 // its publish (LEGION-504).
 func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
+	t.Parallel()
 	for _, during := range []bool{true, false} {
 		name := "after the store read"
 		if during {

@@ -49,6 +49,7 @@ var formattingWords = strings.Fields("one two three alpha beta gamma")
 // exactly the formatting the room committed, under writes of both kinds: the room's own local
 // transactions, which it never cleans up after, and its browsers' updates, which it does.
 func TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly(t *testing.T) {
+	t.Parallel()
 	t.Run("a plain run between two marked ones", testAReplicaKeepsARunTheRoomLeftPlain)
 	t.Run("local writes and browser edits interleaved", testAReplicaReplaysInterleavedFormatting)
 }

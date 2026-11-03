@@ -24,6 +24,7 @@ import (
 // settlement, so the settlement goes on to version what it read. The version the edit's own
 // settlement writes holds the edit and credits its author (LEGION-503).
 func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -69,6 +70,7 @@ func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
 // pending authors the version then lists: the version credits its author although the credit
 // followed the bound, and no later version credits them again.
 func TestSettlementCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -119,6 +121,7 @@ func TestSettlementCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.
 // the same key before it arms that edit's settlement, and the settlement's commit releases only
 // the entry it took, not that newer one (LEGION-503).
 func TestSettlementKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -165,6 +168,7 @@ func TestSettlementKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testin
 // credits the edit's author, the edit's own settlement finds the document already versioned and
 // writes none, and no later version credits the author again.
 func TestAnEditReadBeforeItsObserverRunsIsCreditedOnTheVersionThatStoresIt(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -211,6 +215,7 @@ func TestAnEditReadBeforeItsObserverRunsIsCreditedOnTheVersionThatStoresIt(t *te
 // settlement's author take and its copy, with the observer held at hook, then lets it go and
 // settles again (LEGION-503).
 func TestANewAskIsAttributedToTheUpdateThatIntroducedIt(t *testing.T) {
+	t.Parallel()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
@@ -312,6 +317,7 @@ func TestANewAskIsAttributedToTheUpdateThatIntroducedIt(t *testing.T) {
 // room's only editor and left, and Bob, alone after her, types in that window (Qual's probe B,
 // Deep's probe E, Acceptance's present-before-the-take test).
 func TestAnAskInTheRoomBeforeASettlementsTakeKeepsItsAuthor(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -407,6 +413,7 @@ func holdObserver(t *testing.T, service *Service, artifactID string, hook *func(
 // (registerAskAuthors), the browser's from the room's one connected peer - because attribution no
 // longer depends on which update's observer renders the merged catch-up (LEGION-503).
 func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *testing.T) {
+	t.Parallel()
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service, artifactID := newTestService(t)
@@ -443,6 +450,7 @@ func TestAServiceWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *te
 // liveWriteOrigin (the API-shaped case LEGION-503 reports): an agent's own ask was attributed to a
 // concurrently editing browser user, and the agent never followed its own question.
 func TestAPublishedAgentWriteAndABrowserEditLandTogetherEachAskGoesToItsOwnAuthor(t *testing.T) {
+	t.Parallel()
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service, artifactID := newTestService(t)
@@ -527,6 +535,7 @@ func askAuthorByQuestion(t *testing.T, service *Service, artifactID, question st
 // the backfill's own stamp applies, instead of crediting the renamed block to the edit's own actor
 // (LEGION-503).
 func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing.T) {
+	t.Parallel()
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service, artifactID := newTestService(t)
@@ -556,6 +565,7 @@ func TestApplyOpsOwnBlockIDRepairCarriesForwardTheRenamedBlocksAuthor(t *testing
 // goes to its own actor, not to whichever update's observer happens to render the commit's publish
 // first (LEGION-503).
 func TestAConditionalEditIntroducesAnAskCreditedToItsAuthor(t *testing.T) {
+	t.Parallel()
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -592,6 +602,7 @@ func TestAConditionalEditIntroducesAnAskCreditedToItsAuthor(t *testing.T) {
 // first-registration-wins rule must not let a discarded write's registration outrank a later,
 // legitimate commit of the same author-chosen literal id (LEGION-503).
 func TestADiscardedJoinedWriteDoesNotOutrankALaterCommitOfTheSameAskID(t *testing.T) {
+	t.Parallel()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	service, artifactID := newTestService(t)
@@ -638,6 +649,7 @@ func TestADiscardedJoinedWriteDoesNotOutrankALaterCommitOfTheSameAskID(t *testin
 // Forgetting it anyway would make the room's next observer treat the still-live original as newly
 // introduced (LEGION-503).
 func TestRecordStampedAskBlocksKeepsACopiedRenamesPreviousIDLive(t *testing.T) {
+	t.Parallel()
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -685,6 +697,7 @@ func holdPeerEdit(t *testing.T, service *Service, artifactID string, hook *func(
 // and the room's pendingAskAuthors must hold nothing afterward for any id the refused edit's own
 // stamp renamed (LEGION-503).
 func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
+	t.Parallel()
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service, artifactID := newTestService(t)
@@ -716,6 +729,7 @@ func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
 // before its own commit, takes nothing out of them: its transaction rolls back, so alice is still
 // owed, and it marked no in-flight credit consumed. The next settlement lists her.
 func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -767,6 +781,7 @@ func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t
 // once the source's block leaves its document. That ask names the session, not the copy's latest
 // editor, and the source's ask and document never credit it (LEGION-651).
 func TestACopiedAskBlocksAuthorIsKeptForTheAskItOpensOnceItsSourceIsRetracted(t *testing.T) {
+	t.Parallel()
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	service, original := newTestService(t)

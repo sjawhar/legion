@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -97,12 +96,12 @@ func (s *Service) blockIndexTick(ctx context.Context, cursor string, liveAhead l
 		return BlockIndexReconcileInterval, cursor
 	}
 	if err != nil {
-		slog.Error("dispatch: block index reconciliation", "error", err)
+		s.log().Error("dispatch: block index reconciliation", "error", err)
 	}
 	if tick.Documents > 0 || tick.Items > 0 || tick.ItemBlocks > 0 || tick.LiveAhead != logged.LiveAhead ||
 		tick.OwedDocuments != logged.OwedDocuments || tick.OwedItems != logged.OwedItems ||
 		tick.OwedItemBlocks != logged.OwedItemBlocks {
-		slog.Info("dispatch: block index", "documents", tick.Documents, "items", tick.Items,
+		s.log().Info("dispatch: block index", "documents", tick.Documents, "items", tick.Items,
 			"item_blocks", tick.ItemBlocks, "owed_documents", tick.OwedDocuments, "owed_items", tick.OwedItems,
 			"owed_item_blocks", tick.OwedItemBlocks, "live_ahead", tick.LiveAhead)
 		*logged = tick
@@ -174,7 +173,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		case ctx.Err() != nil:
 			return tick, ctx.Err()
 		case err != nil:
-			slog.Error("dispatch: block index skipped a document it could not index",
+			s.log().Error("dispatch: block index skipped a document it could not index",
 				"artifact", document.id, "error", err)
 		case ahead:
 			tick.LiveAhead++
@@ -201,7 +200,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
 			}
-			slog.Error("dispatch: block index skipped an item it could not index",
+			s.log().Error("dispatch: block index skipped an item it could not index",
 				"kind", item.Kind, "id", item.ID, "error", err)
 			continue
 		}
@@ -218,7 +217,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
 			}
-			slog.Error("dispatch: block index skipped the blocks of an item it could not index",
+			s.log().Error("dispatch: block index skipped the blocks of an item it could not index",
 				"kind", item.Kind, "id", item.ID, "error", err)
 			continue
 		}
@@ -353,7 +352,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 	case ctx.Err() != nil:
 		return false, false, ctx.Err()
 	case errors.Is(err, ErrDocumentUnloadable), errors.Is(err, ErrDocOutsideSchema):
-		slog.Warn("dispatch: block index cannot read the document; its latest version is indexed with no blocks",
+		s.log().Warn("dispatch: block index cannot read the document; its latest version is indexed with no blocks",
 			"artifact", document.id, "error", err)
 		unreadable = true
 	case err != nil:
@@ -414,7 +413,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		}
 		held, heldBlocks, err := closedVersionBlocks(stored, markdown, blocks, indexRows)
 		if err != nil {
-			slog.Warn("dispatch: block index cannot read back a closed issue's document version; it is indexed with no blocks",
+			s.log().Warn("dispatch: block index cannot read back a closed issue's document version; it is indexed with no blocks",
 				"artifact", document.id, "version", version, "error", err)
 			held, heldBlocks = stored, nil
 		}

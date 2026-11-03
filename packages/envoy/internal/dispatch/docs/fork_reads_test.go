@@ -278,6 +278,7 @@ func requireForkReads(t *testing.T, what string, got, want forkReads) {
 // rendering, a mark already written is no change and keeps both, and a document outside the
 // schema answers its own refusal, which a read of it answers too.
 func TestForkReadsAMarkQuoteAnswersItsAnchorAndAVersionAfterItReusesItsRendering(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
 	topLevel := map[string]bool{}
@@ -564,6 +565,7 @@ func runForkSteps(t *testing.T, service *Service, artifactID string, checks *ren
 // whose fork stands where its one read left it, so every rendering after that commit is still
 // reused. Each version records the state its own transaction wrote.
 func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
 	markQuote := func(kind MarkKind, id, quote string) forkStep {

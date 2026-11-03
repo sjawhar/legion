@@ -73,6 +73,7 @@ func rebuildDocument(t *testing.T, service *Service, artifactID string, markdown
 // Until the rebuild's transaction ends its room refuses loads and a second rebuild, which would
 // read the old history the transaction has not yet replaced; once it commits, the room opens.
 func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	persistence := NewPgVersioned(database)
@@ -137,6 +138,7 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 // A resident room remains live even when no writer holds its advisory lock, so the server registry
 // refuses rebuilding it without changing durable history.
 func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before\n")
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
@@ -190,6 +192,7 @@ func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room str
 }
 
 func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	persist := &rebuildCaptureStore{
@@ -211,6 +214,7 @@ func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
 // paragraphs, past the 65,536 elements one write may make - stored before that bound, or grown past
 // it by browser edits - rebuilds whole.
 func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	heavy := strings.Repeat("a\n\n", 16_384) + "a\n"
@@ -234,6 +238,7 @@ func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
 // the route answers it 413 CAP_EXCEEDED rather than 500. 160,000 empty list items make about 1.12
 // million items, from 320 KB of markdown, and replace no history.
 func TestARebuildWhoseSeedPassesTheItemCapIsRefusedAsTooLarge(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	items := strings.Repeat("-\n", 160_000)
@@ -268,6 +273,7 @@ func TestARebuildWhoseSeedPassesTheItemCapIsRefusedAsTooLarge(t *testing.T) {
 // headings of exactly 1 MiB, which render as 1,064,959 bytes, are refused and replace no history;
 // the same headings two bytes shorter rebuild the document.
 func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}

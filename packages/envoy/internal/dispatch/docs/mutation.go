@@ -197,7 +197,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 	if err := op.write.state.failure(); err != nil {
 		// The 503 this becomes is the only other trace of a room that stays failed, so the
 		// refusal names the room and the cause here too (see awaitRoomRecovery).
-		slog.Warn("dispatch: refuse a joined write on a failed document room",
+		s.log().Warn("dispatch: refuse a joined write on a failed document room",
 			"room", op.write.artifactID, "error", err)
 		return err
 	}
@@ -1603,7 +1603,7 @@ func (s *Service) SetBlockAttributes(
 	err := s.setBlockAttributes(ctx, artifactID, blockID, attributes, actor)
 	if IsTooLarge(err) {
 		if withheld, withholds := withoutAnswer(attributes); withholds {
-			slog.Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
+			s.log().Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
 			// A refused write appends nothing, and the transaction's next write starts from a
 			// fork built again without it (forkLive).
 			err = s.setBlockAttributes(ctx, artifactID, blockID, withheld, actor)

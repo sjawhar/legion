@@ -23,6 +23,7 @@ import (
 // version the block as still open and index the open block's text. An answer that selects
 // nothing is versioned as the room holds it, an empty list.
 func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext before.\n")
@@ -90,6 +91,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 // rendering of the read would index no row for the appended paragraph, and version and index the
 // pasted callout under the id of the callout it copies.
 func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before\n\n:::callout{#note kind=\"note\" title=\"\"}\nNoted.\n:::\n")

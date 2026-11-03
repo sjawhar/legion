@@ -24,6 +24,7 @@ import (
 // browser edits in between keeps the edit, and the stored document and the version the settlement
 // writes hold both (LEGION-479).
 func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -52,6 +53,7 @@ func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
 // before it versions writes the version of the document as it stands, the edit included, rather
 // than of the tree its stamp read (LEGION-479).
 func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -81,6 +83,7 @@ func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
 // replacement: its version is read from the document it held, which would never get the repair.
 // The settlement the replacement's load arms versions the document with the repair (LEGION-479).
 func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -125,6 +128,7 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 // edit's author too: the edit's own settlement finds the document already versioned and writes no
 // version that could credit them (LEGION-479).
 func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -159,6 +163,7 @@ func TestSettlementRepairCreditsTheAuthorOfAnEditItsVersionHolds(t *testing.T) {
 // from - while that version renders - is not in the version, so the version does not credit its
 // author. The version the edit's own settlement writes holds it and credits them (LEGION-479).
 func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -222,6 +227,7 @@ func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []m
 // the edit's own append - and the edit's own settlement finds the document already versioned
 // (LEGION-479).
 func TestSettlementStoresAnEditItsRepairedVersionHoldsBeforeTheRepair(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
@@ -272,6 +278,7 @@ func requireLatestVersionMarkdown(t *testing.T, service *Service, artifactID, wa
 // scheduled. The repair's transaction, which changed nothing, still reports an update; its slot is
 // finished with that update and the room's persistence worker consumes it (LEGION-479).
 func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext.\n")
@@ -318,6 +325,7 @@ func latestVersionNumber(t *testing.T, service *Service, artifactID string) int 
 // persistence worker at the next update it is handed, and every later update of the room with it
 // (LEGION-479).
 func TestSettlementReleasesTheSlotOfAStampTheDocumentNoLongerNeeds(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -356,6 +364,7 @@ func TestSettlementReleasesTheSlotOfAStampTheDocumentNoLongerNeeds(t *testing.T)
 // content change, for which the next settlement would version a document nobody edited
 // (LEGION-479).
 func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
@@ -416,6 +425,7 @@ func TestBackfillStoresNothingForAStampTheDocumentNoLongerNeeds(t *testing.T) {
 // room, and the room's persistence worker is handed each on its own. Both are held from it and
 // released once each reaches it (LEGION-479).
 func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
@@ -445,6 +455,7 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 // settlement holds, waits for the repair's commit to reach the room's persistence rather than
 // retiring the room's worker under it (roomServer, LEGION-498).
 func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	pause := pauseRepairCommits(service)
@@ -482,6 +493,7 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 // settlement is refused its broadcast once the room is shutting down and fails the room, whose
 // unstored updates its browsers send again when they reconnect.
 func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.T) {
+	t.Parallel()
 	for _, closer := range []struct {
 		name  string
 		close func(service *Service, artifactID string) error

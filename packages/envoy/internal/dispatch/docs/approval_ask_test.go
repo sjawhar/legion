@@ -7,6 +7,7 @@ import (
 )
 
 func TestApprovalAskSummaryRoundTripsTheSharedQuestion(t *testing.T) {
+	t.Parallel()
 	ask := model.Ask{
 		ID:       "approval-1",
 		Question: ApprovalQuestion("spec.md", 2, "Names the rollback plan."),

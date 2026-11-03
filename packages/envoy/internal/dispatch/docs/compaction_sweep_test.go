@@ -21,6 +21,7 @@ import (
 // than the tail fold into the fold point and the young row stays as written, byte for byte, and the
 // document reads as it did.
 func TestTheCompactionSweepFoldsADocumentTheRestartedServiceNeverOpened(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -53,7 +54,7 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	second := storetest.SecondProcess(t, database)
-	waitOutTheSweepHour(t, database)
+	sweepDue := sweepHourMidpoint(t, database)
 	logs := &storetest.LockedLog{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
@@ -64,14 +65,14 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 	t.Cleanup(func() { _ = other.Shutdown(context.Background()) })
 
 	swept := storeAgedRows(t, database, 3, 20*time.Minute)
-	first.compactionSweepTick(ctx, excerptLeases(t, database))
+	first.compactionSweepTickAt(ctx, excerptLeases(t, database), sweepDue)
 	if got := storedRows(t, database, swept); len(got) != 1 {
 		t.Fatalf("the first process's sweep left rows %v, want the document folded into one", rowVersions(got))
 	}
 
 	due := storeAgedRows(t, database, 3, 20*time.Minute)
 	rows := storedRows(t, database, due)
-	other.compactionSweepTick(ctx, excerptLeases(t, second))
+	other.compactionSweepTickAt(ctx, excerptLeases(t, second), sweepDue)
 	requireRowsAsStored(t, database, due, rows)
 
 	ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", compactionSweepLease)
@@ -81,13 +82,13 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 	}
 	var thisHour bool
 	if err := database.Pool.QueryRow(ctx, `
-		select boundary = to_timestamp(floor(extract(epoch from now()) / 3600) * 3600)
+		select boundary = to_timestamp(floor(extract(epoch from $3::timestamptz) / 3600) * 3600)
 		from duty_passes where lease = $1 and period_ns = $2
-	`, compactionSweepLease, compactionSweepPeriod.Nanoseconds()).Scan(&thisHour); err != nil {
+	`, compactionSweepLease, compactionSweepPeriod.Nanoseconds(), sweepDue).Scan(&thisHour); err != nil {
 		t.Fatalf("read the sweep's duty record: %v", err)
 	}
 	if !thisHour {
-		t.Fatal("the sweep's duty record does not hold this hour's pass")
+		t.Fatal("the sweep's duty record does not hold the hour the ticks were due in")
 	}
 }
 
@@ -96,6 +97,7 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 // past the tail, so a compaction would fold them, and fewer than compactMinRows - is left as stored
 // for the queue of whichever process writes or reads it next.
 func TestTheCompactionSweepLeavesADocumentWhoseRowsAreYoungerThanTheAgeRule(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -116,6 +118,7 @@ func TestTheCompactionSweepLeavesADocumentWhoseRowsAreYoungerThanTheAgeRule(t *t
 // its first, and no other: a document of one row, or of none, has nothing a compaction could fold,
 // and the append of a document's first row names nothing.
 func TestTheCompactionSweepListsADocumentOnceAnAppendGivesItASecondRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	one := storeAgedRows(t, database, 1, time.Hour)
@@ -147,6 +150,7 @@ func TestTheCompactionSweepListsADocumentOnceAnAppendGivesItASecondRow(t *testin
 // point: one that folds every row, all of them old, takes it off, and one that leaves a row younger
 // than the tail above the fold point keeps it there until a later compaction folds that row too.
 func TestACompactionTakesItsDocumentOffTheSweepsListOnceNoRowStaysAboveTheFoldPoint(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	whole := storeAgedRows(t, database, 3, time.Hour)
@@ -174,6 +178,7 @@ func TestACompactionTakesItsDocumentOffTheSweepsListOnceNoRowStaysAboveTheFoldPo
 // A document's deletion and its rebuild, which leaves it one row, each take it off the sweep's
 // list in their own transaction; the rebuilt document's next append names it again.
 func TestDeleteAndRebuildTakeTheDocumentOffTheSweepsList(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
@@ -209,6 +214,7 @@ func TestDeleteAndRebuildTakeTheDocumentOffTheSweepsList(t *testing.T) {
 // single row, one whose rows went with its artifact - and keeps a document whose rows after its
 // first are too young to be due, which it leaves as stored.
 func TestTheCompactionSweepForgetsADocumentWithNoRowAfterItsFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -263,6 +269,7 @@ func requireOwed(t *testing.T, database *store.Store, what string, want ...strin
 // lists its candidates by reading every document's rows (a scan of doc_updates, by its heap or its
 // primary key) reads at least one row per document, every hour, on a table of production's size.
 func TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -339,6 +346,7 @@ func docUpdatesTuplesRead(t *testing.T, database *store.Store) int64 {
 // compaction queue, not waited for: the pass goes on and compacts the next document, and the queue
 // compacts the busy one once its lock is free.
 func TestTheCompactionSweepHandsABusyDocumentToTheQueue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -368,23 +376,28 @@ func TestTheCompactionSweepHandsABusyDocumentToTheQueue(t *testing.T) {
 	}
 }
 
-// waitOutTheSweepHour returns with at least half a minute of the database clock's aligned hour
-// left, so two sweep ticks a test makes one after the other fall in one period (duty.Exclusive).
-func waitOutTheSweepHour(t *testing.T, database *store.Store) {
+// sweepHourMidpoint is the middle of the aligned hour the database clock is in, the instant a
+// test makes its sweep ticks due at. The sweep's period is an hour (duty.Exclusive), so two ticks
+// a test makes one after the other fall in one period only while the hour does not turn between
+// them; a fixed instant inside the hour says which period each tick is for, instead of waiting
+// out the up to an hour that is left of the one the test happens to start in.
+func sweepHourMidpoint(t *testing.T, database *store.Store) time.Time {
 	t.Helper()
-	var left time.Duration
-	if err := database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, compactionSweepPeriod.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the hour is left: %v", err)
+	var now time.Time
+	if err := database.Pool.QueryRow(context.Background(), `select now()`).Scan(&now); err != nil {
+		t.Fatalf("read the database clock: %v", err)
 	}
-	if left < 30*time.Second {
-		time.Sleep(left + time.Second)
-	}
+	return now.Truncate(compactionSweepPeriod).Add(compactionSweepPeriod / 2)
 }
 
 // compactionSweepTick is one tick of the sweep, due now, as RunCompactionSweep's ticker makes one:
 // the pass, when this process takes the lease and no process has swept this hour.
 func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, compactionSweepLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
+	s.compactionSweepTickAt(ctx, leases, time.Now())
+}
+
+// compactionSweepTickAt is compactionSweepTick for a tick the test says is due at due, so which
+// period it is for does not depend on when the test runs.
+func (s *Service) compactionSweepTickAt(ctx context.Context, leases duty.Leases, due time.Time) {
+	duty.Exclusive(ctx, leases, compactionSweepLease, due, compactionSweepPeriod, s.compactionSweepPass)
 }

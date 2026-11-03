@@ -18,6 +18,7 @@ import (
 // comments, suggestions and asks. A row anchored on another document, a comment with no anchor
 // and an ask block (block_artifact_id set, no anchor) record none of its marks.
 func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	documentA := createDocument(t, database, "")
 	documentB := createDocument(t, database, "")
@@ -68,6 +69,7 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 // so asks_anchor_artifact's coalesce (0032) never cast their anchor - they are exactly the shape
 // an earlier release could have stored and no index has checked.
 func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	documentA := createDocument(t, database, "")
 	documentB := createDocument(t, database, "")
@@ -109,6 +111,7 @@ func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 // test requires the index's node to carry an Index Cond, and fails exactly when an edit to a
 // target's uuid expression breaks its exact-expression match with that table's anchor index.
 func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	for _, target := range recordedMarkTargets {
 		t.Run(target.table, func(t *testing.T) {

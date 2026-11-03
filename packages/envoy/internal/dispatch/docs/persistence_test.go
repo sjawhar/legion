@@ -16,6 +16,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// The package runs at go test's own parallelism, one test per core, and not above it: a document
+// test waits on Postgres and on its own rooms, and those waits are work a core is doing
+// elsewhere, not idle time. Eight at once on a two-core machine was measured at three times the
+// package's elapsed, with tests failing their own deadlines under the contention
+// (dispatch://INFRA-1075).
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
@@ -126,6 +131,7 @@ func genRandomSuffix(t testing.TB) string {
 }
 
 func TestPgVersionedConformance(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	persistence.RunConformance(t, func() persistence.VersionedPersistence {
 		return newMappedTestPersistence(t, database)
@@ -205,6 +211,7 @@ func (p *mappedTestPersistence) artifactIDForRoom(room string) string {
 // after that is an error - a caller that reaches one has outlived the process's shutdown - and
 // never a nil-pool dereference, including when nothing had loaded a room before the close.
 func TestLoadAfterClosingThePoolErrors(t *testing.T) {
+	t.Parallel()
 	unusedDatabase := storetest.Open(t)
 	unusedArtifact := createDocument(t, unusedDatabase, "before")
 	unusedDatabase.Pool.Close()

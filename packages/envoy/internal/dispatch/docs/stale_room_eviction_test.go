@@ -135,6 +135,7 @@ func requireNoStaleRoomNote(t *testing.T, notes <-chan staleRoomNote, artifactID
 // document, B's paragraph included. Without the eviction it would hold A's text, which the store
 // no longer has, for as long as it stayed connected.
 func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	runStaleRoomEvictor(t, pair.taskA)
 	browser := connectPeer(t, pair.serverA.URL, pair.artifactID, "alice")
@@ -172,6 +173,7 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 // under the lock it appended in, so the room stands at the head - and this waits for each
 // keystroke's own notification to be decided rather than for a moment to pass.
 func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	notes := runStaleRoomEvictor(t, pair.taskA)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -216,6 +218,7 @@ func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {
 // taken from under its readers before any reconnect could finish. The interval is measured on the
 // evictor's clock, which this test holds still and then moves past staleRoomEvictInterval.
 func TestABurstOnTheOtherProcessEvictsARoomOnceWithinTheInterval(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -255,6 +258,7 @@ func TestABurstOnTheOtherProcessEvictsARoomOnceWithinTheInterval(t *testing.T) {
 // interval asked after the locked confirmation, the call below waits for this test's own
 // transaction instead, and the test fails on its bounded wait.
 func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -315,6 +319,7 @@ func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
 // test's own, and the interval is measured on the evictor's clock, which this test holds still
 // over the burst and then moves past the window.
 func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	clock := &atomic.Int64{}
@@ -383,6 +388,7 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 // failed read. A close an open live write held off is the other way to reach no verdict; its
 // re-arm is asserted by TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen.
 func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -450,6 +456,7 @@ func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *
 // are what this asserts, not the steps between them: the first is the cadence the ordinary case
 // converges on, and the ceiling is the rate the backoff climbs to and stays at.
 func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -517,6 +524,7 @@ func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *test
 // (staleRoomEvictor.connected), which is why the wait below is on the reconnect and not on a
 // notification.
 func TestARoomLeftBehindWhileTheListenerWasDownIsEvictedOnTheReconnect(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	var down atomic.Bool
@@ -559,6 +567,7 @@ func TestARoomLeftBehindWhileTheListenerWasDownIsEvictedOnTheReconnect(t *testin
 // TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit,
 // TestAStaleRoomWithItsBrowsersAppendQueuedIsEvicted).
 func TestARoomWithAnOpenLiveWriteIsNotEvictedUnderIt(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -591,6 +600,7 @@ func TestARoomWithAnOpenLiveWriteIsNotEvictedUnderIt(t *testing.T) {
 // with a reader on it and nothing left to look at it again: roomIdleTimeout counts from the last
 // peer leaving, which a room with a tab in it never reaches.
 func TestARoomReExaminedWithAWriteInFlightKeepsItsWindow(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -650,6 +660,7 @@ func TestARoomReExaminedWithAWriteInFlightKeepsItsWindow(t *testing.T) {
 // by whichever close reserves it first: the evictor's, or the refused settlement's own
 // (reloadRoomBehindHead), which the evictor finds reserved and leaves to it as a verdict.
 func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
 	now := time.Now()
@@ -757,6 +768,7 @@ func TestAStaleRoomWhoseWindowEndsAsItsSettlementRunsIsEvicted(t *testing.T) {
 // the room at the head; closed instead, the room would lose its reader over this process's own
 // repair.
 func TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	editAsConnectedPeer(t, pair.taskA, pair.artifactID, 1, alice,
@@ -819,6 +831,7 @@ func TestARepairingSettlementIsNotEvictedBetweenItsCursorAndItsCommit(t *testing
 // stands at the head and writes. Deferring to the append as a write in flight instead left the
 // room to the append's own failure, and armed a window that closed nothing more.
 func TestAStaleRoomWithItsBrowsersAppendQueuedIsEvicted(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -870,6 +883,7 @@ func TestAStaleRoomWithItsBrowsersAppendQueuedIsEvicted(t *testing.T) {
 // the store at the head, and a close by name, once the confirmation finds the old instance behind,
 // closes it under the browser that has just synced with it.
 func TestAnEvictionClosesOnlyTheInstanceItFoundBehind(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -920,6 +934,7 @@ func TestAnEvictionClosesOnlyTheInstanceItFoundBehind(t *testing.T) {
 // replacement loads at the head with a state of its own. The failure's eviction, closing by name,
 // closed that replacement under the browser that had just synced with it.
 func TestAFailedRoomsEvictionLeavesTheReloadThatReplacedIt(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	ctx := context.Background()
@@ -983,6 +998,7 @@ func TestAFailedRoomsEvictionLeavesTheReloadThatReplacedIt(t *testing.T) {
 // (maxSettleFailures). The stale-room evictor no longer waits for a running settlement, so such a
 // settlement is one it leaves behind every time it evicts while one runs.
 func TestASettlementOfAnEvictedRoomCountsNoFailureAgainstItsReload(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	ctx := context.Background()
@@ -1040,6 +1056,7 @@ func TestASettlementOfAnEvictedRoomCountsNoFailureAgainstItsReload(t *testing.T)
 // arming took it, and a settlement refused after the close counted its refusal against the
 // reload.
 func TestALiveWriteDuringAnEvictionLeavesNoGenerationForTheReload(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	ctx := context.Background()
@@ -1103,6 +1120,7 @@ func TestALiveWriteDuringAnEvictionLeavesNoGenerationForTheReload(t *testing.T) 
 // lock and taking it the instant the commit drops it, is refused and fails the room under the
 // browser that made the edit.
 func TestAColdWritesOwnRoomIsNotLeftBehindBetweenItsCommitAndPublish(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -1171,6 +1189,7 @@ func TestAColdWritesOwnRoomIsNotLeftBehindBetweenItsCommitAndPublish(t *testing.
 // A notification for a document this process holds no room for does nothing: it loads no room,
 // and it is most of the traffic on the channel, since every append of both processes notifies.
 func TestANotificationForADocumentWithNoRoomHereDoesNothing(t *testing.T) {
+	t.Parallel()
 	pair := newProcessPair(t)
 	elsewhere := createDocument(t, pair.database, "# Elsewhere")
 	seedServiceText(t, pair.taskB, elsewhere, "Only the other process holds this.\n")
@@ -1189,6 +1208,7 @@ func TestANotificationForADocumentWithNoRoomHereDoesNothing(t *testing.T) {
 // transaction commits: an append rolled back - the gate's refusal, a commit that failed - leaves
 // the stored document as it was, and must evict nobody's room.
 func TestADurableAppendIsAnnouncedOnlyWhenItsTransactionCommits(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	heard := listenForDocumentChanges(t, database)
@@ -1236,6 +1256,7 @@ func TestADurableAppendIsAnnouncedOnlyWhenItsTransactionCommits(t *testing.T) {
 // A rebuild replaces a document's whole stored history in its own transaction (RebuildTx), and
 // announces it there too: every room resident elsewhere holds a history that no longer exists.
 func TestARebuildAnnouncesTheDocumentsChange(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	// invalid makes the document's first load unreadable, which is what a rebuild needs to see
@@ -1311,6 +1332,7 @@ func listenForDocumentChanges(t *testing.T, database *store.Store) <-chan string
 // advanced, or still holds it, so the second read waits for it. Deciding on the pool read alone
 // closes a healthy room mid-write, and the browser that was typing into it is disconnected.
 func TestARoomIsNotEvictedBetweenItsOwnAppendsCommitAndItsCursor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service, _ := newTestServiceInstance(t, database)

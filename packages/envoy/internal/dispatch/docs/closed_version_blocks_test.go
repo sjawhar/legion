@@ -14,6 +14,7 @@ import (
 // paste's text is "Bar.". refs.IndexBlocks indexes only the first holder of an id, so the
 // version's two "Foo." blocks take p1 and p2, each once.
 func TestClosedVersionBlocksCountsOnlyTheFirstHolderOfAnID(t *testing.T) {
+	t.Parallel()
 	paragraph := func(id, body string) *pmdoc.Node {
 		return &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id}, Children: []*pmdoc.Node{{Type: "text", Text: body}}}
 	}

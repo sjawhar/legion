@@ -32,6 +32,7 @@ import (
 // private specs: the test logs only their size, sha256 and anchor count, and a difference on one
 // names only lengths and sha256s.
 func TestAMarginWriteMatchesTheWholeDocumentWrite(t *testing.T) {
+	t.Parallel()
 	sources := []equivalenceSource{
 		{name: "generated-390KiB", markdown: generatedSpec(390 << 10)},
 		{name: "generated-600KiB", markdown: generatedSpec(600 << 10)},

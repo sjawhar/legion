@@ -44,6 +44,7 @@ func dropBlock(t *testing.T, prefix string) func(*pmdoc.Node) *pmdoc.Node {
 // The settlement that follows the write's publish versions the deletion. A deletion creates no Yjs
 // struct and advances no client's clock, the case a clock-only signal would miss.
 func TestADeletionTheRoomTakesAfterAWritesReadIsVersionedAfterTheWrite(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before\n\ndoomed paragraph")
@@ -88,6 +89,7 @@ func TestADeletionTheRoomTakesAfterAWritesReadIsVersionedAfterTheWrite(t *testin
 // version the settlement then writes holds the deletion, and its refresh, the only one that sees
 // the quote gone, must orphan the ask.
 func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before\n\nthe anchored quote paragraph")
@@ -145,6 +147,7 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 // is a browser and an agent writing together, where every spurious invalidation is a full document
 // render back under the issue row.
 func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -201,6 +204,7 @@ func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
 // encoding of the room runs, so it is granted the lock in that window: the interleave is driven
 // rather than waited for.
 func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	body := make([]string, 0, 1200)
@@ -211,7 +215,11 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	reused, stale := 0, 0
-	const rounds = 640
+	// One pass over the 160 offsets the delete is walked across below, rather than the four the
+	// round count used to make: every position in the window is still swept, and a position
+	// swept again samples the same interleave at four times the cost of a round, which on this
+	// document is a third of a second (dispatch://INFRA-1075).
+	const rounds = 160
 	for round := range rounds {
 		marker := fmt.Sprintf("DOOMED-%d under the browser's cursor", round)
 		editLiveTree(t, service, artifactID, appendBlocks(t, marker))

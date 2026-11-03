@@ -13,6 +13,7 @@ import (
 // for a room nothing is closing or repairing, however many documents were repaired, evicted, or
 // closed with their issue without ever loading.
 func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
+	t.Parallel()
 	service, first := newTestService(t)
 	service.settle = time.Hour
 	ctx := context.Background()
@@ -53,6 +54,7 @@ func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
 // for the close: the close waits for repairs already committing, and a settlement writing a repair
 // holds the document's lock, which a failed room's close compacts under (roomServer).
 func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	generation := owedStamp(t, service, artifactID)
@@ -93,6 +95,7 @@ func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
 // A repair holds the exact document Server.Apply found. Once its room has retired that document,
 // holdOpen refuses and releases the gate it acquired for the check.
 func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	owedStamp(t, service, artifactID)

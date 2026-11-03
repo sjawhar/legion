@@ -19,6 +19,7 @@ import (
 // were found over the wrong tree, or over the wrong range of it, waves one of these through or
 // names another block.
 func TestEditRefusalsKeepTheirWords(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		document string
@@ -68,6 +69,7 @@ func TestEditRefusalsKeepTheirWords(t *testing.T) {
 // own shape, and its code writable in a cell is applied, so none of them refuses a write by
 // reading blocks the write never changed.
 func TestEditRefusalsKeepAWriteTheyDoNotJudge(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, document, with, want string }{
 		{"html inside a line", "Intro.\n\nfoo Body. bar\n", "<div>x</div>", "Intro.\n\nfoo <div>x</div> bar\n"},
 		{"code without a pipe in a cell", "| h |\n| --- |\n| Body. |\n", "`a b`", "| h |\n| --- |\n| `a b` |\n"},

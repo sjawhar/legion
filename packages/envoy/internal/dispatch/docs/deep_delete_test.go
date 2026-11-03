@@ -27,6 +27,7 @@ import (
 // of the recursive delete is 208 bytes, so at this depth it needs about 40 MiB, two and a half
 // times the cap.
 func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
+	t.Parallel()
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		const (
 			levels      = 200_000

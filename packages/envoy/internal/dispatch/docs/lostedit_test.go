@@ -143,6 +143,7 @@ func rewritingTopLevelBlock(text, want string) func(*pmdoc.Node) *pmdoc.Node {
 // the browser's document while naming the agent as its author, and the agent would move on
 // believing its edit landed (LEGION-269).
 func TestAnEditIsRefusedWhenAConcurrentChangeRemovesItsTextBeforeTheVersion(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		edit func(*pmdoc.Node) *pmdoc.Node
@@ -205,6 +206,7 @@ func TestAnEditIsRefusedWhenAConcurrentChangeRemovesItsTextBeforeTheVersion(t *t
 // text typed into the same paragraph, text removed around the agent's own insertion, and a
 // deletion elsewhere in the document all merge with it.
 func TestAnEditThatSurvivesAConcurrentChangeStillReportsSuccess(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		edit func(*pmdoc.Node) *pmdoc.Node
@@ -254,6 +256,7 @@ func TestAnEditThatSurvivesAConcurrentChangeStillReportsSuccess(t *testing.T) {
 // An operation whose only change is a removal inserts nothing a concurrent deletion could undo, so
 // a browser deleting the same paragraph never refuses it.
 func TestADeletingOperationIsNeverReportedLost(t *testing.T) {
+	t.Parallel()
 	service, artifactID := lostEditService(t)
 	edit := startEditInFlight(t, service, artifactID, model.EditOp{
 		Op: "delete", Find: "Alpha paragraph.",
@@ -277,6 +280,7 @@ func TestADeletingOperationIsNeverReportedLost(t *testing.T) {
 // reports it instead, so the agent learns the live document does not carry its change
 // (LEGION-269's second window).
 func TestAnEditReportsTextTheRoomLostBetweenTheVersionAndThePublish(t *testing.T) {
+	t.Parallel()
 	service, artifactID := lostEditService(t)
 	edit := startEditInFlight(t, service, artifactID, model.EditOp{
 		Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph edited.",
@@ -313,6 +317,7 @@ func TestAnEditReportsTextTheRoomLostBetweenTheVersionAndThePublish(t *testing.T
 // Nothing concurrent, nothing lost: the uncontended edit reaches a verdict of its own rather than
 // leaving the caller unable to tell survival from an unanswered check.
 func TestAnUncontendedEditPublishesAnEmptyLossVerdict(t *testing.T) {
+	t.Parallel()
 	service, artifactID := lostEditService(t)
 	edit := startEditInFlight(t, service, artifactID, model.EditOp{
 		Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph edited.",
@@ -334,6 +339,7 @@ func TestAnUncontendedEditPublishesAnEmptyLossVerdict(t *testing.T) {
 // same way. It has no operation index, so its refusal names the suggestion, and a loss in the
 // second window reports on the accept rather than on an operation.
 func TestAnAcceptedSuggestionIsRefusedWhenAConcurrentChangeRemovesItsText(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		lateEdit bool
@@ -404,6 +410,7 @@ func TestAnAcceptedSuggestionIsRefusedWhenAConcurrentChangeRemovesItsText(t *tes
 // A batch of several operations names the ones that went, not the batch: the refusal is
 // all-or-nothing, but the caller has to know which of its operations the document lost.
 func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
+	t.Parallel()
 	service, artifactID := lostEditService(t)
 	edit := startEditInFlight(t, service, artifactID,
 		model.EditOp{Op: "replace", Find: "Alpha paragraph.", With: "Alpha paragraph edited."},
@@ -427,6 +434,7 @@ func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
 // wrote it, so the batch answers for it: such a block belongs to every operation of the batch,
 // and the paragraph never vanishes while the edit reports success.
 func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		ops     []model.EditOp
@@ -493,6 +501,7 @@ func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
 // concurrent change could remove, so it reaches the empty verdict. Only a publish that failed
 // leaves none, so the caller can always tell survival from an unanswered check.
 func TestAnEditThatInsertsNothingStillReachesAVerdict(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		op   model.EditOp

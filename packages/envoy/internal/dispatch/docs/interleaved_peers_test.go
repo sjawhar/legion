@@ -26,6 +26,7 @@ import (
 // held hand-over; and once that hand-over runs it stores nothing and leaves the room counting no
 // update as pending, so nothing holds the room's settlement or its record (unusedLocked).
 func TestARoomWhosePeersUpdatesReachItsPersistenceOutOfOrderSettlesBoth(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	var attempts atomic.Int64

@@ -19,6 +19,7 @@ import (
 // and the fork a write of a document no room holds makes (coldFork). Each refusal is still an
 // invalid update.
 func TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce(t *testing.T) {
+	t.Parallel()
 	row := newProofHistory(t, 101).write("A first paragraph.\n\nA second paragraph, longer than the first.\n")
 	cutWhere := func(reasonless bool) []byte {
 		t.Helper()

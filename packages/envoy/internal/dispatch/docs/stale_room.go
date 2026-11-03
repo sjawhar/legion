@@ -91,6 +91,10 @@ type staleRoomEvictor struct {
 	backoff                 func(attempt int) time.Duration
 	// now is the clock the interval is measured on, the service's; a test moves its own.
 	now func() time.Time
+	// interval is the least time between two evictions of one room, the service's
+	// (staleRoomEvictInterval); a test that drives the evictor on a clock of its own sets a short
+	// one, so the room it waits out of the window is waited out in milliseconds.
+	interval time.Duration
 	// listening runs after each LISTEN succeeds and the sweep that follows it (connected), and
 	// handled after each notification is decided. Nil outside tests: a test waits on listening
 	// before the write whose notification it expects, since a notification sent before the LISTEN
@@ -122,6 +126,7 @@ func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 		service:  service,
 		dial:     service.store.Pool.Listener,
 		now:      service.now,
+		interval: service.staleRoomEvictInterval,
 		evicted:  map[string]time.Time{},
 		deferred: map[string]time.Time{},
 		attempts: map[string]int{},
@@ -415,10 +420,10 @@ func (e *staleRoomEvictor) mayEvict(artifactID string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	last, evicted := e.evicted[artifactID]
-	if !evicted || now.Sub(last) >= staleRoomEvictInterval {
+	if !evicted || now.Sub(last) >= e.interval {
 		return true
 	}
-	e.deferred[artifactID] = last.Add(staleRoomEvictInterval)
+	e.deferred[artifactID] = last.Add(e.interval)
 	return false
 }
 
@@ -480,7 +485,7 @@ func (e *staleRoomEvictor) recordEviction(artifactID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for room, at := range e.evicted {
-		if now.Sub(at) >= staleRoomEvictInterval {
+		if now.Sub(at) >= e.interval {
 			delete(e.evicted, room)
 		}
 	}
@@ -526,8 +531,8 @@ const staleRoomRetryBackoffMax = 2 * pglisten.DefaultListenIdle
 // and adds no jitter: the jitter is there to keep the tasks of a rolling deploy from redialing
 // one database in step, and this is one process re-reading one of its own rooms, which nothing
 // else is in step with.
-func staleRoomRetryBackoff(attempt int) time.Duration {
-	wait := staleRoomEvictInterval
+func (e *staleRoomEvictor) staleRoomRetryBackoff(attempt int) time.Duration {
+	wait := e.interval
 	for n := 1; n < attempt && wait < staleRoomRetryBackoffMax; n++ {
 		wait *= 2
 	}
@@ -562,7 +567,7 @@ func (e *staleRoomEvictor) armRetry(artifactID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.attempts[artifactID]++
-	e.deferred[artifactID] = now.Add(staleRoomRetryBackoff(e.attempts[artifactID]))
+	e.deferred[artifactID] = now.Add(e.staleRoomRetryBackoff(e.attempts[artifactID]))
 }
 
 // reachedVerdict ends artifactID's run of attempts that reached none, so the next one is armed

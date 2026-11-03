@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -293,7 +292,7 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		state := s.lockState(artifactID)
 		if state.reloading {
 			s.unlockState(artifactID, state)
-			slog.Warn("dispatch: refuse a write on a document room closing behind the durable head", "room", artifactID)
+			s.log().Warn("dispatch: refuse a write on a document room closing behind the durable head", "room", artifactID)
 			return nil, fmt.Errorf("%w: room %s", errRoomReloading, artifactID)
 		}
 		if state.liveWriter == nil {
@@ -812,7 +811,7 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 		if err == nil {
 			continue
 		}
-		slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+		s.log().Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
 		if s.afterPublishRefused != nil {
 			s.afterPublishRefused(write.artifactID)
 		}
@@ -859,11 +858,11 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if err := s.readLive(write.artifactID, live, func(doc *crdt.Doc) {
 		lost, lossErr = write.loss.lost(doc)
 	}); err != nil {
-		slog.Warn("dispatch: copy a published write's room to read its text back", "room", write.artifactID, "error", err)
+		s.log().Warn("dispatch: copy a published write's room to read its text back", "room", write.artifactID, "error", err)
 		return
 	}
 	if lossErr != nil {
-		slog.Warn("dispatch: read a published write's text back from its room", "room", write.artifactID, "error", lossErr)
+		s.log().Warn("dispatch: read a published write's text back from its room", "room", write.artifactID, "error", lossErr)
 		return
 	}
 	write.lost, write.lostVerdict = lost, true

@@ -25,6 +25,7 @@ import (
 // nothing of the refused update, then reaches the other peer, and the room and that peer must read
 // the same document.
 func TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	shrinkPendingItems(t, service, nil)
 	seedServiceText(t, service, artifactID, "hello world")

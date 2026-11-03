@@ -19,6 +19,7 @@ import (
 )
 
 func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "one two one")
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
@@ -42,6 +43,7 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 // An edit that leaves the canonical markdown as it was is not a failure and not a change: the
 // route mints no version for it, so ApplyOps carries the batch's own verdict out.
 func TestApplyOpsReportsABatchThatWroteNoUpdatesAsUnchanged(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	result, err := joinedApplyOps(service, artifactID, []model.EditOp{
@@ -60,6 +62,7 @@ func TestApplyOpsReportsABatchThatWroteNoUpdatesAsUnchanged(t *testing.T) {
 // The other no-op shape: operations that do write Yjs updates (here a fresh block id) and still
 // leave the canonical markdown byte-identical. It has to report exactly like the first.
 func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
 	blocksBefore, err := service.Blocks(context.Background(), artifactID)
@@ -93,6 +96,7 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 // an anchor's edge writes its text outside that anchor. That is a change, and the version that
 // records it must still be minted (Deep1326).
 func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Keep anchored words here.")
 	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
@@ -116,6 +120,7 @@ func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 }
 
 func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
 	if err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -152,6 +157,7 @@ func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing
 }
 
 func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
@@ -218,6 +224,7 @@ func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.
 }
 
 func TestConditionalEditAdmissionBoundsQueuedRequests(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	release, err := service.AcquireConditionalEdit(context.Background(), artifactID)
 	if err != nil {
@@ -263,6 +270,8 @@ func queueDepth(gate *conditionalEditGate) int {
 	return gate.queued
 }
 
+// It runs on its own: pmdoc.SetBlockIDGenerator replaces the package-level generator every minted
+// block id comes from, so any test whose write mints an id beside it would be given this test's.
 func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
 	pmdoc.SetBlockIDGenerator(func() string { return "generated-body" })
 	t.Cleanup(func() { pmdoc.SetBlockIDGenerator(nil) })
@@ -292,6 +301,7 @@ func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
 }
 
 func TestApplyOperationLabelsInvalidRetypeFields(t *testing.T) {
+	t.Parallel()
 	tree, err := pmdoc.Parse("Which transport should we expose?\n")
 	if err != nil {
 		t.Fatalf("parse source paragraph: %v", err)
@@ -316,6 +326,7 @@ func TestApplyOperationLabelsInvalidRetypeFields(t *testing.T) {
 }
 
 func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nShip it?\n:::\n")
@@ -336,6 +347,7 @@ func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
 }
 
 func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")
 	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
@@ -350,6 +362,7 @@ func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 }
 
 func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# First")
@@ -383,6 +396,7 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 }
 
 func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# Title\n\nBody text.\n")
 	_, err := joinedApplyOps(service, artifactID, []model.EditOp{
@@ -398,6 +412,7 @@ func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 }
 
 func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "keep")
 	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
@@ -411,6 +426,7 @@ func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 // Table rows inserted before a table's header cell, which the table cannot hold there, are an
 // invalid insert naming its markdown, never an error the handler answers 500.
 func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ spec, markdown string }{
 		{"| a | b |\n| --- | --- |\n| c | d |\n", "| x | y |"},
 		{"| a |\n| --- |\n| c |\n", "| a |\n| - |\n| b |"},
@@ -428,6 +444,7 @@ func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
 }
 
 func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -500,6 +517,7 @@ func wholeBudgetTable() *pmdoc.Node {
 // beside a stored table spanning 5,940 cells, or 1,000 cells after six paragraph inserts, are
 // stored, a small table among them included.
 func TestApplyOperationsInsertsBesideAStoredSpanTableSpendNoBatchBudget(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name              string
 		width, rows       int
@@ -551,6 +569,7 @@ func spannedTable(width, rows int) *pmdoc.Node {
 // rows each insert of a batch writes share the batch's budget: two inserts of 60 one-cell rows into
 // a 100-column table, 5,940 cells each, are refused at the second, naming the limit.
 func TestApplyOperationsChargesEveryTableRowInsertToTheBatch(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput(strings.Repeat("| h ", 100) + "|\n" + strings.Repeat("| - ", 100) + "|\n| A10 " + strings.Repeat("| x ", 99) + "|\n")
 	if err != nil {
 		t.Fatal(err)
@@ -567,6 +586,7 @@ func TestApplyOperationsChargesEveryTableRowInsertToTheBatch(t *testing.T) {
 }
 
 func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Before anchor after.\n\nNext.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -590,6 +610,7 @@ func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing
 }
 
 func TestApplyOperationInsertsInlineMarkdownAsOwnParagraph(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Before anchor after.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -613,6 +634,7 @@ func TestApplyOperationInsertsInlineMarkdownAsOwnParagraph(t *testing.T) {
 }
 
 func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -636,6 +658,7 @@ func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
 }
 
 func TestApplyOperationRejectsFindTargetSpanningTextblocks(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("one\n\ntwo\n")
 	if err != nil {
 		t.Fatal(err)
@@ -652,6 +675,7 @@ func TestApplyOperationRejectsFindTargetSpanningTextblocks(t *testing.T) {
 }
 
 func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		markdown string
@@ -697,6 +721,7 @@ func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
 }
 
 func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Use `config` with care.\n\nUse it sparingly.\n\nUnrelated paragraph.\n\nAnother one.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -719,6 +744,7 @@ func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
 const askFixture = ":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport?\n:::\n"
 
 func TestApplyOperationDeletesABlockByID(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("# Title\n\n" + askFixture + "\n1. only\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -749,6 +775,7 @@ func TestApplyOperationDeletesABlockByID(t *testing.T) {
 }
 
 func TestApplyOperationsExplainsBlockCascadeWithinBatch(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("- Parent\n  - Child\n")
 	if err != nil {
 		t.Fatal(err)
@@ -787,6 +814,7 @@ func TestApplyOperationsExplainsBlockCascadeWithinBatch(t *testing.T) {
 // LEGION-140: a delete whose match is a textblock's entire text removes the block; a list
 // emptied of every item disappears; a partial match keeps the block with its remaining text.
 func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
+	t.Parallel()
 	const list = "# Acceptance\n\n- first criterion\n- second criterion\n- third criterion\n\n## Next\n"
 	for _, test := range []struct {
 		name     string
@@ -862,6 +890,7 @@ func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
 }
 
 func TestApplyOperationDeleteThatEmptiesATypedBlockNamesTheSchemaRule(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput(askFixture)
 	if err != nil {
 		t.Fatal(err)
@@ -874,6 +903,7 @@ func TestApplyOperationDeleteThatEmptiesATypedBlockNamesTheSchemaRule(t *testing
 }
 
 func TestApplyOperationDeleteOfABulletWithOtherContentNamesTheItemBlock(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("- Parent\n\n  Extra paragraph.\n\n- Sibling\n")
 	if err != nil {
 		t.Fatal(err)
@@ -899,6 +929,7 @@ func TestApplyOperationDeleteOfABulletWithOtherContentNamesTheItemBlock(t *testi
 }
 
 func TestApplyOperationMovesABlockToAnAnchor(t *testing.T) {
+	t.Parallel()
 	const contextMarkdown = "# Context\n\nThe context ends with no drift.\n\n## 4\\. Design\n\nDesign body.\n"
 	tree, err := parseInput(askFixture + "\n" + contextMarkdown)
 	if err != nil {
@@ -953,6 +984,7 @@ func TestApplyOperationMovesABlockToAnAnchor(t *testing.T) {
 }
 
 func TestApplyOperationMoveRejectsMalformedAndSelfAnchoredMoves(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput(askFixture + "\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -982,6 +1014,7 @@ func TestApplyOperationMoveRejectsMalformedAndSelfAnchoredMoves(t *testing.T) {
 }
 
 func TestApplyOperationRetypesATypedBlock(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput(askFixture)
 	if err != nil {
 		t.Fatal(err)
@@ -1013,6 +1046,7 @@ func TestApplyOperationRetypesATypedBlock(t *testing.T) {
 // Replacing a heading's text with "4. Design" turned the heading into an ordered list and left
 // an empty list and an empty heading behind; a quote-anchored replace is inline by contract.
 func TestApplyOperationReplaceInsideATextblockIsInline(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with, want string
 	}{
@@ -1050,6 +1084,7 @@ func TestApplyOperationReplaceInsideATextblockIsInline(t *testing.T) {
 // the Proof schema, which Dispatch refuses to import at all. The single-# row is the control:
 // it is escaped today and must stay so.
 func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with string
 	}{
@@ -1098,6 +1133,7 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 // too, no block changes type, and rendering it is a fixed point. Four spaces or a tab is past this
 // boundary: the parser reads that as a code block, so it is refused instead — see the sibling test.
 func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with string
 	}{
@@ -1148,6 +1184,7 @@ func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *te
 // block, and whitespace alone has no inline content. An empty `with` is the only one that deletes
 // on purpose. This is LEGION-280, reachable from the escape the marker refusal suggests.
 func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, with string }{
 		{name: "four spaces", with: "    - Not a bullet"},
 		{name: "a tab", with: "\t- Not a bullet"},
@@ -1180,6 +1217,7 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 // wrote the marker for. Spliced in silently, it would be the same silent structural mismatch
 // LEGION-280 closed at position 0, one hard break further in.
 func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, with, marker string }{
 		{name: "a two-space break into an ordered one", with: "Body.  \n1. item", marker: "1. "},
 		{name: "a backslash break into a bullet", with: "Body.\\\n- item", marker: "- "},
@@ -1214,6 +1252,7 @@ func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
 // with its mark's delimiter, not the marker character. Each of these still replaces, and its
 // canonical markdown still reads back as the document it was rendered from.
 func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, with string }{
 		{name: "a hard break into plain text", with: "Body.  \ntwo"},
 		{name: "a soft break into an ordered one", with: "Body.\n1. was a year"},
@@ -1263,6 +1302,7 @@ func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
 
 // An empty `with` still deletes the matched span on purpose.
 func TestApplyOperationReplaceWithNothingStillDeletesTheMatch(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Keep this.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1299,6 +1339,7 @@ func blockTypes(tree *pmdoc.Node) []string {
 // (ErrTargetAmbiguous) or across two textblocks (ErrTargetSpansBlocks) falls through raw, so an
 // agent is told "pmdoc: target is ambiguous" with no operation index and no quote to act on.
 func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find string
 	}{
@@ -1333,6 +1374,7 @@ func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testin
 // refused. These land where HTML starts a block - the whole of a paragraph, a list item's start,
 // the line after a hard break.
 func TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ document, find, with string }{
 		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<div>x</div>"},
 		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<!-- note -->"},
@@ -1360,6 +1402,7 @@ func TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands(t *testing.
 // The positive control for that refusal: the same HTML where it opens no block - inside a line, in
 // a table cell, in a heading - is kept, and the document reads back as written.
 func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T) {
+	t.Parallel()
 	const paragraph, cell, heading = "Intro.\n\nfoo Body. bar\n", "| h |\n| --- |\n| Body. |\n", "# Body.\n"
 	for _, test := range []struct{ document, with string }{
 		{document: "Intro.\n\nBody.\n", with: "before <b>x</b> after"},
@@ -1412,6 +1455,7 @@ func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T
 // The id stays the caller's to keep when the block that had it goes first: a delete earlier in
 // the batch frees it, so a typed block can be put back in its own place under its own id.
 func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.T) {
+	t.Parallel()
 	const id = "11111111-1111-4111-8111-111111111111"
 	tree, err := parseInput("Before.\n\n:::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
 	if err != nil {
@@ -1439,6 +1483,7 @@ func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.
 // indented code block after the first paragraph would vanish - and every paragraph after it with
 // it - while the batch reported itself changed.
 func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		with    string
 		dropped string
@@ -1472,6 +1517,7 @@ func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 // longer reads as bold, a code span or link whose text gained the space, a no-break space written
 // twice, a blank line that split the paragraph.
 func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ with, want string }{
 		{with: " **x**", want: "foo  **x** bar"},
 		{with: "**x** ", want: "foo **x**  bar"},
@@ -1508,6 +1554,7 @@ func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testi
 // line break inside a code span or inline HTML, ends the block there: the heading reads back as a
 // heading and a paragraph, the cell's row as two rows. In a paragraph or a list item they are kept.
 func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		document string
 		refused  bool
@@ -1544,6 +1591,7 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 // table a browser edit already left such code in still takes writes, the one that rewrites that
 // code among them, but not one that adds such code beside it, the same code included.
 func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
+	t.Parallel()
 	const table = "| Cmd | Note |\n| --- | --- |\n| run | x |\n"
 	replace := func(find, with string) model.EditOp { return model.EditOp{Op: "replace", Find: find, With: with} }
 	for _, test := range []struct {
@@ -1614,6 +1662,7 @@ func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testin
 // every character in its cell, never as the `\\|` that ends the cell between the backslash and the
 // `|`.
 func TestSettlementVersionsCodeWithAPipeAfterABackslashInATableCellWithThePipeAfterTheCode(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, code, row string }{
 		{"one backslash", "a\\|b", "| run | `a\\`\\|`b` |"},
 		{"a grep alternation's code", "grep -n 'one\\|two' notes.txt", "| run | `grep -n 'one\\`\\|`two' notes.txt` |"},
@@ -1651,6 +1700,7 @@ func TestSettlementVersionsCodeWithAPipeAfterABackslashInATableCellWithThePipeAf
 // of the textblock it lands in there is no text to continue, and whitespace kept there would be
 // stripped on the next read - or, after a footnote's marker, open indented code.
 func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ document, with, want string }{
 		{document: "Intro.\n\nBody.\n", with: "   x", want: "Intro.\n\nx\n"},
 		{document: "Intro.\n\nBody.\n", with: "x   ", want: "Intro.\n\nx\n"},
@@ -1682,6 +1732,7 @@ func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
 // into a heading. This is the shape `replace` actually produces: ParseInline turns a soft newline
 // into a space, and a caller who wants two lines writes a hard break.
 func TestApplyOperationReplaceEscapesBlockMarkersAfterAHardBreak(t *testing.T) {
+	t.Parallel()
 	for _, with := range []string{
 		"Title\\\n==",
 		"Title  \n--",
@@ -1725,6 +1776,7 @@ func TestApplyOperationReplaceEscapesBlockMarkersAfterAHardBreak(t *testing.T) {
 // break would read back as an escaped backslash and a soft break, so the text the caller wrote as
 // two lines would come back as one.
 func TestApplyOperationReplaceKeepsAHardBreakAfterATrailingBackslash(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1755,6 +1807,7 @@ func TestApplyOperationReplaceKeepsAHardBreakAfterATrailingBackslash(t *testing.
 // A document whose block ends in a backslash renders exactly as it was written, so nothing about
 // it drifts: the canonical markdown a version records is the caller's own bytes.
 func TestADocumentEndingInABackslashRendersAsItWasStored(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	const stored = `The path is C:\` + "\n"
 	seedServiceText(t, service, artifactID, stored)
@@ -1771,6 +1824,7 @@ func TestADocumentEndingInABackslashRendersAsItWasStored(t *testing.T) {
 // A link whose text carries a `]` keeps its link: the escaped bracket `replace` accepts comes
 // back as a literal, where an unescaped one closes the label early and the link is gone.
 func TestApplyOperationReplaceKeepsALinkWhoseTextHasABracket(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1798,6 +1852,7 @@ func TestApplyOperationReplaceKeepsALinkWhoseTextHasABracket(t *testing.T) {
 // Bold text ending in a backslash keeps its bold: the closing `**` would otherwise be escaped by
 // that backslash, and the document would read back as plain text with a stray marker.
 func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1820,6 +1875,7 @@ func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.
 	}
 }
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
+	t.Parallel()
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
 	// comment on the rewritten text loses its quote but keeps its pin - while a heading, list or
@@ -1880,6 +1936,7 @@ func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 // it rewrites either way (TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged), and the
 // surviving block is what an orphaned comment stays pinned to.
 func TestReplacePlusInsertKeepsTheParagraphsBlockID(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1928,6 +1985,7 @@ func blockIDOfText(t *testing.T, tree *pmdoc.Node, text string) string {
 // (`## ##`, `7. 7\.`, `4. 4\.`, `-    - `). The heading rename is the one shape that keeps
 // working, because `find` carried the marker through the match.
 func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("## New since we talked (2026-09-24)\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -1951,6 +2009,7 @@ func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
 }
 
 func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with, escaped string
 	}{
@@ -2015,6 +2074,7 @@ func backtickedSuggestion(t *testing.T, reason string) string {
 // that level". A level-blind `find` — the `# ` selector both descriptions teach — renames the
 // text and keeps the level it selected, rather than silently flattening the section (Deep1326).
 func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with, want string
 	}{
@@ -2049,6 +2109,7 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 // reader whose item is `7.` that the block renders `1.` sends them looking for a different
 // bullet. A list beside a list of its kind is written with the kind's other marker.
 func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ markdown, find, with, want string }{
 		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
 		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Acceptance", with: "9. Acceptance", want: `"8. "`},
@@ -2075,6 +2136,7 @@ func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
 // A refusal is rendered from the typed error, not the wrapped chain, so the operation index has
 // to survive on the error itself or a multi-op batch never says which operation was refused.
 func TestApplyOperationsRefusalsCarryTheirOperationIndex(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Body.\n\n- Retracted\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2095,6 +2157,7 @@ func TestApplyOperationsRefusalsCarryTheirOperationIndex(t *testing.T) {
 // The refusal is about a duplicated marker, so a marker landing anywhere the renderer does not
 // write one stays the literal text it has always been.
 func TestApplyOperationReplaceKeepsAMarkerTheRendererDoesNotRepeatLiteral(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown, find, with, want string
 	}{
@@ -2136,6 +2199,7 @@ func TestApplyOperationReplaceKeepsAMarkerTheRendererDoesNotRepeatLiteral(t *tes
 // An anchor that is a prefix of a longer heading misses, and the miss names the anchor and the
 // nearest headings rather than only `pmdoc: target not found`.
 func TestApplyOperationHeadingAnchorMissNamesTheAnchorAndNearestHeadings(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("## New since we talked (2026-09-24) - SUPERSEDED, kept as record\n\nBody.\n\n## Acceptance\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2165,6 +2229,7 @@ func TestApplyOperationHeadingAnchorMissNamesTheAnchorAndNearestHeadings(t *test
 }
 
 func TestApplyOperationsQuoteMissNamesTheOperationTheQuoteAndNearestBlocks(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Alpha block.\n\nBeta block.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2190,6 +2255,7 @@ func TestApplyOperationsQuoteMissNamesTheOperationTheQuoteAndNearestBlocks(t *te
 // A quote cut before its closing `**` can never match rendered text, and "quote not found"
 // sends the agent looking for the wrong mistake.
 func TestApplyOperationRefusesAFindWithAnUnbalancedInlineMark(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("1. **SUPERSEDED by the ruling** and the rest.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2210,6 +2276,7 @@ func TestApplyOperationRefusesAFindWithAnUnbalancedInlineMark(t *testing.T) {
 // merely contains an odd delimiter — so the nearest blocks that would fix an ordinary miss stay
 // in the message (Deep1326).
 func TestApplyOperationUnbalancedMarkKeepsNearestBlocks(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Closest rendered block.\n\nAnother block.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2228,6 +2295,7 @@ func TestApplyOperationUnbalancedMarkKeepsNearestBlocks(t *testing.T) {
 // and the anchor, with candidates to disambiguate, and offers the occurrence advice a heading
 // anchor can actually use (Rev1326).
 func TestApplyOperationsAmbiguousHeadingAnchorNamesTheOperationAndAnchor(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Body.\n\n# Dup\n\nMore.\n\n# Dup\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2251,6 +2319,7 @@ func TestApplyOperationsAmbiguousHeadingAnchorNamesTheOperationAndAnchor(t *test
 // An insert anchored on a quote spanning two blocks is the same failure as a replace or delete
 // with that quote, and reads the same way (Rev1326).
 func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("## Alpha\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2269,6 +2338,7 @@ func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.
 // row quoted with the pipes left out reaches from one cell into the next, and that refusal names
 // both cells too.
 func TestApplyOperationQuoteAcrossTableCellsNamesTheCellsToQuote(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Intro.\n\n| Item | Owner |\n| --- | --- |\n| Cut freezes run as build-pool pods | MACH; worker PoolFreeze |\n| Literal | x \\| y |\n| same | same |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2378,6 +2448,7 @@ func TestApplyOperationQuoteAcrossTableCellsNamesTheCellsToQuote(t *testing.T) {
 // carrying the same kind of marker replaces the item's text, and a miss says what the marker means
 // and what to quote instead.
 func TestApplyOperationQuoteOpeningWithAListMarkerSelectsTheItem(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Plan:\n\n1. First point.\n2. Second point.\n3. A fresh reviewer checks points 1 to 4.\n\nThen:\n\n- bullet one\n- bullet two\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2444,6 +2515,7 @@ func TestApplyOperationQuoteOpeningWithAListMarkerSelectsTheItem(t *testing.T) {
 // A task box after a list marker selects only a task item in that state, and a with carrying the
 // marker and the other box ticks the item it selected.
 func TestApplyOperationListMarkerQuoteMatchesTheTaskBox(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("- [ ] deploy\n- [x] ship\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2466,6 +2538,7 @@ func TestApplyOperationListMarkerQuoteMatchesTheTaskBox(t *testing.T) {
 // quote, and an upload re-anchoring one, read the marker as the text it was, so a cached quote
 // `5. deploy` never lands on an item `1. deploy`.
 func TestAListMarkerSelectsAnItemForADocumentEditAlone(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("1. deploy\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2484,6 +2557,7 @@ func TestAListMarkerSelectsAnItemForADocumentEditAlone(t *testing.T) {
 // The selection reads each step of the matcher on its own, item text that opens with punctuation
 // is no marker text, and a find that matched as markup elsewhere selected nothing by its marker.
 func TestAListMarkerSelectionEdgeCases(t *testing.T) {
+	t.Parallel()
 	render := func(t *testing.T, out *pmdoc.Node) string {
 		t.Helper()
 		markdown, err := pmdoc.Render(out)
@@ -2527,6 +2601,7 @@ func TestAListMarkerSelectionEdgeCases(t *testing.T) {
 // A with that is only the selected item's marker, and its box, would empty the item with no word
 // of it, so it is refused; an empty with deletes the text on purpose.
 func TestAMarkerOnlyWithForASelectedItemIsRefused(t *testing.T) {
+	t.Parallel()
 	for doc, op := range map[string]model.EditOp{
 		"- deploy\n":     {Op: "replace", Find: "- deploy", With: "- "},
 		"1. deploy\n":    {Op: "replace", Find: "1. deploy", With: "1. "},
@@ -2560,6 +2635,7 @@ func TestAMarkerOnlyWithForASelectedItemIsRefused(t *testing.T) {
 // A row quote takes off only the escape of a pipe a cell holds, leaving every other backslash to
 // the cell's inline parse, as the table parser does: a cell shown as `x\|z` is quoted `x\\\|z`.
 func TestARowQuoteDecodesACellsEscapedPipeOnce(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| A | B |\n| --- | --- |\n| x\\\\\\|z | y |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2574,6 +2650,7 @@ func TestARowQuoteDecodesACellsEscapedPipeOnce(t *testing.T) {
 // A row quote keeps an empty cell between two pipes, one part alone is no row, and a part written
 // with inline markdown matches the text its cell shows.
 func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| A | Gap | B |\n| --- | --- | --- |\n| A |  | B |\n| Item | Owner | x |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2598,6 +2675,7 @@ func TestARowQuoteReadsEmptyAndFormattedCells(t *testing.T) {
 // A row quote is split as a markdown row is split: a pipe after an odd run of backslashes is the
 // pipe a cell holds, and one after an even run ends a cell.
 func TestApplyOperationRowQuoteSplitsAtPipesAsARowDoes(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| Item | Owner |\n| --- | --- |\n| a\\\\ | b |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2617,6 +2695,7 @@ func TestApplyOperationRowQuoteSplitsAtPipesAsARowDoes(t *testing.T) {
 // An out-of-range occurrence is a miss like any other: it names the quote, how many places it
 // did match, and the nearest blocks — not a bare "target not found" (Rev1326).
 func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("Alpha block.\n\nAlpha block.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2635,6 +2714,7 @@ func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing
 // A too-wide table row is the same class of refusal as any other: it reaches the caller without
 // the service's internal "apply live document operations:" prose (Quality1326).
 func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| a | b |\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2655,6 +2735,7 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 // parse refuses is refused; a table the fragment makes itself keeps its own refusal, and a fragment
 // that parse does not read as one table is the block path's, read as a document of its own.
 func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
+	t.Parallel()
 	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
 	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
 	for _, test := range []struct {
@@ -2766,6 +2847,7 @@ func askRowState(t *testing.T, service *Service, askID string) (state string, re
 var editingSession = model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 
 func TestApplyOpsMovingAnOpenAskBlockKeepsItsAsk(t *testing.T) {
+	t.Parallel()
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
 	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
 		t.Fatalf("move ask block: %v", err)
@@ -2781,6 +2863,7 @@ func TestApplyOpsMovingAnOpenAskBlockKeepsItsAsk(t *testing.T) {
 }
 
 func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
+	t.Parallel()
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
 	// Answer the ask the way the answer handler does: the row first, then the block's
 	// server-owned attributes.
@@ -2829,6 +2912,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 }
 
 func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
+	t.Parallel()
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
 	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
 		t.Fatalf("delete ask block: %v", err)
@@ -2848,6 +2932,7 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 // and its id stay, holding nothing, whatever blocks are around it; where the text it leaves would
 // read as block syntax at a line start, it is stored escaped and reads back as the characters.
 func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown string }{
 		{"before a list", "Intro.\n\nBody.\n\n- a\n"},
 		{"after a list", "- a\n\nBody.\n\nAfter.\n"},
@@ -2919,6 +3004,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 // holding one empty paragraph, as the browser editor's parser reads it, so the definition keeps
 // its callout and its reference stays a footnote reference rather than literal text.
 func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) {
+	t.Parallel()
 	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
 	if err != nil {
 		t.Fatal(err)
@@ -2955,6 +3041,7 @@ func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) 
 // it; only the prefix of the containers around it is not the code's. A replace writing one stores
 // that code and reads it back.
 func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, with, code string }{
 		{"after a line feed", "Intro.\n\nBody.\n\nAfter.\n", "x `a\n  b` y", "a\n  b"},
 	} {
@@ -2996,6 +3083,7 @@ func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
 // later replace in that block writing block syntax stores it escaped, as it does in a block that
 // never held one, and the block reads back holding it as text.
 func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, with, escaped string }{
 		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---", "\n> \\---\n"},
 		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~", "\n> \\~~~\n"},
@@ -3048,6 +3136,7 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 // definition alike. The browser editor's parser reads those escaped lines as text too (the
 // escaped-block-markers fixture).
 func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
+	t.Parallel()
 	const footnote = "x[^1]\n\n[^1]: Body.\n"
 	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 	for _, test := range []struct{ name, markdown, with, stored string }{
@@ -3093,6 +3182,7 @@ func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
 // matter, so an insert landing there, at `start` or before the first block, still opens the
 // document with a closed front-matter block.
 func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		op   model.EditOp
@@ -3145,6 +3235,7 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 // anchored, rather than leaving an empty line beside what it writes, and so lands at the
 // document's start, where a closed front-matter block is front matter.
 func TestApplyOperationInsertIntoAnEmptyDocumentTakesItsPlace(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"The problem.",
 		"## Problem\n\nAgents retry forever.\n",
@@ -3190,6 +3281,7 @@ func TestApplyOperationInsertIntoAnEmptyDocumentTakesItsPlace(t *testing.T) {
 // read as a verdict before the write it would wave the write through, and after it it would
 // refuse the caller's text with the panic's message.
 func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
+	t.Parallel()
 	before, err := pmdoc.Parse("Intro.\n\nBody.\n")
 	if err != nil {
 		t.Fatal(err)

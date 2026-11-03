@@ -33,8 +33,12 @@ import (
 // documents are opened over a day: what fills the cap is how many were touched, not how many are
 // open at once.
 func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
+	t.Parallel()
 	service, database := newRoomReleaseService(t)
-	const written, read, opened = 100, 100, maxLiveRooms
+	// A tenth of the cap written and a tenth read, and the cap itself opened in the editor: more
+	// documents touched than the cap admits live, which is what the test is about, with each
+	// batch and the rooms the API left well inside it, as at production's thousand.
+	written, read, opened := service.maxLiveRooms/10, service.maxLiveRooms/10, service.maxLiveRooms
 	ids := createDocuments(t, database, written+read+opened+1)
 	writtenIDs, readIDs, openedIDs := ids[:written], ids[written:written+read], ids[written+read:len(ids)-1]
 	untouched := ids[len(ids)-1]
@@ -49,7 +53,7 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 			t.Fatalf("read document %s: %v", id, err)
 		}
 	}
-	for batch := range slices.Chunk(openedIDs, 200) {
+	for batch := range slices.Chunk(openedIDs, service.maxLiveRooms/5) {
 		openInEditor(t, service, httpServer.URL, batch)
 		waitFor(t, 30*time.Second, "the rooms the editor opened to go idle", func() bool {
 			return len(service.srv.Rooms()) <= written
@@ -70,8 +74,9 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 // are evicted on the idle schedule too, so touching more documents than the cap through the API
 // alone leaves a new document openable and the service's per-document maps empty once they idle.
 func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
+	t.Parallel()
 	service, database := newRoomReleaseService(t)
-	ids := createDocuments(t, database, maxLiveRooms+51)
+	ids := createDocuments(t, database, service.maxLiveRooms+5)
 	touched, untouched := ids[:len(ids)-1], ids[len(ids)-1]
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
@@ -103,6 +108,7 @@ func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
 // timer, and it goes with its room even while another document's settlement timer sits between its
 // registration and its attachment, which the register holds as a nil entry.
 func TestAStateWithNoTimerIsReleasedWhileAnotherRoomArmsOne(t *testing.T) {
+	t.Parallel()
 	service, _ := newRoomReleaseService(t)
 	const id = "00000000-0000-4000-8000-000000000513"
 	timerID := service.nextSettleTimer.Add(1)
@@ -119,6 +125,7 @@ func TestAStateWithNoTimerIsReleasedWhileAnotherRoomArmsOne(t *testing.T) {
 // while the issue is closed, so its state goes with its room; its pending-settlement row stays, and
 // settles it once the issue reopens or its room next loads.
 func TestClosingAnIssueReleasesItsUnsettledDocuments(t *testing.T) {
+	t.Parallel()
 	service, database := newRoomReleaseService(t)
 	service.settle = time.Hour // the issue closes before any settlement runs
 	ctx := context.Background()
@@ -150,6 +157,7 @@ func TestClosingAnIssueReleasesItsUnsettledDocuments(t *testing.T) {
 // lookup hands out, so the write the lookup was for lands on the document's current state: here a
 // seed's author, which the document's settlement attributes its ask blocks to.
 func TestAStateReleasedAsALookupFindsItTakesNoWrite(t *testing.T) {
+	t.Parallel()
 	service, id := newTestService(t)
 	actor := model.Actor{Kind: "session", ID: "seeding-session"}
 	released := false
@@ -206,6 +214,10 @@ func newRoomReleaseService(t *testing.T) (*Service, *store.Store) {
 	})
 	// ygo's idle sweeper reads it when the first room starts it, so it is set before any room.
 	service.srv.RoomIdleTimeout = time.Second
+	// A cap of fifty rather than production's thousand: the tests here touch more documents than
+	// the cap and watch the rooms go, and what they check is the cap's rule, not its size, so
+	// fifty costs them a twentieth of the rooms to open, write and wait out.
+	service.maxLiveRooms = 50
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)

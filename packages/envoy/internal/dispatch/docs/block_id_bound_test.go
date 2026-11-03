@@ -113,6 +113,7 @@ func requireIndexedWithoutLongIDs(t *testing.T, database *store.Store, service *
 // id in its markdown, its other blocks are indexed, the long-id blocks are no nodes, and a mention
 // written in one starts at the innermost node holding it.
 func TestAVersionHoldingABlockIDPastTheBoundIsWrittenAndIndexed(t *testing.T) {
+	t.Parallel()
 	database, service := blockIndexService(t)
 	spec := createOwedDocument(t, database, service, "", "spec", boundSpec, "")
 	long := giveLongBlockIDs(t, service, spec)
@@ -134,6 +135,7 @@ func TestAVersionHoldingABlockIDPastTheBoundIsWrittenAndIndexed(t *testing.T) {
 // without the bound - is indexed by the reconciliation like any other: its other blocks become
 // nodes, the long-id blocks none, and it is owed nothing more, so the next tick has nothing to do.
 func TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed(t *testing.T) {
+	t.Parallel()
 	database, service := blockIndexService(t)
 	spec := createOwedDocument(t, database, service, "", "spec", boundSpec, "")
 	settle(t, database, spec)

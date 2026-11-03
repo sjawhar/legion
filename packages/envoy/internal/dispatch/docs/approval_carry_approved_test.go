@@ -26,6 +26,7 @@ import (
 // enough that settlement does not run between the steps and repair or version the repeat on its
 // own.
 func TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
+	t.Parallel()
 	database, service, artifactID := seededRegionDocument(t, time.Second)
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 

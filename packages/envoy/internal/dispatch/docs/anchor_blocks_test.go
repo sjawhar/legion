@@ -10,6 +10,7 @@ import (
 )
 
 func TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Introduction.\n\nTarget passage.\n")
 	askID := insertAnchoredAsk(t, service, artifactID, "Target passage")
@@ -59,6 +60,7 @@ func TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce(t *testing.T) {
 // BackfillAnchorBlocks repair pins. The advisory lock holds the settlement between the ask's
 // refresh event and the comment's update, which is the window a loaded CI runner hit on its own.
 func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
+	t.Parallel()
 	const holdKey = int64(4815162342)
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -193,6 +195,7 @@ func waitForHeldAnchorRefresh(t *testing.T, service *Service, key int64) {
 }
 
 func TestBlockForQuoteLeavesTopLevelCrossBlockAnchorsUnpinned(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "One.\n\nTwo.\n")
 

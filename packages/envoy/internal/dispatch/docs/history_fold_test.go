@@ -27,6 +27,7 @@ import (
 // another fixture's and back, a margin record projected over itself, and a second client's insert
 // written against the first state, which the replacement already deleted around.
 func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
+	t.Parallel()
 	fixtures := readHistoryFixtures(t)
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
@@ -73,6 +74,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 // projected forty times over itself is stored as the one record it is, and so is the load of the
 // history before compaction.
 func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
@@ -118,6 +120,7 @@ func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
 // persisted before one it depends on that never was - so a load and a compaction keep them, and
 // once the missing updates arrive the parked insert shows and the parked delete holds.
 func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	ctx := context.Background()
@@ -199,6 +202,7 @@ func requireParkedArrive(t *testing.T, what string, state, lost, gone []byte) {
 // load and a compacted load read as the rows applied in order. Row 0 is what a compaction stored
 // for a log that lacked one of client 101's updates: 101:27+29 is a skip.
 func TestALogWithASkippedClockRangeFoldsIntoItsState(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AwkBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYGAAEBBnN0cm9uZwR0cnVlhAECAWOEAQMDb2ZngQEGA4YBCQZzdHJvbmcEbnVsbCEAAQACaWQBIQEFbWFya3MCYzABA2QAxGUmZScMIGRwYWcgYmllY21oiAELAXcDMTMyqAEMAXYDBGtpbmR3B2NvbW1lbnQHcmVwbGllc3UCdwpmcGttb2dqbW5pfEKeAAAEdGV4dHeNAWttb2tjbW1kZGhmcG5rYWFvZGNsYWNwZ2xjIGdpYmpvbWdmZGJrYmpjZm4gIGdjb3Boa25ubW9sbGdvayBlaWVpYWxkbmNocGtiY2ltYmhsbWtqZmlwZCBwY2pkZmRwY2ViZGxtbmxiZWRsaGdiYWlnbGZoaGJjaWxubmFmaGFkYmRhaG9rbWZrY29rbAdlAMQBAwEEFGZwIGRpaW1oY2NuZWJoZmNvZmRvwWUTAQQBxGUUAQQGbmcga21hCh0oAQVtYXJrcwJjMgF2AwRraW5kdwdjb21tZW50B3JlcGxpZXN1AncKamFkYWFuICBvYnxCYAAABHRleHR3TmloampuaiBvaGVwa2hlYWdkaW9lbG1wamlsZmNuaW5uIGxjbWNobm5uaGhoYXBnbWhib25pbGRuIGlmbmVobW5jamNwYWZkbG5vZWZjZMYBCAEJBGNvZGUEdHJ1ZYYBCgRjb2RlBG51bGwCAQIHAwsCZQEUAQ==",
 		"AAIBAgcDCwJlARQB",
@@ -283,6 +287,7 @@ func rawReading(t *testing.T, doc *crdt.Doc) string {
 // loses nothing the missing update brings once it is stored. Client 101's clocks 10-11 are stored
 // before its clocks 7-9, with a compaction between them.
 func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AQFlAAQBAXQFIGNlY2gA",
 		"AQJlBQcBAWEBKABlBQF2AXcDaGJmAA==",
@@ -333,6 +338,7 @@ func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) 
 // A compacted document preserves the right origins that later text updates depend on. Compaction
 // runs after nine rows; after the tenth, Yjs and the stored rows merged both read "hc  chb".
 func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
+	t.Parallel()
 	rows := base64Rows(t,
 		"AQFlAAQBAXQBYwA=",
 		"AQFkAAgBAWECdwRlZyBnfEBAAAABZQEAAQ==",
@@ -388,6 +394,7 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
+	t.Parallel()
 	rows, _ := unfoldableHistory()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
@@ -475,6 +482,7 @@ func shrinkPendingItems(t *testing.T, service *Service, versioned *PgVersioned) 
 // holds short of the document's clock or not at all, and one the state holds that the document did
 // not.
 func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
+	t.Parallel()
 	writer := crdt.New(crdt.WithClientID(7))
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })

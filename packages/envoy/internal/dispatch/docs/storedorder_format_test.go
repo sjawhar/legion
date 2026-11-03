@@ -19,6 +19,7 @@ import (
 // store as *xy*. Each version is named after a commit, so the check compares the fold with the
 // room at every step of the edits, not only at their end.
 func TestStoredOrderFormattedWritesReplayToEveryVersion(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "seed")

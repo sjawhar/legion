@@ -124,6 +124,9 @@ func pointerRowsOf(t *testing.T, database *store.Store, artifactID string) []poi
 // A change of an attribute's targets reaches the pointers a document already stores at its next
 // indexing: a version of the citing document that changes nothing about the pointer lists the edge
 // the new targets allow.
+// It runs on its own: pmdoctest.UseBlockSchema replaces pmdoc's package-level block schema
+// (pmdoc/schema.go) for the whole process, so any test parsing or rendering a document beside
+// it would read its markdown against this test's schema.
 func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
@@ -150,6 +153,9 @@ func TestATargetsChangeReachesStoredPointersAtTheNextIndexing(t *testing.T) {
 // A browser's write is never refused: a settled browser tree holding a pointer to a block of a type
 // the attribute does not allow writes its version and stores the pointer, which the graph does not
 // list until its target has an allowed type.
+// It runs on its own: pmdoctest.UseBlockSchema replaces pmdoc's package-level block schema
+// (pmdoc/schema.go) for the whole process, so any test parsing or rendering a document beside
+// it would read its markdown against this test's schema.
 func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
@@ -189,6 +195,9 @@ func TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed(t *testing.
 
 // The reconciliation indexes a document's pointers as its version write did: re-indexing the same
 // version leaves every block_refs row as it was, the pointer's targets included.
+// It runs on its own: pmdoctest.UseBlockSchema replaces pmdoc's package-level block schema
+// (pmdoc/schema.go) for the whole process, so any test parsing or rendering a document beside
+// it would read its markdown against this test's schema.
 func TestTheReconciliationIndexesTheSamePointersAsTheVersionWrite(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	database, service := blockIndexService(t)
@@ -241,6 +250,9 @@ func TestTheReconciliationIndexesTheSamePointersAsTheVersionWrite(t *testing.T) 
 // offset, so a claim after one holding the same id is the id's node and writes its pointer. The
 // version write, which indexes the tree, and the reconciliation, which reads the version's markdown
 // back (no paragraph's or list item's id is written there), store the same rows.
+// It runs on its own: pmdoctest.UseBlockSchema replaces pmdoc's package-level block schema
+// (pmdoc/schema.go) for the whole process, so any test parsing or rendering a document beside
+// it would read its markdown against this test's schema.
 func TestARepeatedBlockIDWritesPointersOnlyFromItsNode(t *testing.T) {
 	const (
 		r1 = "dispatch://CORE-1/artifact/target#b-r1"
@@ -341,6 +353,9 @@ func TestARepeatedBlockIDWritesPointersOnlyFromItsNode(t *testing.T) {
 // reconciliation, which reads the version's markdown back, store the same rows: a claim whose id
 // holds a space keeps its pointer on both. An id holding U+0000 is written U+FFFD, as markdown reads
 // that character, and both paths list the claim's pointer under the id as written.
+// It runs on its own: pmdoctest.UseBlockSchema replaces pmdoc's package-level block schema
+// (pmdoc/schema.go) for the whole process, so any test parsing or rendering a document beside
+// it would read its markdown against this test's schema.
 func TestATypedBlockIDReadsBackFromTheMarkdownAsTheTreeHoldsIt(t *testing.T) {
 	const r1 = "dispatch://CORE-1/artifact/target#b-r1"
 	for _, test := range []struct{ name, id, written string }{

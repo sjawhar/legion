@@ -37,6 +37,7 @@ func rules(count int) string { return strings.Repeat("***\n\n", count) }
 // meets a lock at each text it reads (YXmlText.ToDelta) and none in a run of rules, so the document
 // holds one long enough that a keystroke lands inside the walk.
 func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
+	t.Parallel()
 	seeded := "# Heading\n\n" + rules(200) + "before\n\nafter\n"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	reads := []struct {
@@ -92,6 +93,9 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	}
 	for _, test := range reads {
 		t.Run(test.name, func(t *testing.T) {
+			// Each read builds a service and a document of its own, so the reads run beside one
+			// another as well as beside their peers.
+			t.Parallel()
 			service, artifactID, serverURL := newPeeredService(t, seeded)
 			service.markWait = 10 * time.Millisecond
 			headingID := firstBlockID(t, service, artifactID)
@@ -115,6 +119,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// update takes next, so each peer lands at most one update in that walk: a second peer types
 	// beside the first.
 	t.Run("version capture", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
 		// The hook is set before the peers type, as settlement's are.
 		var peer atomic.Value
@@ -148,6 +153,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// document's lock, so none of the peer's updates lands while it reads: it runs for a fixed time
 	// rather than until its runs have overlapped one.
 	t.Run("unrecorded mark sweep", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, seeded)
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 		for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {
@@ -161,6 +167,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// write. One write is committed and published, then its read-back runs over and over: a whole
 	// write per read would leave too few reads beside the peer's updates to meet one.
 	t.Run("published edit", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, seeded)
 		peer := typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 		ctx := context.Background()
@@ -202,6 +209,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// of each run. The peer deletes each paragraph it types, so settlement also meets a block its
 	// read counted to stamp that is gone when it stamps.
 	t.Run("settlement", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
 		// The hooks are set before the peer types, since a settlement can run on a timer from then.
 		var peer atomic.Value
@@ -227,6 +235,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	// The room's own update observer renders the room after each update, while another peer's
 	// update can be applying.
 	t.Run("update observer", func(t *testing.T) {
+		t.Parallel()
 		service, artifactID, serverURL := newPeeredService(t, seeded)
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
@@ -238,6 +247,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 // stored stamp under cached hits and shared folds. The reader service must stay roomless and each
 // read must observe one complete stored state.
 func TestColdReadsRunBesideStoredWrites(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	versioned := NewPgVersioned(database)

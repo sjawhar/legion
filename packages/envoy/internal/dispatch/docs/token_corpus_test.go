@@ -159,6 +159,7 @@ func tokenCorpusDescendants(tree *pmdoc.Node) (descendants map[string][]string, 
 }
 
 func TestTokenCorpus(t *testing.T) {
+	t.Parallel()
 	dir := os.Getenv("DISPATCH_TOKEN_CORPUS")
 	if dir == "" {
 		t.Skip("DISPATCH_TOKEN_CORPUS unset; set it to a directory of markdown specs to dump their reads")

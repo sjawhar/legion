@@ -16,6 +16,7 @@ import (
 // refusal (recordUnfoldable, "serving them merged"), so the doubled text would be the line an operator
 // reads for a history that does not fold.
 func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
+	t.Parallel()
 	writer := newProofHistory(t, 101)
 	first := writer.write("A first paragraph.\n")
 	second := writer.write("A first paragraph.\n\nA second paragraph, longer than the first.\n")

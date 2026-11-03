@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -120,7 +119,7 @@ func (s *Service) runTaskProgressReconciliation(ctx context.Context, firstRetry 
 		}
 		wait = min(2*wait, taskProgressBootRetryCeiling)
 	}
-	slog.Warn("dispatch: issue task progress reconciliation left drift it could not lock to the next start")
+	s.log().Warn("dispatch: issue task progress reconciliation left drift it could not lock to the next start")
 }
 
 // taskProgressPassRetries is how many failed or short batches one reconciliation pass retries
@@ -145,7 +144,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 			if ctx.Err() != nil {
 				return false
 			}
-			slog.Error("dispatch: reconcile issue task progress", "error", err)
+			s.log().Error("dispatch: reconcile issue task progress", "error", err)
 		}
 		counted += n
 		if err == nil && !remaining {
@@ -156,7 +155,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 		}
 		retries++
 		if retries > taskProgressPassRetries {
-			slog.Warn("dispatch: issue task progress reconciliation pass left drift",
+			s.log().Warn("dispatch: issue task progress reconciliation pass left drift",
 				"counted", counted)
 			driftLeft = true
 			break
@@ -168,7 +167,7 @@ func (s *Service) ReconcileTaskProgress(ctx context.Context) (driftLeft bool) {
 		}
 	}
 	if counted > 0 {
-		slog.Info("dispatch: reconciled issue task progress", "issues", counted)
+		s.log().Info("dispatch: reconciled issue task progress", "issues", counted)
 	}
 	return driftLeft
 }
@@ -229,7 +228,7 @@ func (s *Service) reconcileTaskProgressBatch(
 			// the reader cannot read at all is counted as none.
 			counted, err := pmdoc.CountTasksMarkdown(issue.markdown)
 			if err != nil {
-				slog.Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
+				s.log().Warn("dispatch: issue task progress reconciliation cannot read the spec; counting none",
 					"issue", issue.key, "error", err)
 			} else {
 				progress = counted

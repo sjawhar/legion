@@ -13,6 +13,7 @@ import (
 // is first read as rows under a header the server writes itself, and those two lines are not the
 // caller's (LEGION-416).
 func TestInsertRefusalNamesTheCallersLineAtATableCell(t *testing.T) {
+	t.Parallel()
 	const opening = `:::ask{urgency="med" title="x | y"}`
 	const table = "| K | V |\n| --- | --- |\n| a | c |\n"
 	const paragraph = "Context c here.\n"

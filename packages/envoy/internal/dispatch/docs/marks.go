@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"time"
 
@@ -846,7 +845,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
 	if err != nil {
-		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
+		s.log().Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
 		return
 	}
 	now := s.now()
@@ -911,7 +910,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		return
 	}
 	if err := s.unmarkExpired(room, expired); err != nil {
-		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
+		s.log().Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
 	}
 }
 

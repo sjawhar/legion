@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"runtime/debug"
 	"strconv"
 	"sync"
@@ -64,8 +63,10 @@ func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentSta
 const documentReadBudget = 256 << 20
 
 // coldReadTimeout bounds a cold read's fold of the stored history (LoadDocument), which belongs to
-// the document rather than to the request that started it, so no request's end cancels it.
-var coldReadTimeout = 60 * time.Second
+// the document rather than to the request that started it, so no request's end cancels it. It is
+// the default of Service.coldReadTimeout, the field each fold reads, so the test of the timeout
+// shortens one service's bound rather than the package's.
+const coldReadTimeout = 60 * time.Second
 
 // documentRead is everything the four reads of a document no room holds answer (Text,
 // TextWithToken, TextWithBlocks and BlockPath), rendered from one tree of one stored state, the
@@ -338,15 +339,15 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold col
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("cold document read panicked: %v\n%s", recovered, debug.Stack())
-			slog.Error("dispatch: cold document read panicked", "room", artifactID, "error", err)
+			s.log().Error("dispatch: cold document read panicked", "room", artifactID, "error", err)
 		}
 	}()
-	foldCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coldReadTimeout)
+	foldCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.coldReadTimeout)
 	defer cancel()
 	loaded, err := s.persistence.LoadDocument(foldCtx, artifactID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && errors.Is(foldCtx.Err(), context.DeadlineExceeded) {
-			return coldFold{}, fmt.Errorf("cold document read timed out after %s", coldReadTimeout)
+			return coldFold{}, fmt.Errorf("cold document read timed out after %s", s.coldReadTimeout)
 		}
 		return coldFold{}, err
 	}

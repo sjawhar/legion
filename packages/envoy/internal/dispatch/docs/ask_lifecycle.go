@@ -162,7 +162,7 @@ func (s *Service) writeDocumentAskStates(
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, _ func(func(*crdt.Transaction))) error {
 		if current.Node() == nil {
 			// Settlement reads none of its ask blocks either (settleRoomWithin).
-			slog.Warn("dispatch: leave the ask blocks of a document outside Proof schema as they are", "artifact", artifactID)
+			s.log().Warn("dispatch: leave the ask blocks of a document outside Proof schema as they are", "artifact", artifactID)
 			return nil
 		}
 		var err error
@@ -183,7 +183,7 @@ func (s *Service) writeDocumentAskStates(
 		// Nothing can load the document, so no reader sees its blocks open, and a retry meets the
 		// same history: the close, reopen or repair writing it goes on without it. The rebuild
 		// that makes it load again writes its closed issue's states itself (RebuildDocument).
-		slog.Warn("dispatch: leave the ask blocks of a document whose history cannot load as they are",
+		s.log().Warn("dispatch: leave the ask blocks of a document whose history cannot load as they are",
 			"issue", *owner.IssueKey, "artifact", artifactID, "error", err)
 		return nil, nil
 	default:
@@ -466,7 +466,7 @@ func (s *Service) SettleIssueDocuments(ctx context.Context, issueKey string) err
 			}
 		}
 		if err != nil {
-			slog.Warn("dispatch: settle a document of an issue", "issue", issueKey, "room", room, "error", err)
+			s.log().Warn("dispatch: settle a document of an issue", "issue", issueKey, "room", room, "error", err)
 			failures = append(failures, fmt.Errorf("settle document %s: %w", room, err))
 		}
 	}

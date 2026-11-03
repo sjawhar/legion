@@ -15,6 +15,7 @@ import (
 // Every condition unusedLocked names keeps an otherwise detached document state until that holder
 // ends. Removing any clause would let a later operation on that document create a second state.
 func TestEveryRoomStateHolderKeepsADetachedState(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		hold    func(*Service, *roomState)
@@ -87,6 +88,7 @@ func TestEveryRoomStateHolderKeepsADetachedState(t *testing.T) {
 // A transaction's writer slot pins its state, so another transaction sees the slot and waits rather
 // than taking a fresh state and a second writer slot for the same document.
 func TestLiveWriterKeepsOneWriterSlotAfterItsRoomHasGone(t *testing.T) {
+	t.Parallel()
 	service, _ := newRoomReleaseService(t)
 	const id = "00000000-0000-4000-8000-000000000516"
 	first, err := service.openLiveWrite(context.Background(), &Ledger{}, id)
@@ -105,6 +107,7 @@ func TestLiveWriterKeepsOneWriterSlotAfterItsRoomHasGone(t *testing.T) {
 // exit compaction also looks the state up, so calling the registered hook directly keeps this test
 // about the hook rather than that incidental backstop.
 func TestOnUnloadDocumentReleasesAnOtherwiseUnusedState(t *testing.T) {
+	t.Parallel()
 	service, _ := newRoomReleaseService(t)
 	const id = "00000000-0000-4000-8000-000000000517"
 	_ = service.room(id) // the test accessor deliberately leaves an otherwise unused state behind.
@@ -121,6 +124,7 @@ func TestOnUnloadDocumentReleasesAnOtherwiseUnusedState(t *testing.T) {
 // A room ygo has published but not finished loading is still live: releaseIfUnusedLocked must see
 // it in Rooms even before GetDoc can return it. Otherwise the load would attach to a forgotten state.
 func TestAStillLoadingRoomKeepsItsState(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	load := service.srv.OnLoadDocument
 	entered := make(chan struct{})

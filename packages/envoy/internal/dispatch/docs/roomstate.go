@@ -522,7 +522,7 @@ func (s *Service) canOpenRoom(room string) bool {
 		return true
 	}
 	live := s.srv.Rooms()
-	return len(live) < maxLiveRooms || slices.Contains(live, room)
+	return len(live) < s.maxLiveRooms || slices.Contains(live, room)
 }
 
 func (s *Service) canAddConnection() bool {

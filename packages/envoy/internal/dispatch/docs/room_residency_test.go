@@ -218,6 +218,7 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 // and the store holds both writes' text. The write here waits inside its Apply while the peer
 // leaves and a read loads the room again (roomIdleTimeout).
 func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -313,6 +314,7 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 // touch, as it evicts a room its last browser left (roomIdleTimeout), and the document reads back
 // what the API wrote.
 func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	// Production waits roomIdleTimeout; two seconds keeps the test short, and ygo then sweeps
@@ -594,6 +596,7 @@ func listedReplica(t *testing.T, service *Service, artifactID string) (weak.Poin
 // read: a link reading back with the target the reader wrote, an answered ask with the choice it
 // wrote.
 func TestEditingALiveReadsTreeChangesNoLaterRead(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, `:::ask{#ask-1}
@@ -688,6 +691,7 @@ func newRetiringRoomService(t *testing.T) (*Service, *store.Store) {
 // The test pauses the commit in an observer between those two, retires the worker there, and lets
 // the commit go on. A failed room's eviction, which cancels the room's slots first, is a control.
 func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		peer   bool
@@ -831,6 +835,7 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 // the room's persistence worker under the publish's Apply; the commit returns either way. The longer
 // the document, the longer its room's update observer renders, and the wider that window.
 func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
+	t.Parallel()
 	markdown := func(paragraphs int, tag string) string {
 		var text strings.Builder
 		for index := range paragraphs {
@@ -841,6 +846,8 @@ func TestAWriteSurvivesItsIssueClosingAsItPublishes(t *testing.T) {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for _, paragraphs := range []int{20, 50, 200} {
 		t.Run(fmt.Sprintf("%d paragraphs", paragraphs), func(t *testing.T) {
+			// Each length runs on a service and a database of its own.
+			t.Parallel()
 			service, database := newRetiringRoomService(t)
 			ctx := context.Background()
 			const trials = 40

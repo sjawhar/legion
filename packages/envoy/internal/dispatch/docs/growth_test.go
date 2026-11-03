@@ -20,6 +20,7 @@ import (
 // limit can still be trimmed or rewritten as long, and front matter, which an upload's parse does
 // not count, is not counted here either.
 func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	t.Parallel()
 	prose := func(bytes int) string { return strings.Repeat("word ", bytes/5) + "\n" }
 	code := func(bytes int) string {
 		return "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", bytes/40) + "```\n"
@@ -79,6 +80,7 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 // not grown. Without the bound, thirty-two suggestions of 900 KB took one cold websocket load of
 // their document to 296 MiB.
 func TestAMarginMayNotGrowPastWhatADocumentMayHold(t *testing.T) {
+	t.Parallel()
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Text.\n")
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -154,6 +156,7 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 // whose labels are the asker's text - is caller text, so on such a document it is left out of the
 // block, which says who answered and when, and the document grows by the server's state alone.
 func TestTheAsksOfADocumentPastTheBoundCanStillBeAnsweredAndResolved(t *testing.T) {
+	t.Parallel()
 	service, _ := newTestService(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	ask := func(id string) string {

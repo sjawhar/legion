@@ -23,6 +23,7 @@ import (
 // single row as stored, a folded log as its merge reads, a log with parked items keeping them, and
 // a log the fold cannot apply served merged, which a cold read refuses as ErrDocumentUnloadable.
 func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) {
+	t.Parallel()
 	fixtures := readHistoryFixtures(t)
 	parked, lost, gone := parkedHistory(t)
 	unfoldable, _ := unfoldableHistory()
@@ -125,6 +126,7 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 // inside its fold, and folds once the first gives the slot back; a waiter whose context ends
 // returns that context's error without folding.
 func TestABufferedFoldWaitsForASlotWithinItsContext(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	versioned.foldSlots = make(chan struct{}, 1)
@@ -249,6 +251,7 @@ func idleInTransaction(t *testing.T, database *store.Store) int {
 // starts, returns the context's error and no state, and a fold whose context ends between two
 // updates applies none after it and returns that error.
 func TestABufferedFoldEndsWithItsContext(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
 	writer := newProofHistory(t, 101)
@@ -339,6 +342,7 @@ func (d *roomDecodes) of(room string) [][]byte {
 // is decoded by the fold's read-back too, and then once in the room. Either room reads the text
 // its history wrote.
 func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
+	t.Parallel()
 	service, versioned, decodes := roomLoadService(t)
 	ctx := context.Background()
 	writer := crdt.New(crdt.WithClientID(7))
@@ -406,6 +410,7 @@ func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
 // than the server's pending cap does not load, nor does a log the fold cannot apply, served
 // merged.
 func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) {
+	t.Parallel()
 	service, versioned, decodes := roomLoadService(t)
 	// Before any room opens: ygo reads the server's cap as each room loads, and the log below is
 	// built to park more than that cap holds.
