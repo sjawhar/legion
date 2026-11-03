@@ -18415,7 +18415,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
     return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
-  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
+  const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children|decisions)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
@@ -18430,6 +18430,8 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec")
       return `dispatch://${key}/spec${blockOf("v")}`;
+    if (page === "decisions")
+      return `dispatch://${key}/artifact/decisions-md`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
