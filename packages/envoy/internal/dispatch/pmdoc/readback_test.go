@@ -13,6 +13,7 @@ import (
 // another document, or refuse it. Each document here is read as the browser editor's engine reads
 // it, and its rendering reads back otherwise.
 func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"> [^n]: -\n> -\n",
 		"> [^n]: *\n> 10. text x[^n]\n",
@@ -33,6 +34,7 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 // alignment: the rendering writes it as a cell of that column, which reads back with the column's
 // alignment, so a padded cell holding another would store a table that reads back otherwise.
 func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
+	t.Parallel()
 	markdown := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |\n"
 	doc, err := Parse(markdown)
 	if err != nil {
@@ -57,6 +59,7 @@ func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
 // a URL holding a parenthesis, a backtick or `>`, which no bare URL is written with, is written as
 // a link both read back.
 func TestRenderKeepsABackslashInsideABareURL(t *testing.T) {
+	t.Parallel()
 	const chars = "!\"#$%&'()+,-./:;=>?@[]^_`{}~"
 	var markdowns []string
 	for _, char := range chars {
@@ -96,6 +99,7 @@ func TestRenderKeepsABackslashInsideABareURL(t *testing.T) {
 // writes it: the parser splits it as written, and the browser editor's parser reads the same
 // bytes as the same tree.
 func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
+	t.Parallel()
 	assertRenders(t, []struct{ markdown, want string }{
 		{"*x**b***\n", "*x****b***\n"},
 		{"_p x**b**_ q\n", "*p x****b*** q\n"},
@@ -113,6 +117,7 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 // escaped bytes read back in both parsers, so a keep-open spelling tried first changed a document
 // that writer stores correctly.
 func TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen(t *testing.T) {
+	t.Parallel()
 	assertRenders(t, []struct{ markdown, want string }{
 		{"- ****1**a__1***\n", "- \\*\\*\\**1****a\\_\\_1***\n"},
 		{"****b.**(c)***(c)\n", "\\*\\*\\**b.****(c)***(c)\n"},
@@ -126,6 +131,7 @@ func TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen(t *testing.T) {
 // and opened again between them: open marks stay open, and a text opens first the marks the text
 // after it carries.
 func TestRenderKeepsAMarkOpenWhereAFusedRunDoesNotReadBack(t *testing.T) {
+	t.Parallel()
 	assertRenders(t, []struct{ markdown, want string }{
 		{"*a **b [l](https://e.com/u) c** d*\n", "*a **b [l](https://e.com/u) c** d*\n"},
 		{"*a **b***\n", "*a **b***\n"},
@@ -206,6 +212,7 @@ func assertRenders(t *testing.T, cases []struct{ markdown, want string }) {
 // and beside one whose read-back would pad more than a read-back's budget the write is refused,
 // naming the limit, rather than stored without the check.
 func TestRefuseMisreadWriteReadsStoredSpansBackOnABudgetOfTheirOwn(t *testing.T) {
+	t.Parallel()
 	paragraph := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "New."}}}
 	shortRow := spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{1, 1}})
 	spanned := documentBesideSpannedTable(100, 60)

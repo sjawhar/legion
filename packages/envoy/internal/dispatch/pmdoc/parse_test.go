@@ -30,6 +30,7 @@ func TestParseMatchesMilkdownForFixtures(t *testing.T) {
 }
 
 func TestRenderParseRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			doc, err := FromJSON(fx.PMJSON)
@@ -54,6 +55,7 @@ func TestRenderParseRoundTrip(t *testing.T) {
 }
 
 func TestParsePreservesTaskListCheckboxState(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("- [x] checked\n- [ ] unchecked\n")
 	if err != nil {
 		t.Fatalf("parse task list: %v", err)
@@ -84,6 +86,7 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 // document editor drawing the stored document show different alt text, the divergence this
 // package exists to close.
 func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
+	t.Parallel()
 	for _, row := range []struct{ markdown, alt string }{
 		// A declaration at a lowercase letter: inline raw HTML to both readers
 		// (inlineRawHTMLParser), so its characters are the alt's.
@@ -124,6 +127,7 @@ func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
 }
 
 func TestParseRejectsBlockHTML(t *testing.T) {
+	t.Parallel()
 	_, err := Parse("<div>\nblock HTML\n</div>\n")
 	if err == nil || !errors.Is(err, ErrSchema) {
 		t.Fatalf("Parse(block HTML) = %v, want ErrSchema", err)
@@ -134,6 +138,7 @@ func TestParseRejectsBlockHTML(t *testing.T) {
 // definition inside another as a setext underline, where CommonMark reads it as the paragraph's
 // text, so a definition inside another is refused.
 func TestParseRefusesAFootnoteDefinitionInsideAnother(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ markdown, reason string }{
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n", "a footnote definition inside another"},
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n    =\n", "a footnote definition inside another"},
@@ -153,6 +158,7 @@ func TestParseRefusesAFootnoteDefinitionInsideAnother(t *testing.T) {
 // giving as its reason that the editor refers to it only from inside the block or after it, would
 // tell the writer something the editor does not do.
 func TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n",
@@ -178,6 +184,7 @@ func TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes(t *testi
 // editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
 // holds unsavable, so the link's text around the image keeps its link and the write is taken.
 func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ linked, stored string }{
 		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
 		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
@@ -205,6 +212,7 @@ func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
 // `[^&auml;]: `, but written `[^\&AUML;]` beside `[^ä]: ` it is text. One whose decoded label still
 // matches the definition's reads.
 func TestParseRefusesAReferenceMatchingItsDefinitionOnlyAsWritten(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"x[^&auml;] and [^&AUML;]\n\n[^&auml;]: d\n",
 		"x[^&auml;]\n\n[^&AUML;]: d\n",
@@ -220,6 +228,7 @@ func TestParseRefusesAReferenceMatchingItsDefinitionOnlyAsWritten(t *testing.T) 
 }
 
 func TestParsePreservesInlineHTMLAtom(t *testing.T) {
+	t.Parallel()
 	got, err := Parse("Before <span class=\"note\">inside</span> after.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +253,7 @@ func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 // quote or footnote definition in the rest; the renderer never writes such a document, since a
 // rule opening one is written `***`.)
 func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		markdown string
 		kinds    []string
@@ -273,6 +283,7 @@ func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 // Reading an unclosed `---` as a rule must not cost a closed front-matter block, which stays the
 // document's own first node.
 func TestParseKeepsClosedFrontmatter(t *testing.T) {
+	t.Parallel()
 	const markdown = "---\ntitle: x\n---\n\nBody.\n"
 	tree, err := Parse(markdown)
 	if err != nil {
@@ -291,6 +302,7 @@ func TestParseKeepsClosedFrontmatter(t *testing.T) {
 }
 
 func TestParsePreservesLiteralEscapesInsideCodeSpan(t *testing.T) {
+	t.Parallel()
 	got, err := Parse("`\\*literal\\* &amp;`\n")
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +318,7 @@ func TestParsePreservesLiteralEscapesInsideCodeSpan(t *testing.T) {
 }
 
 func TestParseJoinsSoftLineBreaksWithSpaces(t *testing.T) {
+	t.Parallel()
 	got, err := Parse("First soft line\ncontinues in the same paragraph.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +344,7 @@ func TestParseJoinsSoftLineBreaksWithSpaces(t *testing.T) {
 // content, so a definition ending in code, a list, a quote, a rule or a typed block reads as the
 // blocks it holds and writes back the same.
 func TestParseReadsAFootnoteDefinitionEndingInABlock(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, last string }{
 		{"code", "x[^1]\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n", "code_block"},
 		{"a list", "x[^1]\n\n[^1]: Note.\n\n    - item\n", "bullet_list"},
@@ -402,6 +416,7 @@ func TestParseResolvesUnmatchedReferencesWithoutComparingEveryDefinition(t *test
 // crashes the caller, and is this package's bug: an ErrPanic, which callers answer as an internal
 // error, never an ErrSchema refusal of the caller's markdown.
 func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
+	t.Parallel()
 	read := func() (doc *Node, err error) {
 		defer recoverPanic(&doc, &err, "reading markdown")
 		panic("can not call with inline nodes.")
@@ -418,6 +433,7 @@ func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
 // one. Goldmark judges the lengths the runs were written with and pairs that `*` with the
 // closer, reading " see below" as emphasis alone.
 func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
+	t.Parallel()
 	nodes, err := ParseInline("***Note:****&#32;see below*", NewWriteBudget())
 	if err != nil {
 		t.Fatal(err)
@@ -482,6 +498,7 @@ func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
 }
 
 func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
+	t.Parallel()
 	markdown := tablePaddingBomb(70) + "\n" + tablePaddingBomb(70) + "\n" + tablePaddingBomb(70)
 	_, err := Parse(markdown)
 	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
@@ -520,6 +537,7 @@ func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 // header row and a callout at its opener. The tree is the one Parse reads, and the empty paragraph
 // of a document with no blocks starts nowhere.
 func TestParseWithSourceStartsPlacesEveryTopLevelBlock(t *testing.T) {
+	t.Parallel()
 	openings := []string{
 		"---\ntitle: x\n---",
 		"# Heading",

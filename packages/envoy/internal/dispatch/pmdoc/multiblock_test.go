@@ -9,6 +9,7 @@ import (
 // one position short of its end, and replaces both whole: a one-character textblock at the
 // range's edge is not one of them.
 func TestMultiblockRangeIsTheTextblocksTheEditorReads(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("L", 250)
 	for _, test := range []struct {
 		name, markdown, quote string

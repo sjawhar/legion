@@ -18,6 +18,7 @@ import (
 // line that could close it, so the engine keeps every block whole with its code, and so does this
 // parser.
 func TestTypedFencesReadTheSameInTheEngineAndHere(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join("testdata", "typed-fence-lines.json"))
 	if err != nil {
 		t.Fatal(err)

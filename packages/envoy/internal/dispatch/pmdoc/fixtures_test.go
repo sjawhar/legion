@@ -98,6 +98,7 @@ func loadSpliceFixtures(t *testing.T) []spliceFixture {
 }
 
 func TestFixturesAreWithinSchema(t *testing.T) {
+	t.Parallel()
 	fixtures := loadFixtures(t)
 	wantNames := []string{
 		"adjacent-lists", "ask-answered", "ask", "bare-address-after-punctuation", "bare-url-trailing-punctuation", "bare-url", "blockquote", "browser-list-spacing", "callout-blocks", "callout-nested", "callout", "code-directive-example", "code-fence", "code-span-line-ends", "code", "definition-callout-holding-an-unclosed-fence", "definition-items-spaced-around-callouts-holding-an-unclosed-fence", "directive-like-text", "emphasis-beside-another-marker", "emphasis-rule-of-three",
@@ -125,6 +126,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 }
 
 func TestSpliceFixturesHaveRequiredCoverage(t *testing.T) {
+	t.Parallel()
 	fixtures := loadSpliceFixtures(t)
 	wantNames := []string{
 		"paragraph-inline", "paragraph-multiblock", "paragraph-list", "list-item-code",

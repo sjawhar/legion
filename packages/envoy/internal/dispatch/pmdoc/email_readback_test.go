@@ -30,6 +30,7 @@ func inlineSummaries(doc *Node) string {
 // rendering writes each address as a link to its mailto: URL, which reads back, in Go and in the
 // engine alike, as the markdown's reading.
 func TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine(t *testing.T) {
+	t.Parallel()
 	rows := []string{
 		"Mail a@b.test now.\n",
 		"Mail <a@b.test> now.\n",
@@ -105,6 +106,7 @@ func TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine(t *testing.T) {
 // begins the one after it, and both readers link an address that text opens with alone (`.@y.zz`),
 // so the writer writes the email as its address there (runSpelling.bareEmails).
 func TestEmailReadingsAgreeWithTheEngine(t *testing.T) {
+	t.Parallel()
 	markdowns := []string{
 		"Mail mailto:a@b.test now.\n",
 		"Mail xmpp:a@b.test now.\n",

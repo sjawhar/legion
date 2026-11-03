@@ -13,6 +13,7 @@ import (
 // spacing it reads, in quotes and footnote definitions included, is the list-spacing-in-containers
 // and footnote-placement corpus documents', which the fixtures compare with the engine's reading.
 func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		// refused holds a shape only the browser editor and this parser read alike; readable, when
@@ -168,6 +169,7 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 // parser reads as the code's, and a definition inside a typed block with a list item around it,
 // whose lines and the blank lines next to it that parser counts otherwise.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
+	t.Parallel()
 	const (
 		fenceBlanks     = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed"
 		typedDefinition = "a footnote definition inside a typed block with a list item around it"
@@ -216,6 +218,7 @@ func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 // sjawhar/legion#2403 avoided by refusing every
 // footnote definition in a typed block (INFRA-581).
 func TestAListInADefinitionInATypedBlockIsReadSpreadAsTheBrowserReadsItOrRefused(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		":::callout{}\n[^f]: - a\n\n    - b\n:::\n\nText[^f].\n",
 		":::callout{}\n[^f]:\n    - x\n      \n      note\n:::\n\nText[^f].\n",

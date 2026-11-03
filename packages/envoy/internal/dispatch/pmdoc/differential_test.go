@@ -278,6 +278,7 @@ func differs(base, head *string) bool {
 }
 
 func TestDifferentialCompare(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("PMDOC_DIFF_BASE") == "" {
 		t.Skip("PMDOC_DIFF_BASE unset; gen/differential.sh runs this")
 	}

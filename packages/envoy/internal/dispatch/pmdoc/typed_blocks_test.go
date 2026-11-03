@@ -56,6 +56,7 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 // alone. One case is this test's own: U+0000 is written U+FFFD, as markdown reads it
 // (withNulsWritten), so the id reads back with each U+0000 as U+FFFD.
 func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
 	if err != nil {
 		t.Fatalf("read table: %v", err)
@@ -123,6 +124,7 @@ func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
 // (the editor keeps the last), an `id` with no value or an empty one (the editor mints one), and the
 // tree's own name for the id, `blockId`, which the editor refuses as undeclared.
 func TestTheTypedBlockIDSpellingsTheReaderTakesAndRefuses(t *testing.T) {
+	t.Parallel()
 	read := []struct{ attributes, id string }{
 		{`#a`, "a"},
 		{`id="a"`, "a"},
@@ -185,6 +187,7 @@ func TestTheTypedBlockIDSpellingsTheReaderTakesAndRefuses(t *testing.T) {
 // A typed block's markdown reads `id="…"` as its block id and its tree holds that id as blockId,
 // so the schema refuses an attribute of either name.
 func TestABlockSchemaRefusesAnAttributeNamingTheBlockID(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"id", BlockIDAttr} {
 		err := validateBlockSchema(BlockSchema{Version: 1, Types: []BlockTypeSchema{{
 			Name: "test", Content: BlockContentParagraphs, Render: "host",
@@ -201,6 +204,7 @@ func TestABlockSchemaRefusesAnAttributeNamingTheBlockID(t *testing.T) {
 // fence outgrows every such line: a nested typed block's fence, or a line of code, measured with the
 // width of the list markers around it; a line in a blockquote closes nothing.
 func TestTypedBlockFenceOutgrowsTheColonLinesItHolds(t *testing.T) {
+	t.Parallel()
 	callout := func(id string, children ...*Node) *Node {
 		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: id, "kind": "note", "title": ""}, Children: children}
 	}
@@ -299,6 +303,7 @@ func TestAskDirectiveRoundTripsOpenAndAnsweredState(t *testing.T) {
 }
 
 func TestRetypeBlockKeepsTheBlockIdentityAndParagraphBody(t *testing.T) {
+	t.Parallel()
 	doc := &Node{Type: "doc", Children: []*Node{{
 		Type:     "paragraph",
 		Attrs:    Attrs{BlockIDAttr: "question-id"},
@@ -328,6 +333,7 @@ func TestRetypeBlockKeepsTheBlockIdentityAndParagraphBody(t *testing.T) {
 }
 
 func TestSetBlockAttributesChangesOnlyTheRequestedTypedBlock(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse(":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nQuestion?\n:::\n")
 	if err != nil {
 		t.Fatalf("parse ask: %v", err)
@@ -353,6 +359,7 @@ func TestSetBlockAttributesChangesOnlyTheRequestedTypedBlock(t *testing.T) {
 }
 
 func TestTypedStringArrayAttributesRoundTripThroughYjs(t *testing.T) {
+	t.Parallel()
 	const markdown = ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"answered\" selected=\"[&#x22;REST&#x22;]\"}\nQuestion?\n:::\n"
 	tree, err := Parse(markdown)
 	if err != nil {
@@ -385,6 +392,7 @@ func TestTypedStringArrayAttributesRoundTripThroughYjs(t *testing.T) {
 }
 
 func TestTypedStringArrayAttributesUpdateAnExistingYjsBlock(t *testing.T) {
+	t.Parallel()
 	initial, err := Parse(":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nQuestion?\n:::\n")
 	if err != nil {
 		t.Fatalf("parse open ask: %v", err)
@@ -430,6 +438,7 @@ func TestTypedStringArrayAttributesUpdateAnExistingYjsBlock(t *testing.T) {
 }
 
 func TestTypedStringArrayAttributesUpdateAfterYjsReload(t *testing.T) {
+	t.Parallel()
 	initial, err := Parse(":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nQuestion?\n:::\n")
 	if err != nil {
 		t.Fatalf("parse open ask: %v", err)
@@ -468,6 +477,7 @@ func TestTypedStringArrayAttributesUpdateAfterYjsReload(t *testing.T) {
 // named a different one from run to run; it names every undeclared attribute, sorted, reading the
 // markdown or checking a tree.
 func TestTypedBlockNamesItsUndeclaredAttributesSorted(t *testing.T) {
+	t.Parallel()
 	const want = `outside Proof schema: typed block "callout" does not declare attributes "bar", "foo"`
 	markdown := ":::callout{#block-1 kind=\"note\" title=\"T\" foo=\"x\" bar=\"y\"}\nBody.\n:::\n"
 	tree := &Node{Type: "doc", Children: []*Node{{
@@ -487,6 +497,7 @@ func TestTypedBlockNamesItsUndeclaredAttributesSorted(t *testing.T) {
 }
 
 func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		markdown string
@@ -710,6 +721,7 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 // makes names the line in the fragment the caller wrote, not in the parse's own text, blank lines
 // ahead of the rows counted.
 func TestTableRowFragmentRefusalNamesTheCallersLine(t *testing.T) {
+	t.Parallel()
 	const rows = "> | x |\n>     :::callout{kind=\"note\" title=\"a | b\"}\n"
 	for markdown, want := range map[string]string{
 		rows:        "line 2,",
@@ -726,6 +738,7 @@ func TestTableRowFragmentRefusalNamesTheCallersLine(t *testing.T) {
 // the whole of a replace's inline text - is stored as that text; only a line the writer broke to
 // open a block, which the parser reads as the paragraph's text anyway, is refused.
 func TestTypedBlockOpeningWrittenAsTextOnPurposeIsKept(t *testing.T) {
+	t.Parallel()
 	const opening = `:::ask{urgency="med"}`
 	for name, markdown := range map[string]string{
 		"escaped on a line of its own": "Context\n\\" + opening + "\n",
@@ -750,6 +763,7 @@ func TestTypedBlockOpeningWrittenAsTextOnPurposeIsKept(t *testing.T) {
 }
 
 func TestDocumentLevelUnclosedTypedBlockIsRejected(t *testing.T) {
+	t.Parallel()
 	markdown, err := os.ReadFile("testdata/corpus-errors/unclosed-typed-block.md")
 	if err != nil {
 		t.Fatalf("read unclosed directive corpus: %v", err)
@@ -781,6 +795,7 @@ func TestNestedUnclosedTypedBlockRunsToItsParentEnd(t *testing.T) {
 	}
 }
 func TestTypedBlockBodyFollowsTheSchemaContentRule(t *testing.T) {
+	t.Parallel()
 	const markdown = ":::callout{#callout-1 kind=\"note\" title=\"Body blocks\"}\nIntroduction.\n\n- Choice one\n- Choice two\n\n```text\nexample\n```\n\n> Quoted context.\n:::\n"
 
 	doc, err := Parse(markdown)
@@ -800,6 +815,7 @@ func TestTypedBlockBodyFollowsTheSchemaContentRule(t *testing.T) {
 }
 
 func TestFencedCodeMayQuoteUnsupportedDirectiveSyntax(t *testing.T) {
+	t.Parallel()
 	markdown, err := os.ReadFile("testdata/corpus/code-directive-example.md")
 	if err != nil {
 		t.Fatalf("read code directive corpus: %v", err)
@@ -815,6 +831,7 @@ func TestFencedCodeMayQuoteUnsupportedDirectiveSyntax(t *testing.T) {
 }
 
 func TestSchemaSupportsTypedBlockContentRules(t *testing.T) {
+	t.Parallel()
 	for _, content := range []string{"paragraph+", "block+", "paragraph+ bullet_list?"} {
 		t.Run(content, func(t *testing.T) {
 			err := validateBlockSchema(BlockSchema{
@@ -834,6 +851,7 @@ func TestSchemaSupportsTypedBlockContentRules(t *testing.T) {
 }
 
 func TestTypedBlockContentRulesValidateTheirChildSequences(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		content  BlockContentRule
@@ -915,6 +933,7 @@ func TestParseMintsAnOmittedTypedBlockID(t *testing.T) {
 // A refused ask is named by the opening words of its question as well as its block id, which the
 // parser makes up when the markdown gives none.
 func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose to the partners first?\n\n```\ncode\n```\n:::\n")
 	if err != nil {
 		t.Fatal(err)
@@ -934,6 +953,7 @@ func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
 // An ask holding a block its content rule does not allow is refused naming that block as a
 // reader would, with its article.
 func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {
+	t.Parallel()
 	paragraph := func(text string) *Node {
 		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
 	}

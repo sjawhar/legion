@@ -10,6 +10,7 @@ import (
 var yattrMarkSuffixOracle = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
 func TestYattrToMarkNameDropsARecordMarksDigest(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, want string }{
 		{name: "proofComment--AbCd12+/", want: "proofComment"},
 		{name: "proofComment", want: "proofComment"},

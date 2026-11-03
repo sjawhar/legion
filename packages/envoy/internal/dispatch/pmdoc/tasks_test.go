@@ -6,6 +6,7 @@ import (
 )
 
 func TestCountTasks(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		markdown string
@@ -37,6 +38,7 @@ func TestCountTasks(t *testing.T) {
 // A task item emptied of its text, as a browser leaves one it has just added, renders as a plain
 // `- ` (render.go), so the live tree's count agrees with its stored rendering's: zero.
 func TestCountTasksSkipsAnEmptyTaskItem(t *testing.T) {
+	t.Parallel()
 	doc := &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
 		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": true, "spread": false}, Children: []*Node{{Type: "paragraph"}}},
 		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": false, "spread": false}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "real"}}}}},
@@ -63,6 +65,7 @@ func TestCountTasksSkipsAnEmptyTaskItem(t *testing.T) {
 // document (markWideRows) and the reconciliation reported no progress at all for it; LEGION-36
 // and LEGION-179 failed the same way with three and five cells.
 func TestCountTasksMarkdownCountsPastATableTheSchemaRefuses(t *testing.T) {
+	t.Parallel()
 	const markdown = "## Requirements\n\n" +
 		"| Requirement | Where it comes from |\n" +
 		"| :--- | :--- |\n" +
@@ -93,6 +96,7 @@ func TestCountTasksMarkdownCountsPastATableTheSchemaRefuses(t *testing.T) {
 // (the first version of this counter did not, and creation would have stored 1/2 where the
 // document holds 0/0). Markdown the reader cannot read at all is the error.
 func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"A paragraph.\n",
 		"- one\n- two\n",
@@ -128,6 +132,7 @@ func TestCountTasksMarkdownAgreesWithCountTasks(t *testing.T) {
 // A document the Proof schema refuses for a block beside the list - an html block, an unknown
 // typed block - still has its task items counted, as the wide-row table is.
 func TestCountTasksMarkdownCountsPastOtherSchemaRefusals(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, refusal string }{
 		{"html block", "<div>\nx\n</div>\n\n- [x] one\n- [ ] two\n", "block HTML"},
 		{"unknown typed block", ":::unknown{#b1}\nBody.\n:::\n\n- [x] one\n- [ ] two\n- [ ] three\n", "unknown typed block"},

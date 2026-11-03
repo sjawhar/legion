@@ -9,6 +9,7 @@ import (
 // two refused blocks is refused with the reason of the one written first, whichever kinds they are,
 // since the walk, not conversion, refuses every block.
 func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
+	t.Parallel()
 	blocks := []struct{ name, markdown string }{
 		{"a link reference definition", "[a]: http://x\n"},
 		{"block HTML", "<div>\nx\n</div>\n"},
@@ -58,6 +59,7 @@ func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
 // written. What that parser leaves as written, and the rest of the info string, which both drop,
 // is read as before.
 func TestParseRefusesACodeLanguageTheBrowserDecodes(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"```a\\*b\nx\n```\n",
 		"```a&amp;b\nx\n```\n",

@@ -98,6 +98,7 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 // DISPATCH_BLOCK_POINTER_VALUES, which `packages/contracts/src/dispatch-block-ref.test.ts` holds
 // this file to.
 func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
+	t.Parallel()
 	raw, err := os.ReadFile("testdata/block-pointer-values.json")
 	if err != nil {
 		t.Fatalf("read table: %v", err)
@@ -156,6 +157,7 @@ func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
 // (RenderWithBlockOffsets, which GET /api/v1/artifacts/{id}/blocks lists) holds for the corpus is
 // one, and a list item or a table's row or cell, which it never holds, is not.
 func TestBuiltInBlockTargetsAreTheBlocksTheBlockListHolds(t *testing.T) {
+	t.Parallel()
 	paths, err := filepath.Glob("testdata/corpus/*.md")
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("corpus: %v (%d documents)", err, len(paths))

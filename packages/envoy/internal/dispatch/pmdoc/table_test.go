@@ -27,6 +27,7 @@ import (
 // so findTableRows finds none where goldmark would form one. Each shape here, and every paragraph
 // of the corpus fixtures, is read by both, the transformer on a copy apart from any document.
 func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
+	t.Parallel()
 	shapes := []string{
 		"| a | b |\n| - | - |\n| 1 | 2 |\n",
 		"| a |\n| - | - |\n| 1 | 2 |\n",
@@ -240,6 +241,7 @@ func TestSetextLookAheadReadsEachLineOnce(t *testing.T) {
 // and both ways to write it, as is one a `|` after two backslashes widens; written `\|`, the same
 // row is read whole.
 func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
+	t.Parallel()
 	const row = "| `runtime.ts` | Hold `x: Promise<void> | undefined`; every caller waits. |\n"
 	for _, markdown := range []string{
 		"| File | Rule |\n| --- | --- |\n" + row,
@@ -283,6 +285,7 @@ func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
 // the browser editor's parser reads a closing pipe an odd run of backslashes escapes as the last
 // cell's text. After an even run the pipe closes the row in both.
 func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
+	t.Parallel()
 	for markdown, want := range map[string][2]string{
 		"| a | b |\n| - | - |\n| x | y \\|\n":     {"b", "y |"},
 		"| a | b \\|\n| - | - |\n| x | y |\n":     {"b |", "y"},
@@ -306,6 +309,7 @@ func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
 // keepEscapedClosingPipes walked past the row and Parse panicked on untrusted markdown: a row
 // the split widens past its table is the wide-row refusal, and one that fits reads its cells.
 func TestParseReadsASplitRowEndingInAnEscapedPipe(t *testing.T) {
+	t.Parallel()
 	for _, markdown := range []string{
 		"| h | i |\n| --- | --- |\n| a | b \\\\| \\|\n",
 		"| h | i |\n| --- | --- |\n| a | b \\\\| c \\\\| \\|\n",
@@ -345,6 +349,7 @@ func TestParseReadsASplitRowEndingInAnEscapedPipe(t *testing.T) {
 // delimiter row makes no table there, and the lines stay a paragraph. Each table renders as
 // markdown that reads back the same.
 func TestParseEndsACellAtAPipeAfterAnEvenRunOfBackslashes(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, markdown string
 		cells          [][]string
@@ -452,6 +457,7 @@ func TestParseEndsACellAtAPipeAfterAnEvenRunOfBackslashes(t *testing.T) {
 // backslash out; such an input is no comparison, and the split cells are tested against the
 // browser editor's reading (TestParseEndsACellAtAPipeAfterAnEvenRunOfBackslashes).
 func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
+	t.Parallel()
 	read := func(source []byte) (ast.Node, gmtext.Reader, parser.Context) {
 		reader := gmtext.NewReader(source)
 		pc := parser.NewContext()

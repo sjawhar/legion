@@ -11,6 +11,7 @@ import "testing"
 // its content's offset, a footnote definition eats nothing, and a quote eats its `>` and one
 // optional space. Each row is what the engine reads in its markdown (checkCodeAndSpread).
 func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
+	t.Parallel()
 	checkCodeAndSpread(t, []codeAndSpreadRow{
 		// A line short of the fence's indentation is empty.
 		{name: "last line, no fence closing", markdown: "  ~~~\n \n", codes: []string{""}},

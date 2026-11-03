@@ -300,6 +300,7 @@ func assertWrittenAsOracle(t *testing.T, name string, doc *Node) {
 }
 
 func TestAsWrittenIsTheOldPipelineOnEveryBranch(t *testing.T) {
+	t.Parallel()
 	for name, doc := range writtenCases() {
 		t.Run(name, func(t *testing.T) {
 			assertWrittenAsOracle(t, name, doc)
@@ -308,6 +309,7 @@ func TestAsWrittenIsTheOldPipelineOnEveryBranch(t *testing.T) {
 }
 
 func TestAsWrittenIsTheOldPipelineOnRealSizeDocuments(t *testing.T) {
+	t.Parallel()
 	for _, size := range []int{150_000, 660_000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			doc := writtenRealSizeDoc(t, size)
@@ -342,6 +344,7 @@ func TestAsWrittenSharesWhatItWritesAsItIs(t *testing.T) {
 // every step, as its encoding costs as much as a read-back; the others after each step, which
 // names the one that wrote.
 func TestRenderAndReadBackLeaveTheirInputUntouched(t *testing.T) {
+	t.Parallel()
 	check := func(t *testing.T, name string, tree *Node, eachStep bool) {
 		t.Helper()
 		before := writtenJSON(t, name, tree)
@@ -391,6 +394,7 @@ func TestRenderAndReadBackLeaveTheirInputUntouched(t *testing.T) {
 // writtenMarks filters a bare URL's link out of the marks it writes in place (withoutMark), which
 // is safe only because visibleMarks gives it a slice of its own: the node's marks stay as they are.
 func TestWrittenMarksDoesNotAliasABareURLsMarks(t *testing.T) {
+	t.Parallel()
 	const url = "https://example.com"
 	node := &Node{Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url}}, {Type: "strong"}}}
 	want := slices.Clone(node.Marks)

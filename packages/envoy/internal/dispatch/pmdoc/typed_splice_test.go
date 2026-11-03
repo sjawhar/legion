@@ -12,6 +12,7 @@ import (
 // ask-block check to refuse. ProseMirror would instead split the ask, closing it after the paragraph
 // and putting the code block after it, which no oracle case pins because Dispatch refuses the write.
 func TestSpliceKeepsAnAskItsReplacementDoesNotFit(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +49,7 @@ func TestSpliceKeepsAnAskItsReplacementDoesNotFit(t *testing.T) {
 // would leave the old ask emptied beside the new one, under the same id, which the write's
 // block-id check would refuse.
 func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, quote, replacement, want string }{
 		{name: "an ask's whole question",
 			markdown:    "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",
@@ -90,6 +92,7 @@ func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
 // under none, is a different block, and a fit never replaces the typed block it lands in, so it
 // stays inside the block, which keeps its id, for the document service's checks to judge.
 func TestSpliceKeepsATypedBlockAReplacementOfItsTypeUnderAnotherIDLandsIn(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, markdown, quote, replacement, parent, id string }{
 		{name: "an ask under another id",
 			markdown:    "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",

@@ -289,6 +289,7 @@ func TestPadTablesBoundsShortRowsBeforeAllocation(t *testing.T) {
 }
 
 func TestPadTablesSharesThePaddingBudgetAcrossTables(t *testing.T) {
+	t.Parallel()
 	doc := shortTableForPadding(70, 70)
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
@@ -319,6 +320,7 @@ func emptyTableCellForPadding(kind string) *Node {
 // not an inline node's, and not twice for an id two of its blocks carry. A table without an id has
 // no entry.
 func TestTableDescendantIDsListsEachTablesBlockIDsOnce(t *testing.T) {
+	t.Parallel()
 	block := func(typ, id string, children ...*Node) *Node {
 		node := &Node{Type: typ, Children: children}
 		if id != "" {

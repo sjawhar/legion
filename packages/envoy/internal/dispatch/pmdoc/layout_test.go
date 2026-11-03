@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -16,8 +17,11 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// spliceTally counts what a differential run of Layout.Splice saw.
+// spliceTally counts what a differential run of Layout.Splice saw. Its counts are added from the
+// parallel subtests one differential run splits into, so count takes a lock; the run reads the
+// tally only once every subtest of its group has finished.
 type spliceTally struct {
+	mu                         sync.Mutex
 	documents, trials, spliced int
 	// textTrials and textSpliced count the text inserts and deletes in a paragraph, a heading or a
 	// list, the edit people make most, which must splice in the large majority.
@@ -28,6 +32,8 @@ type spliceTally struct {
 func newSpliceTally() *spliceTally { return &spliceTally{byKind: map[string][2]int{}} }
 
 func (tally *spliceTally) count(kind string, text, spliced bool) {
+	tally.mu.Lock()
+	defer tally.mu.Unlock()
 	tally.trials++
 	counts := tally.byKind[kind]
 	counts[0]++
@@ -42,6 +48,13 @@ func (tally *spliceTally) count(kind string, text, spliced bool) {
 			tally.textSpliced++
 		}
 	}
+}
+
+// countDocument records that one more document's differential ran.
+func (tally *spliceTally) countDocument() {
+	tally.mu.Lock()
+	defer tally.mu.Unlock()
+	tally.documents++
 }
 
 func (tally *spliceTally) log(t *testing.T, name string) {
@@ -374,7 +387,7 @@ func spliceDifferential(t *testing.T, name string, doc *Node, perBlock, rounds i
 	if err != nil {
 		return
 	}
-	tally.documents++
+	tally.countDocument()
 	rng := rand.New(rand.NewPCG(seed, uint64(len(markdown))))
 	texts := insertionsFor(doc)
 	for index, block := range doc.Children {
@@ -404,34 +417,47 @@ func spliceDifferential(t *testing.T, name string, doc *Node, perBlock, rounds i
 // TestIncrementalRenderMatchesTheWholeRenderOnTheFixtures runs the splice differential over every
 // document of testdata: each fixture's tree as the browser editor reads it, and each corpus file as
 // Parse reads it.
+// Each document is a subtest of its own, run in parallel: the documents share nothing but the
+// tally, which counts under a lock, and one document's differential is a tenth of a second's work
+// where the whole run was minutes of it. The group holds them, so the tally is read once every one
+// has finished.
 func TestIncrementalRenderMatchesTheWholeRenderOnTheFixtures(t *testing.T) {
+	t.Parallel()
 	tally := newSpliceTally()
 	perBlock, rounds := 21, 30
 	if raceEnabled || testing.Short() {
 		perBlock, rounds = 7, 10
 	}
-	for index, fx := range loadFixtures(t) {
-		doc, err := FromJSON(fx.PMJSON)
-		if err != nil {
-			t.Fatalf("%s: %v", fx.Name, err)
-		}
-		spliceDifferential(t, "fixture "+fx.Name, doc, perBlock, rounds, uint64(index), tally)
-	}
 	paths, err := filepath.Glob(filepath.Join("testdata", "corpus", "*.md"))
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("corpus: %d files, %v", len(paths), err)
 	}
-	for index, path := range paths {
-		source, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+	t.Run("documents", func(t *testing.T) {
+		for index, fx := range loadFixtures(t) {
+			doc, err := FromJSON(fx.PMJSON)
+			if err != nil {
+				t.Fatalf("%s: %v", fx.Name, err)
+			}
+			t.Run("fixture "+fx.Name, func(t *testing.T) {
+				t.Parallel()
+				spliceDifferential(t, "fixture "+fx.Name, doc, perBlock, rounds, uint64(index), tally)
+			})
 		}
-		doc, err := Parse(string(source))
-		if err != nil {
-			continue
+		for index, path := range paths {
+			source, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, err := Parse(string(source))
+			if err != nil {
+				continue
+			}
+			t.Run("corpus "+filepath.Base(path), func(t *testing.T) {
+				t.Parallel()
+				spliceDifferential(t, "corpus "+filepath.Base(path), doc, perBlock, rounds, uint64(1000+index), tally)
+			})
 		}
-		spliceDifferential(t, "corpus "+filepath.Base(path), doc, perBlock, rounds, uint64(1000+index), tally)
-	}
+	})
 	tally.log(t, "testdata")
 	assertMostTextEditsSplice(t, tally)
 }
@@ -524,7 +550,12 @@ func withAttr(attrs Attrs, name string, value any) Attrs {
 
 // TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument runs the splice differential over a
 // generated document of at least 390 KB holding every kind of block, every top-level block mutated.
+// Each trial is a subtest of its own, run in parallel: a trial renders the whole 390 KB document
+// as the oracle its splice is read against, which is about a twentieth of a second's work, and the
+// trials share only the document, the rendering and the layout they all read, and the tally, which
+// counts under a lock. The mutations are drawn first, in order, so one rng still decides them all.
 func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
+	t.Parallel()
 	doc := generatedDocument(t, 400<<10)
 	markdown, _, layout, err := RenderWithLayout(doc)
 	if err != nil {
@@ -551,13 +582,25 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 	}
 	rng := rand.New(rand.NewPCG(644, 390))
 	texts := insertionsFor(doc)
+	type spliceTrial struct {
+		name    string
+		kind    string
+		text    bool
+		next    *Node
+		touched []int
+	}
+	var trials []spliceTrial
 	for index := 0; index < len(doc.Children); index += stride {
 		kind := mutationKinds[rng.IntN(len(mutationKinds))]
 		changed := cloneNode(doc.Children[index])
 		mutate(changed, kind, rng, texts)
-		next := replaceBlocks(doc, map[int]*Node{index: changed})
-		ok := assertSpliceIsWhole(t, fmt.Sprintf("large block %d %s", index, kind), markdown, layout, next, []int{index})
-		tally.count(kind, isTextEdit(kind, doc.Children[index]), ok)
+		trials = append(trials, spliceTrial{
+			name:    fmt.Sprintf("large block %d %s", index, kind),
+			kind:    kind,
+			text:    isTextEdit(kind, doc.Children[index]),
+			next:    replaceBlocks(doc, map[int]*Node{index: changed}),
+			touched: []int{index},
+		})
 	}
 	for round := range rounds {
 		changes := map[int]*Node{}
@@ -567,10 +610,22 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 			mutate(changed, []string{"insert", "delete"}[rng.IntN(2)], rng, texts)
 			changes[index] = changed
 		}
-		touched := slices.Sorted(maps.Keys(changes))
-		ok := assertSpliceIsWhole(t, fmt.Sprintf("large round %d", round), markdown, layout, replaceBlocks(doc, changes), touched)
-		tally.count("several", false, ok)
+		trials = append(trials, spliceTrial{
+			name:    fmt.Sprintf("large round %d", round),
+			kind:    "several",
+			next:    replaceBlocks(doc, changes),
+			touched: slices.Sorted(maps.Keys(changes)),
+		})
 	}
+	t.Run("trials", func(t *testing.T) {
+		for _, trial := range trials {
+			t.Run(trial.name, func(t *testing.T) {
+				t.Parallel()
+				ok := assertSpliceIsWhole(t, trial.name, markdown, layout, trial.next, trial.touched)
+				tally.count(trial.kind, trial.text, ok)
+			})
+		}
+	})
 	tally.documents = 1
 	tally.log(t, fmt.Sprintf("large document (%d bytes, %d top-level blocks, layout %d bytes, %s)", len(markdown), layout.Blocks(), layoutSize(layout), time.Since(started).Round(time.Millisecond)))
 	assertMostTextEditsSplice(t, tally)
@@ -579,6 +634,7 @@ func TestIncrementalRenderMatchesTheWholeRenderOnALargeDocument(t *testing.T) {
 // TestIncrementalRenderCorpus runs the splice differential over every .md file of the directory
 // DISPATCH_RENDER_CORPUS names (real documents, never committed), skipped where it is unset.
 func TestIncrementalRenderCorpus(t *testing.T) {
+	t.Parallel()
 	dir := os.Getenv("DISPATCH_RENDER_CORPUS")
 	if dir == "" {
 		t.Skip("DISPATCH_RENDER_CORPUS is unset")
@@ -611,6 +667,7 @@ func TestIncrementalRenderCorpus(t *testing.T) {
 // (ReadForRendering) and block by block (ReadBlockForRendering), and splices every block of it read
 // so into the whole rendering, unchanged.
 func TestIncrementalRenderReadsBlocksAsTheWholeRead(t *testing.T) {
+	t.Parallel()
 	spliced := 0
 	for _, fx := range loadFixtures(t) {
 		doc := crdt.New()
@@ -698,6 +755,7 @@ func spliceCase(t *testing.T, name string, doc *Node, changes map[int]*Node, wan
 // TestIncrementalRenderGuards holds one case for each guard of Layout.Splice, and the cases next
 // to them that splice.
 func TestIncrementalRenderGuards(t *testing.T) {
+	t.Parallel()
 	reference := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "See "}, {Type: "footnote_reference", Attrs: Attrs{"label": "a"}}}}
 	t.Run("G4 a footnote definition in the block", func(t *testing.T) {
 		doc := &Node{Type: "doc", Children: []*Node{paragraph("[^b] stays text"), reference, footnoteDefinition("a", paragraph("Note."))}}
@@ -816,6 +874,7 @@ func TestIncrementalRenderGuards(t *testing.T) {
 // TestIncrementalRenderLayoutRecordsAsksAndSize checks what a layout tells its caller: the blocks
 // holding an ask, wherever it stands, the block count and the bytes it holds.
 func TestIncrementalRenderLayoutRecordsAsksAndSize(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse("# Title\n\n:::ask{#a1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- A: a\n- B: b\n:::\n\nText.\n\n> :::ask{#a2 urgency=\"high\" multiple=\"false\" state=\"open\"}\n> Which?\n>\n> - A: a\n> - B: b\n> :::\n")
 	if err != nil {
 		t.Fatal(err)

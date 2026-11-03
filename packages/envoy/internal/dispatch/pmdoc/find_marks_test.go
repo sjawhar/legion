@@ -142,6 +142,7 @@ func firstDifferingByte(left, right string) int {
 // spans across list and table boundaries. Each states the quote it expects as well as asking the
 // oracle, so a change to the frozen copies cannot pass unnoticed either.
 func TestFindMarksMatchesFindMarkOnHandBuiltTrees(t *testing.T) {
+	t.Parallel()
 	comment := func(id string) Mark { return Mark{Type: "proofComment", Attrs: Attrs{"id": id, "by": "user:alice"}} }
 	run := func(text string, marks ...Mark) *Node { return &Node{Type: "text", Text: text, Marks: marks} }
 	node := func(nodeType string, children ...*Node) *Node { return &Node{Type: nodeType, Children: children} }
@@ -814,6 +815,7 @@ func anchorShapes(doc *Node) (split, crossing, sameTypeOverlaps int) {
 }
 
 func TestFindMarksMatchesFindMarkOnCorpus(t *testing.T) {
+	t.Parallel()
 	for _, document := range corpusMarkdown(t) {
 		for _, count := range []int{1, 6, 20} {
 			doc, err := Parse(document.markdown)
@@ -827,6 +829,7 @@ func TestFindMarksMatchesFindMarkOnCorpus(t *testing.T) {
 }
 
 func TestFindMarksMatchesFindMarkOnRealSizeDocuments(t *testing.T) {
+	t.Parallel()
 	for _, size := range realSizeDocuments {
 		for _, count := range []int{12, 47, 80} {
 			t.Run(fmt.Sprintf("%s/%d", size.name, count), func(t *testing.T) {
@@ -845,6 +848,7 @@ func TestFindMarksMatchesFindMarkOnRealSizeDocuments(t *testing.T) {
 }
 
 func TestFindMarksMatchesFindMarkOnAnchorCorpus(t *testing.T) {
+	t.Parallel()
 	for _, document := range anchorCorpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			checked := 0

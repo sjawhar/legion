@@ -240,6 +240,7 @@ func textWithin(doc *Node, r Range) (Range, bool) {
 }
 
 func TestReanchorReuseMatchesPerCall(t *testing.T) {
+	t.Parallel()
 	for _, document := range corpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			checkReanchorReuse(t, document.name, document.markdown, 47, 47, false)
@@ -256,6 +257,7 @@ func TestReanchorReuseMatchesPerCall(t *testing.T) {
 }
 
 func TestReanchorReuseMatchesPerCallOnAnchorCorpus(t *testing.T) {
+	t.Parallel()
 	for _, document := range anchorCorpusMarkdown(t) {
 		t.Run(document.name, func(t *testing.T) {
 			var total reanchorStats
@@ -274,6 +276,7 @@ func TestReanchorReuseMatchesPerCallOnAnchorCorpus(t *testing.T) {
 // before: the same range, the same description of a miss and the same choice of an ambiguous
 // quote.
 func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
+	t.Parallel()
 	doc, err := Parse(strings.Join([]string{
 		"# Title of the spec",
 		"The quick brown fox jumps over the lazy dog. The quick brown fox sleeps.",
@@ -369,6 +372,7 @@ func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
 // mark's type, its attributes' nesting, then the fragment's text ranges, read only once those
 // checks pass.
 func TestMarkWriterRefusesInMarkRangesOrder(t *testing.T) {
+	t.Parallel()
 	comment := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}}
 	nested := Attrs{"id": "c1", "nested": crafted.NestedValue(expectedMaxMarkAttrNesting + 1)}
 	// misaligned writes a paragraph "abc" ending in a hard break that holds text, which

@@ -38,6 +38,7 @@ func TestParseForWriteRefusesDeeplyNestedBareDirectivesQuickly(t *testing.T) {
 // fences that shorten inwards (nestedCallouts), since a closing fence closes the outermost block
 // it satisfies.
 func TestParseForWriteReads32NestedTypedBlocks(t *testing.T) {
+	t.Parallel()
 	doc, err := ParseForWrite(nestedCallouts(expectedMaxTypedNesting), nil)
 	if err != nil {
 		t.Fatalf("%d nested callouts: %v, want them read", expectedMaxTypedNesting, err)
@@ -50,6 +51,7 @@ func TestParseForWriteReads32NestedTypedBlocks(t *testing.T) {
 // A document write refuses a 33rd typed block nested inside 32, at its opening line, as the
 // browser's default mode does; the read-only engine draws that opener as text.
 func TestParseForWriteRefusesA33rdNestedTypedBlock(t *testing.T) {
+	t.Parallel()
 	_, err := ParseForWrite(nestedCallouts(expectedMaxTypedNesting+1), nil)
 	refusal := fmt.Sprintf("line %d opens a typed block inside %d typed blocks; a document nests at most %d typed blocks",
 		expectedMaxTypedNesting+1, expectedMaxTypedNesting, expectedMaxTypedNesting)
@@ -61,6 +63,7 @@ func TestParseForWriteRefusesA33rdNestedTypedBlock(t *testing.T) {
 // The corpus's 33 nested typed blocks are refused by every reader of caller markdown at the 33rd
 // opener's line.
 func TestCorpusOf33NestedTypedBlocksIsRefused(t *testing.T) {
+	t.Parallel()
 	markdown, err := os.ReadFile("testdata/corpus-errors/typed-blocks-nested-33-deep.md")
 	if err != nil {
 		t.Fatalf("read 33 nested typed blocks corpus: %v", err)
@@ -78,6 +81,7 @@ func TestCorpusOf33NestedTypedBlocksIsRefused(t *testing.T) {
 // block inside 32 others, is refused on read-back for how deeply its typed blocks nest, not for a
 // line of a rendering nobody wrote.
 func TestReadBackRefusalNamesTheTypedBlockNesting(t *testing.T) {
+	t.Parallel()
 	doc, err := ParseForWrite(nestedCallouts(expectedMaxTypedNesting), nil)
 	if err != nil {
 		t.Fatalf("%d nested callouts: %v", expectedMaxTypedNesting, err)
