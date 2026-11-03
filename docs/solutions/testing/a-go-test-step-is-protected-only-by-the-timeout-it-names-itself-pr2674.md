@@ -53,9 +53,9 @@ touches no file under `packages/daemon/`.
 Whoever adds the flag raises the job's limit with it, or sizes the flag to fit.
 The job's limit must stay above the sum of the largest setup time and, for each `go test` step, its
 largest measured green duration plus its own `-timeout`.
-The `test` job's `timeout-minutes` is 80 for a measured worst case of 77, so a flag raised without
-the limit can let the runner cancel the job before Go prints the goroutine dump a hang needs — the
-budget rule in
+The `test` job's `timeout-minutes` is 80 for a measured worst case of about 76, so a flag raised
+without the limit can let the runner cancel the job before Go prints the goroutine dump a hang
+needs — the budget rule in
 docs/solutions/testing/a-race-lane-names-the-packages-that-hold-the-shared-state-and-its-job-limit-outlasts-every-steps-test-timeout-INFRA-141.md.
 
 ## Evidence

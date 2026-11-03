@@ -1668,10 +1668,11 @@ jobs:
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the goroutine dump that names it. A step's worst case is therefore its largest
     # measured green duration plus its own -timeout, not its compile plus its -timeout: 325 s of
-    # setup before the plain step starts, then that step's 839 s and its 15 minutes, then the race
-    # step's 734 s and its 30, then 13 s for every step after it and 7 s for the cache save that
-    # runs only on a miss, which is 4618 s, or 77 minutes (dispatch://INFRA-1052 measured them over
-    # the 30 newest counted test jobs of main push runs).
+    # setup before the plain step starts, then that step's 839 s (measured while it still ran
+    # internal/daemon, so an upper bound for it now) and its 15 minutes, then the race step's
+    # 694 s and its 30, then 13 s for the steps after it and 7 s for the cache save that runs only
+    # on a miss, which is 4578 s, or about 76 minutes (dispatch://INFRA-1052 measured them over the
+    # 30 newest counted test jobs of main push runs).
     timeout-minutes: 80
     services:
       postgres:

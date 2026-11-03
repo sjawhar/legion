@@ -413,9 +413,9 @@ GATES = [
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
     ], exact=[
         # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
-        # pinned, as the envoy-go unit step's is. The entry declares ./... on purpose: the race
-        # step tests the four, so the test filter must still select the job on a change to any of
-        # them, and the gate's closure is what it is today.
+        # pinned, as the envoy-go unit step's is. A Run cannot name "./... but the four", so the
+        # entry declares the superset ./..., as the envoy-go unit step's does; the race step's Run
+        # above is what claims the four.
         pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
             (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
