@@ -27,7 +27,11 @@
     "indentWidth": 2,
     "lineWidth": 100,
     "lineEnding": "lf",
-    "includes": ["**", "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json"]
+    "includes": [
+      "**",
+      "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json",
+      "!packages/envoy-client/src/__tests__/fixtures/command-surface.json"
+    ]
   },
   "linter": {
     "enabled": true,

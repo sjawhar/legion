@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import type { SearchAsk, Suggestions, WriteAdvice, WriteSuggestion } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
@@ -1257,7 +1257,15 @@ describe("dispatch_related", () => {
 // `## ` heading of that skill's SKILL.md, read as dispatch-tools.test.ts reads the Dispatch skill's.
 test("every skill section a notice cites is a heading of that skill", () => {
   const repoRoot = path.resolve(import.meta.dir, "../../../..");
-  const source = readFileSync(path.resolve(import.meta.dir, "../dispatch-execute.ts"), "utf8");
+  // The dispatcher's entry and every module of its commands: a notice's text sits with the
+  // handler that prints it, and a handler moves between modules, so all of them are read.
+  const commands = path.resolve(import.meta.dir, "../dispatch-commands");
+  const source = [
+    readFileSync(path.resolve(import.meta.dir, "../dispatch-execute.ts"), "utf8"),
+    ...readdirSync(commands)
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => readFileSync(path.join(commands, file), "utf8")),
+  ].join("\n");
   const citations = [...source.matchAll(/the \\?`([a-z0-9-]+)\\?` skill, "([^"]+)"/gu)].map(
     ([, skill, section]) => ({ skill, section })
   );
