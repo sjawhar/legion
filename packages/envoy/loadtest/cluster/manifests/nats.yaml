@@ -1,0 +1,379 @@
+# nats.yaml: rendered by render-nats.sh (do not edit): chart nats/nats 2.15.1 from
+# https://nats-io.github.io/k8s/helm/charts/
+# (archive sha256 b209c62784b1b24c714d5ff6503b4c7dd948ec187d4222beee16b579f1258cc1),
+# helm template --skip-tests at helm v3.20.2 with nats-values.yaml, each image pinned to
+# its digest:
+#   mirror.gcr.io/library/nats:2.15.1-alpine -> mirror.gcr.io/library/nats@sha256:7ae34c25dfd6fe2e01c6483eabef20d796690fdcac6c4d94ca780a6cf9877fde
+#   mirror.gcr.io/natsio/nats-server-config-reloader:0.24.0 -> mirror.gcr.io/natsio/nats-server-config-reloader@sha256:d758a82a9c20337e46c2f7356a413faa52cf4d6b02497c3ad81f72f1ba106464
+#   mirror.gcr.io/natsio/nats-box:0.20.0 -> mirror.gcr.io/natsio/nats-box@sha256:d2f04223f40e016f77922a8115d34b0cd5fad2ec10b19b39316ae92d07f3d295
+# cluster.sh fills the namespace, storage class and run id placeholders.
+---
+# Source: nats/templates/nats-box/contexts-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/component: nats-box
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats-box-contexts
+  namespace: __NAMESPACE__
+stringData:
+  default.json: |
+    {
+      "url": "nats://nats"
+    }
+type: Opaque
+---
+# Source: nats/templates/config-map.yaml
+apiVersion: v1
+data:
+  nats.conf: |
+    {
+      "cluster": {
+        "name": "nats",
+        "no_advertise": true,
+        "port": 6222,
+        "routes": [
+          "nats://nats-0.nats-headless:6222",
+          "nats://nats-1.nats-headless:6222",
+          "nats://nats-2.nats-headless:6222"
+        ]
+      },
+      "http_port": 8222,
+      "jetstream": {
+        "max_file_store": 18Gi,
+        "max_memory_store": 0,
+        "store_dir": "/data"
+      },
+      "lame_duck_duration": "30s",
+      "lame_duck_grace_period": "10s",
+      "pid_file": "/var/run/nats/nats.pid",
+      "port": 4222,
+      "server_name": $SERVER_NAME
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats-config
+  namespace: __NAMESPACE__
+---
+# Source: nats/templates/headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats-headless
+  namespace: __NAMESPACE__
+spec:
+  clusterIP: None
+  ports:
+  - appProtocol: tcp
+    name: nats
+    port: 4222
+    targetPort: nats
+  - appProtocol: tcp
+    name: cluster
+    port: 6222
+    targetPort: cluster
+  - appProtocol: http
+    name: monitor
+    port: 8222
+    targetPort: monitor
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/name: nats
+---
+# Source: nats/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats
+  namespace: __NAMESPACE__
+spec:
+  ports:
+  - appProtocol: tcp
+    name: nats
+    port: 4222
+    targetPort: nats
+  selector:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/name: nats
+---
+# Source: nats/templates/nats-box/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: nats-box
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats-box
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: nats-box
+      app.kubernetes.io/instance: nats
+      app.kubernetes.io/name: nats
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        app.kubernetes.io/component: nats-box
+        app.kubernetes.io/instance: nats
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: nats
+        app.kubernetes.io/part-of: dispatch-loadtest
+        app.kubernetes.io/version: 2.15.1
+        dispatch-loadtest/role: nats-box
+        dispatch-loadtest/run: __RUN_ID__
+        helm.sh/chart: nats-2.15.1
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - sh
+        - -ec
+        - trap true INT TERM; sleep infinity & wait
+        command:
+        - sh
+        - -ec
+        - |
+          work_dir="$(pwd)"
+          mkdir -p "$XDG_CONFIG_HOME/nats"
+          cd "$XDG_CONFIG_HOME/nats"
+          if ! [ -s context ]; then
+            ln -s /etc/nats-contexts context
+          fi
+          if ! [ -f context.txt ]; then
+            echo -n "default" > context.txt
+          fi
+          cd "$work_dir"
+          exec /entrypoint.sh "$@"
+        - --
+        image: mirror.gcr.io/natsio/nats-box@sha256:d2f04223f40e016f77922a8115d34b0cd5fad2ec10b19b39316ae92d07f3d295
+        name: nats-box
+        resources:
+          limits:
+            cpu: 500m
+            ephemeral-storage: 256Mi
+            memory: 512Mi
+          requests:
+            cpu: 500m
+            ephemeral-storage: 256Mi
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /etc/nats-contexts
+          name: contexts
+      enableServiceLinks: false
+      volumes:
+      - name: contexts
+        secret:
+          secretName: nats-box-contexts
+---
+# Source: nats/templates/stateful-set.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app.kubernetes.io/component: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/part-of: dispatch-loadtest
+    app.kubernetes.io/version: 2.15.1
+    dispatch-loadtest/run: __RUN_ID__
+    helm.sh/chart: nats-2.15.1
+  name: nats
+  namespace: __NAMESPACE__
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  podManagementPolicy: Parallel
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: nats
+      app.kubernetes.io/instance: nats
+      app.kubernetes.io/name: nats
+  serviceName: nats-headless
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+      labels:
+        app.kubernetes.io/component: nats
+        app.kubernetes.io/instance: nats
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: nats
+        app.kubernetes.io/part-of: dispatch-loadtest
+        app.kubernetes.io/version: 2.15.1
+        dispatch-loadtest/role: nats
+        dispatch-loadtest/run: __RUN_ID__
+        helm.sh/chart: nats-2.15.1
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - args:
+        - --config
+        - /etc/nats-config/nats.conf
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: SERVER_NAME
+          value: $(POD_NAME)
+        image: mirror.gcr.io/library/nats@sha256:7ae34c25dfd6fe2e01c6483eabef20d796690fdcac6c4d94ca780a6cf9877fde
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - nats-server
+              - -sl=ldm=/var/run/nats/nats.pid
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz?js-enabled-only=true
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: nats
+        ports:
+        - containerPort: 4222
+          name: nats
+        - containerPort: 6222
+          name: cluster
+        - containerPort: 8222
+          name: monitor
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz?js-server-only=true
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: "2"
+            ephemeral-storage: 1Gi
+            memory: 4Gi
+          requests:
+            cpu: "2"
+            ephemeral-storage: 1Gi
+            memory: 4Gi
+        startupProbe:
+          failureThreshold: 90
+          httpGet:
+            path: /healthz
+            port: monitor
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /etc/nats-config
+          name: config
+        - mountPath: /var/run/nats
+          name: pid
+        - mountPath: /data
+          name: nats-js
+      - args:
+        - -pid
+        - /var/run/nats/nats.pid
+        - -config
+        - /etc/nats-config/nats.conf
+        image: mirror.gcr.io/natsio/nats-server-config-reloader@sha256:d758a82a9c20337e46c2f7356a413faa52cf4d6b02497c3ad81f72f1ba106464
+        name: reloader
+        resources:
+          limits:
+            cpu: 50m
+            ephemeral-storage: 256Mi
+            memory: 64Mi
+          requests:
+            cpu: 50m
+            ephemeral-storage: 256Mi
+            memory: 64Mi
+        volumeMounts:
+        - mountPath: /var/run/nats
+          name: pid
+        - mountPath: /etc/nats-config
+          name: config
+      enableServiceLinks: false
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 60
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/component: nats
+            app.kubernetes.io/instance: nats
+            app.kubernetes.io/name: nats
+        maxSkew: 1
+        minDomains: 3
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+      volumes:
+      - configMap:
+          name: nats-config
+        name: config
+      - emptyDir: {}
+        name: pid
+  volumeClaimTemplates:
+  - metadata:
+      labels:
+        app.kubernetes.io/part-of: dispatch-loadtest
+        dispatch-loadtest/run: __RUN_ID__
+      name: nats-js
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 20Gi
+      storageClassName: __STORAGE_CLASS__

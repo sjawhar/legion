@@ -465,9 +465,10 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 
 // An architect writes a spec whose decisions are ask blocks and a human approves it straight
 // away. Settlement indexes those blocks seconds later, over words nobody has touched since. A
-// version minted for that indexing stales an approval a human has just given, and Legion's
-// design gate - open exactly while the approved version is the latest - closes with nothing in
-// the event log to explain it (LEGION-273).
+// version minted for that indexing staled an approval a human had just given and closed Legion's
+// design gate with nothing in the event log to explain it (LEGION-273); the approval carry would
+// now carry the approval to it instead, a version and an artifact.approved event nothing explains,
+// so settlement mints none and the approval stays at the version the human approved.
 func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)

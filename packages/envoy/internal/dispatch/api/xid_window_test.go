@@ -383,6 +383,34 @@ func TestXidWindowUploadReplace(t *testing.T) {
 	})
 }
 
+// An upload of the text a person approved carries his approval to the version it writes
+// (docs.CarryRestoredApproval). Everything that carry is decided on - the document's newest
+// review, the approved version's text, its decision blocks' rows and the open approval request -
+// is read in the route's read phase, and what it writes - the request's answer, when one is open,
+// and the review - is queued with the route's own writes, so the window is that one batch and the
+// commit ending it.
+func TestXidWindowUploadRestoringTheApprovedText(t *testing.T) {
+	f := newXidFixture(t, testServerOptions{}, "")
+	approval := reviewDocument(t, f.handler, f.specID, "alice", "approved", "")
+	approved := versionMarkdown(t, f.handler, f.specID, approval.Version)
+	revised := strings.Replace(f.spec, "Revision token r0", "Revision token r1", 1)
+	if uploaded := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/artifacts", map[string]any{
+		"name": "spec.md", "content": revised, "summary": "Bump the revision", "actor": sessionActor(),
+	}); uploaded.Code != http.StatusCreated {
+		t.Fatalf("stale the approval before the restore: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	waitForArtifactVersion(t, f.handler, f.specID, approval.Version+1)
+	f.measureBatched(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+		return sessionRequest(t, h, http.MethodPost, "/api/v1/issues/"+f.issueKey+"/artifacts", map[string]any{
+			"name": "spec.md", "content": approved, "actor": sessionActor(),
+		})
+	})
+	// The measured request is the restore only while it carries the approval: a window measured
+	// over a route that carried nothing would report a window this write path never ran in.
+	waitForArtifactVersion(t, f.handler, f.specID, approval.Version+2)
+	requireReviewCarriedWith(t, f.handler, f.specID, approval.Version+2, approval.Version, restoreSentence(approval.Version), nil)
+}
+
 // A named version of a document changed since its last version captures and renders the live
 // document.
 func TestXidWindowNamedVersion(t *testing.T) {

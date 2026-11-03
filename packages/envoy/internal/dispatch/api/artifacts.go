@@ -616,6 +616,18 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
+		// It carries the document's newest approval when its text is the approved text again and
+		// its decision blocks are as their rows have them, as every version the document service
+		// writes does (docs.carryApproval): an exact undo uploaded is the approved document. It
+		// runs where the route's other document work runs, so its reads see this transaction's
+		// own queued writes and its own writes join the queue, and its events reach the ledger
+		// beside the move's.
+		if err := docs.CarryRestoredApproval(
+			documentCtx, tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, documentReadBack, s.deps.ServerURL,
+		); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		diff, err = s.namedVersionDiff(r.Context(), tx, ledger, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -646,8 +658,8 @@ func (s *server) storeArtifact(
 	}
 	// The approval this upload's own version superseded, read in its read phase as the edit route
 	// reads it: an upload to an existing document always writes a version, so a replacement of an
-	// approved spec closes its design gate as an edit does. A new document has no review of its
-	// own to supersede.
+	// approved spec closes its design gate as an edit does, unless the restore above carried the
+	// approval to it. A new document has no review of its own to supersede.
 	var superseded *supersededApproval
 	if kind == "doc" && !created {
 		superseded = s.supersededApprovalAdvice(
