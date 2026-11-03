@@ -298,7 +298,7 @@ func TestKV_AGoneBootsYoungAttemptIsTakenOverAtOnce(t *testing.T) {
 	a := newTestKV(kv, "boot-a", clock)
 	gone := map[string]bool{}
 	b := NewKV(kv, KVConfig{Durable: testDurable, Boot: "boot-b", TakeoverAfter: testTakeoverAfter, Now: clock.Now,
-		GoneBoot: func(boot string) bool { return gone[boot] }})
+		GoneBoot: func(boot string) (bool, time.Duration) { return gone[boot], 0 }})
 
 	mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
 	key := a.Key("publish.abc", "ses_target")
@@ -324,6 +324,41 @@ func TestKV_AGoneBootsYoungAttemptIsTakenOverAtOnce(t *testing.T) {
 		t.Fatalf("record after the take-over = %+v, want attempted by boot-b", record)
 	}
 	mustAttempt(t, b, "publish.abc", "ses_target", InFlight)
+}
+
+// A gone boot that is still settling the push it had in hand holds its attempt: the ledger defers
+// the pair, with the settling time left as RetryIn, until GoneBoot reports that boot settles
+// nothing more. That is what keeps the pod taking a released lease over from pushing a message
+// the pod before it may already have delivered.
+func TestKV_AGoneBootStillSettlingHoldsItsAttempt(t *testing.T) {
+	kv := openTestBucket(t)
+	clock := newTestClock()
+	a := newTestKV(kv, "boot-a", clock)
+	settling := 2 * time.Second
+	b := NewKV(kv, KVConfig{Durable: testDurable, Boot: "boot-b", TakeoverAfter: testTakeoverAfter, Now: clock.Now,
+		GoneBoot: func(boot string) (bool, time.Duration) { return boot == "boot-a", settling }})
+
+	attempt := mustAttempt(t, a, "publish.abc", "ses_target", Proceed)
+	deferred := mustAttempt(t, b, "publish.abc", "ses_target", Deferred)
+	if deferred.RetryIn != settling {
+		t.Fatalf("RetryIn = %s, want the %s boot-a has left to settle", deferred.RetryIn, settling)
+	}
+	if record := readRecord(t, kv, a.Key("publish.abc", "ses_target")); record.Boot != "boot-a" {
+		t.Fatalf("the deferred answer changed the record: %+v", record)
+	}
+
+	// Boot A's settle landed: the pair is delivered, and boot B skips it rather than taking the
+	// attempt over.
+	if err := a.Record(attempt); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	mustAttempt(t, b, "publish.abc", "ses_target", Delivered)
+
+	// A second pair boot A never settled: once its settling time is up, boot B takes it over.
+	mustAttempt(t, a, "publish.def", "ses_target", Proceed)
+	mustAttempt(t, b, "publish.def", "ses_target", Deferred)
+	settling = 0
+	mustAttempt(t, b, "publish.def", "ses_target", Proceed)
 }
 
 func TestKV_AnotherBootsOldAttemptIsTakenOverAndItsClearLeavesTheNewOne(t *testing.T) {

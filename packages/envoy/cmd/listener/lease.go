@@ -48,6 +48,22 @@ const (
 // a hard take-over is bounded at.
 const leaseReceiveLost = 3 * time.Second
 
+// leaseFormerSettle is how long a holder that released the lease is given, from this pod's
+// acquisition, to settle the pushes it had in hand before the delivery ledger takes its
+// unresolved attempts over (FormerHolder, dedupe.KVConfig.GoneBoot).
+//
+// A release is a soft hand-over: the pod is alive and its ledger connection is up, so the push it
+// had at a session's port when its term ended is still being answered, and its relay has
+// relaySettleGrace to write that push's delivered record or to give its attempt up. Taking such
+// an attempt over at once would push a message the session may already have taken a second time,
+// which only a hard take-over is allowed to do (cmd/listener/README.md). This is the relay's
+// grace and a margin: the term's end reaches the relays a moment after the release the successor
+// takes, so the successor must wait a little longer than the relay holds. A holder killed or cut
+// off from the bucket releases nothing and is taken over at once, so the 15 s hard take-over
+// bound is untouched; only the one message a pod had in flight per session waits this out, and
+// only when its port answered neither way inside the grace.
+const leaseFormerSettle = relaySettleGrace + time.Second
+
 // leaseConfig carries the lease's timing, so a test of this package shortens it;
 // productionLeaseConfig is the only value the listener runs with.
 type leaseConfig struct {
@@ -178,8 +194,12 @@ type lease struct {
 	rev        uint64
 	validUntil time.Time
 	term       uint64
-	how        leaseAcquisition
-	settle     bool
+	// termStarted is when the term began on this pod's monotonic clock, zero before the first:
+	// how long a former holder that released the record has had to settle is read from it
+	// (FormerHolder), with no wall clock of another pod or of the server in the comparison.
+	termStarted time.Time
+	how         leaseAcquisition
+	settle      bool
 	// handBack is whether the term is a candidate for a clean hand-back and replaced the revision
 	// of the record its acquiring write wrote over, which the mark that would vouch for that
 	// hand-back is keyed by (leaseStatus, HandBackMarked).
@@ -416,17 +436,27 @@ func (l *lease) Successor() (taken, receiving bool, err error) {
 }
 
 // FormerHolder reports whether boot is one of the boots that held the lease before the holder of
-// the record as this process last wrote or read it (former_boots): a process that delivers
-// nothing more, whose unresolved delivery attempt the ledger takes over at once.
-func (l *lease) FormerHolder(boot string) bool {
+// the record as this process last wrote or read it (former_boots), and how long that process may
+// still be settling a push it had in hand. A boot taken over by force - killed, its node lost,
+// its record left to expire - writes nothing more, so it is reported with no time at all and the
+// ledger takes its unresolved attempt over at once. One that released the record is alive and its
+// relays have relaySettleGrace to finish the push they had in hand and record or give up its
+// attempt, so what is left of leaseFormerSettle since this term's acquisition is reported and the
+// ledger defers that attempt until then. A pod holding no term reports no time: it delivers
+// nothing, so nothing of its own waits on the answer.
+func (l *lease) FormerHolder(boot string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, former := range l.record.FormerBoots {
-		if former.Boot == boot {
-			return true
+		if former.Boot != boot {
+			continue
 		}
+		if !former.Released || l.termStarted.IsZero() {
+			return true, 0
+		}
+		return true, max(0, leaseFormerSettle-l.now().Sub(l.termStarted))
 	}
-	return false
+	return false, 0
 }
 
 // Release stops the lease and, when this process holds the record, marks it released at its
@@ -733,9 +763,12 @@ func (l *lease) renew() time.Duration {
 // from here until its settle hold ends (Settled), and no term has subscribed when it starts. It
 // clears what an earlier term's release recorded, so this term's stop marks a hand-back only for
 // a record its own release wrote (released, MarkHandBack). acquire records stale_binding itself,
-// which it carries over from the record it took. Callers must hold l.mu.
+// which it carries over from the record it took. It stamps the term's start on this pod's
+// monotonic clock, which is how long a former holder that released the record has had to settle
+// (FormerHolder). Callers must hold l.mu.
 func (l *lease) startTermLocked(how leaseAcquisition, settle, handBack bool, replaced uint64, resumed bool) {
 	l.term++
+	l.termStarted = l.now()
 	l.how = how
 	l.settle, l.handBack, l.replaced, l.resumed = settle, handBack, replaced, resumed
 	l.unsettled, l.ackWaitOwed, l.receiving = settle, settle, false

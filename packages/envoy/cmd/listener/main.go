@@ -1033,10 +1033,12 @@ func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
 // every pod of machineID, under the lease's boot, so a pod that takes the lease over does not prompt
 // a session again for a message the pod before it delivered, and prompts at once one that a former
 // lease holder (lease.FormerHolder) only attempted, so its settle hold delivers it in stream order.
-// Another pod's young attempt is otherwise deferred until it is requestLimit and
-// ledgerTakeoverMargin old. A listener with no lease (its NATS user lacks the grant for the
-// bucket) is the machine's one deliverer and keeps the ledger in process (dedupe.Memory), which a
-// restart forgets.
+// A former holder that released the lease is alive and finishing the push it had in hand, so its
+// attempt is deferred until it has had leaseFormerSettle to record or give up that push, and only
+// a holder taken over by force is taken over at once. Another pod's young attempt is otherwise
+// deferred until it is requestLimit and ledgerTakeoverMargin old. A listener with no lease (its
+// NATS user lacks the grant for the bucket) is the machine's one deliverer and keeps the ledger
+// in process (dedupe.Memory), which a restart forgets.
 //
 // A record is keyed by the envelope's dedupe key, not its event id: fan-out normalization can
 // produce envelopes with one event id and distinct dedupe keys. Each prompt is recorded as

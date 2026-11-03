@@ -323,6 +323,15 @@ func (w *servePortWorkers) stop(ctx context.Context) {
 // lost lease leaves them to their ack wait (receive_stop.go). A push handed over after this is
 // refused (enqueue), so the term's messages end with the term.
 //
+// It gives up each taken-back push's delivery-ledger attempt (clearLedgerAttempt), once the
+// workers have left those pushes: this pod pushes none of them again and records none of them,
+// so the attempt is the ledger's answer that no push of this pair is in flight, and the pod
+// taking over pushes the message as soon as it has it rather than waiting the attempt out
+// (lease.FormerHolder defers a released holder's unresolved attempts). Each of those messages
+// reaches its session in the stream order of its session's messages, which a wait on one of them
+// would break. A clear races nothing: it deletes the record at the revision its own attempt
+// wrote, so a delivered record a push that landed as the term ended wrote over it stands.
+//
 // idle reports whether every worker had left the term's pushes within wait: one still inside a
 // push holds a message of the term that its stop cannot account for, so a graceful stop writes no
 // clean-hand-back mark for it (durableReceiver.markHandBack).
@@ -338,6 +347,7 @@ func (w *servePortWorkers) endTerm(term *servePortTermHandle, wait time.Duration
 	}
 	state.ended = true
 	state.idleLocked()
+	var taken []servePortPush
 	for sessionID, queue := range w.queues {
 		kept := queue[:0]
 		for _, push := range queue {
@@ -345,6 +355,7 @@ func (w *servePortWorkers) endTerm(term *servePortTermHandle, wait time.Duration
 				kept = append(kept, push)
 				continue
 			}
+			taken = append(taken, push)
 			if msg := push.settle.abandon(); msg != nil {
 				parked = append(parked, msg)
 			}
@@ -358,6 +369,9 @@ func (w *servePortWorkers) endTerm(term *servePortTermHandle, wait time.Duration
 	w.mu.Lock()
 	delete(w.terms, term)
 	w.mu.Unlock()
+	for _, push := range taken {
+		clearLedgerAttempt(w.cfg, push.item, push.attempt)
+	}
 	return parked, idle
 }
 

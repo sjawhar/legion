@@ -84,6 +84,18 @@ const (
 	// the max.
 	pushRetryFirst = time.Second
 	pushRetryMax   = 30 * time.Second
+	// relaySettleGrace is how long a relay stopped with a push in hand lets that push, and the
+	// delivery record of it, finish before it gives up: the term's end cancels the relay, but a
+	// push the session's port may already have taken must not be left as an attempt record no one
+	// settles. Inside it the relay writes the push's delivered record, or gives the attempt up
+	// when the port refused it, so the pod that takes the lease over reads an answer rather than
+	// a record it would have to guess at. 3 s is a round trip to a port that is answering and
+	// the ledger write after it, with room for a loaded box, and it sits inside both take-over
+	// bounds: the stopping pod's own hand-back runs longer than this (inflightGrace alone is
+	// 3 s), so no graceful stop waits on it, and the pod taking over holds such an attempt for
+	// leaseFormerSettle, which is longer, so this record is there before the successor would
+	// push the message again.
+	relaySettleGrace = 3 * time.Second
 	// relayHeldRecheck is how often the relay judges a message it holds again: one another path is
 	// already pushing (holdWhilePushedElsewhere), which it neither pushes nor acks until that push
 	// lands or the attempt record naming it is gone.
@@ -892,6 +904,15 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 // durable path's fan-out judges it (followedTopicVerdict): one the session already has is acked
 // unpushed, and one another path is already pushing is held until that push lands or ends
 // (holdWhilePushedElsewhere).
+//
+// The push in hand, and the ledger record of it, run under a context of their own that outlives
+// the relay's by relaySettleGrace (settleContext): a term's end stops the relay from pushing
+// anything more at once, but a push the session's port may already have taken is left to finish,
+// so the pod taking the lease over reads the ledger's answer for it rather than an attempt
+// nobody will ever settle. A push that ends unlanded inside the grace gives its attempt up
+// (releaseStoppedPush); one still in flight when the grace runs out leaves it standing, since
+// only the port's answer would say whether the session took the message, and the successor waits
+// that attempt out (lease.FormerHolder).
 func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string, msg bus.SessionMessage) bool {
 	var item contracts.Envelope
 	if err := decodeStoredEnvelope(msg.Data, &item); err != nil {
@@ -909,11 +930,17 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		// starts next pulls it again.
 		return false
 	}
+	settle, endSettle := settleContext(ctx, relaySettleGrace)
+	defer endSettle()
 	return pushWithBackoff(ctx, m.cfg.logger, sessionID, item, func(attempt int) (bool, error) {
-		if err := m.push(ctx, sessionID, item, msg); err != nil {
+		if err := m.push(settle, sessionID, item, msg); err != nil {
 			if errors.Is(err, session.ErrAddressNotReachable) {
 				m.refuseUnreachableAddress(sessionID, item, msg, claim, err)
 				return true, nil
+			}
+			if ctx.Err() != nil && settle.Err() == nil {
+				m.releaseStoppedPush(sessionID, item, claim, err)
+				return false, err
 			}
 			_ = msg.InProgress()
 			return false, err
@@ -926,9 +953,9 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		// trouble often enough -- one dropped connection fails both -- and the copy the server
 		// then gives back is pushed again by whichever relay asks a ledger that holds only the
 		// attempt.
-		if !m.recordDelivered(ctx, sessionID, item, msg, claim) {
-			// The relay was stopped before the ledger took the record: the message stays unacked
-			// for the relay that pulls it next, which the attempt still standing holds until the
+		if !m.recordDelivered(settle, sessionID, item, msg, claim) {
+			// The grace ran out before the ledger took the record: the message stays unacked for
+			// the relay that pulls it next, which the attempt still standing holds until the
 			// ledger can answer for it.
 			return false, ctx.Err()
 		}
@@ -938,6 +965,33 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
 		return true, nil
 	})
+}
+
+// settleContext returns a context that follows parent while parent lasts and stays live for
+// grace after it ends, and the func that releases it. It costs no goroutine while parent is
+// live: the timer that ends the grace is armed only once parent is done, and arming it again
+// after the returned func ran cancels an already-cancelled context, which is a no-op.
+func settleContext(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() { time.AfterFunc(grace, cancel) })
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+// releaseStoppedPush gives up the ledger attempt of a push the relay's stop ended unlanded: the
+// port refused it, or the transport failed, inside the settle grace, so nothing of this message
+// is on its way to the session and the pod taking the lease over pushes it itself with no wait
+// (lease.FormerHolder would otherwise hold it for leaseFormerSettle). The message stays unacked,
+// as it does after any refused push, so that pod's relay pulls it again.
+func (m *sessionRelays) releaseStoppedPush(sessionID string, item contracts.Envelope, claim dedupe.Attempt, err error) {
+	if clearErr := m.cfg.ledger.Clear(claim); clearErr != nil {
+		m.cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "clear"), slog.String("session_id", sessionID),
+			slog.String("event_id", item.EventID), slog.Bool("retry", false), slog.String("error", clearErr.Error()))
+	}
+	m.cfg.logger.DeliveryLog(slog.LevelInfo, "session relay gave up a push its stop ended unlanded", sessionID, item.Topic, item.EventID, "retrying",
+		slog.String("dedupe_key", item.DedupeKey), slog.String("error", err.Error()))
 }
 
 // ledgerEpisode logs one path's trouble with the delivery ledger once per episode rather than

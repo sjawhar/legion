@@ -9,8 +9,10 @@ import (
 )
 
 // A lease record names the boots that held the lease before its holder (former_boots), so the
-// delivery ledger takes a former holder's unresolved attempt over at once (FormerHolder) rather
-// than waiting out the ledger's takeover age (the 30 s prompt limit and ledgerTakeoverMargin).
+// delivery ledger takes a former holder's unresolved attempt over without waiting out the
+// ledger's takeover age (the 30 s prompt limit and ledgerTakeoverMargin): at once for a holder
+// taken over by force, and once it has had leaseFormerSettle to settle for one that released the
+// record and is still alive (FormerHolder).
 // An acquisition keeps the ones that stopped less than leaseFormerBootAge, twice that age, before
 // it, and the newest leaseFormerBootsMax of those.
 const (
@@ -80,11 +82,16 @@ type leaseFields struct {
 	FormerBoots    []formerBoot `json:"former_boots,omitempty"`
 }
 
-// formerBoot is one entry of a lease record's former_boots: a boot that held the lease and the
-// server time it stopped, the timestamp of the acquiring write over its record.
+// formerBoot is one entry of a lease record's former_boots: a boot that held the lease, the
+// server time it stopped, and whether the record it stopped on was released rather than taken
+// over expired. A released holder is alive: its relays are finishing the pushes they had in hand
+// and writing or giving up their ledger attempts (relaySettleGrace), so the ledger defers those
+// attempts for leaseFormerSettle rather than taking them over at once, while a holder that was
+// killed or lost its node writes nothing more and is taken over at once.
 type formerBoot struct {
-	Boot    string    `json:"boot"`
-	Stopped time.Time `json:"stopped"`
+	Boot     string    `json:"boot"`
+	Stopped  time.Time `json:"stopped"`
+	Released bool      `json:"released,omitempty"`
 }
 
 // formerBoots is the former_boots of a record that boot acquires at stopped, a server time, over
@@ -99,7 +106,7 @@ func formerBoots(previous leaseRecord, boot string, stopped time.Time) []formerB
 		}
 	}
 	if previous.Boot != "" && previous.Boot != boot {
-		boots = append(boots, formerBoot{Boot: previous.Boot, Stopped: stopped})
+		boots = append(boots, formerBoot{Boot: previous.Boot, Stopped: stopped, Released: previous.Released})
 	}
 	return boots[max(0, len(boots)-leaseFormerBootsMax):]
 }

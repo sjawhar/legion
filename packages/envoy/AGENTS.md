@@ -2690,6 +2690,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   do not add a durable role consumer, or retry role messages anywhere else
   — the role lane stays core, and a holder's stored forward is its own session consumer's to deliver.
 
+- **A former holder's unresolved attempt** in that ledger (`dedupe.KVConfig.GoneBoot`, `lease.FormerHolder`): a boot that held the machine's lease before the current holder (the lease record's `former_boots`) is taken over without the 35 s wait another pod's attempt earns, but only once it can settle nothing more.
+  A holder taken over by force -- killed, its node lost, its record left to expire -- writes nothing again and is taken over at once.
+  One that released the record is alive, and its relay has 3 s past the end of its term to record or give up the push it had in hand ("Relay to a serving port" below), so its attempt is deferred until 4 s after this pod's acquisition (`leaseFormerSettle`), read on this pod's own monotonic clock from the start of its term.
+  A release is a soft hand-over and a repeat is not allowed over one: the successor reads the former holder's answer for the pair rather than pushing a message the session may already have taken, and only a hard take-over may repeat a message (`cmd/listener/README.md`).
+  `TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccessor` (build tag `multiprocess`, `cmd/listener/multiprocess_takeover_test.go`) holds that to real pods: a relay's push sits unanswered at a session's port while the pod's receive connection alone is cut, the pod releases the lease on its own bound, the port then takes the push, and the standby that took the lease must deliver that message no second time.
+
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket.
   Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`;
   listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry.
@@ -3835,6 +3841,9 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   Any other answer, a transport error or a timeout keeps the message at the head, in progress, and pushes it again after a wait that doubles from 1 s to 30 s, so the session's later messages wait behind it.
   The key is recorded once the port answers 204, as a delivery of the durable path records it.
   The relay waits for that record rather than moving on without it (`recordDelivered`): a ledger that could not take it leaves the pair attempted, and the copy the server gives back when the ack fails with it -- one dropped connection fails both -- would be pushed again by a relay that asked the ledger then.
+  A term's end stops the relay from pushing anything more at once, but the push it already has at the port, and the ledger record of it, run under a context of their own that outlives the relay's by 3 s (`relaySettleGrace`, `settleContext`).
+  That is how the term's end never leaves an attempt nobody will settle: inside the grace the relay writes the push's delivered record, or gives the attempt up when the port refused it (`releaseStoppedPush`), so the pod taking the lease over reads an answer for that pair.
+  Only a push whose port answered neither way inside the grace leaves its attempt standing, and the pod taking over waits that one out, since only the port's answer says whether the session took the message.
 
 - **A followed topic on a serving port's relay:** the message is judged by the durable path's own refusals, as if no attempt record of it stood (`judgeFollowedTopicWithoutAttempt`, which the fan-out applies with that record on top):
   a copy under a dedupe key the session already took and one the session published itself are acked unpushed, and one whose delivery mode the session does not advertise, or whose mode cannot be read unambiguously, is acked with a `delivery_failed` exception.

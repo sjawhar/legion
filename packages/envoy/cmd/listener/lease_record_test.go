@@ -47,7 +47,14 @@ func formerBootNames(record leaseRecord) []string {
 }
 
 func sameFormerBoot(x, y formerBoot) bool {
-	return x.Boot == y.Boot && x.Stopped.Equal(y.Stopped)
+	return x.Boot == y.Boot && x.Stopped.Equal(y.Stopped) && x.Released == y.Released
+}
+
+// formerHolder is FormerHolder's first answer alone, for a test that reads the flag and not the
+// settling time left.
+func formerHolder(l *lease, boot string) bool {
+	gone, _ := l.FormerHolder(boot)
+	return gone
 }
 
 // An acquisition over an expired record and one over a released record each add that record's
@@ -76,9 +83,12 @@ func TestLeaseFormerBootsAreWrittenOnEveryTakeOverAndCarriedAlongAChain(t *testi
 		t.Fatalf("former_boots after the expired take-over = %+v (acquired_at %v), want pod-a's boot %s stopped at acquired_at",
 			expired.FormerBoots, expired.AcquiredAt, a.boot)
 	}
-	if !b.FormerHolder(a.boot) || b.FormerHolder(b.boot) || b.FormerHolder(c.boot) {
+	if !formerHolder(b, a.boot) || formerHolder(b, b.boot) || formerHolder(b, c.boot) {
 		t.Fatalf("pod-b's FormerHolder: pod-a %v, pod-b %v, pod-c %v; want pod-a alone",
-			b.FormerHolder(a.boot), b.FormerHolder(b.boot), b.FormerHolder(c.boot))
+			formerHolder(b, a.boot), formerHolder(b, b.boot), formerHolder(b, c.boot))
+	}
+	if _, settling := b.FormerHolder(a.boot); settling != 0 {
+		t.Fatalf("pod-a is given %s to settle, want none: its record expired, so it writes nothing more", settling)
 	}
 
 	for range 3 {
@@ -107,8 +117,19 @@ func TestLeaseFormerBootsAreWrittenOnEveryTakeOverAndCarriedAlongAChain(t *testi
 		t.Fatalf("former_boots after A -> B -> C = %+v (acquired_at %v), want pod-a's stop kept and pod-b's at acquired_at",
 			chained.FormerBoots, chained.AcquiredAt)
 	}
-	if !c.FormerHolder(a.boot) || !c.FormerHolder(b.boot) || c.FormerHolder(c.boot) {
+	if !formerHolder(c, a.boot) || !formerHolder(c, b.boot) || formerHolder(c, c.boot) {
 		t.Fatal("pod-c's FormerHolder does not name pod-a and pod-b alone")
+	}
+	if _, settling := c.FormerHolder(b.boot); settling != leaseFormerSettle {
+		t.Fatalf("pod-b, whose record pod-c took released, is given %s to settle, want the whole %s: it is alive and its relays are finishing their pushes",
+			settling, leaseFormerSettle)
+	}
+	if _, settling := c.FormerHolder(a.boot); settling != 0 {
+		t.Fatalf("pod-a, carried along the chain from an expired record, is given %s to settle, want none", settling)
+	}
+	clock.advance(leaseFormerSettle)
+	if _, settling := c.FormerHolder(b.boot); settling != 0 {
+		t.Fatal("pod-b is still settling once leaseFormerSettle has passed since pod-c's term began")
 	}
 }
 
@@ -132,7 +153,7 @@ func TestLeaseFormerBootsArePrunedByAgeAndCount(t *testing.T) {
 	if got := formerBootNames(record); len(got) != 2 || got[0] != "00000000000000a2" || got[1] != "00000000000000aa" {
 		t.Fatalf("former_boots = %v, want [00000000000000a2 00000000000000aa]: the old entry and pod-b's own boot pruned", got)
 	}
-	if b.FormerHolder("00000000000000a1") {
+	if formerHolder(b, "00000000000000a1") {
 		t.Fatal("FormerHolder names a boot that stopped longer than leaseFormerBootAge before the take-over")
 	}
 
@@ -183,7 +204,7 @@ func TestLeaseFormerBootsAreNotChangedByAResumeAfterALapse(t *testing.T) {
 	if len(resumed.FormerBoots) != 1 || !sameFormerBoot(resumed.FormerBoots[0], acquired.FormerBoots[0]) {
 		t.Fatalf("former_boots after the resume = %+v, want the acquisition's %+v", resumed.FormerBoots, acquired.FormerBoots)
 	}
-	if a.FormerHolder(a.boot) {
+	if formerHolder(a, a.boot) {
 		t.Fatal("a resumed holder names its own boot a former holder")
 	}
 }

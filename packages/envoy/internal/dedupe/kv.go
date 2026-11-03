@@ -46,10 +46,15 @@ type KVConfig struct {
 	// margin.
 	TakeoverAfter time.Duration
 	// GoneBoot reports whether boot belongs to a process that no longer holds the machine's
-	// delivery lease: one the current holder took the lease over from. Its unresolved attempt is
-	// taken over at once, however young, since that process delivers nothing more. Nil treats
-	// every other boot as one that may still be prompting.
-	GoneBoot func(boot string) bool
+	// delivery lease - one the current holder took the lease over from - and how long that
+	// process may still be settling a push it had in hand when it let go. A former holder that
+	// can settle nothing more (it was killed, its node was lost, or its settling bound has
+	// passed) answers zero, and its unresolved attempt is taken over at once, however young,
+	// since no record of it is coming. One that is still settling answers the time it has left,
+	// and its attempt is deferred until then: the push it is finishing may already be at the
+	// session, which only its own delivered record, or its giving the attempt up, can say. Nil
+	// treats every other boot as one that may still be prompting.
+	GoneBoot func(boot string) (gone bool, settling time.Duration)
 	// DeliveredAge is DeliveredAge when zero; a test shortens it. There is no field for the
 	// attempted age: both ledgers hold an attempt by the package's one rule (attemptHolds), and a
 	// field only one of them read would let a change to it move the sweep without moving the hold.
@@ -149,10 +154,11 @@ func (l *KV) value(state string) []byte {
 // reads it: delivered within DeliveredAge is Delivered; attempted by this boot is InFlight while
 // this process holds the attempt that wrote it (unsettled and younger than TakeoverAfter, or kept
 // and younger than AttemptedAge), and taken over otherwise; attempted by a boot GoneBoot reports
-// is taken over at once; attempted by another boot (or a record this build cannot read) younger
-// than TakeoverAfter is Deferred until it reaches that age; anything older is taken over with
-// Update at its revision, which is Proceed. Two Attempts of this process for one pair run one
-// after the other.
+// gone is taken over at once when that boot can settle nothing more, and Deferred for as long as
+// GoneBoot says it is still settling; attempted by another boot (or a record this build cannot
+// read) younger than TakeoverAfter is Deferred until it reaches that age; anything older is taken
+// over with Update at its revision, which is Proceed. Two Attempts of this process for one pair
+// run one after the other.
 func (l *KV) Attempt(dedupeKey, sessionID string) (Attempt, error) {
 	pair := Key{DedupeKey: dedupeKey, SessionID: sessionID}
 	writing := l.claim(pair)
@@ -204,11 +210,13 @@ func (l *KV) judge(pair Key, entry nats.KeyValueEntry) (verdict Verdict, retryIn
 		return Delivered, 0, deliveredStops(age, l.cfg.DeliveredAge)
 	case record.State == stateAttempted && record.Boot == l.cfg.Boot:
 		return InFlight, 0, l.holds(pair, entry.Revision())
-	case record.State == stateAttempted && record.Boot != "" && l.cfg.GoneBoot != nil && l.cfg.GoneBoot(record.Boot):
-		return Deferred, 0, false
-	default:
-		return Deferred, l.cfg.TakeoverAfter - age, age < l.cfg.TakeoverAfter
 	}
+	if record.State == stateAttempted && record.Boot != "" && l.cfg.GoneBoot != nil {
+		if gone, settling := l.cfg.GoneBoot(record.Boot); gone {
+			return Deferred, settling, settling > 0
+		}
+	}
+	return Deferred, l.cfg.TakeoverAfter - age, age < l.cfg.TakeoverAfter
 }
 
 // claim takes the pair's write lock for an Attempt of this process, once any other Attempt of

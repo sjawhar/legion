@@ -1,0 +1,16 @@
+kind: Fixed
+body: |-
+    A message a relay had at a session's port when its receive term ended is no longer pushed a
+    second time by the pod that takes the lease over. The term's end cancelled the push, so
+    nothing was recorded for it, and the successor took the former holder's attempt over at once:
+    the port answered the first push 204 a moment later and the session was prompted twice. A
+    relay stopped with a push in hand now lets that push, and the delivery record of it, finish
+    within 3 s (`relaySettleGrace`), writing the pair delivered or giving its attempt up when the
+    port refused it, so the successor reads an answer rather than a record nobody will settle.
+    And a former holder that released the lease is alive: the ledger defers its unresolved
+    attempt until it has had 4 s to settle (`leaseFormerSettle`), where only one taken over by
+    force -- killed, its node lost, its record left to expire -- is taken over at once. A hard
+    take-over is bounded as before at 15 s, and only a hard take-over may repeat a message.
+time: 2026-11-03T09:40:00.000000000Z
+custom:
+    Issue: pr2404

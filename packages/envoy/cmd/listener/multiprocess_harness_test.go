@@ -67,16 +67,6 @@ const (
 	// mpQuiet is how long a row watches for a repeat after every message arrived: past the ack wait
 	// (6 s), so a message a pod held without acking and that came back would have arrived.
 	mpQuiet = 8 * time.Second
-	// mpKillInFlight is how far on either side of a SIGKILL a message's first prompt may land and
-	// still count as the killed pod's push in flight at the kill (requireOnceExceptInFlight). A pod
-	// that pushed a message earlier than this had time to record it delivered, so the pod taking
-	// over skips it and a repeat of it is a fault, while one pushed inside the window may have died
-	// with its record unwritten; a first prompt later than this is the successor's push. A
-	// delivered record is one KV write, milliseconds on the box the rows run on; a second is three
-	// orders of magnitude over that and still far under the 6 s ack wait that brings the message
-	// back, and under the successor's first push after the kill, which the 6 s ack wait and the
-	// settle hold put seconds later.
-	mpKillInFlight = time.Second
 )
 
 // mpHTTP is every row's HTTP client. Its timeout is the 10 s every answer a row asserts on must
@@ -706,26 +696,21 @@ func (p *mpPod) subscribe(t *testing.T, body string) {
 // mpEventMark carries a message's event id in the text of the prompt its session receives.
 var mpEventMark = regexp.MustCompile(`mp-event=([A-Za-z0-9_-]+)`)
 
-// mpPrompt is one prompt a session took: the event id it carried, and when the serving port
-// answered it.
-type mpPrompt struct {
-	event string
-	at    time.Time
-}
-
 // mpServingPort is the fake serve process every port session of a row lives on. It answers each
 // POST /session/<id>/prompt_async 204 and records it, under the session, once the answer is
 // written. A prompt held (hold) is not answered until the listener gives up on it, and is not
 // recorded: the session never took it. A prompt to a failing session (fail) is answered 500 and
 // counted apart: the session never took it either. Every prompt it sees, whichever of those it
-// is, is recorded in the row's delivery journal (mpJournal), which a failing row prints.
+// is, is recorded in the row's delivery journal (mpJournal), which a failing row prints. The
+// prompts it answered, and the checks a row reads them through, are mpPromptLog's
+// (kill_allowance_test.go), which it embeds.
 type mpServingPort struct {
+	mpPromptLog
 	port    int
 	journal *mpJournal
 
-	mu      sync.Mutex
-	prompts map[string][]mpPrompt
-	holds   map[string]chan struct{}
+	mu    sync.Mutex
+	holds map[string]chan struct{}
 	// gates holds, per session, the next prompt until its release closes, then answers it 204
 	// (gate).
 	gates      map[string]mpPortGate
@@ -737,7 +722,7 @@ type mpServingPort struct {
 
 func mpStartServingPort(t *testing.T) *mpServingPort {
 	t.Helper()
-	serving := &mpServingPort{journal: mpJournalOf(t), prompts: map[string][]mpPrompt{}, holds: map[string]chan struct{}{}, gates: map[string]mpPortGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
+	serving := &mpServingPort{journal: mpJournalOf(t), holds: map[string]chan struct{}{}, gates: map[string]mpPortGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
 	server := httptest.NewServer(http.HandlerFunc(serving.serve))
 	t.Cleanup(server.Close)
 	// Runs before server.Close, which waits for every held prompt to return.
@@ -814,9 +799,7 @@ func (s *mpServingPort) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 	taken := time.Now()
-	s.mu.Lock()
-	s.prompts[sessionID] = append(s.prompts[sessionID], mpPrompt{event: event, at: taken})
-	s.mu.Unlock()
+	s.took(sessionID, event, taken)
 	s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
 }
 
@@ -872,51 +855,6 @@ func (s *mpServingPort) failures(sessionID string) int {
 	return s.failed[sessionID]
 }
 
-// counts is how many prompts the serving port answered for each event id.
-func (s *mpServingPort) counts() map[string]int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	counts := map[string]int{}
-	for _, prompts := range s.prompts {
-		for _, prompt := range prompts {
-			counts[prompt.event]++
-		}
-	}
-	return counts
-}
-
-// promptsTo is how many prompts the serving port answered for sessionID.
-func (s *mpServingPort) promptsTo(sessionID string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.prompts[sessionID])
-}
-
-// first is when event's first prompt was answered, and whether it was.
-func (s *mpServingPort) first(sessionID, event string) (time.Time, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, prompt := range s.prompts[sessionID] {
-		if prompt.event == event {
-			return prompt.at, true
-		}
-	}
-	return time.Time{}, false
-}
-
-// order is the event ids sessionID took, each at its first prompt, in the order it took them.
-func (s *mpServingPort) order(sessionID string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var order []string
-	for _, prompt := range s.prompts[sessionID] {
-		if !slices.Contains(order, prompt.event) {
-			order = append(order, prompt.event)
-		}
-	}
-	return order
-}
-
 func (s *mpServingPort) tookAll(messages []mpMessage) bool {
 	counts := s.counts()
 	for _, m := range messages {
@@ -959,43 +897,6 @@ func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
 	if len(wrong) > 0 {
 		t.Fatalf("%d of %d messages were not prompted exactly once: %v", len(wrong), len(messages), wrong)
 	}
-}
-
-// killAllowanceViolations reports, one line each, the messages that did not reach their session,
-// and those that reached it more often than the kill allowance permits: every message reaches its
-// session exactly once, except that a message whose delivery was still in flight at moment - the
-// instant a pod was killed - may have reached it twice: that is the one repeat a hard take-over
-// allows (cmd/listener/README.md, "A repeat with the same event id is possible after a hard
-// take-over"), because the killed pod died between the push its session took and the delivered
-// record that would have told the pod taking over.
-//
-// A message counts as in flight at moment when it was published before it and its session took it,
-// by its first prompt, within window on either side of it. Only such a first prompt can be the
-// killed pod's own push: one more than window before the kill is a push the killed pod had time to
-// record, and one more than window after it is a push of the pod taking over, since a message the
-// session never took before the kill (queued behind a held push, or not pulled yet) was pushed by
-// nothing but the successor, and a repeat of either is a fault of the take-over. The window
-// reaches past the kill too because the port records a prompt when its request arrives, and the
-// killed pod's last push can still be on its way, or in the port's handler, at the kill instant.
-// A prompt names no pod, and attributing one exactly would take a socket probe this harness does
-// not carry - the request's source port, its socket inode in /proc/net/tcp, and the pod holding
-// that socket under /proc/<pid>/fd - so the window around the kill is what marks a first prompt as
-// the killed pod's.
-func (s *mpServingPort) killAllowanceViolations(messages []mpMessage, moment time.Time, window time.Duration) []string {
-	counts := s.counts()
-	var wrong []string
-	for _, m := range messages {
-		count, limit, want := counts[m.event], 1, "once"
-		took, taken := s.first(m.session, m.event)
-		if m.published.Before(moment) && taken && took.After(moment.Add(-window)) && took.Before(moment.Add(window)) {
-			limit, want = 2, "once, or twice as a push in flight at the kill"
-		}
-		if count >= 1 && count <= limit {
-			continue
-		}
-		wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times, want %s", m.event, m.session, count, want))
-	}
-	return wrong
 }
 
 // requireOnceExceptInFlight fails the test on any violation of the kill allowance
@@ -1082,13 +983,6 @@ func (s *mpServingPort) requireWithin(t *testing.T, messages []mpMessage, bound 
 		t.Fatalf("%d of %d messages reached their session later than %s: %v", len(late), len(messages), bound, late)
 	}
 	t.Logf("all %d messages reached their session within %s, the slowest after %s", len(messages), bound, slowest.Round(time.Millisecond))
-}
-
-// mpMessage is one message a row published to a session.
-type mpMessage struct {
-	event     string
-	session   string
-	published time.Time
 }
 
 // mpPublisher publishes messages to port sessions from a bus client of the test's own, straight to

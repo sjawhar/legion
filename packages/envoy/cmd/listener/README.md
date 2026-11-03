@@ -344,9 +344,17 @@ standby answering `/v1`, answers as the active pod would:
   (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of its own
   boot that it holds no such attempt for (a clear that could not be written, a write whose reply
   was lost) is taken over and the session prompted. An attempt by a boot that held this machine's
-  lease before the current holder (the lease record's `former_boots`: a holder that was killed, lost
-  the lease, or released it) is taken over at once, so the settle hold delivers that message in
-  stream order. An attempt by a pod that still holds or renews a lease, or by a live pod's role or
+  lease before the current holder (the lease record's `former_boots`) is taken over without that
+  wait, so the settle hold delivers that message in stream order: at once for a holder taken over
+  by force (killed, its node lost, its record left to expire), which writes nothing more, and
+  only after 4 s (`leaseFormerSettle`) for one that released the record, which is alive. A
+  release is a soft hand-over, and a repeat is not allowed over one: the relay of the pod letting
+  go has 3 s (`relaySettleGrace`) past the end of its term to finish the push it had at a
+  session's port and write that push's delivered record, or to give its attempt up when the port
+  refused it, and the pod taking over reads that answer rather than pushing a message the session
+  may already have taken. Only a push whose port answered neither way inside the grace is left
+  for the successor to wait out.
+  An attempt by a pod that still holds or renews a lease, or by a live pod's role or
   live lane, less than 35 s old (the 30 s prompt limit and 5 s) is retried later on the durable
   lane; an older one is taken over, since its writer died. A repeat with the same event id is
   possible after a hard take-over. A ledger that cannot be read NAKs the durable message for a
