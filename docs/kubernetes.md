@@ -636,7 +636,7 @@ A pull request's build, which publishes only a `sha-` tag that no deployment pin
 Its layer cache is the GitHub Actions cache under the image's own scope (`cache-from: type=gha,scope=worker-image`).
 Only a build on `main` writes it, only the final image's layers (`cache-to: type=gha,mode=min,scope=worker-image,ignore-error=true`);
 a pull request's build reads what main wrote and writes none, because a newer head can cancel that build in the middle of a cache export, and because GitHub never lets a `main` run restore a branch's entries, so no pull request can put a layer into the attested release build.
-The image is pushed with the workflow's own `GITHUB_TOKEN`: no third-party builder, no project variable, no extra credential.
+The image is pushed with the workflow's own `GITHUB_TOKEN`: no third-party builder, no extra credential; the variable `LEGION_CI_RUNNER` decides only where a pull request's build runs.
 It runs (1) from `release.yaml` on every `main` run (its push paths include every file the image builds from):
 a build-only call beside the `publish` job, linking the plugin pair `legion_build` decided, then an attest-only call after `publish`;
 (2) from the `worker-image` job of `ci.yaml` on every head of a pull request, on any base, whose diff its `worker_image` filter matches
