@@ -247,6 +247,51 @@ func TestDecisionLinksGoStaleWithTheDecisionAndClearWithTheirBlock(t *testing.T)
 	}
 }
 
+// A `#` heading after a decision ends it, as the block walk ends it, so text under that heading
+// is no part of the decision and changing it marks nothing; and a heading the document carries
+// twice - a decision made again after a replaced one of the same name - still names each of its
+// decisions, so the live one's links go out of date with its own text.
+func TestTheVersionCutReadsTheSameDecisionsAsTheBlockWalk(t *testing.T) {
+	fixture := newDecisionsFixture(t)
+	handler, key := fixture.handler, fixture.issue.Key
+
+	// A `#` heading and a paragraph written after the agent decision, before the next one.
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "insert", "markdown": "# Notes\n\nA note.", "before": "## " + nameDecision},
+	})
+	table := decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision)
+	if strings.Contains(table.Text, "A note.") {
+		t.Fatalf("the `#` heading did not end the decision: %q", table.Text)
+	}
+	if stale := staleTargets(table); len(stale) != 0 {
+		t.Fatalf("a `#` heading written after the decision marks %v out of date", stale)
+	}
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "replace", "find": "A note.", "with": "A changed note."},
+	})
+	if table = decisionNamed(t, readIssueDecisions(t, handler, key), tableDecision); len(staleTargets(table)) != 0 {
+		t.Fatalf("text under the `#` heading marks %v out of date", staleTargets(table))
+	}
+
+	// The same heading under `## Replaced`: the document now carries it twice, and the live
+	// decision's own change still marks the blocks it links.
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "insert", "markdown": "### " + tableDecision + "\n\nThe file store we tried first.", "after": "## Replaced"},
+	})
+	editIssueDocument(t, handler, key, fixture.decisions.Slug, []map[string]any{
+		{"op": "replace", "find": tableParagraph, "with": changedTableSay},
+	})
+	view := readIssueDecisions(t, handler, key)
+	live := view.Decisions[0]
+	if live.Heading != tableDecision || live.Replaced {
+		t.Fatalf("the document's first decision = %#v, want the live %q", live, tableDecision)
+	}
+	if got := len(staleTargets(live)); got != 2 {
+		t.Fatalf("beside a replaced decision of its own heading the live one marks %v out of date, want both spec blocks",
+			staleTargets(live))
+	}
+}
+
 // Keep records a person's agreement with the text they read, which stops the decision waiting for
 // review; a later change of the decision asks for review again, and a Keep that carries the text
 // before that change is refused. A bearer may not keep, and a block that is no decision heading

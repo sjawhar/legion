@@ -1,0 +1,17 @@
+kind: Fixed
+body: |-
+    `envoy-infra`'s `gcp:Dispatch` applies under an ordinary CI account. Its RoleBinding
+    `<hostname>-tailnet-tls` names the Role by an output that waits on the Role's ID, so a preview
+    that creates the Role leaves the name unknown and pulumi-kubernetes sends the API server no
+    server-side dry run of the binding; an account without the `bind` verb saw that dry run refused
+    as "not found" while the Role did not exist, and the preview failed. The Tailscale Service
+    `svc:<hostname>` is now declared with no tags: Tailscale refuses a Service whose requested tags
+    the OAuth client creating it may not set, so an apply by a client holding only the `services`
+    scope failed after it had deleted the old tailnet device, leaving Dispatch with no tailnet name.
+    The component's `tags` input is unchanged and still reaches the front door's nodes, which is
+    what auto-approves them as the Service's hosts. A tailnet policy that reached `svc:<hostname>`
+    through the hosts' `tags` must now name the Service: `dst: ["svc:<hostname>"]` with
+    `ip: ["443"]`.
+time: 2026-11-02T07:45:20Z
+custom:
+    Issue: pr2668

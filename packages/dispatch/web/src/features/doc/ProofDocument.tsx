@@ -39,7 +39,7 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
-import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
+import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
 import {
   buildDispatchReference,
   buildIssuePath,
@@ -548,7 +548,9 @@ export function ProofDocument({
     // The editor's place in the page - its typed blocks, the margin, search highlights, a block
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
+        watchPicturePath(queryClient, route, onPicture)
+      );
       handle.setBlockMarks(blockMarksRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.

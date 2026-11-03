@@ -30,7 +30,7 @@ export type IssueRoute =
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
-  | { key: string; kind: "ask"; id: string }
+  | ({ key: string; kind: "ask"; id: string } & BlockTarget)
   | ({ key: string; kind: "comment"; id: string } & BlockTarget)
   | ({ key: string; kind: "message"; id: string } & BlockTarget);
 
@@ -476,12 +476,11 @@ export function nodeRouteFromHref(
  * control character, naming a slug Dispatch never gives a document, or that is no issue/document
  * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item whatever
  * its fragment, at any version of the document: the dashboard writes a document block's fragment
- * beside `?comment=`, never a block of the comment. A version of the spec (`?v=N`) is the spec's
- * artifact at N, as `dispatch read` reads the page. The fragment names a block of a live
- * document, or of the issue comment or message its own page shows; no block of an ask, nor of a
- * document's version page, whose stored text holds no block ids (`withBlock`). A raw `@` in a
- * fragment is no pin, since pins are written only in `dispatch://` references; any other fragment
- * leaves the page. */
+ * beside it, never a block of the item. A version of the spec (`?v=N`) is the spec's artifact at
+ * N, as `dispatch read` reads the page. The fragment names a block of a live document, or of the
+ * issue ask, comment or message its own page shows; no block of a document's version page, whose
+ * stored text holds no block ids (`withBlock`). A raw `@` in a fragment is no pin, since pins are
+ * written only in `dispatch://` references; any other fragment leaves the page. */
 function pageRoutes(
   href: string,
   appOrigin: string
@@ -794,7 +793,7 @@ export function shortForm(route: DispatchReferenceRoute): string {
     case "artifact":
       return `${route.key} ${route.slug}${block}`;
     case "ask":
-      return `${route.key} ask`;
+      return `${route.key} ask${block}`;
     case "comment":
       return `${route.key} comment${block}`;
     case "message":
@@ -969,9 +968,16 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
   );
 }
 
-/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add. */
+/** Whether this route is the Inbox page itself, the one place a peek at it has nothing to add.
+ *  `app.tsx` renders `InboxPage` at `/credentials/*` as well, for an address kept from before
+ *  Dispatch's credential record page was deleted, and ranks `/credentials/machine`, a page of its
+ *  own, above that splat, as this does. */
 export function routeIsInbox(pathname: string): boolean {
-  return pathname === "/";
+  return (
+    pathname === "/" ||
+    (matchPath("/credentials/*", pathname) !== null &&
+      matchPath("/credentials/machine", pathname) === null)
+  );
 }
 
 /** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */

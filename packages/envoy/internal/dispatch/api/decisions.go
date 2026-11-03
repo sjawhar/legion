@@ -27,10 +27,12 @@ import (
 // `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's
 // decision links its answered ask.
 //
-// A spec block X linked from decision D by link L is out of date exactly when D changed after it
-// first linked X (D's changed version is above L's created version) and X has not changed since D
-// did. A new decision therefore marks nothing, and neither does the block index's first pass over
-// a document, which gives every block and every pair one version.
+// A spec block X linked from decision D by link L is out of date exactly when D's own text
+// changed after it first linked X and X has not changed since D did, both read from the
+// document's text at a version (markStaleLinks) rather than from D's changed version, which is
+// the greatest of the blocks D holds now and so does not move when a block leaves D or joins it.
+// A new decision therefore marks nothing, and neither does the block index's first pass over a
+// document, which gives every block and every pair one version.
 //
 // The links are read through refs.BlockLinks, the read GET /api/v1/block-links already serves, and
 // each block's own changed version through refs.BlockChanges: this view writes no query for a link
@@ -233,7 +235,11 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 		return nil, err
 	}
 	decisions := make([]model.Decision, 0, len(sections))
+	keys := make([]sectionKey, 0, len(sections))
+	seen := map[string]int{}
 	for _, section := range sections {
+		keys = append(keys, sectionKey{heading: section.heading, occurrence: seen[section.heading]})
+		seen[section.heading]++
 		decision := model.Decision{
 			BlockID:  section.headingBlock,
 			Heading:  section.heading,
@@ -276,7 +282,7 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 			(decision.Kept == nil || decision.Kept.TextSHA256 != decision.TextSHA256)
 		decisions = append(decisions, decision)
 	}
-	if err := s.markStaleLinks(ctx, document.ID, markdown, decisions); err != nil {
+	if err := s.markStaleLinks(ctx, document.ID, markdown, decisions, keys); err != nil {
 		return nil, err
 	}
 	return decisions, nil
@@ -292,11 +298,13 @@ func (s *server) readDecisions(ctx context.Context, document model.Artifact, ref
 // whether the decision changed since; the text at the version current when the spec block last
 // changed says whether it changed since that, which is what clears a link the spec answered.
 //
-// A version this document does not hold, a heading the version did not carry, and a spec block
-// Dispatch records no change for each leave the link as it is: the view marks nothing it cannot
-// read, as the block index's first pass over a document marks nothing.
+// A version this document does not hold, and a spec block Dispatch records no change for, each
+// leave the link as it is: the view marks nothing it cannot read, as the block index's first
+// pass over a document marks nothing. Each decision is named across versions by its heading and
+// its occurrence among the decisions of that heading (sectionKey), the same pair the view's own
+// walk gives it, so a document that carries one heading twice still names each of them.
 func (s *server) markStaleLinks(
-	ctx context.Context, artifactID, markdown string, decisions []model.Decision,
+	ctx context.Context, artifactID, markdown string, decisions []model.Decision, keys []sectionKey,
 ) error {
 	times := map[int64]time.Time{}
 	numbers := map[int]bool{}
@@ -325,12 +333,12 @@ func (s *server) markStaleLinks(
 	current := decisionSums(markdown)
 	for i := range decisions {
 		decision := &decisions[i]
-		now, ok := current[decision.Heading]
+		now, ok := current[keys[i]]
 		if !ok {
 			continue
 		}
 		for j := range decision.Links {
-			decision.Links[j].Stale = staleLink(now, decision.Heading, decision.Links[j], sums, atTime)
+			decision.Links[j].Stale = staleLink(now, keys[i], decision.Links[j], sums, atTime)
 		}
 	}
 	return nil
@@ -341,16 +349,17 @@ func (s *server) markStaleLinks(
 // in another `time.Time` value, which no map matches.
 //
 // A version this document does not hold leaves the link as it is. A version it holds that gives
-// this decision no sum - the heading was renamed since, or that version carried it twice - is
-// text that differs from the text now, which it is.
+// this decision no sum - its heading was renamed since, or that version carried fewer decisions
+// of that heading - is text that differs from the text now, which it is.
 func staleLink(
-	now, heading string,
+	now string,
+	key sectionKey,
 	link model.DecisionLink,
-	sums map[int]map[string]string,
+	sums map[int]map[sectionKey]string,
 	atTime map[int64]int,
 ) bool {
 	atCreated, read := sums[link.CreatedVersion]
-	if !read || atCreated[heading] == now {
+	if !read || atCreated[key] == now {
 		return false
 	}
 	if link.To.ChangedAt == nil {
@@ -366,7 +375,7 @@ func staleLink(
 		return true
 	}
 	atChange, read := sums[number]
-	return read && atChange[heading] != now
+	return read && atChange[key] != now
 }
 
 // versionsAtTimes is, for each time, the document's greatest version written at or before it:
@@ -409,12 +418,12 @@ func (s *server) versionsAtTimes(
 	return at, rows.Err()
 }
 
-// decisionSumsAt is each named version's decisions by heading, with the sum of each one's text:
-// the version's own stored markdown, cut by the same rule as the document as it stands.
+// decisionSumsAt is each named version's decisions, with the sum of each one's text: the
+// version's own stored markdown, cut by the same rule as the document as it stands.
 func (s *server) decisionSumsAt(
 	ctx context.Context, artifactID string, numbers []int,
-) (map[int]map[string]string, error) {
-	sums := map[int]map[string]string{}
+) (map[int]map[sectionKey]string, error) {
+	sums := map[int]map[sectionKey]string{}
 	if len(numbers) == 0 {
 		return sums, nil
 	}
@@ -437,41 +446,35 @@ func (s *server) decisionSumsAt(
 	return sums, rows.Err()
 }
 
-// decisionSums cuts a document's markdown into its decisions by heading, and sums each one's
-// text. A version holds no block id, so a decision is found here by its heading, as a reader
-// reads it; a heading the document carries twice is left out rather than guessed at, and a
-// renamed heading reads as a decision whose text changed, which it is.
+// decisionSums cuts a document's markdown into its decisions and sums each one's text. It cuts
+// by the rule the block walk cuts the document that stands by (decisionSections): a `##` heading
+// outside `## Replaced` and a `###` heading under it opens a decision, a heading of its own
+// level or higher closes it - `#` included, which opens none - and a deeper heading is text of
+// the decision it stands in.
 //
-// A section runs from its heading line to the line before the next heading of its own level or
-// higher, as the block walk cuts the document that stands (decisionSections), and its sum is
-// taken over that text with the blank lines at its end removed, so the same section of two
-// versions sums alike whatever follows it.
-func decisionSums(markdown string) map[string]string {
-	sums := map[string]string{}
-	repeated := map[string]bool{}
+// A stored version holds no block id, so a decision is keyed by its heading and by how many
+// decisions before it carry that heading (sectionKey): a document that carries one heading twice,
+// which a replaced decision made again does, is two decisions here as it is two in the view,
+// rather than one the sum cannot name. Its sum is taken over the section's text with the blank
+// lines at its end removed, so the same section of two versions sums alike whatever follows it.
+func decisionSums(markdown string) map[sectionKey]string {
+	sums := map[sectionKey]string{}
+	seen := map[string]int{}
 	type section struct {
-		heading string
-		level   int
-		start   int
+		key   sectionKey
+		level int
+		start int
 	}
-	var open []section
+	var open *section
+	inReplaced := false
 	fenced := ""
 	offset := 0
-	closeTo := func(level, end int) {
-		for len(open) > 0 && open[len(open)-1].level >= level {
-			last := open[len(open)-1]
-			open = open[:len(open)-1]
-			text := strings.TrimRight(markdown[last.start:end], "\n")
-			if repeated[last.heading] {
-				continue
-			}
-			if _, held := sums[last.heading]; held {
-				delete(sums, last.heading)
-				repeated[last.heading] = true
-				continue
-			}
-			sums[last.heading] = decisionTextSum(text)
+	closeAt := func(end int) {
+		if open == nil {
+			return
 		}
+		sums[open.key] = decisionTextSum(strings.TrimRight(markdown[open.start:end], "\n"))
+		open = nil
 	}
 	for _, line := range strings.SplitAfter(markdown, "\n") {
 		if line == "" {
@@ -488,15 +491,35 @@ func decisionSums(markdown string) map[string]string {
 			continue
 		}
 		if fenced == "" {
-			if level, heading := markdownHeading(trimmed); level > 1 {
-				closeTo(level, offset)
-				open = append(open, section{heading: heading, level: level, start: offset})
+			if level, heading := markdownHeading(trimmed); level > 0 {
+				if open != nil && level <= open.level {
+					closeAt(offset)
+				}
+				if level <= 2 {
+					inReplaced = level == 2 && heading == replacedHeading
+				}
+				if open == nil && isDecisionHeading(level, inReplaced) {
+					occurrence := seen[heading]
+					seen[heading] = occurrence + 1
+					open = &section{
+						key:   sectionKey{heading: heading, occurrence: occurrence},
+						level: level,
+						start: offset,
+					}
+				}
 			}
 		}
 		offset += len(line)
 	}
-	closeTo(2, len(markdown))
+	closeAt(len(markdown))
 	return sums
+}
+
+// sectionKey names one decision of a document across its versions: its heading, and how many
+// decisions before it carry that heading.
+type sectionKey struct {
+	heading    string
+	occurrence int
 }
 
 // codeFence is the fence a line opens or closes a fenced code block with (three or more

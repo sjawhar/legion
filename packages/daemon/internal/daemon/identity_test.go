@@ -39,24 +39,24 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		os.Unsetenv(name)
 	}
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
-	var owners []string
+	var asked []string
 	s := specs{stateDir: stateDir, project: "s1", repositories: noRepositoriesView,
 		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
 			return ghrepo.MustParse("zeta/tools"), "main", nil
 		},
-		identity: func(_ context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+		identity: func(_ context.Context, role claim.Role, repository ghrepo.Repository) (runtime.GitIdentity, error) {
 			if role != claim.RoleImplementer {
 				t.Errorf("identity asked for %s, want the claim's role", role)
 			}
-			owners = append(owners, owner)
+			asked = append(asked, repository.String())
 			return bot, nil
 		}}
 	spec, err := s.SpawnSpec(context.Background(), c)
 	if err != nil || spec.Repository != ghrepo.MustParse("zeta/tools") {
 		t.Fatalf("SpawnSpec = %q, %v; want zeta/tools, the runtime's to locate the workspace from", spec.Repository, err)
 	}
-	if want := []string{"zeta"}; !slices.Equal(owners, want) {
-		t.Errorf("identity asked for owners %q, want the recorded repository's owner alone, %q", owners, want)
+	if want := []string{"zeta/tools"}; !slices.Equal(asked, want) {
+		t.Errorf("identity asked for %q, want the recorded repository alone, %q: the owner its lease is minted for is identity's own to decide", asked, want)
 	}
 	identity := map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
@@ -67,7 +67,7 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		t.Errorf("the launch's Env = %v, want the six git identity variables alone", spec.Env)
 	}
 
-	s.identity = func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
+	s.identity = func(context.Context, claim.Role, ghrepo.Repository) (runtime.GitIdentity, error) {
 		return runtime.GitIdentity{}, errors.New("github_app_not_installed")
 	}
 	if _, err := s.SpawnSpec(context.Background(), c); err == nil || !strings.Contains(err.Error(), "github_app_not_installed") {

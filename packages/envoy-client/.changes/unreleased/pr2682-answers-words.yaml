@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+    `sessionAnswersWords(items)` in `@legion/envoy-client/session-answers` keys what the people
+    wrote in each item (kind, id, author, times, options chosen, words), and `readSessionAnswers`
+    returns it as `words` on a `fresh` or `cache` read for the items its list shows, so a host can
+    tell a new item shown or a changed answer from a list that only lost items or changed its
+    titles or header.
+time: 2026-11-02T18:00:01.000000000Z
+custom:
+    Issue: pr2682

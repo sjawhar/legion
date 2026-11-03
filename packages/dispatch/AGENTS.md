@@ -852,9 +852,9 @@ is an `<a>` to the broker's own page, the `approve_url` the broker names on the 
 `brokerPage.ts` takes only as an absolute `http:` or `https:` URL (anything else, a
 `javascript:` URL among them, reads as absent, since the body is the broker's word relayed
 verbatim; the check itself is `lib/external-href.ts`, shared with the issue header's external
-links); from a broker too old to name one the row keeps the `<Link>` it had before that page
-existed, to `/credentials/<record>`, the only place such a request can be decided, since that
-broker serves no page of its own. Below that link each row shows the session the
+links); from a broker that names no page the row is the same summary with no link at all, a plain
+`<div>` rather than an anchor (`PendingRowLine`), since Dispatch decides no secret request of its
+own any more. Below that line each row shows the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): each id as an
 `AgentName` - its name, its running state and its live link - followed by the full id in text,
 because the id is an unsigned claim (`session.ts`) and `session:<8>…` alone would let another id
@@ -867,57 +867,56 @@ alone, or both agreeing, shows one unlabeled line. A request-only id (the common
 case, which has no enrollment `session_id` of its own) shows one line with no preamble
 (`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
 enrollment's under "The session that enrolled:", since that is the one the broker verified, and
-the request's bare (`CredentialSessionLines.tsx`, shared with the record page below); never
-"Requested by". `pending.ts`'s
+the request's bare (`CredentialSessionLines.tsx`, which this row is the one caller of);
+never "Requested by". `pending.ts`'s
 `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
-`CredentialRecordPage.tsx` (`/credentials/:recordId`) sends the browser to the broker's own page
-whenever the record's answer names one: `brokerPage.ts` reads `approve_url` off the record, and
-an effect (never a render, which would repeat the side effect) calls `window.location.replace`,
-so the back button returns where the person came from; until the browser leaves, and for good if
-it never does, the page is one line and a link to the request's page there. What follows is what
-a record the broker names no page for still renders, and what the machine page always renders.
-That record page and its read routes go in step 3 of this rollout.
-`CredentialRecordPage.tsx` and `MachineLoginPage.tsx`
-(`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
-own line uses), lifetime, requested/expiry timestamps, policy
-version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
-login name, reads "Anyone signed in to Dispatch" - then the agent's reason) and
-`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
-The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
-two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on
+`MachineLoginPage.tsx` (`/credentials/machine`) is the one page Dispatch renders a credential
+record on. `app.tsx` routes `/credentials/*` to the Inbox, and React Router ranks that static
+machine path above the splat, so every other `/credentials/...` path - an old link to a single
+record among them - opens the Inbox. A secret request is decided on the broker's own page,
+which the Inbox row links; Dispatch serves no page of its own for one.
+The machine page looks a pending machine login up by the 8-character code the operator typed
+(`POST /api/v1/credential-requests/machine-lookup`), and renders `CredentialRecordFacts.tsx`
+(kind, which reads "Machine login" since the lookup returns nothing else; identifiers; lifetime;
+requested/expiry timestamps; policy version; approver, the broker's `anyone`, which a shared
+secret's request and a service's machine login name, reading "Anyone signed in to Dispatch"; then
+the agent's reason) above
+`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown while the looked-up login carries no
+decision; a service's login gets Deny alone, since no person approves one any more).
+That lookup selects machine logins alone, and the broker leaves such a record's enrollment and both
+of its session ids empty, so the facts carry no enrollment, no worker slot and no session line; the
+session lines are the Inbox row's own. A record waiting on
 `anyone` is in every signed-in person's pending list, since the broker lists it for every approver,
 and any of them decides it the same way; a person's own machine login is decided by that person
 alone.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
-a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
-you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's),
-"Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
-yours reaches its pods unless you approve the request for it."; an approval made on the machine
-page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
-<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
-machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
-decide it. A decision is one plain
-POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
-send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
-decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
+a pending machine record adds the sentence "Approving lets `<host>` start agent sessions as
+you." verbatim, or, for a service's login (the record's `service` set, the Legion daemon's), the
+sentence that it is a login from before services logged in with their own Kubernetes token and no
+one can approve it any more: deny it, or let it expire. The decision shown in the buttons' place -
+one made here, or the one a looked-up login already carried - reads "Approved. `<host>` can start
+agent sessions as you." or "Approved. `<service> on <host>` can start worker pods as
+`<service>`."; any other decision reads its own word capitalised, as in "Denied. `<host>` is not
+logged in."
+A decision is one plain
+POST: approve and deny both send `{code}`, the code the viewer typed for that lookup (the broker
+requires it on either decision). The page never says who decides: Dispatch's server names the
+signed-in viewer (below),
 and the broker refuses anyone a machine login's rule does not admit (anyone signed in for a
 service's login; otherwise its approver) with `403 NOT_APPROVER`, surfaced verbatim. A secret
 request's decision never reaches that rule through Dispatch: the broker answers
-`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the record page
-sends the browser to the broker's own page.
-Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
-recorded decision and no buttons, on the record page and on the machine page alike, whether the
-machine page looked the login up already decided or decided it itself; every broker error
+`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the Inbox row
+links the broker's page and Dispatch renders no Approve or Deny for a secret request at all.
+A login looked up already decided (`approved`, `denied`, `expired`, `cancelled`, `revoked`)
+renders that recorded decision and no buttons, as one decided here does; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`RevocableList.tsx` is the revocable table both lists below render through, as
-`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+`RevocableList.tsx` is the revocable table both lists below render through: each section hands it
 its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
 `window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
 states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
@@ -929,7 +928,9 @@ grant of a session the viewer operates, automatic or approved by anyone, and eve
 approved (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names how it was
 granted (the broker's `granted`: "Automatically", or "Approved by" its `approver`; `CredentialGrant`
 is a union on `granted`, so an automatic grant has a null approver and record and an approved one
-has both), a pod enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` to
+has both), a pod enrollment's slot under its enrollment - the broker's `enrollment.slot`
+(`implementer-g3`, null without one), which is what tells two roles' grants in one pod apart, since
+they share the pod's kind and runtime id - and has a Revoke button that POSTs `{}` to
 `/api/v1/credential-grants/{id}/revoke`. Only its operator sees an automatic grant, and revoking
 one makes that session ask before it gets those secrets again: its other automatic grants of them
 end with it.
@@ -968,9 +969,8 @@ browser's body; any other field the browser sends, an `approver` among them, is 
 as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
-rows every page above calls:
-`GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts
+the eight `human`-auth proxy rows every page above calls: `GET /api/v1/credential-requests`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
 `POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
@@ -1248,7 +1248,7 @@ A decision block is a card whose chrome is React and whose question text stays t
 
 The pure drawing those node views use lives in `features/doc/typed-block-drawing.ts`: `renderTypedBlock`, `askBlockFacts` (what an `ask` node says about itself), `askBlockShell` (the decision shell's frame and content classes, the attributes its frame stamps — urgency, state, and `data-dispatch-ask-malformed` only while malformed — and whether a mounted card folds the source option list, the one place each rule lives), `renderAskBlockShell` (the decision shell as a static spec, which `AskBlockView` and the read-only text engine both draw, so the two cannot drift), `askShellSlots` and its `AskShellSlots` (a shell's own header, content hole and footer, never a nested decision's: the one slot lookup both use), `applyAskBlockShell` (writes the shell's classes, stamps and fold over a drawn shell where a card mounts: `AskBlockView` on every update, after it adds the editor-only `data-dispatch-ask-block` and `data-block-id`, and the text path once per paired shell), and the `AskBlockHost` type `AskBlockCard` takes. It imports only types from `prosemirror-model` and small value modules (`theme/classes.ts`, `features/inbox/ask-urgency.ts`) — no editor library, no `picture-view`, no React — so the entry chunk's text engine can draw typed blocks without pulling the editor in. The editors never put the header in a document's HTML; the text engine does put it, and the decision shell, in a body's HTML, through the headless engine's `renderBlock`. A paste of a body still reads only the `[data-proof-block-content]` hole and the `data-proof-block-attr-*` copy attributes, which the schema's `toDOM` wrapper keeps on a host drawing.
 
-`installTypedBlocks` also mounts `pictureView` (`features/doc/picture-view.ts`) for every `image` node, in both editors, because the browser cannot fetch `dispatch://`. A source naming an artifact at a version (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the line `useDraftUpload` writes for a pasted picture) is a `<span data-dispatch-doc-picture="<reference>">` holding an `<img>` loaded lazily from the version's bytes route (`artifactVersionPath` in `api/client.ts`), with `pictureClassName` from `features/refs/DispatchPicture.tsx` and the caption `pictureReference` (`features/refs/routes.ts`, the one reading of an `image` node's `src` and `alt` it shares with `pictureSerializer`) gives it — the trimmed `alt`, or the artifact's slug when that is empty. A version the browser cannot draw (a markdown document, whose version route answers JSON; another file; a missing version — the `<img>`'s `error`, whose listener is attached before `src` is set so an error raised at once is caught), or a source that pins no version or names something other than an artifact, is a plain-DOM `<a href="<SPA path>" data-dispatch-href="<reference>">` whose text is the reference's short form (`shortForm` in `features/refs/routes.ts`, e.g. `CORE-1 notes-md`): in the live editor a click on it reaches the article's click handler and navigates in the app (`stopEvent` returns true inside the link — for every event but a `dragstart`, which is left to ProseMirror so a drag begun over the link's words moves the picture node instead of dropping the browser's own link HTML, while `copy` and `cut` stay stopped so a native copy of those words works — so the click is a click on a link rather than ProseMirror's node-selection gesture; events on the `<img>` are the editor's, so clicking a picture selects it); in the read-only version view the click is taken by proof-editor's `markdownLinkClickPlugin` (its `handleDOMEvents.click`, which `stopEvent` never gates), which opens the artifact's page in a new tab (`window.open` with `noopener,noreferrer`); a Ctrl/Cmd-click in the live editor goes the same way; a middle click uses the real `href`; and in the live editor hovering the link shows two cards — `RefPreviewHost`'s reference card, which triggers on `data-dispatch-href`, and the library's `Open link` card, which the plugin shows for any `a[href]` in an editable view outside `[data-mark-id]` — the one element in the editor that shows both, since a link mark has `href=""` and a web link no `data-dispatch-href`. A primary-button mousedown on the link first puts the editor's caret just after the picture node (`pictureNodeView`, in `picture-view.ts`, hands `pictureView` a `placeCaretAfter` that dispatches a collapsed `TextSelection` at `getPos() + node.nodeSize`): Firefox does not focus a link on mousedown, the editing host takes the focus instead, and ProseMirror then restores the editor's own selection to the DOM, wherever it last was — the document's start for a reader who has not clicked into the text — which scrolls a long document away from the link before the mouseup and the click land; with the caret beside the picture nothing scrolls, and the click reaches the handler with a collapsed selection (`e2e/picture-link-click.e2e.ts`, which runs in Firefox for this). The listener does not `preventDefault`, since Firefox would then start no drag from the link. Any other source — a picture on another website, a relative path, a `dispatch://` string `parseDispatchReference` refuses — is the schema's own `toDOM`, as before. The view has no `contentDOM` and no `update`, so a node whose attributes change is recreated and one whose attributes are unchanged keeps its DOM across a collaborator's edits, the picture not fetched again; it sets no `ignoreMutation`: prosemirror-view's default for a view without a `contentDOM` already ignores the swap from `<img>` to `<a>`, the one DOM change the view makes itself, and still reports the selection records the editor needs.
+`installTypedBlocks` also mounts `pictureView` (`features/doc/picture-view.ts`) for every `image` node, in both editors, because the browser cannot fetch `dispatch://`. A source naming an artifact at a version (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`, the line `useDraftUpload` writes for a pasted picture) is a `<span data-dispatch-doc-picture="<reference>">` holding an `<img>` loaded lazily from the version's bytes route (`artifactVersionPath` in `api/client.ts`), with `pictureClassName` from `features/refs/DispatchPicture.tsx` and the caption `pictureReference` (`features/refs/routes.ts`, the one reading of an `image` node's `src` and `alt` it shares with `pictureSerializer`) gives it — the trimmed `alt`, or the artifact's slug when that is empty. A source naming an artifact without a version (`![shot.png](dispatch://KEY/artifact/shot-png)`) draws its latest version: `installTypedBlocks` takes a `watchPicture` (`ProofDocument` and `VersionView` pass `watchPicturePath` from `features/refs/reference-target.ts`, bound to the page's query client: a `QueryObserver` on the same issue, project-document or agent-artifact summary a reference link reads, so every picture of one issue shares one summary read, and the picture follows that summary as an event refreshes it or a failed read recovers), which reports the latest version's bytes route at once when the summary is already read and on every change after; the wrapper holds the fallback link while it reports undefined (unread, unreadable, or a target that is a document or another file) and the `<img>` otherwise, and the view's `destroy` unsubscribes. A load error falls back to the link only from the `<img>` the wrapper still holds (a version a newer report replaced errs into nothing), and a report after a failed load draws again. The `<img>` is at its own size, scaled down to the column and never capped in height (`pictureClassName`), and a plain primary click on it (`isPlainClick` in `features/refs/picture-lightbox.ts`) opens it at full size: `openPictureLightbox` appends a modal `<dialog data-testid="picture-lightbox" aria-label="<caption>">` to the body holding the same bytes route's picture, as large as its pixels and never larger than the screen, which a click anywhere or Escape closes and removes (the bytes route serves a picture as an attachment, so its URL in a tab would download it). One layer is open at a time: a call while one is open opens nothing and answers undefined, so only the picture that opened the layer holds it, and its view's `destroy` (or `DispatchPicture`'s unmount) closes it. ProseMirror selects the node on mousedown and mouseup as before; the click after them opens the picture. A version the browser cannot draw (a markdown document, whose version route answers JSON; another file; a missing version — the `<img>`'s `error`, whose listener is attached before `src` is set so an error raised at once is caught), or a source that names something other than an artifact, is a plain-DOM `<a href="<SPA path>" data-dispatch-href="<reference>">` whose text is the reference's short form (`shortForm` in `features/refs/routes.ts`, e.g. `CORE-1 notes-md`): in the live editor a click on it reaches the article's click handler and navigates in the app (`stopEvent` returns true inside the link — for every event but a `dragstart`, which is left to ProseMirror so a drag begun over the link's words moves the picture node instead of dropping the browser's own link HTML, while `copy` and `cut` stay stopped so a native copy of those words works — so the click is a click on a link rather than ProseMirror's node-selection gesture; events on the `<img>` are the editor's, so clicking a picture selects it); in the read-only version view the click is taken by proof-editor's `markdownLinkClickPlugin` (its `handleDOMEvents.click`, which `stopEvent` never gates), which opens the artifact's page in a new tab (`window.open` with `noopener,noreferrer`); a Ctrl/Cmd-click in the live editor goes the same way; a middle click uses the real `href`; and in the live editor hovering the link shows two cards — `RefPreviewHost`'s reference card, which triggers on `data-dispatch-href`, and the library's `Open link` card, which the plugin shows for any `a[href]` in an editable view outside `[data-mark-id]` — the one element in the editor that shows both, since a link mark has `href=""` and a web link no `data-dispatch-href`. A primary-button mousedown on the link first puts the editor's caret just after the picture node (`pictureNodeView`, in `picture-view.ts`, hands `pictureView` a `placeCaretAfter` that dispatches a collapsed `TextSelection` at `getPos() + node.nodeSize`): Firefox does not focus a link on mousedown, the editing host takes the focus instead, and ProseMirror then restores the editor's own selection to the DOM, wherever it last was — the document's start for a reader who has not clicked into the text — which scrolls a long document away from the link before the mouseup and the click land; with the caret beside the picture nothing scrolls, and the click reaches the handler with a collapsed selection (`e2e/picture-link-click.e2e.ts`, which runs in Firefox for this). The listener does not `preventDefault`, since Firefox would then start no drag from the link. Any other source — a picture on another website, a relative path, a `dispatch://` string `parseDispatchReference` refuses — is the schema's own `toDOM`, as before. The view has no `contentDOM` and no `update`, so a node whose attributes change is recreated and one whose attributes are unchanged keeps its DOM across a collaborator's edits, the picture not fetched again; it sets no `ignoreMutation`: prosemirror-view's default for a view without a `contentDOM` already ignores the swaps between `<img>` and `<a>`, the only DOM changes the view makes itself, and still reports the selection records the editor needs.
 
 
 ## Commands
@@ -1488,11 +1488,13 @@ or a server that is down answers it 503; either way the page tries again under t
 fake Envoy records one send, and the composer clears with no refusal.
 `pasteFile` pastes a file into a field as the clipboard does (`pastePicture` a PNG).
 `pictures.e2e.ts` pastes a picture into an issue message, an ask's answer and a direct message
-and checks each `<img>` loads from its version's bytes route; it also writes a picture line into
-a spec and checks the live editor and a past version draw it from that route, that a markdown
-version and a version-less source show a link in its place (and that the link navigates), that
+and checks each `<img>` loads from its version's bytes route, and that a click on the direct
+message's picture opens it at full size and a click closes it; it also writes a picture line, and
+the same picture without a version, into a spec and checks the live editor and a past version
+draw both from that route, that a click in the editor opens the full-size layer, that a markdown
+document's line, at a version or not, shows a link in its place (and that the link navigates), that
 a web picture stays the schema's `<img>`, and that the stored markdown (`getIssueArtifactText`,
-`GET /api/v1/issues/<KEY>/artifacts/<slug>/text`) keeps the line. Every
+`GET /api/v1/issues/<KEY>/artifacts/<slug>/text`) keeps the lines. Every
 margin ask card, open or decided, is one keyed list in the Comments tab, with `Needs you` a heading
 item in it (the Inbox's pattern), so an answered ask moves out of the group in place, and a reply
 the reader started typing in its thread stays; the group is each card's `data-margin-section`,
@@ -1913,6 +1915,6 @@ A retracted ask is withdrawn history: the Inbox and the open-ask badges drop it,
 
 Every artifact upload goes through `useArtifactUpload` in `features/artifacts/ArtifactUpload.tsx` (one mutation, one `ArtifactDropZone` that renders both the drop target and the one hidden `Upload artifact` file input the host's picker button opens, and the owner's list invalidation): the issue Artifacts tab stages the pick behind its row's `Summary (optional)` field and confirming `Upload` button, while the project Documents list passes `immediate` and uploads the moment a file is picked or dropped. On a closed issue the Artifacts tab and a document's repair upload pass `CLOSED_ISSUE_UPLOAD_REFUSAL` (`useArtifactUpload({refusal})`): Upload is a `RefusableButton`, `aria-disabled` with `This issue is closed. Reopen it to upload.` as its title and on a visible line, the picker never opens, the hidden file input is `disabled` so no key opens a chooser whose file would be ignored, and a drop is ignored, since Dispatch refuses a fresh upload to a closed issue `409 ISSUE_CLOSED` before it spools the body. A repeat under a key Dispatch answers itself is answered as its first was whatever the issue's state now: an upload that landed before the close is replayed its `201`, and one still running is told `KEY_IN_FLIGHT`.
 
-A file pasted or dropped into a draft - `MentionComposer` (not an edit), an ask's answer and the reply under an answered ask - goes through `useDraftUpload` in the same file: it uploads to the owner the paste named (an issue, a project for a project document, or `{ session }` for a direct message on the Agents page, `POST /api/v1/agents/{session_id}/artifacts`) and appends `uploadedFileText`: a picture (`image/*`) as `![<file name>](dispatch://<owner>/artifact/<slug>@v<N>)`, any other file as its plain reference. Send, Answer and Reply wait while an upload is out. The engine's serializer (`pictureSerializer` in `features/refs/markdown-engine.ts`) writes an `image` node whose address is a Dispatch artifact at a version as a placeholder link to the artifact's page, and `useRenderedMarkdown` portals a `features/refs/DispatchPicture.tsx` into each one, in `MarkdownBody` and `MarkdownPreview` alike: an `<img>` loaded lazily from the slug-form bytes route (`artifactVersionPath` in `api/client.ts`), as wide as its column and at most `max-h-96` in `MarkdownBody`'s block variant, or a 40 px thumbnail beside its caption in its `inline` variant and in every preview (where an inert preview's placeholder is link-styled text, as its links are); one pinning no version reads as a `RefLink`, and so does a version the browser cannot draw (its `error`). A `RefLink` to an image artifact (of an issue, a project or an agent's conversation: `useReferenceTarget`'s `picture` in `features/refs/reference-target.ts`) shows the same thumbnail beside its title. `dispatch://agent/<session id>/artifact/<slug>[@vN]` (the session as written) is `AgentArtifactRoute` in `features/refs/routes.ts`, whose page is `/agents/<session id>/artifacts/<slug>[?v=N]` (`features/artifacts/AgentArtifactPage.tsx`). The Agents page's direct messages and the broadcast page's broadcast and replies render in the block variant, so their pictures show at full width.
+A file pasted or dropped into a draft - `MentionComposer` (not an edit), an ask's answer and the reply under an answered ask - goes through `useDraftUpload` in the same file: it uploads to the owner the paste named (an issue, a project for a project document, or `{ session }` for a direct message on the Agents page, `POST /api/v1/agents/{session_id}/artifacts`) and appends `uploadedFileText`: a picture (`image/*`) as `![<file name>](dispatch://<owner>/artifact/<slug>@v<N>)`, any other file as its plain reference. Send, Answer and Reply wait while an upload is out. The engine's serializer (`pictureSerializer` in `features/refs/markdown-engine.ts`) writes an `image` node whose address is a Dispatch artifact, at a version or not, as a placeholder link to the artifact's page, and `useRenderedMarkdown` portals a `features/refs/DispatchPicture.tsx` into each one, in `MarkdownBody` and `MarkdownPreview` alike: an `<img>` loaded lazily from the slug-form bytes route (`artifactVersionPath` in `api/client.ts`) of the version the source pins, else of the artifact's latest version (`useReferenceTarget`'s `picture`, the summary read the reference's link reads, so it follows a new version as the summary does); in `MarkdownBody`'s block variant at its own size, scaled down to the column and never capped in height, a plain primary click opening it at full size (`openPictureLightbox`, `features/refs/picture-lightbox.ts`, the same layer the editors open; the listener is the `<img>`'s own and stops the click, so the placeholder link does not navigate, while a modified or middle click still opens the artifact's page); or a 40 px thumbnail beside its caption in its `inline` variant and in every preview (where an inert preview's placeholder is link-styled text, as its links are). A version-less source reads as its `RefLink` until its summary is read, and keeps it when the target is no picture; so does a version the browser cannot draw (its `error`). A `RefLink` to an image artifact (of an issue, a project or an agent's conversation: `useReferenceTarget`'s `picture` in `features/refs/reference-target.ts`) shows the same thumbnail beside its title. `dispatch://agent/<session id>/artifact/<slug>[@vN]` (the session as written) is `AgentArtifactRoute` in `features/refs/routes.ts`, whose page is `/agents/<session id>/artifacts/<slug>[?v=N]` (`features/artifacts/AgentArtifactPage.tsx`). The Agents page's direct messages and the broadcast page's broadcast and replies render in the block variant, so their pictures show at full width.
 
-The document editors draw the same picture without the engine: `features/doc/picture-view.ts` is the `image` node view `installTypedBlocks` mounts in `ProofDocument` and `VersionView` (above, under the decision block), with the same `pictureClassName` (exported from `DispatchPicture.tsx`, so a picture in a spec and one in a comment are one class string), the same caption rule and the same bytes route. Where the engine shows a `RefLink` - a version the browser cannot draw, a source pinning no version - the editor shows a plain-DOM `<a>` to the same page whose text is the reference's short form (`shortForm` in `features/refs/routes.ts`): `RefLink` resolves the target's title through `useReferenceTarget`, which a node view without React cannot, so its words are the reference's own, never an author's caption.
+The document editors draw the same picture without the engine: `features/doc/picture-view.ts` is the `image` node view `installTypedBlocks` mounts in `ProofDocument` and `VersionView` (above, under the decision block), with the same `pictureClassName` (exported from `DispatchPicture.tsx`, so a picture in a spec and one in a comment are one class string), the same caption rule, the same bytes route, the same latest-version reading (`watchPicturePath`, the non-React twin of `useReferenceTarget`'s `picture`, which follows the summary as the hook does) and the same full-size layer. Where the engine shows a `RefLink` - a version the browser cannot draw, a version-less source not yet read or naming no picture - the editor shows a plain-DOM `<a>` to the same page whose text is the reference's short form (`shortForm` in `features/refs/routes.ts`): `RefLink` resolves the target's title through `useReferenceTarget`, which a node view without React cannot, so its words are the reference's own, never an author's caption.
