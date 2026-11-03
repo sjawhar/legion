@@ -102,8 +102,8 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 }
 
 // compactionCandidates lists every document doc_compaction_owed names: the documents an append
-// gave a row after their first that no compaction has folded since (appendUpdateTxClass,
-// writeCompaction). It reads that table alone, so the pass reads no row of a document with nothing
+// gave a row after their first that no compaction has folded since (appendUpdatesStatement,
+// through appendWrites; writeCompaction). It reads that table alone, so the pass reads no row of a document with nothing
 // to fold, and it drains the list before it returns.
 func compactionCandidates(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	rows, err := pool.Query(ctx, `select artifact_id::text from doc_compaction_owed`)

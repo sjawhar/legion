@@ -131,10 +131,7 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 	if err != nil || len(flush.versions) == 0 {
 		return 0, err
 	}
-	last := flush.versions[len(flush.versions)-1]
-	// Noted once the document's locks are gone: the note waits on nothing the append holds.
-	p.noted(room, int64(last))
-	return last, nil
+	return flush.versions[len(flush.versions)-1], nil
 }
 
 // AppendUpdatesWithCredit validates updates, each alone, and stores them in one transaction, the
@@ -151,13 +148,7 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 			return 0, err
 		}
 	}
-	first, err := p.appendRoomTx(ctx, room, nil, 0, nil, updates)
-	if err != nil || first == 0 {
-		return first, err
-	}
-	// Noted once the document's locks are gone, as a batch's last version is (AppendRoomFlush).
-	p.noted(room, int64(first)+int64(len(updates))-1)
-	return first, nil
+	return p.appendRoomTx(ctx, room, nil, 0, nil, updates)
 }
 
 // appendRoomTx is the transaction a room's updates are stored in: it holds the room's in-process
@@ -171,7 +162,8 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 //     with its credit held at its version (RoomFlush.markStored), afterAppendCommit, the room
 //     instance's cursor advanced once per version, the room's figures, and the end of the write the
 //     head tracker has followed since the gate (beginOwnWrite), with the head it left. credit lands
-//     before this, committed or not.
+//     before this, committed or not. Once the locks are released, a committed transaction notes its
+//     last version to the compaction queue (PgVersioned.noted).
 //
 // What it stores is flush's run through `through`, read under the document's lock once the first
 // pipeline holds it (Service.flushRun), or, for a nil flush, given, whose credits are held at
@@ -193,6 +185,15 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	if err != nil {
 		return 0, err
 	}
+	// stored is the last version the transaction committed, -1 while it has committed none. The
+	// compaction queue is told of it once the document's locks are gone (PgVersioned.noted),
+	// since the note waits on nothing the append holds: deferred before release, it runs after it.
+	stored := int64(-1)
+	defer func() {
+		if stored >= 0 {
+			p.noted(room, stored)
+		}
+	}()
 	defer release()
 
 	trips := 0
@@ -203,7 +204,7 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	// The head tracker follows the transaction as this process's write from its gate until the
 	// commit's bookkeeping is done, the cursor's advance among it (beginOwnWrite, ownWrite.end).
 	write := p.heads.beginOwnWrite(room)
-	open, stored := true, int64(-1)
+	open := true
 	// finish ends the append however it ends, in this order: the head tracker's write ends while
 	// the session lock still orders it with every other writer of the document; the call's own
 	// credit lands while that lock is still held, whether the transaction committed or not, so no

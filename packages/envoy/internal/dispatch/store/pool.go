@@ -403,8 +403,13 @@ const compactionPoolSize = 2
 // its own it takes neither. Like the rooms pool it is outside the nested-acquire guard, because a
 // separate pool cannot close the cycle the guard prevents.
 func (p *Pool) Compaction() (*pgxpool.Pool, error) {
-	return p.separate(&p.compaction, compactionPoolSize, "dispatch-compaction", "")
+	return p.separate(&p.compaction, compactionPoolSize, "document compaction", compactionApplicationName)
 }
+
+// compactionApplicationName is how a connection of the compaction pool (Pool.Compaction) names
+// itself in pg_stat_activity, as the room pools' do, so a reader of the database's sessions - the
+// load harness's count of the shared pool's share among them - tells a compaction from a request.
+const compactionApplicationName = "dispatch-compaction"
 
 // horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
 // server keeps one Horizon, whose concurrent callers share the one observation in flight, so one

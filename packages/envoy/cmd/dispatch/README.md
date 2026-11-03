@@ -764,7 +764,7 @@ Every pool's size is fixed in code (`internal/dispatch/store/pool.go`), and a se
 | Leases (`leasePoolSize`) | 13 | The periodic maintenance loops' once-overall leases (`duty.Exclusive`), one per caller that can be inside a lease at once. |
 | Room appends (`roomAppendsPoolSize`) | 8 | The document rooms' batches of browser updates; `application_name=dispatch-room-appends`. |
 | Rooms (`RoomsPoolSize`) | 4 | Document loads; `application_name=dispatch-rooms`. |
-| Compaction (`compactionPoolSize`) | 2 | A document's compaction: the read transaction of the rows it folds, and its write back under the document's lock (`Pool.Compaction`). |
+| Compaction (`compactionPoolSize`) | 2 | A document's compaction: the read transaction of the rows it folds, and its write back under the document's lock (`Pool.Compaction`); `application_name=dispatch-compaction`. |
 | Health (`healthPoolSize`) | 1 | The `/healthz` probe. |
 | Outbox (`outboxPoolSize`) | 2 | The events outbox's scan and, beside it, the renewal of its publisher hold (`duty.Hold`). |
 | Horizon (`horizonPoolSize`) | 2 | The event log's safe horizon (`events.Horizon`): its observations, its marks and the reads beside them, its stall diagnosis and its persist write. |

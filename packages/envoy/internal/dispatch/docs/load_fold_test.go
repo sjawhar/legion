@@ -433,7 +433,7 @@ func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) 
 		store func(t *testing.T, artifactID string)
 	}{
 		{"one stored row", func(t *testing.T, artifactID string) {
-			// A row no append takes (appendUpdate decodes it under the same cap), stored as it is.
+			// A row no append takes (AppendUpdatesWithCredit decodes it under the same cap), stored as it is.
 			if _, err := service.store.Pool.Exec(ctx, `
 				insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 1, $2, true)
 			`, artifactID, merged); err != nil {

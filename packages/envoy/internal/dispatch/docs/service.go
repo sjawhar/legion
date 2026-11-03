@@ -96,14 +96,14 @@ type Deps struct {
 // earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
-// caches its rendering by (coldRead). setProcess hands the store the Service's process id
-// (Service.ProcessID), which every content-changing write's head notification names
-// (documentHeadNotice), and the Service's head tracker, which every such write reports itself to
-// (headTracker.beginOwnWrite); a store that wraps a PgVersioned by embedding it passes both on
-// with no code of its own. compactRoom is the compaction every path Dispatch compacts a
-// document on runs (a room's close, the compaction queue, the compaction sweep), under the tail
+// caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts
+// a document on runs (a room's close, the compaction queue, the compaction sweep), under the tail
 // rule; Compact, ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or
-// wraps, which New hands the Service's note of each append and load (noteStoredUpdates).
+// wraps, which New hands the Service's per-process values: its process id (Service.ProcessID),
+// which every content-changing write's head notification names (documentHeadNotice), its head
+// tracker, which every such write reports itself to (headTracker.beginOwnWrite), and its note of
+// each append and load (noteStoredUpdates); a store that wraps a PgVersioned by embedding it
+// passes them on with no code of its own.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error)
@@ -114,7 +114,6 @@ type VersionedStore interface {
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
-	setProcess(id string, heads *headTracker)
 	compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error)
 	pgVersioned() *PgVersioned
 }
@@ -728,7 +727,8 @@ func New(deps Deps) *Service {
 		persist = NewPgVersioned(deps.Store)
 	}
 	processID, heads := uuid.NewString(), newHeadTracker()
-	persist.setProcess(processID, heads)
+	stored := persist.pgVersioned()
+	stored.processID, stored.heads = processID, heads
 	service := &Service{
 		store:             deps.Store,
 		persistence:       persist,
@@ -753,7 +753,7 @@ func New(deps Deps) *Service {
 	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
 	// it wraps.
 	note := service.noteStoredUpdates
-	persist.pgVersioned().noteStored.Store(&note)
+	stored.noteStored.Store(&note)
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true

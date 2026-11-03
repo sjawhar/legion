@@ -3,12 +3,14 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // A settlement already past its entry check when a transaction opens its write can reach the
@@ -204,5 +206,77 @@ func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 	version := waitForDocumentVersion(t, service.store, artifactID, 3)
 	if !reflect.DeepEqual(version.Authors, []model.Actor{later}) {
 		t.Fatalf("version 3 authors = %#v, want only %v", version.Authors, later)
+	}
+}
+
+// A browser's update that its room's batch still holds back, lingering for the keystrokes after it,
+// can be stored first by a transaction that reads the room: a snapshot's capture stores the room's
+// unstored updates through the point it read (Ledger.flushThrough). That update is the room's own,
+// and the instance's cursor advances over it only when the transaction commits, so the
+// transaction's next write must still fork the room, not the committed store, which holds neither
+// the update nor anything after it. A comment the browser anchored on the words that update typed
+// - the margin's re-anchor after a refused send (packages/dispatch/e2e/compose-wait.e2e.ts) - was
+// otherwise refused, or marked orphaned by the refresh of the stale fork's anchors.
+func TestAWriteAfterItsTransactionStoredTheRoomsLingeringUpdateForksTheRoom(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	appends := &heldStore{VersionedStore: NewPgVersioned(database), room: artifactID, entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(appends.let)
+	service := newShutdownTestService(t, database, appends)
+	seedServiceText(t, service, artifactID, "First.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	waitForLandedAppends(t, service, artifactID)
+
+	// The browser's update reaches the room's persistence, whose batch is held before it takes the
+	// document's lock, as one lingering for the keystrokes after it is.
+	appends.armed.Store(true)
+	editAsPeer(t, service, artifactID, appendBlocks(t, "Browser words.\n"))
+	select {
+	case <-appends.entered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the browser's update never reached the room's persistence")
+	}
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	const markID = "00000000-0000-4000-8000-000000000605"
+	held := storedHead(t, database, artifactID)
+	cursor := service.cursorOf(service.srv.GetDoc(artifactID))
+	if cursor == nil || cursor.heldThrough() != held {
+		t.Fatalf("the room's cursor does not stand at the stored head %d before the snapshot", held)
+	}
+	err := joinedWrite(service, func(ctx context.Context) error {
+		if _, err := service.SnapshotVersion(ctx, artifactID, alice); err != nil {
+			return fmt.Errorf("snapshot the document: %w", err)
+		}
+		// What the write below meets: the snapshot stored the browser's held update in this
+		// transaction, and the room's cursor has not moved over it, since that happens only when
+		// the transaction commits. Without both, the write would fork the room either way.
+		tx, _ := txFromContext(ctx)
+		head, err := currentUpdateCursor(ctx, tx, artifactID)
+		if err != nil {
+			return fmt.Errorf("read the transaction's head: %w", err)
+		}
+		if head <= held {
+			return fmt.Errorf("the snapshot stored nothing of the room's held update: the transaction's head is %d, the stored head was %d", head, held)
+		}
+		if through := cursor.heldThrough(); through != held {
+			return fmt.Errorf("the room's cursor stands at %d inside the transaction, want %d: the snapshot's versions are not committed", through, held)
+		}
+		if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: markID, By: alice}, "Browser words.", nil); err != nil {
+			return fmt.Errorf("mark the browser's words after the snapshot stored them: %w", err)
+		}
+		return nil
+	})
+	appends.let()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	tree, err := service.storedTree(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read the stored document: %v", err)
+	}
+	if _, err := readAnchored(tree, MarkComment, markID); err != nil {
+		t.Fatalf("the stored document does not hold the comment's mark on the browser's words: %v", err)
 	}
 }

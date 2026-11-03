@@ -38,8 +38,9 @@ type PgVersioned struct {
 	// which every content-changing write's documentHeadChannel notification names, so a listener
 	// can tell this process's own writes from another's. heads is that Service's head tracker,
 	// which every content-changing write of this store reports itself to (beginOwnWrite). New sets
-	// both (setProcess) before the Service it builds runs anything; a store no Service was built on
-	// - a test's, a seed's - leaves them empty, and its writes report to no tracker.
+	// both through pgVersioned, with noteStored, before the Service it builds runs anything; a store
+	// no Service was built on - a test's, a seed's - leaves them empty, and its writes report to no
+	// tracker.
 	processID string
 	heads     *headTracker
 	// unfoldableMu guards unfoldable: for each room whose rows at or below a compaction's fold
@@ -75,7 +76,8 @@ type PgVersioned struct {
 	noteStored atomic.Pointer[func(room string, head int64)]
 }
 
-// pgVersioned is p itself, the PgVersioned the Service notes appends and loads through.
+// pgVersioned is p itself, the PgVersioned New hands the Service's per-process values: its process
+// id and head tracker (processID, heads) and its note of each append and load (noteStored).
 func (p *PgVersioned) pgVersioned() *PgVersioned {
 	return p
 }
@@ -101,13 +103,6 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 		foldSlots:       make(chan struct{}, bufferedFolds),
 		maxPendingItems: maxUpdateItems,
 	}
-}
-
-// setProcess gives the store the id of the process whose Service was built on it
-// (Service.ProcessID) and that Service's head tracker. It is part of VersionedStore so that New
-// reaches the PgVersioned under any store that wraps one by embedding it.
-func (p *PgVersioned) setProcess(id string, heads *headTracker) {
-	p.processID, p.heads = id, heads
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
