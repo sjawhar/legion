@@ -1966,6 +1966,10 @@ func TestPodUpdateAbortsTheReplacementForAClaimTheGroupNeverHeld(t *testing.T) {
 	// Minutes later in that same tick, the next phase's role is started into the kept pod. It
 	// registers there, holds a session from that moment, and has answered nothing.
 	rig.startInPod(claim.RoleTester, podUpdatePod)
+	// Every machine settles before the sweep: the first tick's ask send can still be in flight,
+	// and a sweep that reads the implementer deciding its outcome masks the answer (roundGroup),
+	// waits for it and calls no ReplacePod at all, so the refusal below would be a coin toss.
+	rig.settleAll()
 
 	rig.s.reconcilePodUpdates(rig.ctx, group)
 
