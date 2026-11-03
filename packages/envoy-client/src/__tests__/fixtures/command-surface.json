@@ -1,0 +1,1560 @@
+{
+  "commands": 27,
+  "refusals": 30,
+  "runs": [
+    {
+      "tool": "dispatch_answers",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/agents/session-1/answers",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "No person wrote to this session in the last 72 hours."
+      ]
+    },
+    {
+      "tool": "dispatch_architecture_sync",
+      "call": "valid",
+      "args": {
+        "project": "CORE",
+        "repo": "acme/infra"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/projects/CORE/architecture-sources/acme/infra/sync",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Synced CORE architecture from acme/infra@main: commit abc1234 (2026-01-02T03:04:05Z)."
+      ]
+    },
+    {
+      "tool": "dispatch_artifact",
+      "call": "valid",
+      "args": {
+        "content": "# Design\n",
+        "issue": "DSP-1",
+        "name": "design.md"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/artifacts",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "content": "# Design\n",
+            "name": "design.md"
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Uploaded design.md as version 1 (artifact slug design-md; dispatch://DSP-1/artifact/design-md)"
+      ]
+    },
+    {
+      "tool": "dispatch_ask",
+      "call": "refusal: artifact beside another anchor artifact",
+      "args": {
+        "anchor": {
+          "artifact": "plan.md",
+          "quote": "old wording"
+        },
+        "artifact": "spec",
+        "issue": "DSP-1",
+        "question": "Which way should the release go?"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch ask was not called: 1 problem",
+        "- artifact spec and anchor.artifact plan.md name two documents; name the document once",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --anchor-json, --anchor-json-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch ask --issue DSP-1 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
+      ]
+    },
+    {
+      "tool": "dispatch_ask",
+      "call": "refusal: artifact with no anchor",
+      "args": {
+        "artifact": "spec",
+        "issue": "DSP-1",
+        "question": "Which way should the release go?"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch ask was not called: 1 problem",
+        "- dispatch ask opens the ask on the issue unless anchor quotes a document, so artifact spec would be dropped: add --anchor-json '{\"artifact\":\"spec\",\"quote\":\"<exact text>\"}' to ask about a passage of it, or drop --artifact",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --anchor-json, --anchor-json-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch ask --issue DSP-1 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
+      ]
+    },
+    {
+      "tool": "dispatch_ask",
+      "call": "refusal: question over the cap once the ref is appended",
+      "args": {
+        "issue": "DSP-1",
+        "question": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+        "ref": "dispatch://DSP-1/comment/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch ask was not called: 1 problem",
+        "- question plus ref is 68 characters over the 2000-character limit (2068/2000); shorten the question or drop the ref",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --anchor-json, --anchor-json-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch ask --issue DSP-1 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
+      ]
+    },
+    {
+      "tool": "dispatch_ask",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1",
+        "options": [
+          {
+            "description": "4.2 ships three days late, with the column drop reviewed.",
+            "label": "Hold to Monday"
+          },
+          {
+            "description": "On time; a wrong drop signs out 1,240 users.",
+            "label": "Ship Friday"
+          }
+        ],
+        "question": "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days."
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/asks",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "options": [
+              {
+                "description": "4.2 ships three days late, with the column drop reviewed.",
+                "label": "Hold to Monday"
+              },
+              {
+                "description": "On time; a wrong drop signs out 1,240 users.",
+                "label": "Ship Friday"
+              }
+            ],
+            "question": "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Asked 01234567-0000-4000-8000-000000000001 on DSP-1 (urgency med): Which way should the release go?",
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'Release ships Friday'",
+        "You follow this ask: its answer and replies reach you directly."
+      ]
+    },
+    {
+      "tool": "dispatch_claim",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/claim",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "DSP-1: claimed by you since 2026-01-02T03:04:05Z. Its status is todo; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop. A person's answers, comments and messages on DSP-1 now reach you directly."
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: artifact with no quote",
+      "args": {
+        "artifact": "spec",
+        "body": "Looks good.",
+        "issue": "DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- dispatch comment posts on the issue unless quote anchors it in a document, so document spec would be dropped: add --quote to comment on a passage of it, or name only the issue",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: issue beside a ref on another issue",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-2",
+        "ref": "dispatch://DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- issue DSP-2 and ref dispatch://DSP-1 name two owners; --ref dispatch://DSP-1 alone acts on DSP-1, and --issue DSP-2 alone acts on DSP-2",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: quote with no artifact",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-1",
+        "quote": "old wording"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- artifact is required when quote is supplied",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: reply_to beside reply_to_ask",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-1",
+        "reply_to": "<id>",
+        "reply_to_ask": "<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- reply_to and reply_to_ask cannot both be set",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: reply_to naming a block of an ask",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-1",
+        "reply_to": "dispatch://DSP-1/ask/<id>#b-p-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- reply_to dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001#b-p-1 names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask 'dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001#b-p-1'",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: reply_to_ask naming a block of a comment",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-1",
+        "reply_to_ask": "dispatch://DSP-1/comment/<id>#b-p-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- reply_to_ask dispatch://DSP-1/comment/01234567-0000-4000-8000-000000000001#b-p-1 names a block of a comment, but reply_to_ask answers a part of the ask it names (dispatch://KEY/ask/<id>#b-<block id>); answer it with dispatch comment --reply-to 'dispatch://DSP-1/comment/01234567-0000-4000-8000-000000000001#b-p-1'",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "refusal: version ref on a live document",
+      "args": {
+        "body": "Looks good.",
+        "quote": "old wording",
+        "ref": "dispatch://DSP-1/artifact/spec@v2"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch comment was not called: 1 problem",
+        "- dispatch comment acts on the live document, so the version ref dispatch://DSP-1/artifact/spec@v2 names would be dropped: drop its @v2",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --occurrence, --body, --body-file, --reply-to, --reply-to-file, --reply-to-ask, --reply-to-ask-file, --turn, --turn-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch comment --issue DSP-1 --body 'Looks good.'"
+      ]
+    },
+    {
+      "tool": "dispatch_comment",
+      "call": "valid",
+      "args": {
+        "body": "Looks good.",
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/comments",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "body": "Looks good."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Posted comment 01234567-0000-4000-8000-000000000001"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_edit",
+      "call": "refusal: artifact beside a ref naming another document",
+      "args": {
+        "artifact": "plan.md",
+        "ops": [
+          {
+            "block": "table-123",
+            "index": 1,
+            "op": "delete_column"
+          }
+        ],
+        "ref": "dispatch://DSP-1/artifact/spec"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch doc-edit was not called: 1 problem",
+        "- artifact plan.md and ref dispatch://DSP-1/artifact/spec name two documents; --ref dispatch://DSP-1/artifact/spec alone names spec, and --issue DSP-1 --artifact plan.md names plan.md",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --ops-json, --ops-json-file, --precondition-json, --precondition-json-file, --summary, --summary-file, --help, --dry-run",
+        "- Example: dispatch doc-edit --issue DSP-1 --artifact spec --ops-json '[{\"op\":\"delete_column\",\"block\":\"table-123\",\"index\":1}]' --precondition-json '{\"blocks\":[{\"id\":\"table-123\",\"token\":\"sha256:current-table-token\"}]}'"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_edit",
+      "call": "refusal: version ref on a live document",
+      "args": {
+        "ops": [
+          {
+            "block": "table-123",
+            "index": 1,
+            "op": "delete_column"
+          }
+        ],
+        "ref": "dispatch://DSP-1/artifact/spec@v2"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch doc-edit was not called: 1 problem",
+        "- dispatch doc-edit acts on the live document, so the version ref dispatch://DSP-1/artifact/spec@v2 names would be dropped: drop its @v2",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --ops-json, --ops-json-file, --precondition-json, --precondition-json-file, --summary, --summary-file, --help, --dry-run",
+        "- Example: dispatch doc-edit --issue DSP-1 --artifact spec --ops-json '[{\"op\":\"delete_column\",\"block\":\"table-123\",\"index\":1}]' --precondition-json '{\"blocks\":[{\"id\":\"table-123\",\"token\":\"sha256:current-table-token\"}]}'"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_edit",
+      "call": "valid",
+      "args": {
+        "artifact": "spec",
+        "issue": "DSP-1",
+        "ops": [
+          {
+            "block": "table-123",
+            "index": 1,
+            "op": "delete_column"
+          }
+        ],
+        "precondition": {
+          "blocks": [
+            {
+              "id": "table-123",
+              "token": "sha256:current-table-token"
+            }
+          ]
+        }
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/artifacts/01234567-0000-4000-8000-00000000000a/edits",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "ops": [
+              {
+                "block": "table-123",
+                "index": 1,
+                "op": "delete_column"
+              }
+            ],
+            "precondition": {
+              "blocks": [
+                {
+                  "id": "table-123",
+                  "token": "sha256:current-table-token"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Applied 1 ops (version 1)"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_read",
+      "call": "refusal: blocks beside a version",
+      "args": {
+        "blocks": true,
+        "issue": "DSP-1",
+        "version": 2
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch doc-read was not called: 1 problem",
+        "- blocks lists the live document, the one dispatch doc-edit changes; name no version",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --version, --blocks, --no-blocks, --ref, --ref-file, --help, --dry-run",
+        "- Example: dispatch doc-read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_read",
+      "call": "refusal: version beside a ref naming another version",
+      "args": {
+        "ref": "dispatch://DSP-1/artifact/spec@v2",
+        "version": 3
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch doc-read was not called: 1 problem",
+        "- version 3 and ref dispatch://DSP-1/artifact/spec@v2 name two versions; name the version once",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --version, --blocks, --no-blocks, --ref, --ref-file, --help, --dry-run",
+        "- Example: dispatch doc-read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_doc_read",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/artifacts/01234567-0000-4000-8000-00000000000a/text",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/comments",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "# Spec",
+        ""
+      ]
+    },
+    {
+      "tool": "dispatch_edit_ask",
+      "call": "refusal: ask named through its document",
+      "args": {
+        "ask": "dispatch://DSP-1/artifact/spec/ask/<id>",
+        "question": "Which way should the release go?"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch edit-ask was not called: 1 problem",
+        "- dispatch://DSP-1/artifact/spec/ask/01234567-0000-4000-8000-000000000001 names an ask through its document, which Dispatch does not address; name it dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001",
+        "- Allowed flags: --ask, --ask-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --help, --dry-run",
+        "- Example: dispatch edit-ask --ask 01234567-0000-4000-8000-000000000001 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
+      ]
+    },
+    {
+      "tool": "dispatch_edit_ask",
+      "call": "refusal: ask that is not an ask reference",
+      "args": {
+        "ask": "dispatch://DSP-1/comment/<id>",
+        "question": "Which way should the release go?"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch edit-ask was not called: 1 problem",
+        "- ask must be a bare ask id or a dispatch://.../ask/<id> reference",
+        "- Allowed flags: --ask, --ask-file, --question, --question-file, --option, --options-json, --clear-options, --multiple, --no-multiple, --urgency, --urgency-file, --help, --dry-run",
+        "- Example: dispatch edit-ask --ask 01234567-0000-4000-8000-000000000001 --question 'Release 4.2 ships Friday. Tuesday'\\''s plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days.' --option 'Hold to Monday: 4.2 ships three days late, with the column drop reviewed.' --option 'Ship Friday: On time; a wrong drop signs out 1,240 users.'"
+      ]
+    },
+    {
+      "tool": "dispatch_edit_ask",
+      "call": "valid",
+      "args": {
+        "ask": "<id>",
+        "options": [
+          {
+            "description": "4.2 ships three days late, with the column drop reviewed.",
+            "label": "Hold to Monday"
+          },
+          {
+            "description": "On time; a wrong drop signs out 1,240 users.",
+            "label": "Ship Friday"
+          }
+        ],
+        "question": "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days."
+      },
+      "requests": [
+        {
+          "method": "PATCH",
+          "path": "/api/v1/asks/01234567-0000-4000-8000-000000000001",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "options": [
+              {
+                "description": "4.2 ships three days late, with the column drop reviewed.",
+                "label": "Hold to Monday"
+              },
+              {
+                "description": "On time; a wrong drop signs out 1,240 users.",
+                "label": "Ship Friday"
+              }
+            ],
+            "question": "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user waits on 4.2, and 1,240 forced sign-ins cost more than three days."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Ask edited: Which way should the release go?"
+      ]
+    },
+    {
+      "tool": "dispatch_follow",
+      "call": "refusal: ask that is not an ask reference",
+      "args": {
+        "action": "follow",
+        "ask": "dispatch://DSP-1/comment/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch follow was not called: 1 problem",
+        "- ask must be a bare ask id or a dispatch://.../ask/<id> reference",
+        "- Allowed flags: --ask, --ask-file, --action, --action-file, --help, --dry-run",
+        "- Example: dispatch follow --ask 01234567-0000-4000-8000-000000000001 --action follow"
+      ]
+    },
+    {
+      "tool": "dispatch_follow",
+      "call": "valid",
+      "args": {
+        "action": "follow",
+        "ask": "<id>"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/asks/01234567-0000-4000-8000-000000000001",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "PUT",
+          "path": "/api/v1/asks/01234567-0000-4000-8000-000000000001/followers/session-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Following ask 01234567-0000-4000-8000-000000000001: its answer and replies reach this session directly."
+      ]
+    },
+    {
+      "tool": "dispatch_handoff_read",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1",
+        "phase": "implement"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/handoffs/implement/latest",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "DSP-1 implement handoff, version 1 (id 01234567-0000-4000-8000-000000000001), written by session session-1 at 2026-01-02T03:04:05Z",
+        "{\"schemaVersion\":1,\"phase\":\"implement\",\"issue\":\"DSP-1\"}"
+      ]
+    },
+    {
+      "tool": "dispatch_handoff_write",
+      "call": "valid",
+      "args": {
+        "body": "{\"schemaVersion\":1,\"phase\":\"implement\",\"issue\":\"DSP-1\"}",
+        "issue": "DSP-1",
+        "phase": "implement"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/handoffs/implement",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "body": "{\"schemaVersion\":1,\"phase\":\"implement\",\"issue\":\"DSP-1\"}"
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Recorded the implement handoff of DSP-1, version 1 (id 01234567-0000-4000-8000-000000000001)"
+      ]
+    },
+    {
+      "tool": "dispatch_issue",
+      "call": "valid",
+      "args": {
+        "project": "DSP",
+        "title": "Native workspace"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "project": "DSP",
+            "title": "Native workspace"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/projects/DSP/architecture-sources",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Created DSP-216: Native workspace → http://dispatch.test/issues/DSP-216; assigned to person@example.com",
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'Native workspace'",
+        "Project DSP has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, \"Architecture components\", to attach it to the parts it changes or mark it as non-architectural with a reason."
+      ]
+    },
+    {
+      "tool": "dispatch_issue_update",
+      "call": "valid",
+      "args": {
+        "before": "DSP-2",
+        "issue": "DSP-1",
+        "priority": 1
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "priority": 1,
+            "rank": {
+              "before": "DSP-2"
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "DSP-1: priority -> P1; rank -> before DSP-2"
+      ]
+    },
+    {
+      "tool": "dispatch_issues",
+      "call": "refusal: all beside limit and offset",
+      "args": {
+        "all": true,
+        "limit": 50,
+        "offset": 100,
+        "project": "PROJ"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch issues was not called: 1 problem",
+        "- --all takes every matching issue in one unpaged read, so it cannot be combined with --limit or --offset: name --all on its own, or page with --limit and --offset",
+        "- Allowed flags: --project, --project-file, --status, --status-file, --parent, --parent-file, --label, --label-file, --priority, --clear-priority, --updated-since, --updated-since-file, --route-status, --route-status-file, --limit, --offset, --all, --no-all, --help, --dry-run",
+        "- Example: dispatch issues --project PROJ --limit 250 --offset 250"
+      ]
+    },
+    {
+      "tool": "dispatch_issues",
+      "call": "valid",
+      "args": {
+        "limit": 250,
+        "offset": 250,
+        "project": "PROJ"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues?limit=250&offset=250&project=PROJ",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "1 issue in PROJ (showing 251-251 of 1)",
+        "DSP-1 [todo] P1 Native workspace ·  open asks"
+      ]
+    },
+    {
+      "tool": "dispatch_message",
+      "call": "refusal: in_reply_to naming a block of an ask",
+      "args": {
+        "body": "Implementation started.",
+        "in_reply_to": "dispatch://DSP-1/ask/<id>#b-p-1",
+        "issue": "DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch message was not called: 1 problem",
+        "- in_reply_to dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001#b-p-1 names a block of an ask, but a message reply answers a block of a message (dispatch://KEY/message/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask 'dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001#b-p-1'",
+        "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'"
+      ]
+    },
+    {
+      "tool": "dispatch_message",
+      "call": "refusal: in_reply_to that is no message id",
+      "args": {
+        "body": "Implementation started.",
+        "in_reply_to": "not-a-message",
+        "issue": "DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch message was not called: 1 problem",
+        "- in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
+        "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'"
+      ]
+    },
+    {
+      "tool": "dispatch_message",
+      "call": "valid",
+      "args": {
+        "body": "Implementation started.",
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/messages",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "body": "Implementation started."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Posted message 01234567-0000-4000-8000-000000000001 (dispatch://DSP-1/message/01234567-0000-4000-8000-000000000001)"
+      ]
+    },
+    {
+      "tool": "dispatch_open_asks",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/asks/open?author_session=session-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "There are no unanswered asks for this session.",
+        "Scope: active open asks you authored on open issues and project documents."
+      ]
+    },
+    {
+      "tool": "dispatch_project",
+      "call": "valid",
+      "args": {
+        "key": "CORE",
+        "name": "Core"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/projects",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "key": "CORE",
+            "name": "Core"
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Created project CORE (Core) at 2026-01-02T03:04:05Z: http://dispatch.test/projects/CORE"
+      ]
+    },
+    {
+      "tool": "dispatch_projects",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/projects",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "DSP Dispatch"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: artifact beside a ref that names no document",
+      "args": {
+        "artifact": "spec",
+        "ref": "dispatch://DSP-1/ask/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- ref dispatch://DSP-1/ask/01234567-0000-4000-8000-000000000001 names no document, so dispatch read would read it and drop artifact spec: drop --artifact to read the ref, or read the document with --issue DSP-1 --artifact spec",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: events beside all_events",
+      "args": {
+        "all_events": true,
+        "events": 5,
+        "issue": "DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- --events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: events on a read that lists none",
+      "args": {
+        "events": 5,
+        "ref": "dispatch://DSP-1/ask/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- --events lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for an ask: drop --events",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: message that is no message id",
+      "args": {
+        "message": "not-a-message"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: project beside an issue ref",
+      "args": {
+        "project": "CORE",
+        "ref": "dispatch://DSP-1"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- project CORE and ref dispatch://DSP-1 name two owners; --ref dispatch://DSP-1 alone acts on DSP-1, and --project CORE alone acts on that project document",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "refusal: version ref on a summary read",
+      "args": {
+        "ref": "dispatch://DSP-1/artifact/spec@v2"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch read was not called: 1 problem",
+        "- dispatch read prints the live document's summary, so the version ref dispatch://DSP-1/artifact/spec@v2 names would be dropped: read that version with dispatch doc-read --ref dispatch://DSP-1/artifact/spec@v2",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --message, --message-file, --events, --all-events, --no-all-events, --help, --dry-run",
+        "- Example: dispatch read --issue DSP-1"
+      ]
+    },
+    {
+      "tool": "dispatch_read",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/references?versions=latest",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/events?after=0&limit=10",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/references?to=dispatch://DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/references?from=dispatch://DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Title: Native workspace",
+        "Key: DSP-1",
+        "Link: http://dispatch.test/issues/DSP-1",
+        "Status: todo",
+        "Assignee: person@example.com",
+        "Claimed by: nobody",
+        "Priority: P1",
+        "Labels: infra",
+        "Components: none live",
+        "Route: none",
+        "Repository: owner/repo (own)",
+        "Progress: none",
+        "External links:",
+        "- none",
+        "Documents:",
+        "- spec-md (spec.md, doc)",
+        "Open asks:",
+        "- none",
+        "References:",
+        "- none",
+        "Events:",
+        "- none",
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none"
+      ]
+    },
+    {
+      "tool": "dispatch_related",
+      "call": "valid",
+      "args": {
+        "project": "CORE",
+        "title": "Retry failed webhook deliveries"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/projects/CORE/related",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "title": "Retry failed webhook deliveries"
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Related-item check searched (meaning and keywords) and found nothing."
+      ]
+    },
+    {
+      "tool": "dispatch_request_approval",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1",
+        "summary": "A live sync replaces the nightly export."
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/artifacts/01234567-0000-4000-8000-00000000000a/approval-requests",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "summary": "A live sync replaces the nightly export."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Approval requested for spec.md (document id 01234567-0000-4000-8000-00000000000a) at version 1 (ask 01234567-0000-4000-8000-000000000001). The human's Inbox asks: \"Which way should the release go?\". The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then."
+      ]
+    },
+    {
+      "tool": "dispatch_resolve_ask",
+      "call": "refusal: ask that is not an ask reference",
+      "args": {
+        "ask": "dispatch://DSP-1/comment/<id>",
+        "kind": "retracted",
+        "reason": "A newer question supersedes this one."
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch resolve-ask was not called: 1 problem",
+        "- ask must be a bare ask id or a dispatch://.../ask/<id> reference",
+        "- Allowed flags: --ask, --ask-file, --kind, --kind-file, --reason, --reason-file, --help, --dry-run",
+        "- Example: dispatch resolve-ask --ask 01234567-0000-4000-8000-000000000001 --kind retracted --reason 'A newer question supersedes this one.'"
+      ]
+    },
+    {
+      "tool": "dispatch_resolve_ask",
+      "call": "valid",
+      "args": {
+        "ask": "<id>",
+        "kind": "retracted",
+        "reason": "A newer question supersedes this one."
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/asks/01234567-0000-4000-8000-000000000001/resolve",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "kind": "retracted",
+            "reason": "A newer question supersedes this one."
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Retracted ask 01234567-0000-4000-8000-000000000001: A newer question supersedes this one."
+      ]
+    },
+    {
+      "tool": "dispatch_resolve_comment",
+      "call": "refusal: comment named at a document version",
+      "args": {
+        "comment": "dispatch://DSP/artifact/plan-md@v2/comment/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch resolve-comment was not called: 1 problem",
+        "- dispatch://DSP/artifact/plan-md@v2/comment/01234567-0000-4000-8000-000000000001 names a comment at a document version, which a comment does not have; name it dispatch://DSP/artifact/plan-md/comment/01234567-0000-4000-8000-000000000001",
+        "- Allowed flags: --comment, --comment-file, --help, --dry-run",
+        "- Example: dispatch resolve-comment --comment 01234567-0000-4000-8000-000000000001"
+      ]
+    },
+    {
+      "tool": "dispatch_resolve_comment",
+      "call": "refusal: comment that is not a comment reference",
+      "args": {
+        "comment": "dispatch://DSP-1/ask/<id>"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch resolve-comment was not called: 1 problem",
+        "- comment must be a bare comment id or a dispatch://.../comment/<id> reference",
+        "- Allowed flags: --comment, --comment-file, --help, --dry-run",
+        "- Example: dispatch resolve-comment --comment 01234567-0000-4000-8000-000000000001"
+      ]
+    },
+    {
+      "tool": "dispatch_resolve_comment",
+      "call": "valid",
+      "args": {
+        "comment": "<id>"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/comments/01234567-0000-4000-8000-000000000001/resolve",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Resolved comment 01234567-0000-4000-8000-000000000001 on DSP-1."
+      ]
+    },
+    {
+      "tool": "dispatch_search",
+      "call": "valid",
+      "args": {
+        "query": "astrolabe"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/search?q=astrolabe",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "No results for \"astrolabe\"."
+      ]
+    },
+    {
+      "tool": "dispatch_suggest",
+      "call": "refusal: version ref on a live document",
+      "args": {
+        "quote": "old wording",
+        "ref": "dispatch://DSP-1/artifact/spec@v2",
+        "replace_with": "new wording"
+      },
+      "requests": [],
+      "outcome": "error",
+      "text": [
+        "dispatch suggest was not called: 1 problem",
+        "- dispatch suggest acts on the live document, so the version ref dispatch://DSP-1/artifact/spec@v2 names would be dropped: drop its @v2",
+        "- Allowed flags: --issue, --issue-file, --project, --project-file, --artifact, --artifact-file, --ref, --ref-file, --quote, --quote-file, --replace-with, --replace-with-file, --body, --body-file, --occurrence, --help, --dry-run",
+        "- Example: dispatch suggest --issue DSP-1 --artifact spec --quote 'old wording' --replace-with 'new wording'"
+      ]
+    },
+    {
+      "tool": "dispatch_suggest",
+      "call": "valid",
+      "args": {
+        "artifact": "spec",
+        "issue": "DSP-1",
+        "quote": "old wording",
+        "replace_with": "new wording"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/comments",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "legion-infra-infra-635",
+                "session_title": "Record the command surface"
+              }
+            },
+            "anchor": {
+              "artifact": "<id>",
+              "quote": "old wording"
+            },
+            "suggestion": {
+              "replace_with": "new wording"
+            }
+          }
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Posted suggestion 01234567-0000-4000-8000-000000000001"
+      ]
+    },
+    {
+      "tool": "dispatch_whoami",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/whoami",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Session session-1 acts for person@example.com: issues you create without an assignee are assigned to person@example.com."
+      ]
+    }
+  ]
+}
