@@ -366,3 +366,15 @@ func sessionDefaultFixture(t *testing.T, m *Machine) {
 	retag(t, m, sessionDefault(policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1")),
 		sessionDefault(policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")))
 }
+
+// TestAMixedNoTTLRequestLastsTwelveHours: a request naming no lifetime for one secret tagged
+// default-grant=session and one untagged gets the 12-hour default, not a session-long grant.
+func TestAMixedNoTTLRequestLastsTwelveHours(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	retag(t, m, sessionDefault(policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1")),
+		policytest.Secret("OTHER_TOKEN", fixtureOperator, policy.TierAgent, "other-v1"))
+	got, err := m.Create(context.Background(), enr, signRequest(t, m, key, "mixed", "AUTO_TOKEN", "OTHER_TOKEN"), "")
+	if err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != int(DefaultGrantLifetime/time.Second) {
+		t.Fatalf("Create(mixed, no TTL) = %+v, %v; want lifetime 43200", got, err)
+	}
+}

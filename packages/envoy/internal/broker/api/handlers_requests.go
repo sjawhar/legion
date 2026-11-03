@@ -138,8 +138,8 @@ type requestStatusResponse struct {
 	// owner does not move it, and it stays once the request is decided. Null when the policy
 	// decided it at once, so no record names one.
 	Approver *string `json:"approver"`
-	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
-	// until the session ends.
+	// How many seconds its grant lasts: as the signed request asked, else 12 hours; null for a
+	// grant that lasts until the session ends (every name tagged default-grant=session).
 	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`

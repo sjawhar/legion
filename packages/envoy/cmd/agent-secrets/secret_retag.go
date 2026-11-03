@@ -32,8 +32,9 @@ var errTagsChanged = errors.New("another write changed the secret after this ret
 // put back to the tags the retag read, which the broker must be asked to reread.
 var errTagsRestored = errors.New("the tags are restored to what this retag read; run the retag again once the other writer is done")
 
-// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners or max grant, in one cloud
-// write. A retag that names none (--kind none, --github-owners none, --max-grant none) removes
+// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners, max grant or default grant, in one
+// cloud write. A retag that names none (--kind none, --github-owners none, --max-grant none,
+// --default-grant none) removes
 // those tags and does nothing else; --kind none also removes the rollback guard written with the
 // kind. Any other retag sets tags. A retag that does both is refused before anything is read or
 // written: AWS removes tags only with UntagResource, so it would be two calls, and a refused second

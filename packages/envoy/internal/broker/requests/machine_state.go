@@ -2,7 +2,8 @@
 // Package requests is the broker's state machine for agent_secret credential requests. A request
 // row freezes, at creation, the enrollment, the resource set with each name's decision and the
 // secret it reads, the allowed approver, the policy version and the lifetime its request object
-// signed, if any: a grant lasts that long, or until its session ends when the request names none.
+// signed, else the 12-hour default (defaultLifetime): a grant lasts that long, or until its session
+// ends when the request names none and every name is tagged default-grant=session.
 // Its only transitions are pending -> granted | denied | cancelled | expired; each is an UPDATE
 // guarded by state='pending' inside one transaction that also writes the audit row, so a duplicate
 // or late decision changes nothing. A request that needs approval also freezes an append-only
@@ -121,8 +122,8 @@ type SecretDecision struct {
 // credential-request record names (a person's canonical login, or record.AnyoneApprover), read
 // from the record rather than the current policy, since the record is what the approver's list
 // shows; it is nil when the request has no record, because the policy decided it at once.
-// LifetimeSeconds is the lifetime its signed request object named, the one its grant lasts; nil
-// when it named none, and its grant lasts until its session ends.
+// LifetimeSeconds is the lifetime its grant lasts: the one its signed request object named, else
+// the 12-hour default; nil when it named none and every name is tagged default-grant=session.
 type Request struct {
 	ID              string           `json:"request_id"`
 	State           string           `json:"state"`

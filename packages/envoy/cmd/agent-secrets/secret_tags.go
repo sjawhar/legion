@@ -28,7 +28,7 @@ func checkOwnerTier(owner, tier string) error {
 	return nil
 }
 
-// tagNone is the value of --kind, --github-owners and --max-grant that removes the tag, the one the
+// tagNone is the value of --kind, --github-owners, --max-grant and --default-grant that removes the tag, the one the
 // broker refuses as a github-owners login (policy.TagRemoved).
 const tagNone = policy.TagRemoved
 
@@ -104,11 +104,11 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 	}
 }
 
-// optionalTags is the kind, github-owners and max-grant tags the flags set: each flag's value
+// optionalTags is the kind, github-owners, max-grant and default-grant tags the flags set: each flag's value
 // when it names one, and nothing for one left unset or set to none. A kind brings the rollback
 // guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
 // than serve its stored key or refresh token.
-func optionalTags(kind, githubOwners, maxGrant string, defaultGrant ...string) map[string]string {
+func optionalTags(kind, githubOwners, maxGrant, defaultGrant string) map[string]string {
 	named := func(value string) bool { return value != "" && value != tagNone }
 	tags := map[string]string{}
 	if named(kind) {
@@ -121,8 +121,8 @@ func optionalTags(kind, githubOwners, maxGrant string, defaultGrant ...string) m
 	if named(maxGrant) {
 		tags[policy.TagMaxGrant] = maxGrant
 	}
-	if len(defaultGrant) > 0 && named(defaultGrant[0]) {
-		tags[policy.TagDefaultGrant] = defaultGrant[0]
+	if named(defaultGrant) {
+		tags[policy.TagDefaultGrant] = defaultGrant
 	}
 	return tags
 }

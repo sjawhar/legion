@@ -109,9 +109,9 @@ machine's Application Default Credentials are its own identity, and so does ever
   lists the GitHub accounts the broker mints installation tokens for, separated by spaces, so the
   shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
+  It must be a duration of at least one second.
 - **`--default-grant session`** is optional. A request with no `--ttl` for secrets that all carry it
   gets a grant that lasts until its session ends, instead of 12 hours.
-  It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
   Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
@@ -237,10 +237,10 @@ form makes.
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   KIND          MAX_GRANT  VALUE  DELETED  EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          yes    -        -
-DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          yes    -        -
-DEMO_LOGIN         ada@example.com  human  google-login  1h         yes    -        -
+NAME               OWNER            TIER   KIND          MAX_GRANT  DEFAULT_GRANT  VALUE  DELETED  EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          -              yes    -        -
+DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          -              yes    -        -
+DEMO_LOGIN         ada@example.com  human  google-login  1h         -              yes    -        -
 Every row is a secret in AWS Secrets Manager account 111122223333 in us-east-1.
 ```
 
@@ -259,6 +259,7 @@ owner: ada@example.com
 tier: agent
 kind: -
 max_grant: -
+default_grant: -
 created: 2026-10-06T20:31:08Z
 last_changed: 2026-10-06T20:31:08Z
 version: 8ae2ea20-8e93-4f1a-b3d1-2e5396ecef72 AWSCURRENT
@@ -413,10 +414,10 @@ that moment is both), and the **earliest** it can be purged:
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   KIND  MAX_GRANT  VALUE  DELETED               EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  human  -     -          yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
-DEMO_EMPTY_KEY     ada@example.com  human  -     -          yes    -                     -
-DEMO_SHARED_KEY    shared           human  -     -          yes    -                     -
+NAME               OWNER            TIER   KIND  MAX_GRANT  DEFAULT_GRANT  VALUE  DELETED               EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  human  -     -          -              yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
+DEMO_EMPTY_KEY     ada@example.com  human  -     -          -              yes    -                     -
+DEMO_SHARED_KEY    shared           human  -     -          -              yes    -                     -
 EARLIEST_PURGE is the deletion plus Secrets Manager's 7-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.
 ```
 
