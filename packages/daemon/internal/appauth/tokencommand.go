@@ -101,7 +101,7 @@ func tokenCommandField(role AppRole) string {
 func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
 	key := fmt.Sprintf("%s|%s|%t", role, strings.ToLower(owner), readOnly)
 	m.mu.Lock()
-	if m.root.Err() != nil {
+	if m.closed {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("%s: the token manager is closed", tokenCommandField(role))
 	}
@@ -134,8 +134,12 @@ func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.
 }
 
 // Close ends every token_command still running and waits for each to exit; a later call needing
-// one is refused. The daemon calls it as the workflow stops.
+// one is refused. The closed mark is set under the lock that accepts a run, so every run accepted
+// before it is counted before Close waits. The daemon calls it as the workflow stops.
 func (m *Manager) Close() {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
 	m.stop()
 	m.runs.Wait()
 }
@@ -170,13 +174,16 @@ func (m *Manager) execTokenCommand(ctx context.Context, role AppRole, app config
 	}), TokenCommandOwner+"="+owner, TokenCommandReadOnly+"="+readOnlyValue)
 	stdout := &boundedBuffer{limit: releaseLimit, overflow: cancel}
 	var stderr bytes.Buffer
-	relay := &redactingLines{out: io.MultiWriter(m.stderr, &stderr)}
+	relay := &redactingLines{out: m.stderr, keep: &stderr, limit: releaseLimit, overflow: cancel}
 	command.Stdout = stdout
 	command.Stderr = relay
 	err := command.Run()
 	relay.flush()
 	if stdout.overflowed {
 		return nil, fmt.Errorf("%s printed more than %d bytes, which no release is", field, releaseLimit)
+	}
+	if relay.overflowed {
+		return nil, fmt.Errorf("%s wrote more than %d bytes to stderr", field, releaseLimit)
 	}
 	if ctx.Err() != nil {
 		return nil, &TransientError{Err: fmt.Errorf("%s did not finish within %s: %w", field, tokenCommandLimit, ctx.Err())}
@@ -223,35 +230,54 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // personal, fine-grained personal), which a command's stderr may carry and no log or error may.
 var tokenPattern = regexp.MustCompile(`(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})`)
 
-// redactingLines writes each whole line of a command's stderr to out with every GitHub token in
-// it replaced, so `agent-secrets`' line naming a pending request reaches the daemon's log as it is
-// written while a token never does; flush writes a last line with no newline.
+// redactingLines writes each whole line of a command's stderr to out, and to keep for the failure's
+// message, with every GitHub token in it replaced, so `agent-secrets`' line naming a pending request
+// reaches the daemon's log as it is written while a token never does; flush writes a last line with
+// no newline. Past limit bytes in all it marks the stream overflowed, calls overflow, which ends the
+// command, and relays nothing more.
 type redactingLines struct {
-	out     io.Writer
-	pending []byte
+	out        io.Writer
+	keep       *bytes.Buffer
+	limit      int
+	overflow   func()
+	overflowed bool
+	seen       int
+	pending    []byte
 }
 
 func (r *redactingLines) Write(p []byte) (int, error) {
+	if r.overflowed {
+		return 0, errors.New("token_command stderr exceeds its limit")
+	}
+	r.seen += len(p)
+	if r.seen > r.limit {
+		r.overflowed, r.pending = true, nil
+		r.overflow()
+		return 0, errors.New("token_command stderr exceeds its limit")
+	}
 	r.pending = append(r.pending, p...)
 	for {
 		end := bytes.IndexByte(r.pending, '\n')
 		if end < 0 {
 			break
 		}
-		_, _ = r.out.Write(tokenPattern.ReplaceAll(r.pending[:end+1], []byte("[redacted]")))
+		r.emit(r.pending[:end+1])
 		r.pending = r.pending[end+1:]
-	}
-	if len(r.pending) > releaseLimit {
-		r.pending = r.pending[:0]
 	}
 	return len(p), nil
 }
 
+func (r *redactingLines) emit(line []byte) {
+	clean := tokenPattern.ReplaceAll(line, []byte("[redacted]"))
+	_, _ = r.out.Write(clean)
+	r.keep.Write(clean)
+}
+
 func (r *redactingLines) flush() {
-	if len(r.pending) > 0 {
-		_, _ = r.out.Write(tokenPattern.ReplaceAll(r.pending, []byte("[redacted]")))
-		r.pending = nil
+	if len(r.pending) > 0 && !r.overflowed {
+		r.emit(r.pending)
 	}
+	r.pending = nil
 }
 
 // loginPattern is a GitHub account login: what a release may name an installation by, and the only

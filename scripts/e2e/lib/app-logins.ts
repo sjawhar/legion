@@ -247,7 +247,7 @@ async function githubRead(read: string, url: string, token: string, init: Reques
   } catch (error) {
     throw new Error(`${read} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const head = body.split(token).join("<token>").slice(0, 300);
+  const head = redactTokens(body.split(token).join("<token>")).slice(0, 300);
   if (!response.ok) throw new Error(`${read} answered ${response.status}: ${head}`);
   try {
     return { answer: JSON.parse(body) as unknown, head };

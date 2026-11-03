@@ -136,10 +136,12 @@ type Manager struct {
 	pendingIdentities map[string]*pendingIdentity
 	commands          map[string]*commandRun
 
-	// root ends every token_command run on Close (stop), and runs counts the runs still going.
-	root context.Context
-	stop context.CancelFunc
-	runs sync.WaitGroup
+	// root ends every token_command run on Close (stop), runs counts the runs still going, and
+	// closed, set under mu, refuses a run after Close.
+	root   context.Context
+	stop   context.CancelFunc
+	runs   sync.WaitGroup
+	closed bool
 }
 
 type pendingLease struct {

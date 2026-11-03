@@ -175,14 +175,26 @@ app_token_mint() {
 app_token_redact() {
   LC_ALL=C sed -E 's/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g'
 }
-# app_token_mint_file FILE OWNER READ_ONLY SECRET writes one release atomically, the token
-# command's stderr reaching the run's through app_token_redact. It returns the token command's
-# non-zero status, or 125 when the command succeeded and printed nothing; either way it leaves no
-# temporary file and FILE as it was.
+# app_token_mint_file FILE OWNER READ_ONLY SECRET writes one release atomically. The token command
+# runs under `timeout` (35 minutes: agent-secrets' 30-minute approval wait and a margin; killed 10 s
+# after), its stdout capped at app_token_release_limit bytes and its stderr at the same, reaching
+# the run's through app_token_redact. It returns the token command's non-zero status (124 when it
+# timed out), 126 when it printed more than the limit, or 125 when it succeeded and printed nothing;
+# either way it leaves no temporary file and FILE as it was.
+app_token_release_limit=1048576
 app_token_mint_file() {
   local file=$1 owner=$2 ro=$3 secret=$4 tmp status=0
   tmp=$(umask 077 && mktemp "$(dirname -- "$file")/.mint.XXXXXXXX") || return 1
-  (umask 077 && LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro sh -c "$(app_token_command "$secret")" >"$tmp" 2> >(app_token_redact >&2) </dev/null) || status=$?
+  (
+    umask 077
+    set -o pipefail
+    LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro timeout --kill-after=10s 35m sh -c "$(app_token_command "$secret")" \
+      2> >(head -c "$app_token_release_limit" | app_token_redact >&2) </dev/null |
+      head -c "$((app_token_release_limit + 1))" >"$tmp"
+  ) || status=$?
+  if [ "$status" = 0 ] && [ "$(wc -c <"$tmp")" -gt "$app_token_release_limit" ]; then
+    status=126
+  fi
   if [ "$status" != 0 ]; then
     rm -f -- "$tmp"
     return "$status"

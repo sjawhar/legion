@@ -272,14 +272,22 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
-		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
+		// The workflow owns a manager it makes: a boot that fails before the workflow is returned
+		// closes it, so a token_command still waiting on a grant does not outlive the boot.
+		owned := appauth.New(cfg.GitHubApps, appauth.Options{})
+		tokens = owned
+		defer func() {
+			if opened == nil {
+				owned.Close()
+			}
+		}()
 	}
 	installs, ok := tokens.(appauth.Installations)
 	if !ok {
