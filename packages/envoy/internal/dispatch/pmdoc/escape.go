@@ -976,7 +976,7 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // wherever its choice reads back under Parse this writer makes it too.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	writtenDepth := altReadsBack(written, alt, context)
+	writtenDepth := altReadsBackFn(written, alt, context)
 	if writtenDepth == 2 {
 		return written
 	}
@@ -993,11 +993,15 @@ func imageAlt(alt string, context inlineContext) string {
 		}
 	}
 	fallback := escapeTablePipes(out.String(), context.tableCell)
-	if altReadsBack(fallback, alt, context) > writtenDepth {
+	if altReadsBackFn(fallback, alt, context) > writtenDepth {
 		return fallback
 	}
 	return written
 }
+
+// altReadsBackFn is the test seam imageAlt reads an alt back through: a test swaps it for a
+// counting wrapper to hold the writer to how many times it reads one back.
+var altReadsBackFn = altReadsBack
 
 // altReadsBack is how far an image label written as written reads back as the alt text alt: 0
 // where Parse does not read it so, 1 where Parse does, and 2 where storedMarkdown does as well.
