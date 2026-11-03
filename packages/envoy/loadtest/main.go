@@ -38,6 +38,10 @@ commands:
                    (-cert-out, for Dispatch's SSL_CERT_FILE): deterministic 1536-float vectors,
                    so a deployment with no Azure still embeds what the seed writes
   cgroup-merge     reduce a cluster sampler's cgroup.jsonl to a step directory's cgroup.json
+  vm-sample        sample the VMs' containers and the VMs themselves over ssh (vm/sample.sh) into
+                   a cgroup.jsonl, the file cgroup-merge reads
+  cloudsql-cpu     a Cloud SQL instance's CPU over a step's window, from Cloud Monitoring; writes
+                   the step's cloudsql-cpu.json
   curves           CURVES.md, curves.csv, KNEES.md, refine.txt and TREND.md from cluster step directories
   codepaths        CODEPATHS.md and codepaths.json: a replay step's CPU and memory by code path beside the outage
   backlog          publish envelopes to the sessions' agent subjects (restart-step.sh); writes a JSON summary
@@ -101,6 +105,10 @@ func main() {
 		err = runStubEmbed(os.Args[2:])
 	case "cgroup-merge":
 		err = runCgroupMerge(os.Args[2:])
+	case "vm-sample":
+		err = runVMSample(os.Args[2:])
+	case "cloudsql-cpu":
+		err = runCloudSQLCPU(os.Args[2:])
 	case "curves":
 		err = runCurves(os.Args[2:])
 	case "codepaths":
