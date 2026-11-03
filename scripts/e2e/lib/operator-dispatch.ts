@@ -8,10 +8,11 @@
 //     prints one JSON object: {"file","url"} when Dispatch is on, having written the bearer to
 //     <bearer file>, which it creates owner-only (0600) and never over a file already there;
 //     {"file","notice"} when nothing configures it or a file turns it off, writing nothing, exiting
-//     0; {"error"} with exit 1 when a file, a URL or a token prevents it, or the bearer file cannot
-//     be created. No output carries the bearer, so an agent that runs the command puts none in its
-//     transcript. A file it found and did not read, a checkout's `.opencode/envoy.json`, is named
-//     on stderr with its rename first. Without <bearer file> it exits 2 with its usage on stderr.
+//     0; {"error"} with exit 1 when a file, a URL or a token prevents it, when the credential is
+//     the secrets broker's rather than a bearer, or when the bearer file cannot be created. No
+//     output carries the bearer, so an agent that runs the command puts none in its transcript. A
+//     file it found and did not read, a checkout's `.opencode/envoy.json`, is named on stderr with
+//     its rename first. Without <bearer file> it exits 2 with its usage on stderr.
 import { closeSync, openSync, writeSync } from "node:fs";
 import type { DispatchEnvironment } from "../../../packages/envoy-client/src/dispatch-config";
 import { messageFor } from "../../../packages/envoy-client/src/errors";
@@ -25,15 +26,27 @@ export type OperatorDispatch =
   | { readonly file: string; readonly notice: string };
 
 /** The operator's Dispatch from `env` and the checkout at `cwd`. Throws naming what prevents it:
- * a relative path the rule would use, a file that cannot be read, or a URL or token that does not
- * resolve. Each file the read found and did not read is written to stderr first, as the `dispatch`
- * command says it. */
+ * a relative path the rule would use, a file that cannot be read, a URL or token that does not
+ * resolve, or a credential this hands on nothing of: only a bearer is a token a script can present
+ * on its own. Each file the read found and did not read is written to stderr first, as the
+ * `dispatch` command says it. */
 export function operatorDispatch(env: DispatchEnvironment, cwd: string): OperatorDispatch {
   const file = sessionConfigFile("command", env);
   if (file.path === null) throw new Error(file.error);
   const { dispatch, warnings } = sessionDispatchSettings(file, env, { cwd });
   for (const warning of warnings) process.stderr.write(`dispatch: ${warning}\n`);
-  if (dispatch.enabled) return { file: file.path, url: dispatch.url, token: dispatch.token };
+  if (dispatch.enabled) {
+    // Only a bearer is a secret whose holder is whoever has a copy of it. The broker's access
+    // token is bound to this process's key, and the scripts this command hands a token to present
+    // it with curl and renew nothing, so it is refused here rather than written to a file that
+    // every request would be rejected with.
+    if (dispatch.credential.scheme !== "Bearer") {
+      throw new Error(
+        `this machine's Dispatch credential is the access token it trades its own identity for at the secrets broker, which is bound to this process's key (DPoP) and refused presented as a bearer (RFC 9449 Section 7.2). This command hands on a static bearer that nothing renews, so it takes one of the operator's: set DISPATCH_TOKEN, or write dispatch.token in ${file.path}, with DISPATCH_TOKEN_BROKER unset`
+      );
+    }
+    return { file: file.path, url: dispatch.url, token: dispatch.credential.secret() };
+  }
   if (dispatch.error !== null) throw new Error(dispatch.error);
   return { file: file.path, notice: dispatch.notice };
 }
