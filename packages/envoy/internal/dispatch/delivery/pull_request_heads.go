@@ -25,8 +25,10 @@ import (
 //
 // Three writers keep it: the `pull_request` envelope (intake.go, every action), the read-through
 // a recorded result makes when its commit is no head Dispatch knows (ReadThroughCommitPulls),
-// and the reconcile's five-minute pass over stale open rows (reconcile.go). Nothing is written
-// when the results are read.
+// and the reconcile's five-minute pass (reconcile.go), which takes every open row read longer
+// than five minutes ago and, once each, the merged rows that no read of GitHub ever reached and
+// that are attributed to nobody (ListStalePullRequestHeads). Nothing is written when the results
+// are read.
 
 // PullRequestHead is one pull request's current head, as pull_request_heads stores it.
 type PullRequestHead struct {
@@ -126,12 +128,29 @@ const (
 	PullRequestHeadBatch      = 200
 )
 
-// ListStalePullRequestHeads is at most limit open rows whose checked_at is older than
-// PullRequestHeadStaleAfter (a row never read first), the longest unread first.
+// ListStalePullRequestHeads is at most limit rows for the reconcile to read again, the longest
+// unread first: every open row whose checked_at is older than PullRequestHeadStaleAfter (a row
+// never read first), and every merged row that carries no attribution and has never been read.
+//
+// The merged arm is what keeps a merged head's currency honest. A `pull_request` envelope that
+// names no head repository attributes nobody (recordPullRequestHead), and GitHub's own answer
+// always names head.repo, so one read settles the row; without this arm a merge delivered by
+// such an envelope would stand unattributed for good, since no other writer looks at a merged
+// row again and a result at that head would read `older` for ever.
+//
+// checked_at is null is the bound, and it holds because only a reader of GitHub stamps it: the
+// reconcile's own refresh (RefreshPullRequestHead, which stamps whether or not the read could
+// attribute), the read-through, and an envelope only when its payload was a complete read, which
+// an envelope naming no head repository is not. So a merged row of this arm is taken exactly
+// once — the refresh stamps it, and it never comes back to the list, even when GitHub's answer
+// still attributes it to nobody. A merged row that was read while it was open and left
+// unattributed is not taken at all: it is stamped already, and GitHub's read of it answers the
+// same after the merge as it did before, so reading it again would buy nothing.
 func ListStalePullRequestHeads(ctx context.Context, pool *store.Pool, limit int, now time.Time) ([]PullRequestHead, error) {
 	rows, err := pool.Query(ctx, `
 		select repo, number from pull_request_heads
-		where state = 'open' and (checked_at is null or checked_at < $1)
+		where (state = 'open' and (checked_at is null or checked_at < $1))
+		   or (state = 'merged' and issue_key is null and checked_at is null)
 		order by checked_at nulls first, repo, number
 		limit $2
 	`, now.Add(-PullRequestHeadStaleAfter), limit)
@@ -326,8 +345,9 @@ func repositoryUnreadable(err error) bool {
 // exactly as the envelope writer attributes one. Attributing from fewer would delete an
 // attribution this read-through cannot make: the write carries the pull request's own
 // updated_at, so it lands on a row a `pull_request` event or the reconcile attributed by its
-// commit messages and overwrites that issue with none — permanently for a merged row, which the
-// reconcile never revisits, leaving that issue's results at the merged head reading `older` for
+// commit messages and overwrites that issue with none — for a merged row, permanently: the
+// reconcile's merged arm takes only rows no read of GitHub has reached, and this write stamps
+// the row read, so that issue's results at the merged head would read `older` for
 // good. A row whose commit messages could not be read is written unstamped instead, so the
 // reconcile reads it again rather than it standing as this read-through's last word.
 func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {

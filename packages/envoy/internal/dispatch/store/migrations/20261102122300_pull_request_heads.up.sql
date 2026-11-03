@@ -16,8 +16,10 @@
 --   title, url         what the event or the App read said, for a reader.
 --   event_at           the pull request's updated_at as the event reported it; an older event
 --                      arriving after a newer one leaves the row as it is.
---   checked_at         when the reconcile last read the pull request through the App; the
---                      reconcile re-reads an open row older than five minutes.
+--   checked_at         when the reconcile or a read-through last read the pull request through
+--                      the App, null when none ever has; the reconcile re-reads an open row
+--                      older than five minutes, and reads a never-read merged row that is
+--                      attributed to nobody once.
 --
 -- A new table: nothing existing is read, locked or rewritten, and the release before this one
 -- neither reads nor writes it, so it rolls beside this one (cmd/dispatch/README.md, "Database
@@ -42,3 +44,8 @@ create table pull_request_heads (
 create index pull_request_heads_issue_head on pull_request_heads (issue_key, head_sha) where issue_key is not null;
 -- The reconcile's batch: the open rows read longest ago first.
 create index pull_request_heads_open_stale on pull_request_heads (checked_at) where state = 'open';
+-- The reconcile's second arm: the merged rows no read has reached that are attributed to
+-- nobody, which one read settles. Partial on all three columns, so the arm is an index read of
+-- a handful of rows rather than a scan of every merged pull request.
+create index pull_request_heads_merged_unread on pull_request_heads (repo, number)
+  where state = 'merged' and issue_key is null and checked_at is null;

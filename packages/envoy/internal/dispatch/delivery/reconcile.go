@@ -455,14 +455,18 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	return nil
 }
 
-// reconcilePullRequestHeads re-reads the open pull requests whose head Dispatch last checked
-// over PullRequestHeadStaleAfter ago, at most PullRequestHeadBatch of them a pass, the longest
-// unread first. GitHub's `pull_request` events carry every head move, so this is the backstop
-// for an event that never arrived — a delivery Dispatch was down for, a repository whose
-// webhook was installed late — and the one way a merge that happened while Dispatch was not
-// listening reaches the head row at all. A rate limit stops the batch and fails the pass, as
-// every other GitHub step's does; any other per-row failure is logged and leaves the row for
-// the next pass.
+// reconcilePullRequestHeads re-reads the pull request heads ListStalePullRequestHeads hands it,
+// at most PullRequestHeadBatch of them a pass, the longest unread first: the open rows Dispatch
+// last checked over PullRequestHeadStaleAfter ago, and the merged rows no read of GitHub has
+// ever reached that are attributed to nobody, each of those taken once. GitHub's `pull_request`
+// events carry every head move, so this is the backstop for an event that never arrived — a
+// delivery Dispatch was down for, a repository whose webhook was installed late — and the one
+// way a merge that happened while Dispatch was not listening reaches the head row at all. The
+// merged arm is the backstop for an envelope that arrived but said too little: one naming no
+// head repository attributes nobody, and only GitHub's own answer, which always names
+// `head.repo`, can attribute that row before a result at the merged head reads `older` for
+// good. A rate limit stops the batch and fails the pass, as every other GitHub step's does; any
+// other per-row failure is logged and leaves the row for the next pass.
 func (r *Reconcile) reconcilePullRequestHeads(ctx context.Context, now time.Time) error {
 	stale, err := ListStalePullRequestHeads(ctx, r.pool, PullRequestHeadBatch, now)
 	if err != nil {
