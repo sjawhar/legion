@@ -1040,6 +1040,21 @@ claude_start() { # claude_start SESSION [--resume]
   agent_pid "$work/claude.pid" claude_pid
 }
 
+# claude_snapshot_shows_state and claude_snapshot_names_stored_for FOLLOWER take the evidence copy
+# of Claude Code's output and judge that copy, so what a check waited for, what it asserted on and
+# what its evidence holds are one file and one moment. Reading the live file instead has twice
+# cost a refusal whose own evidence carried the answer: the host writes a turn's `result` line
+# before it has written everything of that turn, and it keeps appending afterwards.
+claude_snapshot_shows_state() {
+  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
+  shows_state "$evidence/answers/$check.claude.out"
+}
+
+claude_snapshot_names_stored_for() { # claude_snapshot_names_stored_for FOLLOWER
+  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
+  names_stored_for "$evidence/answers/$check.claude.out" "$1"
+}
+
 # claude_turn TEXT sends one user turn and waits for that turn's result line.
 claude_turn() {
   local after
@@ -1697,13 +1712,11 @@ check_every_plugin_shows_the_state() {
   # answer is still coming (seen once: a run whose claude.out ended SUBSCRIBED, '', RESUMED and
   # only then the tool's JSON). Each arm therefore waits for the answer itself, bounded, and the
   # retry is what a turn that truly answered something else gets.
-  if ! wait_until 120 "Claude Code's answer to carry the session's state" shows_state "$work/claude.out"; then
+  if ! wait_until 120 "Claude Code's answer to carry the session's state" claude_snapshot_shows_state; then
     claude_turn "Call the envoy_sessions tool again for $peer and reply with its answer's state and last_seen fields verbatim, as JSON." || return 1
-    wait_until 120 "Claude Code's second answer to carry the session's state" shows_state "$work/claude.out" || true
+    wait_until 180 "Claude Code's second answer to carry the session's state" claude_snapshot_shows_state ||
+      refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
   fi
-  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
-  shows_state "$evidence/answers/$check.claude.out" ||
-    refuse "Claude Code's envoy_sessions answer shows no state and last_seen" || return 1
   grep -q "$peer" "$evidence/answers/$check.claude.out" ||
     refuse "Claude Code's envoy_sessions answer does not name the unresponsive peer $peer" || return 1
   note "both hosts showed the peer's state and its last_seen"
@@ -1753,13 +1766,11 @@ check_every_plugin_names_a_stored_follower() {
   # answer's own field settles it; the assertion is unchanged, and both turns' output is kept.
   # Waited for rather than read once, as check 7a's arm is and for the same reason: a turn ends on
   # a `result` line, which a resume writes too.
-  if ! wait_until 120 "Claude Code's answer to name the stored-for follower" names_stored_for "$work/claude.out" "$follower"; then
+  if ! wait_until 120 "Claude Code's answer to name the stored-for follower" claude_snapshot_names_stored_for "$follower"; then
     claude_turn "Call the envoy_publish tool again with topic $topic and message \"$marker\", and reply with its answer's unresponsive field verbatim, as JSON." || return 1
-    wait_until 120 "Claude Code's second answer to name the stored-for follower" names_stored_for "$work/claude.out" "$follower" || true
+    wait_until 180 "Claude Code's second answer to name the stored-for follower" claude_snapshot_names_stored_for "$follower" ||
+      refuse "Claude Code's envoy_publish answer does not name the unresponsive follower $follower" || return 1
   fi
-  cp -f "$work/claude.out" "$evidence/answers/$check.claude.out"
-  names_stored_for "$evidence/answers/$check.claude.out" "$follower" ||
-    refuse "Claude Code's envoy_publish answer does not name the unresponsive follower $follower" || return 1
   note "both hosts named $follower as a follower the message is only stored for"
 }
 
