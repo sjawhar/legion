@@ -335,13 +335,15 @@ for (const { kind, noun } of overlapKinds) {
         title: "Overlap click",
       });
       const project = testInfo.project.name;
-      // In the row's order: the second mark nests inside or around the first, which is what the
-      // two orders are here to cover.
-      const marks = [];
+      // Written in the row's order: the second mark nests inside or around the first, which is
+      // what the two orders are here to cover. They are kept by their quote, since the click
+      // below names the narrower record whichever order wrote it.
+      const marks: Record<string, { id: string; markId: string }> = {};
       for (const quote of order.quotes) {
-        marks.push(await seedOverlapRecord(issue.key, kind, quote));
+        marks[quote] = await seedOverlapRecord(issue.key, kind, quote);
       }
-      const [wide, narrow] = order.quotes[0] === "quick brown" ? marks : [marks[1], marks[0]];
+      const wide = marks["quick brown"];
+      const narrow = marks.brown;
       const context = await asUser(browser, "alice");
 
       try {

@@ -2895,16 +2895,16 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 
 // waitForPassBehind waits up to within for a session of this test's database whose current
 // statement carries fragment to queue behind a lock holder's transaction owns
-// (storetest.QueuedBehind), and answers that session's backend process id, or 0 if none did. The
-// passes it watches run in the two processes under test, whose connections no pool of this test's
-// can give, so the statement is what names the pass: a count of the backends behind the gate
-// would also take the term-statistics refresh, which writes search_term_totals, and the
-// block-index pass, which reads document_block_versions, for the reference-excerpt pass - all
-// three queue behind the gates this test holds, and a count cannot tell them apart. It reads
-// pg_stat_activity through the pool, a fresh view on each read.
+// (storetest.QueuedBehind), and answers whether one did. The passes it watches run in the two
+// processes under test, whose connections no pool of this test's can give, so the statement is
+// what names the pass: a count of the backends behind the gate would also take the
+// term-statistics refresh, which writes search_term_totals, and the block-index pass, which reads
+// document_block_versions, for the reference-excerpt pass - all three queue behind the gates this
+// test holds, and a count cannot tell them apart. It reads pg_stat_activity through the pool, a
+// fresh view on each read.
 func waitForPassBehind(
 	t *testing.T, database *store.Store, holder pgx.Tx, fragment string, within time.Duration,
-) uint32 {
+) bool {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(within)
@@ -2926,11 +2926,11 @@ func waitForPassBehind(
 				t.Fatal(err)
 			}
 			if queued {
-				return pid
+				return true
 			}
 		}
 		if time.Now().After(deadline) {
-			return 0
+			return false
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -2938,7 +2938,7 @@ func waitForPassBehind(
 
 // The first statement of each pass this test waits for, as pg_stat_activity shows it: the
 // reference-excerpt pass's write (refs.MarkStaleExcerpts) and the block-index pass's read of the
-// documents owed an index (docs' blockIndexDocuments).
+// documents owed an index (docs' owedDocuments).
 const (
 	referenceExcerptPassStatement = "update refs r set excerpt_version = null"
 	blockIndexPassStatement       = "from document_block_versions b"
@@ -3000,7 +3000,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
-	if waitForPassBehind(t, pair.database, gate, referenceExcerptPassStatement, 60*time.Second) == 0 {
+	if !waitForPassBehind(t, pair.database, gate, referenceExcerptPassStatement, 60*time.Second) {
 		t.Fatalf("no reference-excerpt pass reached the refs lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
@@ -3013,7 +3013,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
-	if waitForPassBehind(t, pair.database, blockGate, blockIndexPassStatement, 60*time.Second) == 0 {
+	if !waitForPassBehind(t, pair.database, blockGate, blockIndexPassStatement, 60*time.Second) {
 		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}

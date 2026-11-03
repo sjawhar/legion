@@ -1683,6 +1683,7 @@ export default function envoyExtension(pi: PiApi): void {
     intentionallyClosed.add(topic);
     subscription.unsubscribe();
     subscriptions.delete(topic);
+    unconfirmed.delete(topic);
     return true;
   };
 
@@ -1794,18 +1795,21 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  // The round trip that makes a subject this session subscribed to live rather than merely asked
+  // for: `subscribe()` only writes SUB into the connection's out buffer, and core NATS drops a
+  // publish no subscription matches yet, so without it the caller can register this session's
+  // interest — or claim a role, or tell a peer it is listening — while the server still has
+  // nothing to route to. The window is the whole gap between the write and the next flush, and it
+  // is the one `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's
+  // channel flushes before every registration for the same reason.
+  const confirmSubscribed = (connection: NatsConnection, what: string): Promise<void> =>
+    within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
+
   // Opens every subject of `topic` not already open, and returns once the server has every one of
-  // them; answers whether any were new. A queued task subscribes through its handle, which hands in
+  // them; answers whether this call opened or newly confirmed any, which is when its caller has
+  // something to tell the listener. A queued task subscribes through its handle, which hands in
   // its own `connect`: a connection its task outran refuses there, before the first subject opens,
   // so nothing a newer pass has since settled is reopened behind its back.
-  //
-  // The flush is what makes the subject live rather than merely asked for. `subscribe()` only
-  // writes SUB into the connection's out buffer, and core NATS drops a publish no subscription
-  // matches yet, so without the round trip the caller can register this session's interest — or
-  // claim a role, or tell a peer it is listening — while the server still has nothing to route to.
-  // The window is the whole gap between the write and the next flush, and it is the one
-  // `notifications.legion.<project>.controller` lost a triage notice in. claude-envoy's channel
-  // flushes before every registration for the same reason.
   const subscribe = async (
     topic: string,
     connect: () => Promise<NatsConnection> = ensureConnection
@@ -1825,13 +1829,12 @@ export default function envoyExtension(pi: PiApi): void {
       void pump(subject, subscription);
     }
     for (const subject of confirming) unconfirmed.add(subject);
-    await within(
-      activeConnection.flush(),
-      SUBSCRIBE_FLUSH_TIMEOUT_MS,
-      `confirming the subscription to ${topic}`
-    );
+    await confirmSubscribed(activeConnection, `the subscription to ${topic}`);
     for (const subject of confirming) unconfirmed.delete(subject);
-    return fresh.length > 0;
+    // Every subject of this call is open and confirmed, and at least one of them was not before
+    // it: a subject whose earlier round trip timed out stayed in `unconfirmed`, and the caller
+    // must still register this session's interest in it.
+    return true;
   };
 
   const noteInbox = (envelope: NonNullable<RenderInboundResult["envelope"]>): void => {
@@ -2060,16 +2063,11 @@ export default function envoyExtension(pi: PiApi): void {
     owner.subscription = subscription;
     owner.delivery.beginEpoch();
     void pumpRelay(owner, subscription);
-    // As in `subscribe()`: the subject is live only once the server has answered. The relay's
-    // own registration names this session's delivery subject the moment this returns, and the
-    // listener publishes to it at once, so a SUB still in the out buffer costs the first frames.
-    // The pump is started first, so a connection that never answers still leaves a subscription
-    // the pump's own recovery path owns.
-    await within(
-      connected.flush(),
-      SUBSCRIBE_FLUSH_TIMEOUT_MS,
-      `confirming the relay subscription for ${owner.sessionID}`
-    );
+    // The relay's own registration names this session's delivery subject the moment this returns,
+    // and the listener publishes to it at once, so a SUB still in the out buffer costs the first
+    // frames. The pump is started first, so a connection that never answers still leaves a
+    // subscription the pump's own recovery path owns.
+    await confirmSubscribed(connected, `the relay subscription for ${owner.sessionID}`);
   };
 
   // Opens session `id`'s relay subject, closing another session's relay first.
@@ -2331,16 +2329,11 @@ export default function envoyExtension(pi: PiApi): void {
     const subscription = connected.subscribe(agentStreamControlSubject(session));
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
-    // As in `subscribe()`: the control subject is live only once the server has answered. A
-    // viewer's first ping is published as soon as the registration names this session, and one
+    // A viewer's first ping is published as soon as the registration names this session, and one
     // sent before the server took this SUB would be dropped, leaving the viewer to retry. The
     // pump is started first, so a connection that never answers still leaves a subscription the
     // pump's own recovery path owns.
-    await within(
-      connected.flush(),
-      SUBSCRIBE_FLUSH_TIMEOUT_MS,
-      `confirming the agent stream control subscription for ${session}`
-    );
+    await confirmSubscribed(connected, `the agent stream control subscription for ${session}`);
   };
 
   /** One of this session's messages, on its way to whoever has the session open, tagged with the
