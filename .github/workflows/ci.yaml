@@ -2252,11 +2252,13 @@ jobs:
     # `env:`: a name outside ci_filter_coverage.py's ENV_ALLOWED in this job's or any of its
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
-    # 32, which is four minutes over the 28 the issue's own acceptance sets and five over the
-    # 26 min 46 s this job measured at four lanes (run 41319582999). A job the timeout kills
-    # reports as cancelled and writes no Playwright report, so a timeout tight against the
-    # measurement costs the run that would say why it was slow.
-    timeout-minutes: 32
+    # 40, against the 28 the issue's own acceptance sets. Six executions of this job at four lanes
+    # have measured 19:26, 20:46, 21:31, 28:17, 29:29 and 26:46, on one tree whose browser step
+    # alone read 1,050 s on one runner and 1,464 s on another, so the spread is the fleet's rather
+    # than the suite's. A job the timeout kills reports as cancelled and writes no Playwright
+    # report, so a timeout tight against the measurement costs the run that would say why it was
+    # slow - which is the one run anyone investigating a slow execution needs.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2301,9 +2303,33 @@ jobs:
       - name: Typecheck dispatch dashboard
         run: bun run typecheck
         working-directory: packages/dispatch
+      # The lane cases of e2e/__tests__/psql-session.test.ts and harness-lanes.test.ts skip
+      # themselves when no database is named, and what they prove - that a lane's psql reads its
+      # own lane's database and not the plain name - is exactly what a lane run depends on, so
+      # skipping them in CI leaves the lane contract unproven where it matters most. This job has
+      # no `postgres:` service on purpose (a run of more than one lane refuses a caller-set
+      # DATABASE_URL, since one database cannot serve lanes that truncate it per row), so the
+      # database is one container of the same pinned image the lanes use, started for this step
+      # and read through DATABASE_URL, which the browser step below never sees.
+      - name: Start a database for the dashboard's lane tests
+        run: |
+          docker run -d --name dispatch-unit-pg -p 5440:5432 \
+            -e POSTGRES_PASSWORD=ci \
+            ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+          for _ in $(seq 60); do
+            if docker exec dispatch-unit-pg pg_isready -U postgres -q; then break; fi
+            sleep 1
+          done
+          docker exec dispatch-unit-pg pg_isready -U postgres
       - name: Test dispatch dashboard
         run: bun run test
         working-directory: packages/dispatch
+        env:
+          DATABASE_URL: postgres://postgres:ci@127.0.0.1:5440/postgres?sslmode=disable
+      # The database above is this step's alone: the browser step starts a Postgres per lane.
+      - name: Stop the dashboard's lane database
+        if: always()
+        run: docker rm -f dispatch-unit-pg
       # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
       # cannot be determined; the listing shows the build shipped it.
       - name: Build dispatch dashboard
@@ -2464,11 +2490,17 @@ jobs:
             packages/dispatch/e2e/report.json
             packages/dispatch/e2e/memory-samples.txt
             packages/dispatch/e2e/cpu-samples.txt
+      # A failed row's trace says what the browser saw; these say what its lane's own servers did,
+      # which is where a lane-only failure (a port, a migration, a server that never came up) is
+      # legible. The glob is `$TMPDIR`'s run directory, whose name carries the process id, so it
+      # matches however many lanes ran.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
-          path: packages/dispatch/e2e/test-results
+          path: |
+            packages/dispatch/e2e/test-results
+            ${{ runner.temp }}/dispatch-e2e-run-*/lane-*/log/*.log
       # The browsers above. Last, and only on a push to main whose job succeeded: no other run
       # writes an Actions cache entry.
       - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'

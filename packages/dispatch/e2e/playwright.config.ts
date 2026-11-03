@@ -2,7 +2,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, devices, type Project } from "@playwright/test";
 import { baseUrl } from "./api";
 import { targetedListeners } from "./harness-listeners";
-import { harnessPorts, harnessVariables, laneCount, workerCountVariable } from "./harness-ports";
+import {
+  harnessPorts,
+  harnessVariables,
+  laneCount,
+  laneCountVariable,
+  workerCount,
+  workerCountVariable,
+} from "./harness-ports";
 import { harnessProcessCount } from "./harness-processes";
 import { harnessSignIn } from "./harness-signin";
 import { measuring } from "./measure";
@@ -131,6 +138,20 @@ if (asked !== undefined && asked !== String(lanes)) {
       `--workers ${asked} would not match: a worker reads the lane of its own index. Set ` +
       `${workerCountVariable}=${asked} instead, which starts that many lanes and runs that many ` +
       "workers."
+  );
+}
+
+// `laneCount` answers the worker count where `DISPATCH_E2E_LANES` is unset, so that a run against
+// servers a person started reads its own. That fallback is right for one worker and wrong for
+// more: nothing exported a lane, so every worker would resolve lane 0 and share one harness's
+// servers and database, which e2e/seed.ts truncates per row - rows would delete each other's
+// fixtures and fail in ways that read as product faults. Only e2e/run.ts exports that variable.
+if (process.env[laneCountVariable] === undefined && workerCount() > 1) {
+  throw new Error(
+    `${workerCountVariable}=${workerCount()} asks for more than one worker, but nothing exported ` +
+      `${laneCountVariable}, so there is one harness and every worker would share it. Run this ` +
+      `config through e2e/run.ts, which starts a lane per worker and exports that count: ` +
+      `${runThroughWrapper}.`
   );
 }
 
