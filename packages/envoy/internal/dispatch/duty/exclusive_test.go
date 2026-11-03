@@ -15,6 +15,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -211,6 +212,90 @@ func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing
 	}
 }
 
+// A shutdown can arrive while the gate reads the loop's last pass on the lease's own connection.
+// That read must not end the connection, or the unlock after it runs on a closed connection. The
+// read keeps waiting after the cancel, and once it answers the stopped gate starts no pass, gives
+// the lease back with its unlock, and returns the connection to the lease pool. A first gate
+// leaves the period read prepared on that connection, as a running process's earlier ticks do.
+func TestExclusiveFreesTheLeaseWhenShutdownInterruptsThePeriodRead(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	logged := captureLog(t)
+	ctx := context.Background()
+	const name = SearchTermStatsLease
+
+	if !Exclusive(ctx, leases, EditNoticeLease, time.Now(), time.Hour, func(context.Context) {}) {
+		t.Fatal("the first gate did not run, so the lease connection has no prepared period read")
+	}
+
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds duty_passes: %v", err)
+	}
+	defer func() { _ = holder.Rollback(context.Background()) }()
+	if _, err := holder.Exec(ctx, `lock table duty_passes in access exclusive mode`); err != nil {
+		t.Fatalf("hold duty_passes: %v", err)
+	}
+
+	stopping, stop := context.WithCancel(ctx)
+	defer stop()
+	passRan := false
+	answered := make(chan bool, 1)
+	go func() {
+		answered <- Exclusive(stopping, leases, name, time.Now(), time.Hour, func(context.Context) { passRan = true })
+	}()
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 4*time.Second); waiting < 1 {
+		t.Fatal("the gate's period read never queued behind duty_passes")
+	}
+	stop()
+	// A read on the pass's context would end at the cancel: pgx sets the socket's deadline to now,
+	// and the gate returns within milliseconds while duty_passes is still held.
+	select {
+	case <-answered:
+		t.Fatalf("the gate returned while its period read still waited on duty_passes: the cancel ended the read\n%s", logged.String())
+	case <-time.After(500 * time.Millisecond):
+	}
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, time.Second); waiting < 1 {
+		t.Fatal("the gate's period read stopped waiting on duty_passes at the cancel")
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release duty_passes: %v", err)
+	}
+
+	select {
+	case ran := <-answered:
+		if ran {
+			t.Error("a gate stopped while it read its period reported a pass that ran")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the gate stopped while it read its period did not return")
+	}
+	if passRan {
+		t.Error("the gate started its pass after shutdown")
+	}
+	if output := logged.String(); strings.Contains(output, `msg="dispatch duty: free the lease"`) {
+		t.Fatalf("the stopped gate could not unlock its lease:\n%s", output)
+	}
+	if stat := leases.Stat(); stat.TotalConns() != 1 || stat.IdleConns() != 1 {
+		t.Fatalf("lease pool after the stopped gate: total %d, idle %d; want its connection returned",
+			stat.TotalConns(), stat.IdleConns())
+	}
+	// From a connection of another pool: the lease connection's own session would take a lock it
+	// still held, since a session-level advisory lock is reentrant.
+	other, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a connection of the shared pool: %v", err)
+	}
+	defer other.Release()
+	var taken bool
+	if err := other.QueryRow(ctx, takeLease, leaseNamespace, name).Scan(&taken); err != nil || !taken {
+		t.Fatalf("another session could not take the lease the stopped gate gave back: taken %t, error %v", taken, err)
+	}
+	if _, err := other.Exec(ctx, freeLease, leaseNamespace, name); err != nil {
+		t.Fatalf("give back the lease another session took: %v", err)
+	}
+}
+
 // A period of zero or less is no period at all - mutual exclusion and nothing more - which is what
 // a delivery intake's consumer reconciliation takes: it runs on every bind poll rather than on a
 // ticker, and the throttle that spaces it is its own. There is one such lease per delivery
@@ -360,9 +445,7 @@ func recordedPasses(t *testing.T, database *store.Store, name string) int {
 func captureLog(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logged := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

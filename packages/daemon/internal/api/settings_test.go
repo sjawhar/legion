@@ -81,6 +81,8 @@ var settingsEmitted = map[string]string{
 	"Config.GitHubApps":                              "github_apps",
 	"Config.Linger":                                  "linger_hours",
 	"Config.ProductionCheckBound":                    "production_check_hours",
+	"Config.PodUpdateRetask":                         "pod_update_retask_hours",
+	"Config.PodUpdateNotice":                         "pod_update_notice_hours",
 	"Config.ReviewRoundCap":                          "review_round_cap",
 	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
@@ -269,7 +271,8 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"tree_stop_timeout_seconds", "slow_command_timeout_seconds", "probe_interval_seconds",
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
-		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
+		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours",
+		"pod_update_retask_hours", "pod_update_notice_hours", "review_round_cap",
 		"max_fix_attempts", "controller", "capabilities", "worker_backends", "role_config_files",
 	}
 	top := keysOf(t, encoded)

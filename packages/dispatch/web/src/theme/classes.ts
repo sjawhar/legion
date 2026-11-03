@@ -664,6 +664,8 @@ registerText(
  * backdrop is never itself read as text or a surface color — no contrast check applies). */
 export const backdrop40 = "bg-slate-950/40";
 export const backdrop50 = "bg-slate-950/50";
+/** The darker backdrop a picture opened at full size sits on (`picture-lightbox.ts`). */
+export const backdrop80 = "bg-slate-950/80";
 
 /** A layout-preserving invisible border: reserves the border's width so a hover/focus state
  * that adds a real border doesn't shift the element, or so a loading skeleton matches its live

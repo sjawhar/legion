@@ -1604,12 +1604,12 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 }
 
 // A change caught up while a view's expiry is computing marks the view: an expiry reads nothing,
-// so it records no read position, and a change held back for one (deliveryView.readStarting) would
-// be held for good - the catch-up's cursor moves past it and the expiry ends without looking at
-// it, leaving every subscriber a stale answer. The clock stands still, so the pull request leaving
-// two seconds on is the view's first expiry; the hook holds that expiry open, between its mark of
-// the view as computing and its end, while the test writes a second pull request and has the hub
-// catch it up.
+// so it records no read position and takes over no marks (deliveryHub.read), and the change marks
+// the view as any other does - the catch-up's cursor moves past it and the expiry ends without
+// looking at it, so a change held back here would leave every subscriber a stale answer. The
+// clock stands still, so the pull request leaving two seconds on is the view's first expiry; the
+// hook holds that expiry open, between its mark of the view as computing and its end, while the
+// test writes a second pull request and has the hub catch it up.
 func TestAChangeCaughtUpWhileAViewExpiresIsRecomputed(t *testing.T) {
 	clock := newStillHubClock()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -2073,6 +2073,7 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now().Add(-30*time.Hour)))
+	rig.settle(t)
 	first, second := newFakeLiveConn(), newFakeLiveConn()
 	start := rig.mark()
 	rig.hub.Subscribe(first, subscribeFrame("a", presetView(deliveryLiveTimeline, 7, "author=octocat&repo=acme/widgets")))

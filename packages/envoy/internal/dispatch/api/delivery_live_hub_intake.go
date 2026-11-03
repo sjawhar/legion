@@ -256,10 +256,6 @@ func (h *deliveryHub) catchUpChanges() error {
 		for _, change := range changes {
 			for _, view := range h.views {
 				if change.Seq > max(view.seq, view.readingSeq) && view.touchedBy(change, now) {
-					if view.readStarting {
-						view.startingSeq = max(view.startingSeq, change.Seq)
-						continue
-					}
 					h.markDirtyLocked(view, now, deliveryCauseChange)
 				}
 			}
@@ -384,7 +380,8 @@ func (h *deliveryHub) receive(event model.Event) {
 // issues or their ancestors hold the issue, and every timeline and measures view when the issue is
 // a P0 before or after it (the measures' unowned P0 list); an architecture import every view; and
 // a session's write every view that shows the session under another title than the one it wrote
-// under.
+// under. A view whose read is under way also keeps the issue and the title (deliveryHeard), since
+// the issues and sessions its read names are not known until the read lands.
 func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	switch event.kind {
 	case "issue.created", "issue.updated", "issue.closed":
@@ -423,6 +420,9 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {
 				h.markDirtyLocked(view, now, deliveryCauseChange)
 			}
+			if view.heard != nil {
+				view.heard.titles[event.actor.ID] = title
+			}
 		}
 	}
 }
@@ -433,6 +433,9 @@ func (h *deliveryHub) dirtyIssueLocked(key string, p0 bool, now time.Time) {
 		_, ancestor := view.ancestors[key]
 		if named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline) {
 			h.markDirtyLocked(view, now, deliveryCauseChange)
+		}
+		if view.heard != nil {
+			view.heard.issues[key] = struct{}{}
 		}
 	}
 }

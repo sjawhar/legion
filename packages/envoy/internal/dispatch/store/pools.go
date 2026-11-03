@@ -280,7 +280,7 @@ const leaseNameCount = 13
 // The two spare connections are for what holds one without being a listed lease's pass: pgxpool's
 // own health check and lifetime expiry take an idle connection while they ping or replace it, and
 // a pass whose unlock failed holds its connection until the close that ends its session
-// (duty.freeLeaseOn, teardownTimeout). Without them the next pass waits on those (review BG-5);
+// (duty.FreeSessionLock, leaseCallTimeout). Without them the next pass waits on those (review BG-5);
 // with them a wait at all is a fault, and an acquire that waits leaseAcquireBound makes Exclusive
 // skip the pass rather than queue. They cannot come from the request pool: a lease is held for the
 // whole pass, which is minutes for the compaction sweep, and the request pool's connections are
