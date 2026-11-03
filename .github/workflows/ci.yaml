@@ -389,6 +389,7 @@ jobs:
               - 'packages/daemon/internal/registry/*'
               - 'packages/daemon/internal/repocache/*'
               - 'packages/daemon/internal/requiredchecks/*'
+              - 'packages/daemon/internal/rescue/*'
               - 'packages/daemon/internal/runtime/*'
               - 'packages/daemon/internal/runtime/sandbox/*'
               - 'packages/daemon/internal/runtime/shellprefix/*'
@@ -1686,7 +1687,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
+    # prints the dump that names it: about 5 minutes of the steps before the Go daemon's, then
+    # that step's 20 minutes and the race step's 30, then a minute for the Stage 1 proof, which
+    # is 56.
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1910,8 +1915,14 @@ jobs:
       # launcher that wires it, whose accept loop, copy pairs, pair tracking and bounded drain share
       # state across goroutines. The detector needs cgo, which the runners have gcc for. The lane
       # tests hold a fake clock, so they are deterministic under it.
+      #
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
+      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
+      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof

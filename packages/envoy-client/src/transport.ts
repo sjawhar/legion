@@ -57,12 +57,10 @@ const SessionWireSchema = z.object({
   // The session's real machine, as the client reported it (machineID()); machine_id stays the
   // listener it last registered through. The session's owner is the listener its stored
   // subscription names (the one store.Registry.Match fans its topics out on), else the one on
-  // machine_id; only the owner delivers to a serve-port session, at this host unless the session
-  // runs on the owner's machine (registered through it, or this host is the owner's machine id)
-  // and the owner has a host bridge, and any other listener leaves inbox messages
-  // to it silently (session.go's ErrWrongMachine). Optional here only for a listener predating
-  // the field — the live listener always fills it in, falling back to machine_id itself
-  // (session.SessionEntry.HostOrMachine).
+  // machine_id; the owner relays the session's consumer, and any other listener leaves inbox
+  // messages to it silently (session.HandleAgentResult.OwnedElsewhere). No delivery reads host.
+  // Optional here only for a listener predating the field — the live listener always fills it in,
+  // falling back to machine_id itself (session.SessionEntry.HostOrMachine).
   host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
@@ -229,6 +227,7 @@ export type SubscribeInput = {
   readonly sessionID: string;
   readonly directory: string;
   readonly topics: readonly string[];
+  /** Always 0: the listener refuses a registration whose port is above 0, naming the field. */
   readonly port: number;
   readonly title: string;
   readonly capabilities?: readonly string[];
@@ -675,13 +674,10 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
               // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
               // re-subscribes on each tick). The listener stores it separately from the registering
-              // listener's own machine_id, and the session's owner reaches a serve-port session at
-              // it unless the session runs on the owner's machine (registered through it, or this
-              // value is the owner's machine id) and the owner has a host bridge.
-              // The owner is the listener the session's stored subscription names, else the one it
-              // registered through; only the owner delivers to the session, and any other listener
-              // leaves inbox messages to it silently. With a port, a value that is not a host name
-              // or IP address is refused with 400 (expected: ["host"]).
+              // listener's own machine_id and reads it for no delivery: it is what a human-facing
+              // list shows as the session's machine. The owner is the listener the session's stored
+              // subscription names, else the one it registered through; only the owner relays the
+              // session's consumer, and any other listener leaves inbox messages to it silently.
               host: machineID(),
               plugin: input.plugin.name,
               plugin_version: input.plugin.version,

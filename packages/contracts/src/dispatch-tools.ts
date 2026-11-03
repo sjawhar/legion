@@ -97,8 +97,14 @@ function documentOwnerValidation(
   };
 }
 
-const ARTIFACT_OWNER_AND_SOURCE_RULE =
-  "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+const ARTIFACT_SOURCE_RULE = "Exactly one of path or content is required.";
+const ARTIFACT_OWNER_AND_SOURCE_RULE = `${ARTIFACT_SOURCE_RULE} Exactly one of issue and project is required; with project, artifact names the document.`;
+
+/** Joins the parts of a rule a call broke, so a refusal never names a part the call kept. */
+function brokenParts(parts: ReadonlyArray<readonly [boolean, string]>): string | undefined {
+  const broken = parts.filter(([kept]) => !kept).map(([, message]) => message);
+  return broken.length === 0 ? undefined : broken.join(" ");
+}
 
 const CONTENT_IS_MARKDOWN =
   "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
@@ -126,12 +132,14 @@ function artifactProblem(value: unknown): string | undefined {
     readonly path?: unknown;
     readonly content?: unknown;
   };
-  if (
-    !artifactOwner.check(value) ||
-    (typeof input.path === "string") === (typeof input.content === "string")
-  ) {
-    return ARTIFACT_OWNER_AND_SOURCE_RULE;
-  }
+  const ownerOrSourceProblem = brokenParts([
+    [artifactOwner.check(value), artifactOwner.message],
+    [
+      (typeof input.path === "string") !== (typeof input.content === "string"),
+      ARTIFACT_SOURCE_RULE,
+    ],
+  ]);
+  if (ownerOrSourceProblem !== undefined) return ownerOrSourceProblem;
   if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
   const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
   if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
@@ -139,32 +147,50 @@ function artifactProblem(value: unknown): string | undefined {
 }
 
 const documentEditOwner = documentOwnerValidation(true);
+const PRECONDITION_RULE = "A precondition selects exactly one of document or blocks.";
+
+function preconditionKept(value: unknown): boolean {
+  const input = value as { readonly precondition?: unknown };
+  if (input.precondition === undefined) return true;
+  if (typeof input.precondition !== "object" || input.precondition === null) return false;
+  const precondition = input.precondition as {
+    readonly document?: unknown;
+    readonly blocks?: unknown;
+  };
+  return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
+}
+
+function documentEditProblem(value: unknown): string | undefined {
+  return brokenParts([
+    [documentEditOwner.check(value), documentEditOwner.message],
+    [preconditionKept(value), PRECONDITION_RULE],
+  ]);
+}
+
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    if (!documentEditOwner.check(value)) return false;
-    const input = value as { readonly precondition?: unknown };
-    if (input.precondition === undefined) return true;
-    if (typeof input.precondition !== "object" || input.precondition === null) return false;
-    const precondition = input.precondition as {
-      readonly document?: unknown;
-      readonly blocks?: unknown;
-    };
-    return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
-  },
-  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
+  check: (value) => documentEditProblem(value) === undefined,
+  message: `${documentEditOwner.message} ${PRECONDITION_RULE}`,
+  refusal: (value) =>
+    documentEditProblem(value) ?? `${documentEditOwner.message} ${PRECONDITION_RULE}`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
 const commentOwner = documentOwnerValidation(true);
+const COMMENT_TURN_RULE =
+  "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+
+function commentProblem(value: unknown): string | undefined {
+  const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+  return brokenParts([
+    [commentOwner.check(value), commentOwner.message],
+    [input.turn === undefined || typeof input.reply_to_ask === "string", COMMENT_TURN_RULE],
+  ]);
+}
+
 const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
-    return (
-      commentOwner.check(value) &&
-      (input.turn === undefined || typeof input.reply_to_ask === "string")
-    );
-  },
-  message: `${commentOwner.message} turn requires reply_to_ask.`,
+  check: (value) => commentProblem(value) === undefined,
+  message: `${commentOwner.message} ${COMMENT_TURN_RULE}`,
+  refusal: (value) => commentProblem(value) ?? `${commentOwner.message} ${COMMENT_TURN_RULE}`,
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
@@ -241,26 +267,36 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
  * issue or document, so the id is all there is.
  */
 const readOwner = documentOwnerValidation(false);
+const READ_OWNER_RULE =
+  "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+const READ_MESSAGE_RULE =
+  "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+
+/** dispatch_read's refusal: a call with message breaks only the message rule, and a call
+ *  without it only the owner rule. */
+function readProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly message?: unknown;
+    readonly issue?: unknown;
+    readonly project?: unknown;
+    readonly artifact?: unknown;
+    readonly ref?: unknown;
+  };
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone =
+    input.issue === undefined &&
+    input.project === undefined &&
+    input.artifact === undefined &&
+    input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
+
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as {
-      readonly message?: unknown;
-      readonly issue?: unknown;
-      readonly project?: unknown;
-      readonly artifact?: unknown;
-      readonly ref?: unknown;
-    };
-    if (typeof input.message !== "string") return readOwner.check(value);
-    return (
-      input.issue === undefined &&
-      input.project === undefined &&
-      input.artifact === undefined &&
-      input.ref === undefined
-    );
-  },
-  message:
-    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
-    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
 };
 
 /** Component attachment modes an issue write accepts. */
