@@ -33,6 +33,7 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxRow,
   Issue,
   IssueDetails,
   IssuePriority,
@@ -77,6 +78,31 @@ export type { DispatchServiceErrorShape } from "@legion/contracts";
 export interface ArtifactFileVersion {
   readonly mime: string;
   readonly bytes: Uint8Array;
+}
+
+/** A credential request's two session ids, each read independently by the secrets broker:
+ *  `request` is the id the request itself stated, `enrollment` the id its requesting enrollment
+ *  stated. Either is null where that id was never set, and a machine login answers both null. */
+export interface CredentialSession {
+  readonly request: string | null;
+  readonly enrollment: string | null;
+}
+
+/** One pending credential request of `GET /api/v1/credential-requests?approver=me`, relayed from
+ *  the secrets broker word for word. `identifiers` are the secret rule keys, or the one hostname
+ *  of a machine login; `requested_at` is RFC 3339. `session` is absent from a broker older than
+ *  those ids, and `approve_url` from a machine login's row, which carries no broker page. */
+export interface CredentialPendingRow {
+  readonly record_id: string;
+  readonly kind: string;
+  readonly identifiers: string[];
+  readonly requested_at: string;
+  readonly session?: CredentialSession;
+  readonly approve_url?: string;
+}
+
+export interface CredentialPendingResponse {
+  readonly pending: CredentialPendingRow[];
 }
 
 export class DispatchServiceError extends Error {
@@ -1021,6 +1047,23 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `GET /api/v1/inbox?assignee=<who>`: the open asks one person's Inbox lists, in the server's
+   *  own order (the owning issue's priority, then whose turn it is, then the latest activity),
+   *  which no reader re-sorts. `me` is the caller, and keeps the rows on issues assigned to them,
+   *  which is what the Inbox page shows by default. The route reads the caller's own `person`
+   *  scope and refuses a credential without it with 403 OAUTH_SCOPE_REQUIRED. */
+  async inbox(assignee: string): Promise<InboxRow[]> {
+    return this.#json("GET", ["api", "v1", "inbox"], undefined, { assignee });
+  }
+
+  /** `GET /api/v1/credential-requests?approver=me`: the credential requests the caller may
+   *  decide, relayed from the secrets broker, or null from a Dispatch that has no broker
+   *  configured, which is an ordinary deployment rather than a failure. `me` is the only approver
+   *  the route takes. It needs the same `person` scope the Inbox does. */
+  async credentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.#json("GET", ["api", "v1", "credential-requests"], undefined, { approver: "me" });
   }
 
   /** `POST /api/v1/projects`: create a project. A key that already exists is 409

@@ -26,6 +26,7 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  InboxRow,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -42,6 +43,7 @@ import type {
   OpenAsksResponse,
   Project,
   SessionAnswersResponse,
+  WhoamiResponse,
   WriteAdvice,
 } from "@legion/contracts";
 import {
@@ -78,6 +80,7 @@ import {
   resolveOrigin,
 } from "./dispatch-cwd";
 import {
+  type CredentialPendingRow,
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
@@ -456,6 +459,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_inbox: true,
   dispatch_architecture_sync: true,
 };
 
@@ -2634,6 +2638,125 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
   ].join("\n");
 }
 
+/** How much of an ask's question the Inbox summary's line carries. The event summaries' head
+ *  (`textHead`) is longer: a question is one line among four counted bands here, and the whole of
+ *  it is one `dispatch read` away. */
+const INBOX_QUESTION_HEAD = 80;
+
+/** The first `INBOX_QUESTION_HEAD` characters of a question, on one line. */
+function inboxQuestion(question: string): string {
+  const flat = question.replace(/\s+/g, " ").trim();
+  return flat.length > INBOX_QUESTION_HEAD ? `${flat.slice(0, INBOX_QUESTION_HEAD)}…` : flat;
+}
+
+/**
+ * Whether the person has deferred this row and its moment is still ahead: the Inbox page's own
+ * `isSnoozed` (`packages/dispatch/web/src/features/inbox/snooze.ts`), re-read here because the
+ * `dispatch` command shares no code with the web app. The window is absolute, so nothing an agent
+ * does to the ask shortens it; a row Dispatch lists with no snooze at all is not deferred, and
+ * neither is one whose moment has passed.
+ */
+function inboxSnoozed(row: InboxRow, now: number): boolean {
+  if (row.snoozed_until === null) return false;
+  const at = Date.parse(row.snoozed_until);
+  return !Number.isNaN(at) && at > now;
+}
+
+/**
+ * Which band a row sits in: the page's `sectionOf` (`.../features/inbox/sections.ts`). A snooze
+ * the person set wins over everything, because deferring an ask is them saying it does not need
+ * them now; every other row sits under whose turn it is. A row the Inbox lists without a turn
+ * belongs to no band, as on the page, and so is listed under no heading.
+ */
+function inboxSection(row: InboxRow, now: number): "agent" | "human" | "later" | undefined {
+  if (inboxSnoozed(row, now)) return "later";
+  return row.waiting_on;
+}
+
+/** Where an inbox row's ask lives: the issue key or the document slug its line is named by, and
+ *  the ask's own `dispatch://` address under that owner. Every row the Inbox lists has one owner
+ *  or the other; a row with neither, which no read makes, is named by the ask's id alone. */
+function inboxAskOwner(row: InboxRow): { readonly label: string; readonly ref: string } {
+  const key = row.issue?.key ?? row.issue_key;
+  if (key !== null) {
+    return { label: key, ref: dispatchChildRef(dispatchIssueRef(key), "ask", row.id) };
+  }
+  const document = row.document;
+  if (document !== undefined) {
+    return {
+      label: document.slug,
+      ref: dispatchChildRef(dispatchDocumentRef(document.project, document.slug), "ask", row.id),
+    };
+  }
+  return { label: row.id, ref: row.id };
+}
+
+function inboxAskLine(row: InboxRow): string {
+  const { label, ref } = inboxAskOwner(row);
+  const priority = row.priority === null ? "P-" : `P${row.priority}`;
+  return `- ${label} · ${priority} · ${row.kind} · ${inboxQuestion(row.question)} · ${ref}`;
+}
+
+/** One pending credential request: what it asks for, when, the sessions it names and the page
+ *  where it is decided. A row that names no session leaves that field out rather than printing
+ *  two dashes, and a machine login, which is decided with `dispatch` rather than on a broker
+ *  page, carries no url to print. */
+function credentialRequestLine(request: CredentialPendingRow): string {
+  const session = request.session ?? null;
+  return [
+    `- ${request.kind}`,
+    request.identifiers.join(", "),
+    request.requested_at,
+    ...(session === null
+      ? []
+      : [`session request=${session.request ?? "-"}, enrollment=${session.enrollment ?? "-"}`]),
+    ...(request.approve_url === undefined ? [] : [request.approve_url]),
+  ].join(" · ");
+}
+
+/**
+ * What the person's Inbox page shows, as the `dispatch inbox` command prints it: each heading
+ * with its count, then the rows under it, in the order the page bands them. The rows within a
+ * band are the server's order and nothing re-sorts them.
+ *
+ * `Needs you` counts the page's `needsYou` (`.../features/inbox/BlockedOnYou.tsx`): the asks
+ * waiting on a person that the viewer has not deferred and that sit on their own issues
+ * (`waitingOnYou`), plus every credential request, which is the viewer's by construction because
+ * the list is read as `?approver=me`. The rows it lists are the band's, which is the same set:
+ * `?assignee=me` keeps only the asks on issues assigned to the caller, as the page's default view
+ * does, so `isMine` narrows nothing a read of this command's own routes returns.
+ */
+function formatInboxSummary(
+  rows: readonly InboxRow[],
+  requests: readonly CredentialPendingRow[],
+  viewer: string | null,
+  now: number
+): string {
+  const sections = { agent: [] as InboxRow[], human: [] as InboxRow[], later: [] as InboxRow[] };
+  for (const row of rows) {
+    const section = inboxSection(row, now);
+    if (section !== undefined) sections[section].push(row);
+  }
+  // `isMine`: an ask on an issue assigned to the viewer. Every row of this read already is one,
+  // so this drops nothing; it is here because the count is the page's rule and not the band's.
+  // A credential that acts for no person counts nothing, as the page counts nothing for a login
+  // it has not resolved yet.
+  const yours = sections.human.filter((row) => viewer !== null && row.issue?.assignee === viewer);
+  return [
+    `Needs you ${yours.length + requests.length}`,
+    ...sections.human.map(inboxAskLine),
+    "",
+    `Waiting on agents ${sections.agent.length}`,
+    ...sections.agent.map(inboxAskLine),
+    "",
+    `Later ${sections.later.length}`,
+    ...sections.later.map(inboxAskLine),
+    "",
+    `Credential requests ${requests.length}`,
+    ...requests.map(credentialRequestLine),
+  ].join("\n");
+}
+
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
@@ -3515,6 +3638,49 @@ export async function executeDispatchTool(
     return {
       text: acting + elsewhere + writable,
       details: { session, owner, service, project },
+    };
+  }
+  if (input.tool === "dispatch_inbox") {
+    const client = dispatchClient();
+    let identity: WhoamiResponse;
+    let rows: InboxRow[];
+    try {
+      // Both reads at once: the login whose own asks the count is of, and the rows themselves.
+      [identity, rows] = await Promise.all([client.whoami(), client.inbox("me")]);
+    } catch (error) {
+      // Both routes read the caller's own scopes, and a credential without `person` is refused
+      // 403 OAUTH_SCOPE_REQUIRED, whose message names the scope: the code is what the caller acts
+      // on, so it reaches the text.
+      throw refusalWithCode(error);
+    }
+    const viewer = identity.kind === "user" ? identity.login : identity.owner;
+    let requests: readonly CredentialPendingRow[] = [];
+    const warnings: string[] = [];
+    try {
+      // A Dispatch with no secrets broker answers null, which is an ordinary deployment: it has
+      // no credential requests, so it lists and counts none.
+      requests = (await client.credentialPending())?.pending ?? [];
+    } catch (error) {
+      // The asks are the greater part of the Inbox, so one failed read of the broker's list does
+      // not cost the caller the rest of it. A refusal for want of a scope is the exception: the
+      // credential itself is wrong, and reporting that as a missing section would hide it.
+      if (dispatchAnswered(error, 403) && error.code === "OAUTH_SCOPE_REQUIRED") {
+        throw refusalWithCode(error);
+      }
+      const refusal =
+        error instanceof DispatchServiceError
+          ? `${error.code} ${error.message}`
+          : messageFor(error);
+      warnings.push(`dispatch: warning: credential requests could not be read: ${refusal}`);
+    }
+    return {
+      text: formatInboxSummary(rows, requests, viewer, Date.now()),
+      details: {
+        viewer,
+        asks: rows.length,
+        credential_requests: requests.length,
+      },
+      ...(warnings.length === 0 ? {} : { warnings }),
     };
   }
   const args = checked.args;
