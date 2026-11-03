@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +294,66 @@ func TestTablesMarkAFailedTransactionIDRead(t *testing.T) {
 	}
 	if note := noteLine(text, "(1 failed read)"); !strings.Contains(note, "`resources.xid_read_error`") {
 		t.Errorf("no note of the failed-reads mark names summary.json `resources.xid_read_error`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+}
+
+// TestTablesNameTheDashboardTransport: the live table names the transport per step as soon as one
+// step followed the event feed on something other than the dashboard live socket, and a step of a
+// run from before the dashboard probe, whose summary.json has no config.dashboard, reads live
+// there.
+func TestTablesNameTheDashboardTransport(t *testing.T) {
+	step := func(name, dashboard string) stepData {
+		return stepData{name: name, sum: summary{Config: summaryConfig{Step: name, Dashboard: dashboard}}}
+	}
+	md := renderTables([]stepData{step("socket", dashboardLive), step("older", ""), step("events", dashboardSSE)})
+	text := section(md, "Delivery from sending, and live socket frames")
+	for step, want := range map[string]string{"socket": dashboardLive, "older": dashboardLive, "events": dashboardSSE} {
+		cells := rowCells(text, step)
+		if cells == nil || cells[len(cells)-1] != want {
+			t.Errorf("step %s names transport %q, want %q:\n%s", step, cells, want, text)
+		}
+	}
+	if note := noteLine(text, "transport:"); !strings.Contains(note, "`config.dashboard`") {
+		t.Errorf("no note of the transport column names summary.json `config.dashboard`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+
+	ws := renderTables([]stepData{step("socket", dashboardLive), step("older", "")})
+	wsText := section(ws, "Delivery from sending, and live socket frames")
+	if strings.Contains(wsText, "transport") {
+		t.Errorf("a table whose every step followed the live socket names the transport:\n%s", wsText)
+	}
+	checkRowWidths(t, ws)
+}
+
+// TestTablesReadTheOlderLiveTransport: a step directory of a run whose loadgen named the dashboard
+// transport in live.transport (ws, sse or none) and wrote no config.dashboard is read from that
+// field: sse renders as sse, with the transport column and its note, and ws as the live socket.
+func TestTablesReadTheOlderLiveTransport(t *testing.T) {
+	read := func(name, transport string) stepData {
+		t.Helper()
+		dir := t.TempDir()
+		body := fmt.Sprintf(`{"config": {"step": %q}, "live": {"transport": %q}}`, name, transport)
+		if err := os.WriteFile(filepath.Join(dir, "summary.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := readStep(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	md := renderTables([]stepData{read("older-sse", "sse"), read("older-ws", "ws")})
+	text := section(md, "Delivery from sending, and live socket frames")
+	for step, want := range map[string]string{"older-sse": dashboardSSE, "older-ws": dashboardLive} {
+		cells := rowCells(text, step)
+		if cells == nil || cells[len(cells)-1] != want {
+			t.Errorf("step %s, whose summary.json names live.transport alone, reads transport %q, want %q:\n%s", step, cells, want, text)
+		}
+	}
+	if note := noteLine(text, "transport:"); !strings.Contains(note, "`live.transport`") {
+		t.Errorf("no note of the transport column names summary.json `live.transport`:\n%s", text)
 	}
 	checkRowWidths(t, md)
 }
