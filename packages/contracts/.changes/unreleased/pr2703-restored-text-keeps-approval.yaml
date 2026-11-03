@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+    `dispatch_request_approval`'s description says that a later version whose text is exactly the
+    approved version's again, such as an accidental edit undone exactly, with no decision block in
+    it decided since, carries the approval, and that a document that then does not read approved
+    needs a request. `WriteAdvice.superseded_approval`, `ArtifactReview`, `ArtifactApproval` and
+    `ArtifactReviewEventPayload` describe that carry and its reason (`Carried forward from the
+    approval of version <N>: this version's text is that version's, unchanged.`).
+time: 2026-11-03T03:30:01.000000000Z
+custom:
+    Issue: pr2703

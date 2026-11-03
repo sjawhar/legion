@@ -1,0 +1,5 @@
+kind: Added
+body: 'Decision record types: `IssueDecisions`, `Decision`, `DecisionLink`, `DecisionKeep`, `DocumentRead`, and the `decision.kept` event with its payload.'
+time: 2026-11-01T06:25:12.472763941Z
+custom:
+    Issue: pr2626

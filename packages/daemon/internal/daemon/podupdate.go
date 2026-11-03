@@ -183,8 +183,8 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	s.openPodUpdate(ctx, issue, live, pod, joined, now)
 }
 
-// completePodUpdate replaces the pod and ends the round when the round is over: every claim that
-// blocks it has answered, and no claim of the group runs a turn. Waiting for no claim to be
+// completePodUpdate replaces the pod and ends the round when the round is over: every claim the
+// round asks (askedClaims) has answered, and no claim of the group runs a turn. Waiting for no claim to be
 // working is what keeps the promise that no worker is stopped mid-turn — a worker answers from
 // inside a turn, and that turn ends a moment later. It reports whether it decided the round.
 //
@@ -230,7 +230,7 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // replacement in flight: PodDrift answers for it as it does for a pod that is there and has not
 // drifted, and the round is finished here, where only the pod's end is left to wait for. Once
 // the pod itself is gone, that sweep reads it gone and the round ends there instead, with
-// nothing lost — every claim that blocks the round had answered before this call was made — so
+// nothing lost — every claim the round asks had answered before this call was made — so
 // nothing is deleted earlier than it would have been.
 func (s *supervision) completePodUpdate(ctx context.Context, issue string, snapshot, live []supervise.Claim, round, pod, reasons string, now time.Time) bool {
 	if waiting := waitingClaims(live, round); len(waiting) > 0 {
@@ -283,8 +283,11 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, snaps
 		}
 		return true
 	}
+	// A failed claim was not waited for (askedClaims), so whatever it left unpushed on the disk
+	// went with the pod; the line names it.
+	failed := slices.DeleteFunc(blockingClaims(live), func(c supervise.Claim) bool { return c.State != supervise.StateFailed })
 	s.log.Info("supervise: every worker of this update round has answered; the pod is replaced and the round is over",
-		"issue", issue, "round", round, "pod", pod)
+		"issue", issue, "round", round, "pod", pod, "failedNotWaitedFor", namesOf(failed))
 	s.endPodUpdates(live)
 	return true
 }
@@ -340,7 +343,7 @@ var errReplacementNotDue = errors.New("the pod replacement is no longer due")
 
 // replacementDue is the daemon's last word on a replacement, which the runtime asks under the
 // pod's launch turn and one statement before the write that ends every process in that pod. It
-// re-runs the round's own two blocking checks — every claim that blocks the round has answered,
+// re-runs the round's own two blocking checks — every claim the round asks has answered,
 // and no claim of the issue runs a turn — over the issue's claims as they are at that instant,
 // and refuses the replacement when either fails.
 //
@@ -453,7 +456,7 @@ func (s *supervision) roundGroup(group []supervise.Claim, mask bool) []supervise
 // opening, which is the only clock it has.
 //
 // Every claim listed has answered by now (waitingClaims is empty), so the notice carries the
-// blocking claims with that mark on each (record.UpdateWaiting.Answered): the controller's
+// claims the round asks (askedClaims) with that mark on each (record.UpdateWaiting.Answered): the controller's
 // playbook publishes the update task to a claim that has not answered, and a publish starts a
 // turn, which takes the answer back (takeBackSignal). Telling it to do that here would undo
 // every answer the round is waiting on the daemon's own side to use.
@@ -467,7 +470,7 @@ func (s *supervision) tellLateRound(ctx context.Context, issue string, group []s
 	}
 	s.tellUpdateStalled(ctx, updateStall{
 		issue: issue, round: round, pod: pod, reasons: reasons, group: group,
-		waiting: waitingOf(round, blockingClaims(group)),
+		waiting: waitingOf(round, askedClaims(group)),
 		reason:  why,
 	})
 }
@@ -575,10 +578,11 @@ func (s *supervision) endRoundOverAGonePod(ctx context.Context, issue string, gr
 // decides whether this is the first ask or the next one, pod_update_retask_hours after the last.
 //
 // A claim that blocks the round has a session — an agent has run for it, and may hold unpushed
-// work. A claim with no session has never had a worker and blocks nothing. A failed or
-// operator-suspended claim blocks until the operator acts, which is this issue's own rule, and
-// the notice below is what tells the operator. A worker whose plugin has no ready_for_update op
-// is asked like any other and answers by ending the turn its task starts (supervise's
+// work. A claim with no session has never had a worker and blocks nothing. An operator-suspended
+// claim blocks until the operator acts, which is this issue's own rule, and the notice below is
+// what tells the operator. A failed claim runs no turn on the pod and is asked nothing, so the
+// round does not wait for it (askedClaims). A worker whose plugin has no ready_for_update op is
+// asked like any other and answers by ending the turn its task starts (supervise's
 // answerByTurnEnd), so no claim of the round is one the operator must act on for its contract.
 func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []supervise.Claim, pod, reasons string, now time.Time) {
 	round := supervise.PodRound(pod)
@@ -962,10 +966,10 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 	return blocking
 }
 
-// waitingClaims is whom the replacement waits for: every blocking claim that has not answered
-// this round and has not left it. It is deliberately the conservative of the round's two
-// questions, because what it decides is the deletion of a disk. A claim the round has not
-// reached yet — one whose recorded round is another, or none — has not answered it either, and
+// waitingClaims is whom the replacement waits for: every claim the round asks (askedClaims) that
+// has not answered this round and has not left it. It is deliberately the conservative of the
+// round's two questions, because what it decides is the deletion of a disk. A claim the round has
+// not reached yet — one whose recorded round is another, or none — has not answered it either, and
 // it holds the pod until it does: the round asks it at the next tick, and a replacement made
 // before that would end a turn of a worker the round asked nothing of.
 //
@@ -983,12 +987,32 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 // What a claim lost is the other question (lostClaims), and the two are never the same set.
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var waiting []supervise.Claim
-	for _, c := range blockingClaims(group) {
+	for _, c := range askedClaims(group) {
 		if !answered(c, round) && !c.LeftPodRound(round) {
 			waiting = append(waiting, c)
 		}
 	}
 	return waiting
+}
+
+// askedClaims is every blocking claim the round can ask: all but a failed one. A failed claim's
+// launches or prompts ran out, so it runs no process and no turn of it runs on the pod; the round
+// never reaches it (supervise's askForUpdate asks only a claim with a process, or a suspended one
+// it can revive), and nothing but an operator's or an architect's retry brings it back. Holding
+// the round for its answer held the pod, and every answered worker's next task with it, for an
+// answer it can never give: on the first contract-46 roll a planner that had failed at contract 41
+// recorded no round at all, and held its issue's round open behind the three workers that had
+// answered. A retry starts it again and it is asked like any other claim from the next tick. Work
+// it left on the pod's disk and did not push goes with the pod, since nothing verifies the branch
+// before the pod goes; the replacement's log line names each failed claim it did not wait for.
+func askedClaims(group []supervise.Claim) []supervise.Claim {
+	var asked []supervise.Claim
+	for _, c := range blockingClaims(group) {
+		if c.State != supervise.StateFailed {
+			asked = append(asked, c)
+		}
+	}
+	return asked
 }
 
 // memberOf is whether c is one of round's claims: the round it records is this one. A claim that
