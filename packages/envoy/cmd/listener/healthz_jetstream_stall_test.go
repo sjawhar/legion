@@ -158,11 +158,7 @@ func TestHealthzAnswersAJetStreamThatStoppedAnsweringInsideItsBudget(t *testing.
 			}
 			t.Cleanup(client.Close)
 			const consumer = "listener-healthz-jetstream-stall"
-			durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-			if err != nil {
-				t.Fatalf("bind the durable: %v", err)
-			}
-			t.Cleanup(func() { _ = durable.Unsubscribe() })
+			bindBoundDurable(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 			registry, err := store.Open(client.Conn, store.WithReplicas(1))
 			if err != nil {
 				t.Fatalf("open the interest registry: %v", err)

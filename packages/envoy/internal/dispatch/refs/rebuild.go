@@ -31,8 +31,8 @@ type Rebuild struct {
 	Edges int
 	// BlocksOwed is the number of documents marked owed a block index (document_block_versions).
 	BlocksOwed int
-	// ItemsOwed is the number of comments and messages marked owed a block index of their own
-	// blocks (comment_block_state and message_block_state owed_at).
+	// ItemsOwed is the number of comments, messages and asks marked owed a block index of their
+	// own blocks (comment_block_state, message_block_state and ask_block_state owed_at).
 	ItemsOwed int
 }
 
@@ -49,10 +49,11 @@ type Rebuild struct {
 // A document's blocks and the mentions they hold are cut from its tree too, so the rebuild marks
 // every document owed a block index (document_block_versions.version null), which the block-index
 // reconciliation (docs.Service.RunBlockIndexReconciliation) indexes. It marks every comment and
-// message, direct messages included, owed a block index of its own blocks too (owed_at, a missing
-// state row inserted owed), so the same reconciliation re-reads each item's blocks and the
-// mentions each holds with this build's parser and grammar. It leaves block_grammar_owed alone: it
-// has just re-read every comment, ask and issue message with this build's grammar itself.
+// message, direct messages included, and every ask owed a block index of its own blocks too
+// (owed_at, a missing state row inserted owed), so the same reconciliation re-reads each item's
+// blocks, an ask's parts included, and the mentions each holds with this build's parser and
+// grammar. It leaves block_grammar_owed alone: it has just re-read every comment, ask and issue
+// message with this build's grammar itself.
 func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
@@ -114,6 +115,9 @@ func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, erro
 		{"message", `
 			insert into message_block_state (message_id, owed_at) select id, now() from messages
 			on conflict (message_id) do update set owed_at = excluded.owed_at`},
+		{"ask", `
+			insert into ask_block_state (ask_id, owed_at) select id, now() from asks
+			on conflict (ask_id) do update set owed_at = excluded.owed_at`},
 	} {
 		owed, err := pool.Exec(ctx, mark.query)
 		if err != nil {
@@ -228,8 +232,9 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
 // rewrote appends no event, as rebuild-refs appends none. An item whose source is gone has its
 // edges deleted with its owed row. A comment or message has its blocks indexed too (IndexItem,
-// which takes the item's block state row after the source row), so the mentions its blocks hold
-// are read with the same grammar as its own.
+// which takes the item's block state row after the source row), and an ask its parts
+// (IndexAskParts, read from the same row sourceText locked), so the mentions its blocks hold are
+// read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -242,9 +247,22 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 	}
 	if found {
 		located := text.ExtractAt(body, serverURL)
-		if kind := ItemKind(item.Kind); kind == ItemComment || kind == ItemMessage {
+		switch kind := ItemKind(item.Kind); kind {
+		case ItemComment, ItemMessage:
 			if _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
 				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
+			}
+		case ItemAsk:
+			// An ask's parts are its question, its options and its answer, where sourceText reads
+			// the question alone, which is what the ask's own refs are written from.
+			ask, _, found, err := askForParts(ctx, tx, item.ID)
+			if err != nil {
+				return err
+			}
+			if found {
+				if _, err := IndexAskParts(ctx, tx, ask, serverURL, writtenAt); err != nil {
+					return fmt.Errorf("index the parts of ask %s: %w", item.ID, err)
+				}
 			}
 		}
 		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {

@@ -3,7 +3,7 @@ import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
-import { pictureNodeView } from "./picture-view";
+import { pictureNodeView, type WatchPicture } from "./picture-view";
 import {
   type AskBlockHost,
   applyAskBlockShell,
@@ -160,12 +160,14 @@ export const askBlockEditingPlugin = new Plugin({
  * reporting the live set of hosts (in document order) whenever it changes,
  * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
  * every `image` node (a picture whose source is a Dispatch reference draws from its version's
- * bytes route), while keeping the library's other node views, and `askBlockEditingPlugin`. Call
- * once per editor, right after it is created. */
+ * bytes route, a version-less one from its latest version's, which `watchPicture` reports), while
+ * keeping the library's other node views, and `askBlockEditingPlugin`. Call once per editor,
+ * right after it is created. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
-  onHostsChange: (hosts: readonly AskBlockHost[]) => void
+  onHostsChange: (hosts: readonly AskBlockHost[]) => void,
+  watchPicture: WatchPicture
 ): void {
   const registry = new Map<number, AskBlockHost>();
   const publish = () => {
@@ -189,7 +191,7 @@ export function installTypedBlocks(
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
-      image: pictureNodeView(view),
+      image: pictureNodeView(view, watchPicture),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });

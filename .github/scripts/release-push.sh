@@ -60,14 +60,20 @@
 # tag:       commit the version bump and create the release tag on that
 #            un-rebased commit, so the tag always describes exactly the source
 #            the artifacts were built and published from; pushes nothing
-#            (`push-tag` pushes). A pre-existing tag is reused only when it
-#            carries the same package version; any other collision fails
-#            loudly.
+#            (`push-tag` pushes). The bump is <package-dir>/package.json, whose
+#            version the workflow set, and bun.lock, whose workspace entry for
+#            <package-dir> takes the same version on its "version" line
+#            (lock_set_version, text tools only: the publish job runs no bun),
+#            so a fresh checkout's `bun install` has nothing to rewrite. A
+#            lockfile without exactly one such entry and line fails the
+#            command. A pre-existing tag is reused only when it carries the
+#            same package version; any other collision fails loudly.
 # tagged:    print the release tag an earlier attempt pushed for this checkout,
 #            or nothing: the newest <tag-prefix> tag on HEAD itself, or, given
 #            <package-dir>, on a child of HEAD that changes only
-#            <package-dir>/package.json, the bump commit `tag` makes (the tag
-#            sits on HEAD itself when the manifest already held the version and
+#            <package-dir>/package.json, bun.lock or both, the bump commit
+#            `tag` makes (the tag sits on HEAD itself when the manifest and
+#            the lockfile already held the version and
 #            `tag` had nothing to commit). Without <package-dir> only a tag on
 #            HEAD counts, as for a job that tags the commit it checked out. A
 #            re-run of a release job checks out the same commit, with every tag
@@ -98,10 +104,13 @@
 #            HEAD has one parent; HEAD is the one commit main does not have;
 #            HEAD's tree differs from its parent's — main's fetched tip, or an
 #            older main commit it is then rebased onto and checked against
-#            again — in <package-dir>/package.json alone; and that manifest is
-#            its parent's copy with .version set to <version> and nothing
-#            else, as JSON (sorted-JSON equality: key order, a BOM, duplicate
-#            keys and the blob's mode are not compared; the test `tagged`
+#            again — in <package-dir>/package.json, bun.lock or both and
+#            nothing else; that manifest is its parent's copy with .version
+#            set to <version> and nothing else, as JSON (sorted-JSON equality:
+#            key order, a BOM, duplicate keys and the blob's mode are not
+#            compared); and that lockfile is its parent's copy with the
+#            "version" line of its workspace entry for <package-dir> set to
+#            <version> and nothing else, byte for byte (the test `tagged`
 #            applies to a bump commit, plus its content). The content checks
 #            run before any push, rebase or superseded-version exit, so a
 #            doctored commit on an older main commit is refused, not rebased
@@ -109,11 +118,12 @@
 #            passes them, is rebased onto the tip, which replays the one bump
 #            over what landed since the checkout, and checked again there.
 #            Anything else — a second commit, a merge commit, a parentless
-#            commit, a second path, a manifest changed in more than its
-#            version — is refused, origin untouched: the only commit a run
-#            dispatched from a branch other than main can land is the exact
-#            version bump, which is what a run from main lands. A HEAD main
-#            already holds (the manifest already held the version, so `tag`
+#            commit, another path, a manifest changed in more than its
+#            version, a lockfile changed in more than that one line — is
+#            refused, origin untouched: the only commit a run dispatched from
+#            a branch other than main can land is the exact version bump,
+#            which is what a run from main lands. A HEAD main already holds
+#            (the manifest and the lockfile already held the version, so `tag`
 #            committed nothing) has nothing to push and exits 0. This runs
 #            last, after the tag and GitHub release exist: a lost push only
 #            delays the metadata bump on main, which the tag-anchored version
@@ -124,14 +134,18 @@
 #            A run checks out the merge commit that triggered it, and when the
 #            previous run's bump commit landed after that merge (bump commits
 #            are "[skip ci]" and never trigger a run of their own), both bumps
-#            rewrite the one "version" line of the same package.json from the
-#            same base and the rebase conflicts. One rule resolves it: when the
-#            only conflicted path is the released package's package.json, take
-#            main's copy of that file, set its .version to the version being
-#            released, continue the rebase, and push again. Any other
-#            conflicted path — or the manifest deleted on main — is a real
-#            divergence: the rebase is aborted and the step fails naming the
-#            paths. Exhausting the attempts fails the step too. Every failure
+#            rewrite the one "version" line of the same package.json and of
+#            the same bun.lock entry from the same base and the rebase
+#            conflicts. One rule resolves it: when the conflicted paths are
+#            the released package's package.json, bun.lock or both, take
+#            main's copy of each, set its version to the version being
+#            released (.version in the manifest, the entry's line in the
+#            lockfile), continue the rebase, and push again. Any other
+#            conflicted path — or the manifest or the lockfile deleted on main
+#            — is a real divergence: the rebase is aborted and the step fails
+#            naming the paths. Two packages' bumps change different manifests
+#            and different lockfile entries, which a rebase merges without a
+#            conflict. Exhausting the attempts fails the step too. Every failure
 #            here — a rejected push, an unreachable origin, a rebase that stops
 #            for any other reason — says, in the log and in the job summary,
 #            that the publish, tag and GitHub release already succeeded and
@@ -145,7 +159,7 @@
 #            package landed. It says so in a notice and exits 0, dropping the
 #            bump commit whole, which is right only because the content checks
 #            above, run before this exit, found that commit to change nothing
-#            but the manifest's version. A push that fast-forwards main is not
+#            but the version. A push that fast-forwards main is not
 #            checked against main's version: it can lower main's manifest only
 #            when main held a version above the newest tag, which only a hand
 #            edit makes, and the tags decide every next version anyway.
@@ -446,6 +460,50 @@ is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 # hex.
 is_commit_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 
+# The root lockfile. Its "workspaces" object holds an entry for each workspace
+# package, keyed by the package's directory, whose "version" line copies the
+# package's manifest; `bun install` rewrites a line that disagrees, so a version
+# bump sets it with the manifest (lock_set_version).
+lock=bun.lock
+
+# lock_set_version <package-dir> <version>: print the lockfile read on stdin
+# with the "version" line of its workspace entry for <package-dir> set to
+# <version>, every other byte as it was, a missing final newline included. The
+# entry is the line that is exactly `    "<package-dir>": {` inside the
+# top-level "workspaces" object, through its closing `    }` line, and its
+# version line the one line in it that is exactly `      "version":
+# "<anything>",` (a nested object's keys sit deeper). Both arguments reach awk
+# through its environment, which it reads literally, never through -v, which
+# would decode a backslash. A sentinel byte appended to the input marks its
+# end, so the last line is printed with a newline only when it had one. Text
+# tools only, never bun: a publish job holding credentials runs this. Exits 1,
+# its output not to be used, unless the lockfile holds exactly one such entry
+# with exactly one such line.
+lock_set_version() {
+  { cat; printf '\001'; } | LOCK_ENTRY="    \"$1\": {" LOCK_VERSION=$2 awk '
+    $0 == "  \"workspaces\": {" { workspaces = 1 }
+    workspaces && /^  },?$/ { workspaces = 0 }
+    workspaces && $0 == ENVIRON["LOCK_ENTRY"] { inside = 1; entries++ }
+    inside && /^    },?$/ { inside = 0 }
+    inside && /^      "version": "[^"]*",$/ { $0 = "      \"version\": \"" ENVIRON["LOCK_VERSION"] "\","; lines++ }
+    NR > 1 { print last }
+    { last = $0 }
+    END {
+      printf "%s", substr(last, 1, length(last) - 1)
+      exit !(entries == 1 && lines == 1)
+    }'
+}
+
+# is_bump_change <changed> <package-dir>: true when <changed>, `git diff
+# --name-only` of a commit against its parent, names <package-dir>'s manifest,
+# the lockfile or both, and nothing else: the paths a version bump touches. Git
+# lists the paths in byte order, as `LC_ALL=C sort` does.
+is_bump_change() {
+  local both
+  both=$(printf '%s\n' "$lock" "$2/package.json" | LC_ALL=C sort)
+  [ "$1" = "$2/package.json" ] || [ "$1" = "$lock" ] || [ "$1" = "$both" ]
+}
+
 # quote_all <value>...: the values, each %q-quoted, separated by spaces.
 quote_all() {
   local quoted
@@ -543,7 +601,7 @@ pushed_tag() {
     if [ "$commit" = "$head" ] || {
       [ -n "$package_dir" ] &&
         [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
-        [ "$(git diff --name-only "$head" "$commit")" = "$package_dir/package.json" ]
+        is_bump_change "$(git diff --name-only "$head" "$commit")" "$package_dir"
     }; then
       if ! is_plain_version "${candidate#"$prefix"}"; then
         printf -v shown '%q' "$candidate"
@@ -1057,12 +1115,22 @@ case "$command" in
     tag=${4:?tag}
     git config user.name "$bot_name"
     git config user.email "$bot_email"
-    git add "$package_dir/package.json"
+    # The workflow's "Set release version" step set the manifest's version; the
+    # lockfile's workspace entry takes the same version here, so the bump
+    # leaves nothing for a later `bun install` to rewrite.
+    current_version=$(jq -r .version "$package_dir/package.json")
+    is_plain_version "$current_version" ||
+      fail_error "$package_dir/package.json's version $(quote_all "$current_version") is not X.Y.Z, each field a number without leading zeros; refusing it"
+    if ! lock_set_version "$package_dir" "$current_version" < "$lock" > "$lock.tmp"; then
+      rm -f "$lock.tmp"
+      fail_error "$lock holds no workspace entry \"$package_dir\" with one \"version\" line, so the bump cannot set it to $current_version"
+    fi
+    mv "$lock.tmp" "$lock"
+    git add "$package_dir/package.json" "$lock"
     git diff --staged --quiet || git commit -m "$commit_message"
     git fetch --tags origin
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
       tagged_version=$(git show "$tag:$package_dir/package.json" | jq -r .version)
-      current_version=$(jq -r .version "$package_dir/package.json")
       if [ "$tagged_version" != "$current_version" ]; then
         echo "::error::tag $tag already exists with version $tagged_version, not $current_version"
         exit 1
@@ -1299,7 +1367,7 @@ case "$command" in
     version=${3:?released version}
     manifest="$package_dir/package.json"
     deploy_key_env fail_outstanding
-    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, onto main's tip: its parent's $manifest with .version set to $version and nothing else, as JSON; a run from a branch other than main lands nothing but that exact bump on main."
+    only_bump="push-main pushes the one version-bump commit, which changes only $manifest and $lock, onto main's tip: its parent's $manifest with .version set to $version and nothing else, as JSON, and its parent's $lock with the version line of the workspace entry \"$package_dir\" set to $version and nothing else, byte for byte; a run from a branch other than main lands nothing but that exact bump on main."
     for attempt in 1 2 3 4 5; do
       git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD) || fail_outstanding "Reading main's fetched tip failed."
@@ -1329,13 +1397,17 @@ case "$command" in
       fi
       # The bump's content, against its one parent — main's tip, or an older
       # main commit it is rebased onto below and checked against again — before
-      # any push, rebase or superseded-version exit sees it. The paths and the
-      # manifest are compared against the parent, the manifest as JSON (jq -S),
-      # so the parent's copy with .version set to the released version must be
-      # HEAD's copy.
-      changed=$(git diff --name-only "$parent" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
-      if [ "$changed" != "$manifest" ]; then
-        paths=${changed//$'\n'/ }
+      # any push, rebase or superseded-version exit sees it. The paths, the
+      # manifest and the lockfile are compared against the parent: the
+      # manifest as JSON (jq -S), so the parent's copy with .version set to the
+      # released version must be HEAD's copy, and the lockfile byte for byte
+      # (its blob), so the parent's copy with its workspace entry's version line
+      # set (lock_set_version) must be HEAD's copy. A commit that leaves one of
+      # the two as its parent's passes only when the parent's copy already held
+      # the version.
+      bump_paths=$(git diff --name-only "$parent" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
+      if ! is_bump_change "$bump_paths" "$package_dir"; then
+        paths=${bump_paths//$'\n'/ }
         fail_outstanding "HEAD carries 1 commit main does not — $carried — which changes ${paths:-nothing}, and $only_bump"
       fi
       parent_copy=$(git show "$parent:$manifest" 2>/dev/null) || fail_outstanding "$manifest is missing at HEAD's parent $parent, so HEAD adds it rather than bumping it. $only_bump"
@@ -1343,6 +1415,12 @@ case "$command" in
       actual=$(git show "HEAD:$manifest" | jq -S .) || fail_outstanding "HEAD's $manifest is missing or not JSON."
       if [ "$expected" != "$actual" ]; then
         fail_outstanding "HEAD's $manifest differs from its parent's in more than .version = $version. $only_bump"
+      fi
+      expected=$(git show "$parent:$lock" 2>/dev/null | lock_set_version "$package_dir" "$version" | git hash-object --stdin) ||
+        fail_outstanding "$lock at HEAD's parent $parent is missing or holds no workspace entry \"$package_dir\" with one \"version\" line. $only_bump"
+      actual=$(git rev-parse -q --verify "HEAD:$lock") || fail_outstanding "$lock is missing at HEAD. $only_bump"
+      if [ "$expected" != "$actual" ]; then
+        fail_outstanding "HEAD's $lock differs from its parent's in more than the version line of the workspace entry \"$package_dir\" = $version. $only_bump"
       fi
       if [ "$parent" = "$upstream" ]; then
         # The bump sits on main's tip, checked: push it. HEAD:refs/heads/main
@@ -1359,18 +1437,27 @@ case "$command" in
       fi
       # HEAD's parent is an older main commit (main moved since the checkout,
       # or the push lost the race): the bump is rebased onto main's tip and the
-      # next attempt checks it there. Main's manifest at or past this version
-      # needs nothing pushed (the header's push-main paragraph). A manifest
-      # main deleted, or one without a plain version, is left to the rebase
-      # below.
+      # next attempt checks it there. Main's manifest past this version needs
+      # nothing pushed, nor does main's manifest at this version when main's
+      # lockfile entry holds it too (the header's push-main paragraph); a
+      # lockfile still behind is left to the rebase, so a bump that corrects
+      # the lockfile alone is not dropped when main moves. A manifest main
+      # deleted, or one without a plain version, is left to the rebase below.
       main_version=$(git show "$upstream:$manifest" 2>/dev/null | jq -r .version 2>/dev/null) || main_version=""
+      reason=""
       if is_plain_version "$main_version" &&
         [ "$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -n 1)" = "$main_version" ]; then
-        if [ "$main_version" = "$version" ]; then
-          reason="main's $manifest already holds v$version, so this version bump has nothing to add."
-        else
+        if [ "$main_version" != "$version" ]; then
           reason="main's $manifest holds v$main_version, a later release than v$version, so this version bump is superseded."
+        else
+          main_lock=$(git rev-parse -q --verify "$upstream:$lock") || main_lock=""
+          set_lock=$(git show "$upstream:$lock" 2>/dev/null | lock_set_version "$package_dir" "$version" | git hash-object --stdin) || set_lock=""
+          if [ -n "$main_lock" ] && [ "$main_lock" = "$set_lock" ]; then
+            reason="main's $manifest and $lock already hold v$version, so this version bump has nothing to add."
+          fi
         fi
+      fi
+      if [ -n "$reason" ]; then
         echo "::notice title=Version bump not pushed::$reason"
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
           printf '**Version bump for %s v%s not pushed.** %s\n' "$package_dir" "$version" "$reason" >> "$GITHUB_STEP_SUMMARY"
@@ -1384,28 +1471,39 @@ case "$command" in
         git rebase --abort 2>/dev/null || true
         fail_outstanding "Rebasing the version-bump commit onto main ($upstream) stopped and its conflicting paths could not be read; the rebase was aborted."
       }
-      # Resolvable only when exactly the manifest conflicted and main still has
-      # it: a modify/delete conflict lists that same one path.
-      if [ "$conflicted" != "$manifest" ] || ! git cat-file -e "HEAD:$manifest" 2>/dev/null; then
+      # Resolvable only when the conflict is confined to the manifest and the
+      # lockfile and main still has both: a modify/delete conflict lists the
+      # deleted path too.
+      if ! is_bump_change "$conflicted" "$package_dir" ||
+        ! git cat-file -e "HEAD:$manifest" 2>/dev/null || ! git cat-file -e "HEAD:$lock" 2>/dev/null; then
         git rebase --abort 2>/dev/null || true
         if [ -z "$conflicted" ]; then
           fail_outstanding "Rebasing the version-bump commit onto main ($upstream) failed without conflicting paths."
         fi
-        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: ${conflicted//$'\n'/ }. Only a conflict confined to $manifest, with the file still present on main, is resolved automatically."
+        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: ${conflicted//$'\n'/ }. Only a conflict confined to $manifest and $lock, with both files still present on main, is resolved automatically."
       fi
-      echo "Resolving the $manifest version-line conflict to v$version"
+      echo "Resolving the version-line conflict in ${conflicted//$'\n'/ } to v$version"
       # During a rebase stop HEAD is main's side (plus any commit already
-      # replayed), so this keeps every other change main made to the file. The
-      # rewrite lands through a temp file so a failed pipe never leaves a
-      # truncated manifest. The merge backend opens an editor on --continue;
-      # give it none.
-      if ! { git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest.tmp" \
-          && mv "$manifest.tmp" "$manifest" \
-          && git add "$manifest" \
-          && GIT_EDITOR=true git rebase --continue; }; then
-        rm -f "$manifest.tmp"
+      # replayed), so this keeps every other change main made to each file.
+      # Each rewrite lands through a temp file so a failed pipe never leaves a
+      # truncated file. The merge backend opens an editor on --continue; give
+      # it none.
+      resolved=true
+      while IFS= read -r path; do
+        if [ "$path" = "$lock" ]; then
+          git show "HEAD:$lock" | lock_set_version "$package_dir" "$version" > "$lock.tmp" || resolved=false
+        else
+          git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest.tmp" || resolved=false
+        fi
+        if [ "$resolved" != true ] || ! { mv "$path.tmp" "$path" && git add "$path"; }; then
+          resolved=false
+          break
+        fi
+      done <<<"$conflicted"
+      if [ "$resolved" != true ] || ! GIT_EDITOR=true git rebase --continue; then
+        rm -f "$manifest.tmp" "$lock.tmp"
         git rebase --abort 2>/dev/null || true
-        fail_outstanding "Resolving the $manifest version-line conflict onto main ($upstream) failed; the rebase was aborted."
+        fail_outstanding "Resolving the version-line conflict in ${conflicted//$'\n'/ } onto main ($upstream) failed; the rebase was aborted."
       fi
     done
     # Only main moving under every attempt gets here: each rebase placed the

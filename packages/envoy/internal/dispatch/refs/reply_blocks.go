@@ -13,19 +13,22 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// IndexItemIfOwed indexes comment or message itemID in the caller's transaction when its blocks
-// are owed: its state row is missing (an older build wrote it before the state existed), owed
-// (owed_at set by an older build's write, or by rebuild-refs), or indexed from another body than
-// the stored one. It indexes as ReindexOwedItem does: the blocks and the mentions each holds, and
-// for a comment or an issue message its own refs, at the time its body was written; a direct
-// message writes no mention. A reply that names a block of the item calls it first, so the block
-// it names is one of the item's current body; the block-index reconciliation drains owed items
-// through it (IndexOwedItemBlocks). The caller holds the item's owner row (the reconciliation
-// holds none) and the item row; IndexItem takes the state row after them. It reports whether the
-// item was owed and so indexed.
+// IndexItemIfOwed indexes comment, message or ask itemID in the caller's transaction when its
+// blocks are owed: its state row is missing (an older build wrote it before the state existed),
+// owed (owed_at set by an older build's write, or by rebuild-refs), or indexed from another text
+// than the stored one. It indexes as ReindexOwedItem does: the blocks and the mentions each
+// holds, and for a comment or an issue message its own refs, at the time its body was written; a
+// direct message writes no mention, and an ask's own refs are its question's, which the grammar
+// reconciliation owns (ReindexOwedItem). A reply that names a block of the item calls it first,
+// so the block it names is one the item holds now; the block-index reconciliation drains owed
+// items through it (IndexOwedItemBlocks). The caller holds the item's owner row (the
+// reconciliation holds none) and the item row; the index takes the state row after them. It
+// reports whether the item was owed and so indexed.
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
 	var query string
 	switch kind {
+	case ItemAsk:
+		return indexAskIfOwed(ctx, tx, itemID, serverURL)
 	case ItemComment:
 		query = `
 			select c.body, coalesce(c.edited_at, c.created_at), true,
@@ -67,9 +70,9 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	return true, nil
 }
 
-// CurrentItemBlock is block blockID of comment or message itemID while a current revision of the
-// item holds it: its node id and stored excerpt. found is false when the item holds no such block
-// now, a removed one included.
+// CurrentItemBlock is block blockID of comment, message or ask itemID while a current revision of
+// the item holds it: its node id and stored excerpt. found is false when the item holds no such
+// block now, a removed one included.
 func CurrentItemBlock(ctx context.Context, q Queryer, kind ItemKind, itemID, blockID string) (nodeID, excerpt string, found bool, err error) {
 	tables, err := kind.tables()
 	if err != nil {
@@ -88,39 +91,38 @@ func CurrentItemBlock(ctx context.Context, q Queryer, kind ItemKind, itemID, blo
 	return nodeID, excerpt, true, nil
 }
 
-// ReplyBlocks reads the block each of the replies replyIDs (comments or messages, by kind) names
-// in replies_to_block, keyed by reply id, in one query; a reply that names no block has no entry.
-// A block belongs to an item in its reply's own thread, so its reference is addressed under the
-// reply's owner (as itemBlockParent addresses the reply's parent); a direct message's block has
-// none. Text is the block's stored excerpt, which a removal keeps, so a removed block reads the
-// last text it held.
+// ReplyBlocks reads the block each of the replies replyIDs names in replies_to_block, keyed by
+// reply id, in one query; a reply that names no block has no entry. kind is the kind of item the
+// block belongs to, which names the table its blocks are in and the column keying them
+// (itemTables); the replies are read from the table of the kind that answers such a block
+// (repliesFrom): a comment's and an ask's replies are comments, a message's are messages. A
+// block belongs to an item in its reply's own thread, so its reference is addressed under the
+// reply's owner (as itemBlockParent addresses the reply's parent); a message is owned by its
+// issue alone, so a message reply needs neither project nor slug, and a direct message's block
+// has no reference. Text is the block's stored excerpt, which a removal keeps, so a removed
+// block reads the last text it held.
 func ReplyBlocks(ctx context.Context, q Queryer, kind ItemKind, replyIDs []string) (map[string]*model.ReplyBlock, error) {
 	blocks := make(map[string]*model.ReplyBlock)
 	if len(replyIDs) == 0 {
 		return blocks, nil
 	}
-	var query string
-	switch kind {
-	case ItemComment:
-		query = `
-			select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.comment_id::text,
-			       r.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, '')
-			from comments r
-			join comment_blocks b on b.node_id = r.replies_to_block
-			left join issues i on i.key = r.issue_key
-			left join artifacts a on a.id = r.artifact_id
-			where r.id = any($1::uuid[]) and r.replies_to_block is not null`
-	case ItemMessage:
-		// A message has an address only under its issue, so it needs neither project nor slug.
-		query = `
-			select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.message_id::text,
-			       r.issue_key, '', ''
-			from messages r
-			join message_blocks b on b.node_id = r.replies_to_block
-			where r.id = any($1::uuid[]) and r.replies_to_block is not null`
-	default:
+	tables, err := kind.tables()
+	if err != nil {
 		return nil, fmt.Errorf("read reply blocks of %s: not an item kind", kind)
 	}
+	replies, _ := repliesFrom(kind).tables()
+	owner, joins := `coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, '')`, `
+			left join issues i on i.key = r.issue_key
+			left join artifacts a on a.id = r.artifact_id`
+	if repliesFrom(kind) == ItemMessage {
+		owner, joins = `'', ''`, ``
+	}
+	query := `
+		select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.` + tables.item + `::text,
+		       r.issue_key, ` + owner + `
+		from ` + replies.items + ` r
+		join ` + tables.blocks + ` b on b.node_id = r.replies_to_block` + joins + `
+		where r.id = any($1::uuid[]) and r.replies_to_block is not null`
 	rows, err := q.Query(ctx, query, replyIDs)
 	if err != nil {
 		return nil, fmt.Errorf("read the blocks %s replies name: %w", kind, err)

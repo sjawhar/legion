@@ -5046,11 +5046,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 // watcher's error as a transient KV failure and /healthz answers 200 degraded over a frozen cache.
 func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	client := setupTestNATS(t)
-	sub, err := startListenerSubscription(client, "listener-healthz-interest", func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	bindBoundDurable(t, client, "listener-healthz-interest", func(msg *natsgo.Msg) { _ = msg.Ack() })
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -5097,11 +5093,7 @@ func healthzWithLiveLane(t *testing.T, consumer string, lane bool) (*bus.Client,
 	t.Helper()
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
-	durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = durable.Unsubscribe() })
+	bindBoundDurable(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)

@@ -116,11 +116,10 @@ const heardEnvelope = "envelope-heard-1"
 // live sessions: s-mention, every send to which it refuses, and s-heard, every send to which it
 // accepts under heardEnvelope. s-heard holds the role lead.
 type rig struct {
-	handler   http.Handler
-	database  *store.Store
-	broker    *events.Broker
-	documents docs.API
-	sent      *recorder
+	handler  http.Handler
+	database *store.Store
+	broker   *events.Broker
+	sent     *recorder
 }
 
 func newRig(t *testing.T) *rig {
@@ -187,7 +186,7 @@ func newRig(t *testing.T) *rig {
 	// keyed handlers, detached deliveries, sockets and relay it started have ended, before the
 	// database closes under them.
 	t.Cleanup(api.Register(mux, t.Context(), deps).Wait)
-	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
+	return &rig{handler: mux, database: database, broker: broker, sent: &recorder{topics: map[string][]string{}}}
 }
 
 // call sends one request: as the person login names when it is not empty, else as the session actor
@@ -246,7 +245,7 @@ func (r *rig) publishAll(t *testing.T) {
 	go func() {
 		defer close(stopped)
 		outbox.New(outbox.Deps{
-			Store: r.database, Publisher: r.sent, Broker: r.broker, Listen: r.database.Pool.Listener, Docs: r.documents,
+			Store: r.database, Publisher: r.sent, Broker: r.broker, Listen: r.database.Pool.Listener,
 			RoleClaims: heldRoles{}, Sessions: heldRoles{},
 		}).Run(ctx)
 	}()

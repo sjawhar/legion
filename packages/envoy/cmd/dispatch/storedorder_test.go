@@ -13,7 +13,8 @@ import (
 )
 
 // envoy-dispatch stored-order exits 2 on a usage error, 0 when every document's stored history
-// replays and 1 once one does not, and names a mismatch without the document's text.
+// replays and 1 once one does not, names a mismatch without the document's text, and counts a
+// named document whose versions all record updates below its compaction base as unchecked.
 func TestStoredOrderSubcommandExitCodes(t *testing.T) {
 	ctx := context.Background()
 	run := func(env map[string]string, args ...string) (int, string) {
@@ -95,5 +96,47 @@ func TestStoredOrderSubcommandExitCodes(t *testing.T) {
 	code, out := run(env, "--since", "2000-01-01T00:00:00Z")
 	if code != 1 || !strings.Contains(out, "version number=3 doc_update_version=1") || strings.Contains(out, text) {
 		t.Fatalf("stored-order on a document that does not replay: exit %d, want 1 naming version 3 without its text:\n%s", code, out)
+	}
+
+	// A document a compaction left with its base above every version it holds: update 3 after the
+	// base is checked, no version is compared with the fold, and the run that names it fails.
+	var compactedID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+		values ('DOC-1', 'DOC', 'compacted', 'compacted.md', 'doc', '{"kind":"user","id":"alice"}') returning id::text
+	`).Scan(&compactedID); err != nil {
+		t.Fatalf("seed the compacted document: %v", err)
+	}
+	folded := crdt.New()
+	foldedFragment := folded.GetXmlFragment("prosemirror")
+	folded.Transact(func(txn *crdt.Transaction) { written = pmdoc.Update(txn, foldedFragment, tree) })
+	if written != nil {
+		t.Fatalf("write the compacted document: %v", written)
+	}
+	// Update 2 is the row a compaction folded the history into, the document's base.
+	foldedBase := crdt.EncodeStateAsUpdateV1(folded, nil)
+	after, err := pmdoc.Parse("Before, edited.\n")
+	if err != nil {
+		t.Fatalf("parse the compacted document's edit: %v", err)
+	}
+	var edit []byte
+	unsubscribe := folded.OnUpdate(func(update []byte, _ any) { edit = append([]byte(nil), update...) })
+	folded.Transact(func(txn *crdt.Transaction) { written = pmdoc.Update(txn, foldedFragment, after) })
+	unsubscribe()
+	if written != nil || edit == nil {
+		t.Fatalf("edit the compacted document: %v", written)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 2, $2, true), ($1, 3, $3, true)
+	`, compactedID, foldedBase, edit); err != nil {
+		t.Fatalf("seed the compacted document's updates: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, doc_update_version) values ($1, 1, 'Before.', 1)
+	`, compactedID); err != nil {
+		t.Fatalf("seed the compacted document's version: %v", err)
+	}
+	if code, out := run(env, "--artifact", compactedID); code != 1 || !strings.Contains(out, "versions_compacted=1") || !strings.Contains(out, "unchecked=1") {
+		t.Fatalf("stored-order on a document whose only version is below its compaction base: exit %d, want 1 and the document unchecked:\n%s", code, out)
 	}
 }
