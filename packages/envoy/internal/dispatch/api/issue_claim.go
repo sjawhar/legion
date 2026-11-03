@@ -420,7 +420,7 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+	if err := tx.QueryRow(ctx, `select key from issues where key = $1`, key).Scan(new(string)); err != nil {
 		return claimApplied{}, err
 	}
 	before, err := s.loadIssue(ctx, tx, key)

@@ -3395,6 +3395,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         complete: untilAborted,
       });
       for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
+      console.log("DIAG", JSON.stringify(halted.entries, null, 1).slice(0, 4000));
       expect(halted.entries.map((e) => e.outcome)).toEqual([
         "timeout",
         "timeout",
