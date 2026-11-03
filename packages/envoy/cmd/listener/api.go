@@ -1554,9 +1554,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		// The session's consumer, when the registration asks for one, is created or has its filter
-		// set to the topics just stored before the registration answers, so a message published on
-		// a newly followed stored topic after the answer is the consumer's to deliver.
-		delivery := d.consumers.register(r.Context(), body, item.Topics)
+		// set to the stored topics, this registration's included, before the registration answers,
+		// so a message published on a newly followed stored topic after the answer is the
+		// consumer's to deliver.
+		delivery := d.consumers.register(r.Context(), body, d.registry)
 		if body.SelfSubscribed || delivery.relayed() {
 			epochChanged := false
 			if delivery.relayed() {
@@ -1570,7 +1571,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			}
 			if delivery.relayed() {
 				// The relay serves every registration answered consumer, so there is one to tell.
-				d.consumers.relay.registered(body.SessionID, epochChanged)
+				// The mark tells it which of its runs restarted after this registration: those need
+				// no restart for its epoch (sessionRelays.apply).
+				d.consumers.relay.registered(body.SessionID, epochChanged, delivery.heard)
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)

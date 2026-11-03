@@ -113,6 +113,14 @@ const (
 	relayRestart
 )
 
+// relayNotice is what the relay loop has been told about a session since it last took its events:
+// their flags, and heard, the highest mark (sessionDelivery.mark) of the registrations with a new
+// epoch among them.
+type relayNotice struct {
+	event relayEvent
+	heard uint64
+}
+
 // relayOutcome is how one pull of a session's consumer ended (sessionRelays.relayNATS).
 type relayOutcome uint8
 
@@ -168,7 +176,7 @@ type sessionRelays struct {
 
 	// eventsMu guards events and ownershipChanged, which the loop takes each time wake fires.
 	eventsMu         sync.Mutex
-	events           map[string]relayEvent
+	events           map[string]relayNotice
 	ownershipChanged bool
 	wake             chan struct{}
 
@@ -176,9 +184,10 @@ type sessionRelays struct {
 	relays map[string]*relayRun
 	// listed holds, by session id, the consumers listed for the relays that gaining the durable
 	// binding starts together (listConsumers), until each relay's start takes its own; nil
-	// otherwise. listRefusedLogged is set once a list refused for want of the grant is logged.
-	// Only the loop reads or writes them.
+	// otherwise. listedAt is the mark taken before that list. listRefusedLogged is set once a list
+	// refused for want of the grant is logged. Only the loop reads or writes them.
 	listed            map[string]*jetstream.ConsumerInfo
+	listedAt          uint64
 	listRefusedLogged bool
 
 	// restarts holds a token for each relay restarting its consumer, relayRestartLimit at most.
@@ -198,9 +207,10 @@ type relayRun struct {
 	cancel    context.CancelFunc
 	// done is closed once the run's goroutine has returned.
 	done chan struct{}
-	// restarted is set once the run has restarted the consumer at its ack floor, so a new epoch
-	// heard after that needs a restart of its own, and one heard before it does not.
-	restarted atomic.Bool
+	// restartedAt is the mark (sessionDelivery.mark) the run's last successful restart at the ack
+	// floor took before it read the session's topics and consumer, 0 before the first one
+	// (relayRun.restartedBefore).
+	restartedAt atomic.Uint64
 	// resume carries, at most one at a time, the registrations heard for the session: a paused run
 	// takes one instead of waiting its backoff out (sessionRelays.apply, relayRun.waitPause).
 	resume chan struct{}
@@ -211,21 +221,64 @@ type relayRun struct {
 	// listed is the session's consumer as the burst that started the run listed it
 	// (sessionRelays.listed), which its first restart keeps without a call when it can
 	// (bus.SessionConsumers.KeepListed); nil for a run started alone, and after that first restart.
-	listed *jetstream.ConsumerInfo
+	// listedAt is the mark taken before that list.
+	listed   *jetstream.ConsumerInfo
+	listedAt uint64
 	// outstanding holds the run's frames awaiting done or nak, by token; unanswered holds, in the
 	// order they were sent, its frames the session may not have answered yet. Both under
 	// sessionRelays.framesMu.
 	outstanding map[string]*relayFrame
 	unanswered  []*relayFrame
+	// exitMu orders the run's return against the loop's wakes. exiting is set under it once the
+	// run returns, and a wake the loop sends after that is refused (relayRun.wake), so the loop starts
+	// a run in its place; a wake sent before it is taken by the exit (relayRun.exit), which asks the
+	// loop for that run. A registration heard while the run was returning is never lost.
+	exitMu  sync.Mutex
+	exiting bool
 }
 
-// wake has a paused run restart at once: the session registered. A wake sent while the run is not
-// paused is dropped by the next pause, which names a registration heard before it.
-func (r *relayRun) wake() {
+// wake has a paused run, or one waiting to retry, restart at once: the session registered. A wake
+// sent while the run relays is dropped by its next pause, which names a registration heard before
+// it. It reports false, sending nothing, once the run is returning: the caller then starts a run in
+// its place.
+func (r *relayRun) wake() bool {
+	r.exitMu.Lock()
+	defer r.exitMu.Unlock()
+	if r.exiting {
+		return false
+	}
 	select {
 	case r.resume <- struct{}{}:
 	default:
 	}
+	return true
+}
+
+// exit marks the run as returning, and reports whether a wake was waiting for it: a registration
+// the loop heard since the run's last pause began, for which no run would start otherwise.
+func (r *relayRun) exit() bool {
+	r.exitMu.Lock()
+	defer r.exitMu.Unlock()
+	r.exiting = true
+	select {
+	case <-r.resume:
+		return true
+	default:
+		return false
+	}
+}
+
+// restartedBefore reports whether the run's last restart at the ack floor took its mark before
+// heard, a registration's (sessionDelivery.mark), so the registration's new epoch restarts it: that
+// restart may have read the session's topics and consumer, and the run sent frames, before the
+// plugin subscribed the connection the registration names. A run that has not restarted yet reads
+// both after, and so does one whose restart took its mark after heard, which every run that
+// registration's own entry write started does: the loop can hear the registration only after such
+// a run has restarted and sent frames, and a second restart would send the session every unacked
+// message again and forget the frames it is answering.
+func (r *relayRun) restartedBefore(heard uint64) bool {
+	at := r.restartedAt.Load()
+	return at != 0 && at < heard
 }
 
 // waitPause waits out a paused run's backoff, d, the session's next registration, or the end of the
@@ -235,6 +288,21 @@ func (r *relayRun) waitPause(ctx context.Context, d time.Duration) bool {
 	case <-r.resume:
 	default:
 	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-r.resume:
+	case <-timer.C:
+	}
+	return true
+}
+
+// waitRetry waits out a run's retry backoff after a failed call or pull, d, a wake, or the end of
+// the run, and reports whether the run goes on. Unlike a pause it takes a wake sent before it began:
+// a registration heard while the failed call or pull ran restarts the run at once.
+func (r *relayRun) waitRetry(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
@@ -280,7 +348,7 @@ func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerCo
 		pauseFirst:  relayPauseFirst,
 		pauseMax:    relayPauseMax,
 		loopDone:    make(chan struct{}),
-		events:      map[string]relayEvent{},
+		events:      map[string]relayNotice{},
 		wake:        make(chan struct{}, 1),
 		relays:      map[string]*relayRun{},
 		restarts:    make(chan struct{}, relayRestartLimit),
@@ -311,29 +379,34 @@ func (m *sessionRelays) setOwned(owned bool) {
 }
 
 // registered implements sessionRelay: the session registered, so a relay that paused resumes and a
-// new epoch restarts it at the ack floor.
-func (m *sessionRelays) registered(sessionID string, epochChanged bool) {
-	event := relayResume
+// new epoch restarts it at the ack floor, unless it restarted after heard (relayRun.restartedBefore).
+func (m *sessionRelays) registered(sessionID string, epochChanged bool, heard uint64) {
 	if epochChanged {
-		event |= relayRestart
+		m.enqueue(sessionID, relayResume|relayRestart, heard)
+		return
 	}
-	m.enqueue(sessionID, event)
+	m.enqueue(sessionID, relayResume, 0)
 }
 
 // onChange hears every change to a session's cached entry.
 func (m *sessionRelays) onChange(sessionID string) {
 	if m.owned.Load() {
-		m.enqueue(sessionID, relayCheck)
+		m.enqueue(sessionID, relayCheck, 0)
 	}
 }
 
-func (m *sessionRelays) enqueue(sessionID string, event relayEvent) {
+// enqueue tells the loop event about sessionID, with heard, the mark of a registration with a new
+// epoch, or 0. The flags merge with those the loop has not taken yet, and the highest mark stays.
+func (m *sessionRelays) enqueue(sessionID string, event relayEvent, heard uint64) {
 	m.eventsMu.Lock()
 	if m.events == nil {
 		m.eventsMu.Unlock()
 		return
 	}
-	m.events[sessionID] |= event
+	notice := m.events[sessionID]
+	notice.event |= event
+	notice.heard = max(notice.heard, heard)
+	m.events[sessionID] = notice
 	m.eventsMu.Unlock()
 	m.signal()
 }
@@ -392,7 +465,7 @@ func (m *sessionRelays) loop() {
 			m.eventsMu.Unlock()
 			continue
 		}
-		m.events = map[string]relayEvent{}
+		m.events = map[string]relayNotice{}
 		m.eventsMu.Unlock()
 		if ownershipChanged {
 			if !m.owned.Load() {
@@ -407,23 +480,26 @@ func (m *sessionRelays) loop() {
 			// nothing (wanted).
 			for _, entry := range entries {
 				if _, ok := events[entry.SessionID]; !ok && (entry.Delivery == session.DeliveryConsumer || m.relays[entry.SessionID] != nil) {
-					events[entry.SessionID] = relayCheck
+					events[entry.SessionID] = relayNotice{}
 				}
 			}
+			m.listedAt = m.delivery.mark()
 			m.listed = m.listConsumers()
 		}
-		for sessionID, event := range events {
-			m.apply(sessionID, event)
+		for sessionID, notice := range events {
+			m.apply(sessionID, notice)
 		}
 		m.listed = nil
 	}
 }
 
-// apply makes sessionID's relay match its entry and event: started when the session is this
+// apply makes sessionID's relay match its entry and notice: started when the session is this
 // listener's to relay, stopped when it is not, started again when it registered and the run
-// ended, restarted at the ack floor on a new epoch, and, for a run waiting out a pause, woken by
-// the registration so it probes the session at once.
-func (m *sessionRelays) apply(sessionID string, event relayEvent) {
+// ended or is returning on its own (relayRun.wake), restarted at the ack floor on a new epoch
+// registered after the run's last restart (relayRun.restartedBefore), and, for a run waiting out a
+// pause or a retry, woken by the registration so it restarts at once.
+func (m *sessionRelays) apply(sessionID string, notice relayNotice) {
+	event := notice.event
 	run := m.relays[sessionID]
 	if !m.wanted(sessionID) {
 		if run != nil {
@@ -439,11 +515,14 @@ func (m *sessionRelays) apply(sessionID string, event relayEvent) {
 		if event&relayResume != 0 {
 			m.start(sessionID, run.done)
 		}
-	case event&relayRestart != 0 && run.restarted.Load():
+	case event&relayRestart != 0 && run.restartedBefore(notice.heard):
 		run.cancel()
 		m.start(sessionID, run.done)
 	case event&relayResume != 0:
-		run.wake()
+		if !run.wake() {
+			// The run is returning on its own: a run in its place takes the registration.
+			m.start(sessionID, run.done)
+		}
 	}
 }
 
@@ -495,7 +574,7 @@ func (m *sessionRelays) listConsumers() map[string]*jetstream.ConsumerInfo {
 // started by the burst of gaining the durable binding takes the session's listed consumer.
 func (m *sessionRelays) start(sessionID string, previous <-chan struct{}) {
 	ctx, cancel := context.WithCancel(m.ctx)
-	run := &relayRun{sessionID: sessionID, cancel: cancel, done: make(chan struct{}), resume: make(chan struct{}, 1), listed: m.listed[sessionID]}
+	run := &relayRun{sessionID: sessionID, cancel: cancel, done: make(chan struct{}), resume: make(chan struct{}, 1), listed: m.listed[sessionID], listedAt: m.listedAt}
 	delete(m.listed, sessionID)
 	m.relays[sessionID] = run
 	m.runs.Go(func() {
@@ -506,13 +585,17 @@ func (m *sessionRelays) start(sessionID string, previous <-chan struct{}) {
 			<-previous
 		}
 		m.relay(ctx, run)
+		if run.exit() && ctx.Err() == nil {
+			// The loop heard a registration while the run returned on its own.
+			m.enqueue(sessionID, relayResume, 0)
+		}
 	})
 }
 
 // relay runs one session's relay until it is stopped, restarting at the ack floor after a failed
 // call or pull, with a wait that doubles from relayRetryFirst to relayRetryMax, and after a pause
-// (relayPaused), with a wait that doubles from pauseFirst to pauseMax, cut short by the session's
-// next registration. Both only while the session is still this listener's.
+// (relayPaused), with a wait that doubles from pauseFirst to pauseMax, both cut short by the
+// session's next registration. Both only while the session is still this listener's.
 //
 // The pause is logged once an episode: the line is written for the first pause since the session
 // last answered a frame, not for each probe that found it silent again.
@@ -540,7 +623,7 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 			}
 			pause = min(pause*2, m.pauseMax)
 		default:
-			if waitUnlessDone(ctx, retry) != nil {
+			if !run.waitRetry(ctx, retry) {
 				return
 			}
 			retry = min(retry*2, relayRetryMax)
@@ -562,26 +645,31 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // restart loses the session's position. Only a consumer missing with no start pending (never
 // created, or removed after its inactive threshold) pauses the relay until the next registration.
 //
+// The restart reads the session's stored topics under the session's lock, as a registration and
+// an unsubscribe read them before they write the filter, so it never writes a filter read before
+// one of them wrote a newer one. It takes its mark (sessionDelivery.mark) first, under the lock,
+// and records it once it succeeds (relayRun.restartedAt).
+//
 // The first restart of a run the burst of gaining the durable binding started has the session's
 // consumer as that burst listed it (relayRun.listed): when the restart would keep it unchanged
-// (bus.SessionConsumers.KeepListed), the relay takes no turn and sends no call before it pulls.
+// (bus.SessionConsumers.KeepListed), the relay takes no turn and sends no call before it pulls,
+// and its mark is the one taken before that list (relayRun.listedAt).
 func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	sessionID := run.sessionID
-	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
-	if err != nil {
-		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		return bus.SessionConsumerStart{}, nil, relayRetry
-	}
-	filter := sessionConsumerFilter(sessionID, topics)
 	if listed := run.listed; listed != nil {
 		run.listed = nil
 		unlock := m.delivery.locks.lock(sessionID)
 		callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 		defer cancel()
+		filter, ok := m.storedFilter(callCtx, sessionID)
+		if !ok {
+			unlock()
+			return bus.SessionConsumerStart{}, nil, relayRetry
+		}
 		start, kept, err := m.delivery.consumers.KeepListed(callCtx, sessionID, filter, listed)
 		unlock()
 		if err == nil && kept {
-			run.restarted.Store(true)
+			run.restartedAt.Store(run.listedAt)
 			var pull *bus.SessionPull
 			if pull, err = m.delivery.consumers.Pull(callCtx, sessionID); err == nil {
 				return start, pull, relayRetry
@@ -602,18 +690,35 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 	}
 	defer func() { <-m.restarts }()
 	unlock := m.delivery.locks.lock(sessionID)
+	at := m.delivery.mark()
 	callCtx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
+	filter, ok := m.storedFilter(callCtx, sessionID)
+	if !ok {
+		unlock()
+		return bus.SessionConsumerStart{}, nil, relayRetry
+	}
 	start, err := m.delivery.consumers.RestartAtFloor(callCtx, sessionID, filter)
 	unlock()
 	if err == nil {
-		run.restarted.Store(true)
+		run.restartedAt.Store(at)
 		var pull *bus.SessionPull
 		if pull, err = m.delivery.consumers.Pull(callCtx, sessionID); err == nil {
 			return start, pull, relayRetry
 		}
 	}
 	return m.restartFailed(ctx, sessionID, err)
+}
+
+// storedFilter is the filter of sessionID's consumer for its stored interest topics, read within
+// ctx under the session's lock, which the caller holds; false, logged, when they cannot be read.
+func (m *sessionRelays) storedFilter(ctx context.Context, sessionID string) ([]string, bool) {
+	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
+	if err != nil {
+		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return nil, false
+	}
+	return sessionConsumerFilter(sessionID, topics), true
 }
 
 // restartFailed is the outcome of a restart (sessionRelays.restart) whose call or pull failed
