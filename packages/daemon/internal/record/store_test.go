@@ -2242,3 +2242,54 @@ func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing
 		}
 	})
 }
+
+// The three reads keyed by a pull request's repository find the row whatever the case the name is
+// spelled in: the row carries the spelling of the fact that opened the pull request, while a
+// later fact — an event under GitHub's own spelling of the other name of a configured rename,
+// say — names the same repository in another case. A name that is another repository still finds
+// nothing.
+func TestThePullRequestReadsFindTheRowInAnySpelling(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-303")
+	issue.Repo, issue.GitHubRepo = "sjawhar/legion", "sjawhar/legion"
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-303",
+		HeadSHA: "b1c2d3", HeadUpdatedAt: time.Date(2026, 9, 22, 14, 12, 13, 0, time.UTC),
+		Generation: int64(issue.Generation), State: PullRequestOpen}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+	})
+	for _, name := range []string{"sjawhar/legion", "SJAWHAR/Legion", "sjawhar/LEGION"} {
+		inTx(t, st, func(tx pgx.Tx) {
+			byNumber, err := records.PullRequestByNumber(ctx, tx, name, pr.Number)
+			must(t, err)
+			if byNumber == nil || byNumber.Issue != pr.Issue {
+				t.Fatalf("PullRequestByNumber(%q, %d) = %#v, want the row of %s", name, pr.Number, byNumber, pr.Issue)
+			}
+			byBranch, err := records.PullRequestByBranch(ctx, tx, name, pr.Branch)
+			must(t, err)
+			if byBranch == nil || byBranch.Issue != pr.Issue {
+				t.Fatalf("PullRequestByBranch(%q, %q) = %#v, want the row of %s", name, pr.Branch, byBranch, pr.Issue)
+			}
+			recorded, err := PullRequestRecorded(ctx, tx, name, pr.Number)
+			must(t, err)
+			if !recorded {
+				t.Fatalf("PullRequestRecorded(%q, %d) = false, want the row of %s", name, pr.Number, pr.Issue)
+			}
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		other := "cybermonklabs/legion"
+		byNumber, err := records.PullRequestByNumber(ctx, tx, other, pr.Number)
+		must(t, err)
+		byBranch, err := records.PullRequestByBranch(ctx, tx, other, pr.Branch)
+		must(t, err)
+		recorded, err := PullRequestRecorded(ctx, tx, other, pr.Number)
+		must(t, err)
+		if byNumber != nil || byBranch != nil || recorded {
+			t.Fatalf("the reads of %s = %#v, %#v, %v; want nothing: it is another repository", other, byNumber, byBranch, recorded)
+		}
+	})
+}

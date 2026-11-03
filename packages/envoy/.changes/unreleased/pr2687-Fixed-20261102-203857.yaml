@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A leased background pass that shutdown stops while it reads its last pass now gives its lease back with its own unlock. Before, the cancelled read ended the lease connection, the unlock failed with `failed to deallocate cached statement(s): conn closed`, and the lock went only when Postgres ended that session.'
+time: 2026-11-02T20:38:57.770580917Z
+custom:
+    Issue: pr2687
