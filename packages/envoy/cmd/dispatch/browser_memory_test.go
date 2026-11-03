@@ -2501,6 +2501,83 @@ func TestAnUpdateTheWalkerRefusesIsNotApplied(t *testing.T) {
 	}
 }
 
+// A GC run born deleted over every clock the room holds, forged against the room's own state
+// vector, is admitted by the peer update hook - that is what it is for (internal/dispatch/docs,
+// TestAGCRunOverHeldClocksLeavesLaterDeletesCharged, which says why such a frame is admitted and
+// why the deletes after it are still charged) - and the room goes on taking edits after it: an
+// ordinary keystroke from another browser is answered applied, the server logs no recovered hook
+// panic and no nil pointer dereference, and the document's text carries the keystroke. The pair of
+// applies is the one that broke a room in process (internal/dispatch/docs,
+// TestARoomTakesTypedCharactersAfterAForgedGCRun), driven here over the socket a browser sends on.
+func TestAGCRunOverHeldClocksLeavesTheRoomTakingEdits(t *testing.T) {
+	// forgeryClient is a client the room has never seen, whose one GC struct the room integrates
+	// born deleted; the runs over the clients it does hold integrate nothing.
+	const forgeryClient = 1 << 40
+	// typedAfterTheForgery is what the keystroke adds to the document's first plain paragraph,
+	// which the document's text must carry after it all.
+	const typedAfterTheForgery = " typed-after-the-forgery"
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	stored := server.upload(t, "json", memory.issue, "# Forged\n\n"+strings.Repeat("word ", 400)+"\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	// The room's own state vector, read as a browser reads it, so the forged run covers the clocks
+	// this room holds rather than a figure of the test's own.
+	reader := server.openBrowser(t, room)
+	t.Cleanup(reader.leave)
+	held := newBrowserDocument(t, reader.state(t)).doc.StateVector()
+	// One GC struct per held client over every clock it holds, written as Yjs writes one (its info
+	// byte 0, then its length), and one of the client the room has never seen, with no delete set.
+	forged := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(uint64(len(held)) + 1)
+		for _, client := range slices.Sorted(maps.Keys(held)) {
+			encoder.WriteVarUint(1)
+			encoder.WriteVarUint(uint64(client))
+			encoder.WriteVarUint(0)
+			encoder.WriteUint8(0)
+			encoder.WriteVarUint(held[client])
+		}
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(forgeryClient)
+		encoder.WriteVarUint(0)
+		encoder.WriteUint8(0)
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(0)
+	})
+	attacker := server.openBrowser(t, room)
+	t.Cleanup(attacker.leave)
+	applied, closed, err := attacker.send(attacker.updateFrame(forged))
+	t.Logf("the forged GC run over the %d clients the room holds, %d bytes: applied %v, closed %v, %v",
+		len(held), len(forged), applied, closed, err)
+	if err != nil || !applied || closed != nil {
+		t.Fatalf("the forged GC run was answered applied %v, closed %v, %v; want it applied and the socket open", applied, closed, err)
+	}
+	// The keystroke: one browser's ordinary edit of its own copy of the room, sent as the editor
+	// sends one.
+	typist := server.openBrowser(t, room)
+	t.Cleanup(typist.leave)
+	keystroke := browserEdit(t, typist.state(t), func(tree *pmdoc.Node) {
+		paddingTexts(t, tree)[0].Text += typedAfterTheForgery
+	})
+	applied, closed, err = typist.send(typist.updateFrame(keystroke))
+	t.Logf("the keystroke after it, %d bytes: applied %v, closed %v, %v", len(keystroke), applied, closed, err)
+	if err != nil || !applied || closed != nil {
+		t.Fatalf("the keystroke after the forged GC run was answered applied %v, closed %v, %v; want it applied and the socket open", applied, closed, err)
+	}
+	output := server.output.String()
+	for _, logged := range []string{"hook panicked; recovered", "nil pointer dereference"} {
+		if strings.Contains(output, logged) {
+			t.Errorf("the server logged %q after a browser's GC run and one keystroke", logged)
+		}
+	}
+	if text := server.text(t, room); !strings.Contains(text, typedAfterTheForgery) {
+		t.Fatalf("the document's text is %d bytes and carries none of %q, want the keystroke in it", len(text), typedAfterTheForgery)
+	}
+}
+
 // gcFrame is one client's update of n GC runs of length clocks each, from clock 0, with an empty
 // delete set, written byte for byte as Yjs writes a GC struct: its info byte 0, then its length.
 func gcFrame(client uint64, n int, length uint64) []byte {

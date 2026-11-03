@@ -23,7 +23,11 @@ const noInterval = time.Nanosecond
 
 // loadRendering is markdown as a room's load hands it to its replica (keepReplica,
 // replicaRendering), for a test whose replica renders nothing of its own: it carries no layout,
-// which only a replica splicing an update into the rendering reads (spliceTouched).
+// which only a replica splicing an update into the rendering reads (spliceTouched). So it is for
+// a replica that never drains the room's log - one keepReplica is given no log - and a test whose
+// replica follows the room's commits takes liveRendering instead: production makes no rendering
+// without a layout (documentRenderingWithLayout, renderDocumentForUpdate, pmdoc.Layout.Splice),
+// and a splice of one would read a layout that is not there.
 func loadRendering(markdown string) *replicaRendering {
 	return &replicaRendering{markdown: markdown}
 }

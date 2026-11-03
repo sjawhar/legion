@@ -1518,7 +1518,10 @@ func TestTheClocksAnAdmittedUpdateIntegratesDeletedAreListedFromTheRoomsCommit(t
 // drainedPeerUpdateRoom is peerUpdateRoom's room with its update log open and an observer moving
 // the replica through every commit, as a room's load leaves it (keepReplica, onLoadDocument), and
 // charged in a budget of roomBudgetBytes: so each update the hook admits is drained and charged
-// where a loaded room's is (renderedReplica.chargeAdded).
+// where a loaded room's is (renderedReplica.chargeAdded). Its replica takes the load's rendering
+// as a load makes it (liveRendering, documentRenderingWithLayout): the markdown and the layout of
+// one render of the state the replica starts from, which is what each admitted update is measured
+// and spliced against (renderedReplica.spliceTouched).
 func drainedPeerUpdateRoom(t *testing.T, markdown string) (*Service, *crdt.Doc, *renderedReplica, *roomCharge) {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
@@ -1533,15 +1536,11 @@ func drainedPeerUpdateRoom(t *testing.T, markdown string) (*Service, *crdt.Doc, 
 	if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {
 		t.Fatal(err)
 	}
-	rendering, err := renderDocument(room)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service := calibratedService()
 	service.budget.limit = roomBudgetBytes
 	log := room.OpenUpdateLog()
 	t.Cleanup(log.Close)
-	replica := service.keepReplica(room, log, loadRendering(rendering), nil)
+	replica := service.keepReplica(room, log, liveRendering(t, room), nil)
 	if _, _, measured := replica.size(); !measured {
 		t.Fatal("the room published no measurement for the hook to weigh against")
 	}
