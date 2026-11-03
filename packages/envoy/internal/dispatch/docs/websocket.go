@@ -11,7 +11,6 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // connectionState is one document socket as its admission (ServeHTTP) found it and ygo's
@@ -67,8 +66,9 @@ type servicePersistenceAdapter struct {
 // and the room's stored history already holds every cleanup the room made. A preload
 // (takePreload), which the socket's admission check decoded, goes on the record as a read would.
 //
-// The record also carries the history's size and the tree a socket's admission rendered from it
-// when the load takes that socket's preload (roomLoad.read, takeLoaded).
+// The record also carries the history's size and what a socket's admission made of that history
+// when the load takes that socket's preload: the tree it read from it and the rendering it made of
+// that tree (roomLoad.read, takeLoaded, admissionRendering).
 //
 // It records the load before it reads, and what it read after: the room's load (onLoadDocument)
 // takes the record next on the same goroutine (ygo's loadRoom) to start the instance's roomHold
@@ -101,8 +101,8 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) (_ []byte, err error) {
 			a.service.failRoomLoad(room, load, err)
 		}
 	}()
-	if loaded, tree, rendering, ok := a.service.takePreload(room); ok {
-		load.read(loaded.Version, loaded.Update, tree, rendering)
+	if loaded, rendered, ok := a.service.takePreload(room); ok {
+		load.read(loaded.Version, loaded.Update, rendered)
 		return nil, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
@@ -112,7 +112,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) (_ []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	load.read(result.Version, result.Update, nil, nil)
+	load.read(result.Version, result.Update, admissionRendering{})
 	return nil, nil
 }
 
@@ -488,19 +488,18 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// cold socket's preload takes the tree and the rendering that socket's admission made of the
 	// same state, found inside the schema (roomLoad.takeLoaded), so the document is rendered once.
 	var size int
-	var tree *pmdoc.Node
-	var loaded *replicaRendering
+	var rendered admissionRendering
 	if value, ok := s.roomLoads.Load(room); ok {
-		size, tree, loaded = value.(*roomLoad).takeLoaded()
+		size, rendered = value.(*roomLoad).takeLoaded()
 	}
 	var renderErr error
-	if tree == nil || loaded == nil {
-		tree, renderErr = treeOf(doc)
+	if rendered.tree == nil || rendered.rendering == nil {
+		rendered.tree, renderErr = treeOf(doc)
 		if renderErr == nil {
 			if s.admissionRendered != nil {
 				s.admissionRendered(room)
 			}
-			loaded, renderErr = replicaRenderingOf(tree)
+			rendered.rendering, renderErr = replicaRenderingOf(rendered.tree)
 		}
 	}
 	var askBlocks map[string]struct{}
@@ -510,7 +509,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	case renderErr != nil:
 		return renderErr
 	default:
-		askBlocks = askBlockIDs(tree)
+		askBlocks = askBlockIDs(rendered.tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
 	// (releaseIfUnusedLocked). The issue's state is the newest the record holds, this load's read
@@ -520,6 +519,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	open := !state.closed
 	state.residentBytes += int64(size)
 	s.residentBytes.Add(int64(size))
+	// The room is loaded on this record from here until it unloads (resident, releaseUnloadedRoom),
+	// so a socket's admission offers it no preload while it stands (offerPreload). A preload stored
+	// under the room's name is not this load's - LoadDoc's takePreload ran before any of this - so
+	// it is one no load of this room will ever use, and it is taken out here rather than left for
+	// the socket that offered it to withdraw hours later. Its hold on the room's head-tracker entry
+	// is released once this lock is dropped, so exactly one release ends it: the socket's withdraw
+	// finds the entry gone (CompareAndDelete) and releases nothing.
+	state.resident = true
+	_, swept := s.preloads.LoadAndDelete(room)
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -554,11 +562,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
+	if swept {
+		s.heads.release(room)
+	}
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order. The
 	// replica's verdict starts as this load's rendering said, and the observer's renders move it
 	// on from the first update (renderedReplica.verdict).
-	replica := s.keepReplica(doc, doc.OpenUpdateLog(), loaded)
+	replica := s.keepReplica(doc, doc.OpenUpdateLog(), rendered.rendering)
 	replica.recordVerdict(renderErr)
 	instance := s.keepInstance(room, doc)
 	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (bool, bool) {

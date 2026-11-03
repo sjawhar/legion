@@ -145,6 +145,103 @@ func TestAWarmSocketOpenRendersNothingAndAColdOpenRendersOnce(t *testing.T) {
 	admitSocket(t, server.URL, artifactID, "a socket to the repaired room")
 }
 
+// A cold socket whose admission another socket's load overtakes - its own read of the store began
+// while the room was cold, and the room became resident before it could offer what it read - keeps
+// nothing of that read. The room's load will never read its offer, so the offer goes at that load:
+// neither the whole history it carries nor its hold on the document's head-tracker entry, which the
+// liveness ping follows (holdsWhatTheTrackerProtects), waits for the socket to close, which can be
+// hours later. The socket itself is admitted and current all the same.
+func TestAPreloadOvertakenByTheRoomsLoadIsReleasedWhileItsSocketStaysOpen(t *testing.T) {
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	artifactID := createDocuments(t, database, 1)[0]
+	// The first admission of this room holds here, where it has read and rendered the document and
+	// has not yet offered either to the room's load (admitDocument). Every admission after it goes
+	// through, so the socket that loads the room is admitted while this one waits.
+	rendered := make(chan struct{})
+	release := make(chan struct{})
+	var overtaken atomic.Bool
+	var releasedOnce sync.Once
+	releaseOvertaken := func() { releasedOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseOvertaken)
+	service.admissionRendered = func(room string) {
+		if room != artifactID || overtaken.Swap(true) {
+			return
+		}
+		close(rendered)
+		<-release
+	}
+
+	type opened struct {
+		connection *gws.Conn
+		err        error
+	}
+	cold := make(chan opened, 1)
+	go func() {
+		connection, response, err := gws.DefaultDialer.Dial(socketURL(server.URL, artifactID), http.Header{"X-Dispatch-User": []string{"alice"}})
+		if err != nil {
+			status := "no response"
+			if response != nil {
+				status = response.Status
+			}
+			err = fmt.Errorf("%s: %w", status, err)
+		}
+		cold <- opened{connection, err}
+	}()
+	select {
+	case <-rendered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first cold socket never rendered the document it read, so nothing here is tested")
+	}
+
+	admitSocket(t, server.URL, artifactID, "the socket whose load makes the room resident")
+	// The room's load holds the document's head-tracker entry while the room is resident
+	// (roomLoaded), and the socket that loaded it left no preload behind: its own load took it.
+	// Nothing the overtaken socket does may add to this.
+	held := headHolds(service, artifactID)
+
+	releaseOvertaken()
+	overtakenSocket := <-cold
+	if overtakenSocket.err != nil {
+		t.Fatalf("the overtaken socket was refused (%v), want it admitted to the resident room", overtakenSocket.err)
+	}
+	t.Cleanup(func() { _ = overtakenSocket.connection.Close() })
+	_ = overtakenSocket.connection.SetReadDeadline(time.Now().Add(roomWait(t)))
+	if _, message, err := overtakenSocket.connection.ReadMessage(); err != nil {
+		t.Fatalf("the overtaken socket's first frame = %q (%v), want the room's sync", message, err)
+	}
+
+	if _, kept := service.preloads.Load(artifactID); kept {
+		t.Error("a preload is held for a room already loaded here, want none: no load of this room will ever read it")
+	}
+	if holds := headHolds(service, artifactID); holds != held {
+		t.Errorf("the head tracker holds the document %d times while the overtaken socket is open, want the %d the resident room holds", holds, held)
+	}
+
+	// The socket joined the room it never loaded, so what the room commits reaches it: the
+	// release above took its offer back, not its place in the room.
+	if _, err := joinedReplaceText(service, artifactID, "Overtaken.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write the document the overtaken socket joined: %v", err)
+	}
+	_ = overtakenSocket.connection.SetReadDeadline(time.Now().Add(roomWait(t)))
+	if _, message, err := overtakenSocket.connection.ReadMessage(); err != nil {
+		t.Fatalf("the overtaken socket's frame after a write = %q (%v), want the write's update", message, err)
+	}
+}
+
+// headHolds is how many holders the head tracker counts for room (headTracker.hold), read under
+// the tracker's own lock by the test itself: a resident room's load, each cached cold read of the
+// document, and each preload a cold socket has offered and no load has taken.
+func headHolds(service *Service, room string) int {
+	service.heads.mu.Lock()
+	defer service.heads.mu.Unlock()
+	entry := service.heads.entries[room]
+	if entry == nil {
+		return 0
+	}
+	return entry.holds
+}
+
 // A socket's admission reads the document's issue once, before it loads the document. An issue
 // closed while that load runs - a person closes the issue as a browser reconnects - still reaches
 // the socket: it is admitted read-only, as a socket opened after the close is.

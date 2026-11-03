@@ -19,8 +19,8 @@ import (
 // connections: those that hold or wait for a single-key advisory lock other than the events
 // commit-order lock ($1, $2: its classid and objid), and those not idle whose statement names
 // doc_updates; then how many of them are not on Dispatch's room pools (dispatch-room-appends,
-// dispatch-rooms) or its compaction pool (dispatch-compaction), the shared pool's share. loadgen's own backends (application_name loadgen-*)
-// are left out.
+// dispatch-rooms) or its compaction pool (dispatch-compaction), the shared pool's share. loadgen's
+// own backends (application_name loadgen-*) are left out.
 const roomConnectionsQuery = `
 with held as (
   select l.pid from pg_locks l

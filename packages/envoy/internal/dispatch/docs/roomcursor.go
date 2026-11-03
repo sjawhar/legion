@@ -10,8 +10,6 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
-
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // roomInstance is what one resident room instance records about the durable history behind its
@@ -65,13 +63,13 @@ type roomLoad struct {
 	noticed documentHeadNotice
 	recheck func(documentHeadNotice)
 	// size is the encoded bytes of the history the load read, which the room counts as resident
-	// once it loads (onLoadDocument). tree is the tree a document socket's admission read from the
-	// state the load took (takePreload), and rendering what that admission rendered of it, which
-	// the room's load takes rather than reading and rendering the room again (takeLoaded) and hands
-	// the room's replica (keepReplica); both nil when the load read the store itself.
-	size      int
-	tree      *pmdoc.Node
-	rendering *replicaRendering
+	// once it loads (onLoadDocument). rendered is what a document socket's admission made of the
+	// state the load took (takePreload, admissionRendering): the tree it read from it and what it
+	// rendered of that tree, which the room's load takes rather than reading and rendering the
+	// room again (takeLoaded) and hands the room's replica (keepReplica); zero when the load read
+	// the store itself.
+	size     int
+	rendered admissionRendering
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version
@@ -88,14 +86,13 @@ func (s *Service) beginRoomLoad(room string) *roomLoad {
 
 // read records what the load's read of the store saw: the head, the version the room it loads
 // holds every update through, the state through that head, which the room's load applies next
-// (takeState), and tree and rendering, the tree a document socket's admission read from that state
-// and what it rendered of it, when the load took that socket's preload, nil when the load read the
-// store itself (takeLoaded).
-func (load *roomLoad) read(head persistence.Version, state []byte, tree *pmdoc.Node, rendering *replicaRendering) {
+// (takeState), and rendered, what a document socket's admission read and rendered of that state,
+// when the load took that socket's preload, zero when the load read the store itself (takeLoaded).
+func (load *roomLoad) read(head persistence.Version, state []byte, rendered admissionRendering) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
 	load.head = int64(head)
-	load.state, load.size, load.tree, load.rendering = state, len(state), tree, rendering
+	load.state, load.size, load.rendered = state, len(state), rendered
 }
 
 // takeState hands over the state the load read, once, so the record holds no copy of it for as
@@ -108,15 +105,15 @@ func (load *roomLoad) takeState() []byte {
 	return state
 }
 
-// takeLoaded is the size of the history the load read, and the tree a socket's admission read from
-// it with the rendering it made of that tree, and drops both: the load's record stays with the
-// room's document for as long as it is resident (keepInstance), and the tree is a whole copy of it.
-func (load *roomLoad) takeLoaded() (size int, tree *pmdoc.Node, rendering *replicaRendering) {
+// takeLoaded is the size of the history the load read, and what a socket's admission read and
+// rendered of it, and drops that: the load's record stays with the room's document for as long as
+// it is resident (keepInstance), and the tree is a whole copy of it.
+func (load *roomLoad) takeLoaded() (size int, rendered admissionRendering) {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	size, tree, rendering = load.size, load.tree, load.rendering
-	load.tree, load.rendering = nil, nil
-	return size, tree, rendering
+	size, rendered = load.size, load.rendered
+	load.rendered = admissionRendering{}
+	return size, rendered
 }
 
 // takeLoadedState is the state room's load read (servicePersistenceAdapter.LoadDoc), taken off its

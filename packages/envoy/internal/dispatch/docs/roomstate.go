@@ -127,6 +127,13 @@ type roomState struct {
 	// load takes that read instead of reading the issue again (admittedIssueRead), and a close of
 	// the issue while the socket loads its document reaches the socket through it.
 	admitting int
+	// resident is whether a room's load succeeded on this record (onLoadDocument) and that room
+	// has not unloaded since (releaseUnloadedRoom). A preload is of use only until its room is
+	// loaded on this process, so the load sweeps any preload stored for the room where it sets
+	// this, and a socket's admission offers the room none while it stands (offerPreload): both
+	// decide it under this record's lock, so an offer and a load that race still leave no preload
+	// behind. A load that fails never reaches that point and sets nothing.
+	resident bool
 	// residentBytes is the encoded bytes the room resident on this record took: the history its
 	// load decoded and each update it committed since (queueUpdateClass). The service's
 	// residentBytes counts them too, until the room unloads or the record goes
@@ -253,12 +260,15 @@ func (s *Service) releaseIfUnused(room string) {
 // releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so it no longer counts among
 // the resident rooms, nor holds a place under the room cap unless a socket still holds a
 // reservation on it (roomUnloaded, which takes back what its load counted in onLoadDocument), the
-// bytes it took no longer count as resident, and its state goes too unless something still holds
-// it, whose end releases it instead. ygo calls it exactly once for each room whose load succeeded,
-// whichever way the room goes: the idle sweep, the last peer leaving, CloseRoom.
+// bytes it took no longer count as resident, the record no longer says a room is loaded on it
+// (resident), so a socket's admission may offer the next load a preload again (offerPreload), and
+// its state goes too unless something still holds it, whose end releases it instead. ygo calls it
+// exactly once for each room whose load succeeded, whichever way the room goes: the idle sweep,
+// the last peer leaving, CloseRoom.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
 	s.roomUnloaded(room)
 	if state := s.lockExistingState(room); state != nil {
+		state.resident = false
 		s.dropResidentBytesLocked(state)
 		s.unlockState(room, state)
 	}
