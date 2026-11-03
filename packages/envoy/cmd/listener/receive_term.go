@@ -21,9 +21,12 @@ type receiveTerm struct {
 	conn    *nats.Conn
 
 	queue chan *nats.Msg
-	// handling is the context every message of the term is handled under; cancel ends it.
+	// handling is the context every message of the term is handled under; cancel ends it. It
+	// carries term, the handle of this term the workers key its pushes by (withServePortTerm), so
+	// a handler that wraps the context does not cut its pushes loose from the term.
 	handling context.Context
 	cancel   context.CancelFunc
+	term     *servePortTermHandle
 	// closing is closed once the handler takes no more messages (stopHandling), handled once the
 	// handler has returned, and stopped once the term is over, which ends the InProgress ticker.
 	closing     chan struct{}

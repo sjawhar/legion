@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
@@ -23,10 +24,15 @@ import (
 // startWorkerReceiverRig is a pod of machineID receiving its machine's durable through cfg's
 // handler, with cfg's serving-port workers wired to its term as main wires them
 // (durableReceiverOptions.workers). leaseTiming is the pod's, so a row that has its pod give the
-// lease up can keep it a standby while it reads what the pod did.
-func startWorkerReceiverRig(t *testing.T, uri, machineID, instance string, cfg listenerDeliveryHandlerConfig, timing receiveConfig, leaseTiming leaseConfig) *receiverRig {
+// lease up can keep it a standby while it reads what the pod did. wrap, nil for none, goes around
+// the durable's handler, for a row that hands each message to it under a context of its own.
+func startWorkerReceiverRig(t *testing.T, uri, machineID, instance string, cfg listenerDeliveryHandlerConfig, timing receiveConfig, leaseTiming leaseConfig, wrap func(durableHandler) durableHandler) *receiverRig {
 	t.Helper()
-	rig := newReceiverRig(t, uri, machineID, instance, jetStreamDeliveryHandler(cfg), timing, leaseTiming)
+	handler := jetStreamDeliveryHandler(cfg)
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	rig := newReceiverRig(t, uri, machineID, instance, handler, timing, leaseTiming)
 	rig.receiver.workers = cfg.servePorts
 	rig.lease.Start(context.Background())
 	rig.receiver.Start()
@@ -55,7 +61,7 @@ func TestAGracefulStopHandsBackTheMessageItsServingPortWorkerHolds(t *testing.T)
 	registerServingPortSession(t, harness, port.sessionID, port.port)
 
 	uri := harness.client.Conn.ConnectedUrl()
-	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, handBackTiming(), testLeaseTiming())
+	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, handBackTiming(), testLeaseTiming(), nil)
 	active.awaitState(t, receiveActive, 10*time.Second)
 	handle, received := recordingHandler()
 	standby := startReceiverRig(t, uri, "test-machine", "pod-b", handle, testReceiveTiming(), testLeaseTiming())
@@ -87,6 +93,62 @@ func TestAGracefulStopHandsBackTheMessageItsServingPortWorkerHolds(t *testing.T)
 	}
 }
 
+// wrappedHandlingKey is the key the row below puts a value under in a message's handling context,
+// one of the two ways a handler can wrap it.
+type wrappedHandlingKey struct{}
+
+// The same hand-back, with the durable's handler wrapping each message's handling context in a
+// value and a timeout of its own before it delivers it: the pushes it hands over still belong to
+// the term, so its stop takes them back and hands their messages on. A term identified by the
+// context the handler was given, rather than by the handle that context carries
+// (servePortTermHandle), loses every push of a wrapped one: the stop finds no term, reports
+// itself idle, and the worker goes on pushing a message the successor knows nothing of.
+func TestAGracefulStopHandsBackTheWorkerMessageOfAHandlerThatWrappedItsContext(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	cfg := wireTestDeliveryWorkers(t, harness.config)
+	port := startScriptedPort(t, "ses_worker_wrapped_"+id.New())
+	release := port.hold()
+	t.Cleanup(release)
+	registerServingPortSession(t, harness, port.sessionID, port.port)
+
+	wrap := func(next durableHandler) durableHandler {
+		return func(ctx context.Context, msg *nats.Msg) {
+			ctx, cancel := context.WithTimeout(context.WithValue(ctx, wrappedHandlingKey{}, "wrapped"), time.Minute)
+			defer cancel()
+			next(ctx, msg)
+		}
+	}
+	uri := harness.client.Conn.ConnectedUrl()
+	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, handBackTiming(), testLeaseTiming(), wrap)
+	active.awaitState(t, receiveActive, 10*time.Second)
+	handle, received := recordingHandler()
+	standby := startReceiverRig(t, uri, "test-machine", "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+	waitFor(t, 5*time.Second, "the standby to read pod-a's lease", func() bool {
+		return standby.lease.Status().ActiveInstance == "pod-a"
+	})
+
+	item := newEnvelope("agent", contracts.AgentSubject(port.sessionID), "the message the worker of a wrapped handler holds")
+	publish(t, harness.client, item)
+	awaitDurablePending(t, harness.client, active, 1)
+
+	stopped := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	active.receiver.Stop(ctx)
+
+	end := handBackEnd(t, active)
+	if end["handed_back"] != float64(1) {
+		t.Fatalf("the stop handed %v messages back, want the one the worker of the wrapped handler held: %v", end["handed_back"], end)
+	}
+	message := awaitReceived(t, received, 5*time.Second, "the standby's copy of the message the worker held")
+	if !strings.Contains(message.data, item.EventID) {
+		t.Fatalf("the standby was given %q, want the message the worker held (%s)", message.data, item.EventID)
+	}
+	if after := message.at.Sub(stopped); after >= consumerAckWait {
+		t.Fatalf("the standby was given the worker's message %s after the stop, want it after the hand-back delay rather than the ack wait", after)
+	}
+}
+
 // A lost lease drops the pushes of its term: the ex-holder's worker stops pushing and gives its
 // message up unsettled, so the pod that holds the lease now is given it by the server once its ack
 // wait runs out. A worker that ran on would push that message beside the new holder's delivery of
@@ -106,7 +168,7 @@ func TestALostLeaseDropsTheServingPortPushesOfItsTerm(t *testing.T) {
 	// The pod polls slowly as a standby, so it does not take the lease it gave up back, and start
 	// a term that pushes again, while the row reads what the lost one left.
 	leaseTiming.standbyPoll = 3 * time.Second
-	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, testReceiveTiming(), leaseTiming)
+	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, testReceiveTiming(), leaseTiming, nil)
 	active.awaitState(t, receiveActive, 10*time.Second)
 
 	item := newEnvelope("agent", contracts.AgentSubject(port.sessionID), "the message the lost term was pushing")
@@ -147,7 +209,7 @@ func TestAStopWhoseServingPortPushIgnoresItsCancelMarksNoHandBack(t *testing.T) 
 	registerServingPortSession(t, harness, sessionID, 4567)
 
 	uri := harness.client.Conn.ConnectedUrl()
-	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, handBackTiming(), testLeaseTiming())
+	active := startWorkerReceiverRig(t, uri, "test-machine", "pod-a", cfg, handBackTiming(), testLeaseTiming(), nil)
 	active.awaitState(t, receiveActive, 10*time.Second)
 	handle, _ := recordingHandler()
 	standby := startReceiverRig(t, uri, "test-machine", "pod-b", handle, testReceiveTiming(), testLeaseTiming())

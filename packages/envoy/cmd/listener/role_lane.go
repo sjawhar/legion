@@ -263,5 +263,5 @@ func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message delivery
 		message.finish(cfg, retryIn)
 		return
 	}
-	handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), forward: true, logLine: "listener role forward pushed", term: message.ctx})
+	handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), forward: true, logLine: "listener role forward pushed", term: message.term()})
 }

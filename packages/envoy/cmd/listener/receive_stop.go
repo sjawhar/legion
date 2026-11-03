@@ -57,6 +57,9 @@ func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 		_ = conn.FlushTimeout(time.Second)
 	}
 	t.close()
+	// The pushes this term handed to the serving-port workers are the term's as much as its queue
+	// is, and are taken back below, once nothing of the term is handing more over: the workers
+	// stop pushing them and keeping their messages in progress (servePortWorkers.endTerm).
 	if ctx.Err() == nil {
 		dropped := len(t.takeQueued())
 		r.logger.Info("listener lease lost; stopped receiving the durable", slog.String("consumer", r.consumer), slog.Int("dropped", dropped))
@@ -65,22 +68,21 @@ func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 		case <-ctx.Done():
 		}
 	}
-	if ctx.Err() != nil {
-		r.settleInHand(t)
-	}
-	// The pushes this term handed to the serving-port workers are the term's as much as its queue
-	// is, and are taken back once nothing of the term is handing more over: the workers stop
-	// pushing them and keeping their messages in progress (servePortWorkers.endTerm), so a pod
-	// whose lease is gone pushes nothing more, and the server gives those messages to the pod
-	// holding the lease now once their ack wait runs out, as it does the queue's.
-	parked, _ := r.workers.endTerm(t.handling, servePortTermStopWait)
 	if ctx.Err() == nil {
+		// The lease alone is gone: a pod that no longer holds it pushes nothing more, and the
+		// server gives those messages to the pod holding the lease now once their ack wait runs
+		// out, as it does the queue's.
+		parked, _ := r.workers.endTerm(t.term, servePortTermStopWait)
 		if len(parked) > 0 {
 			r.logger.Info("dropped the serving-port pushes of the term whose lease was lost",
 				slog.String("consumer", r.consumer), slog.Int("dropped_pushes", len(parked)))
 		}
 		return
 	}
+	// A shutdown: the message in hand gets its grace and its handling is cancelled, and what the
+	// term holds, the workers' pushes of it included, is NAKed back to the durable at once.
+	r.settleInHand(t)
+	parked, _ := r.workers.endTerm(t.term, servePortTermStopWait)
 	queued := append(t.takeQueued(), parked...)
 	for _, m := range queued {
 		_ = m.Nak()
@@ -97,7 +99,7 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 	r.settleInHand(t)
 	conn, _ := r.drain(t)
 	t.close()
-	parked, _ := r.workers.endTerm(t.handling, servePortTermStopWait)
+	parked, _ := r.workers.endTerm(t.term, servePortTermStopWait)
 	queued := append(t.takeQueued(), parked...)
 	sortByStreamSequence(queued)
 	for _, m := range queued {
@@ -146,7 +148,7 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 	// given them after the hand-back delay. A worker still inside a push when the take-back's
 	// wait ran out holds a message of this term that this stop cannot account for, which is what
 	// idle says (markHandBack).
-	parked, idle := r.workers.endTerm(t.handling, servePortTermStopWait)
+	parked, idle := r.workers.endTerm(t.term, servePortTermStopWait)
 	deadline := time.Now().Add(r.timing.lingerMax)
 	t.handBack(r.timing.handBackDelay, parked)
 	r.lease.Unsettle(t.leaseTerm)

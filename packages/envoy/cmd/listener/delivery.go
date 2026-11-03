@@ -164,6 +164,14 @@ func (message deliveryMessage) deliverer(cfg listenerDeliveryHandlerConfig) *ses
 	return cfg.deliverer.WithContext(message.ctx)
 }
 
+// term is the handle of the receive term this message belongs to, which every push its handler
+// hands to a serving-port worker carries (servePortPush.term), so the term's end takes those
+// pushes back (servePortWorkers.endTerm). It is nil on the core and live lanes, which have no
+// term, and for a rig that calls the durable's handler with a context of its own.
+func (message deliveryMessage) term() *servePortTermHandle {
+	return servePortTermFrom(message.ctx)
+}
+
 // storedSeq is the stream sequence of a durable message, which decides whether a session's
 // consumer holds it (session.SessionEntry.ConsumerHoldsStored): 0 for a core or live message, and
 // for a durable one whose metadata will not parse, so such a message is delivered rather than left
@@ -264,6 +272,31 @@ func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelo
 	}
 }
 
+// attemptOnceReconnected asks ledger for (item, sessionID), and once more once the ledger's own
+// connection is back when the first call failed while that connection was reconnecting:
+// reconnected waits for it (listenerDeliveryHandlerConfig.ledgerReconnected), so a call that
+// failed in a reconnect's moment costs no retry delay, and the second answer, when it comes, is
+// logged. It is the durable lane's first ask (ledgerAttempt) and the relay's
+// (sessionRelays.followedTopicVerdict) alike. A caller that waits for no reconnect passes nil,
+// and a nil ctx waits on the background context.
+func attemptOnceReconnected(ctx context.Context, logger *logging.Logger, ledger dedupe.Ledger, reconnected func(context.Context) bool, item contracts.Envelope, sessionID string) (dedupe.Attempt, error) {
+	attempt, err := ledger.Attempt(item.DedupeKey, sessionID)
+	if err == nil || reconnected == nil {
+		return attempt, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !reconnected(ctx) {
+		return attempt, err
+	}
+	first := err
+	if attempt, err = ledger.Attempt(item.DedupeKey, sessionID); err == nil {
+		logger.Info("delivery ledger answered once its connection was back", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("first_error", first.Error()))
+	}
+	return attempt, err
+}
+
 // ledgerAttempt asks the delivery ledger for (item, sessionID) before the listener prompts the
 // session over HTTP or forwards the role-lane message to it, and logs and counts any skip. It
 // returns the attempt the delivery settles and deliver=true when the listener goes on to deliver;
@@ -281,19 +314,13 @@ func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelo
 // role picks the role lane's skip line, `listener role dedupe skip`, for every skip.
 func ledgerAttempt(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, role bool) (attempt dedupe.Attempt, deliver bool, retryIn time.Duration) {
 	durable := message.mode == durableDelivery
-	attempt, err := cfg.ledger.Attempt(item.DedupeKey, sessionID)
-	if err != nil && durable && cfg.ledgerReconnected != nil {
-		ctx := message.ctx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		if cfg.ledgerReconnected(ctx) {
-			first := err
-			if attempt, err = cfg.ledger.Attempt(item.DedupeKey, sessionID); err == nil {
-				cfg.logger.Info("delivery ledger answered once its connection was back", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("first_error", first.Error()))
-			}
-		}
+	// Only the durable lane waits for the ledger's connection and asks again: a core lane retries
+	// nothing, so it delivers under the zero attempt rather than waiting.
+	reconnected := cfg.ledgerReconnected
+	if !durable {
+		reconnected = nil
 	}
+	attempt, err := attemptOnceReconnected(message.ctx, cfg.logger, cfg.ledger, reconnected, item, sessionID)
 	if err != nil {
 		cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "attempt"), slog.String("session_id", sessionID), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.Bool("retry", durable), slog.String("error", err.Error()))
 		if durable {
@@ -568,16 +595,23 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 }
 
 // handOverPush hands push to its session's serving-port worker (servePortWorkers) and reports
-// true; the push's outcome is reported when it ends. When the workers cannot take it (they stopped,
-// or are full) it gives push's ledger attempt up and reports false: the caller gives the message
-// back to the durable for a retry.
+// true; the push's outcome is reported when it ends. When the workers cannot take it it gives
+// push's ledger attempt up and reports false: the caller gives the message back to the durable
+// for a retry. The line it logs says which of the two refusals it was - the workers stopped or
+// are full, which names their limits, or the push's receive term has ended, which names that
+// term, since no limit was reached and the limits would say nothing about it.
 func handOverPush(cfg listenerDeliveryHandlerConfig, push servePortPush) bool {
-	if cfg.servePorts.enqueue(push) {
+	handOver := cfg.servePorts.enqueue(push)
+	if handOver == servePortTaken {
 		return true
 	}
 	applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 		sessionID: push.sessionID,
 		log: func(logger *logging.Logger) {
+			if handOver == servePortTermOver {
+				logger.DeliveryLog(slog.LevelWarn, "listener serving-port push belongs to a receive term that has ended; the message goes back to the durable", push.sessionID, push.item.Topic, push.item.EventID, "retrying")
+				return
+			}
 			logger.DeliveryLog(slog.LevelWarn, "listener serving-port workers cannot take the push; the message goes back to the durable", push.sessionID, push.item.Topic, push.item.EventID, "retrying",
 				slog.Int("worker_limit", servePortWorkerLimit), slog.Int("queue_limit", servePortQueueLimit))
 		},
@@ -742,7 +776,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		return
 	}
 	if result.Push {
-		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", term: message.ctx, timer: deliveryTimer})
+		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", term: message.term(), timer: deliveryTimer})
 		return
 	}
 	if result.OwnedElsewhere {
@@ -1038,7 +1072,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				// The durable path's push waits behind the session's earlier messages in its own
 				// worker, which settles the ledger attempt with it, and the message is
 				// acknowledged once that push ends.
-				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), term: message.ctx, timer: deliveryTimer}) {
+				if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, attempt: attempt, settle: message.settle, storedSeq: message.storedSeq(), term: message.term(), timer: deliveryTimer}) {
 					retryIn = max(retryIn, durableRetryDelay)
 				}
 				continue

@@ -257,9 +257,10 @@ func (p *SessionPull) take(ctx context.Context) (*nats.Msg, error) {
 }
 
 // lost reports whether a connection event of the client (ConnectionChanged) has dropped the pull's
-// request. An event that left the request's connection current, connected and unreconnected is
-// none of the pull's: it is the moment between a reconnect nats.go has installed, which Pull read,
-// and the callback that reports it. The pull waits on past such an event, on the next channel.
+// request. An event that left the request's connection the client's current one, open, and with
+// its reconnect count unmoved is none of the pull's (lostRequest): it is the moment between a
+// reconnect nats.go has installed, which Pull read, and the callback that reports it. The pull
+// waits on past such an event, on the next channel.
 func (p *SessionPull) lost() bool {
 	for {
 		select {
@@ -274,14 +275,14 @@ func (p *SessionPull) lost() bool {
 	}
 }
 
-// lostRequest reports whether the connection the pull's request went out on can still answer it:
-// the server drops the request when that connection is replaced by another the client dialled,
-// when it is closed, and when it reconnects in place, which leaves the connection the same one
-// and moves its reconnect count. A disconnect alone ends no pull: the pull ends at the reconnect
-// that follows it, as the relay can pull again only then, and by that time the server has dropped
-// the old connection's request. A pull ended at the disconnect could have its caller publish or
-// pull while the server still held that request, and a message the server delivered to it would
-// wait out the consumer's ack wait.
+// lostRequest reports whether the pull's request is lost: the connection it went out on can no
+// longer answer it, because the server drops the request when that connection is replaced by
+// another the client dialled, when it is closed, and when it reconnects in place, which leaves
+// the connection the same one and moves its reconnect count. A disconnect alone ends no pull: the
+// pull ends at the reconnect that follows it, as the relay can pull again only then, and by that
+// time the server has dropped the old connection's request. A pull ended at the disconnect could
+// have its caller publish or pull while the server still held that request, and a message the
+// server delivered to it would wait out the consumer's ack wait.
 func (p *SessionPull) lostRequest() bool {
 	return p.client.currentConn() != p.conn || p.conn.IsClosed() || p.conn.Stats().Reconnects != p.reconnects
 }

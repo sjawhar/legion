@@ -1437,7 +1437,7 @@ func main() {
 	// delivery, which a listener of an earlier release serves too, rather than ending the start.
 	delivery := connectSessionDelivery(cfg.NATSURLs, logger)
 	// The relay of those consumers hears registrations from the moment /v1 opens, and relays once
-	// this task holds its machine's durable binding (below). Without its reply inbox no frame could
+	// this task serves its machine's receive term (below). Without its reply inbox no frame could
 	// be answered, so a relay that cannot subscribe one leaves every session on core delivery too.
 	var relays *sessionRelays
 	if delivery.consumers != nil {
@@ -1659,33 +1659,36 @@ func shutdownListener(logger *logging.Logger, parts listenerParts, loops listene
 	loops.stop()
 
 	// 2. Stop receiving the durable, inside the 10 s budget the relays, the workers and the HTTP
-	// stop share: the holder-only loops stop, which also stops this pod's session relays
-	// (holderLoops), the handler takes no more messages, the message in hand gets inflightGrace
-	// (3 s) before its prompt is cancelled and it is NAKed, with a second for the handler to
-	// return, every message not handled is NAKed with a delay for the next holder, and the lease
-	// is marked released, so a standby takes the lease at its next poll; the subscription then
-	// stays until the standby receives, at least 1.25 s after the release (lingerUntaken and a
-	// poll, the floor that holds the deliver subject while the standby subscribes) and up to
-	// lingerMax (3 s) after the NAKs, then drains (2 s) and, when the whole hand-over went
-	// through, writes the lease's clean-hand-back mark, one bucket call of 2 s at most, which
-	// ends the standby's settle hold at 3 s (durableReceiver.handBack): 11 s at most, and 12.25 s
-	// when the flush (1 s) and the release (2 s) both run to their bounds and leave that floor
-	// past the cap. This budget bounds none of those waits: it is how long this shutdown waits
-	// for the receive stop. Past it the shutdown goes on to the relays, the workers and the HTTP
-	// stop with no time left, then to the NATS drains below and os.Exit(1), while the hand-back
-	// may still be running. The listener's own shutdown, not the runtime's kill, cuts that
-	// hand-back off: client.Drain ends the subscription of a hand-back still lingering or
-	// draining, and os.Exit(1) ends only a mark write still in flight on the lease's own
-	// connection. So a longer grace period in the runtime keeps no mark, and the next holder then
-	// settles at its 7 s cap, as it does after any stop that wrote none. HTTP keeps serving
-	// meanwhile.
+	// stop share: the term's end stops this pod's session relays (durableReceiver.end), the
+	// holder-only loops stop, the handler takes no more messages, the message in hand gets
+	// inflightGrace (3 s) before its prompt is cancelled and it is NAKed, with a second for the
+	// handler to return, the serving-port workers are given servePortTermStopWait (0.5 s) to
+	// leave the term's pushes, every message not handled is NAKed with a delay for the next
+	// holder, those pushes' messages among them, and the lease is marked released, so a standby
+	// takes the lease at its next poll; the subscription then stays until the standby receives,
+	// at least 1.25 s after the release (lingerUntaken and a poll, the floor that holds the
+	// deliver subject while the standby subscribes) and up to lingerMax (3 s) after the NAKs,
+	// then drains (2 s) and, when the whole hand-over went through, writes the lease's
+	// clean-hand-back mark, one bucket call of 2 s at most, which ends the standby's settle hold
+	// at 3 s (durableReceiver.handBack): 11.5 s at most, and 12.75 s when the flush (1 s) and the
+	// release (2 s) both run to their bounds and leave that floor past the cap. This budget
+	// bounds none of those waits: it is how long this shutdown waits for the receive stop. Past
+	// it the shutdown goes on to the relays, the workers and the HTTP stop with no time left,
+	// then to the NATS drains below and os.Exit(1), while the hand-back may still be running. The
+	// listener's own shutdown, not the runtime's kill, cuts that hand-back off: client.Drain ends
+	// the subscription of a hand-back still lingering or draining, and os.Exit(1) ends only a
+	// mark write still in flight on the lease's own connection. So a longer grace period in the
+	// runtime keeps no mark, and the next holder then settles at its 7 s cap, as it does after
+	// any stop that wrote none. HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	loops.receiver.Stop(shutdownCtx)
 
 	// 3. The session relays and the serving-port workers: publish no frame, push to no port and
-	// ack nothing more; the messages they hold are delivered again once their ack wait runs out,
-	// to whichever pod of this machine receives the durable then.
+	// ack nothing more. Every push of the receive term is the stop above's to dispose of, NAKed
+	// in its hand-back batch or left to its ack wait (servePortWorkers.endTerm), so what is left
+	// here is a push of no term, which is delivered again once its ack wait runs out, to
+	// whichever pod of this machine receives the durable then.
 	parts.relays.stop(shutdownCtx)
 	parts.stopWorkers(shutdownCtx)
 

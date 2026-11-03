@@ -3722,12 +3722,12 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   The registration or unsubscribe call sets the filter before it answers.
   A consumer keeps its position when its filter changes, so a newly followed topic starts at that position.
 
-- **Owner:** the listener whose machine id is on the session's entry, and, among the tasks of one machine id, the task that holds the machine's durable binding (`sessionRelays.setOwned`).
+- **Owner:** the listener whose machine id is on the session's entry, and, among the tasks of one machine id, the task serving the machine's receive term (`sessionRelays.setOwned`).
   A serving-port session's owner is the machine on its stored interest row, else on its entry, since only that machine reaches its port.
   Each listener relays the entries of its watched session cache that name its machine and record `delivery: "consumer"` (`sessionRelays.wanted`).
   It stops relaying an entry that moves to another machine id at once, and at start it relays every such entry in its cache without waiting for a registration.
 
-- **Restart at the ack floor:** every start of a session's relay (the listener starts or gains the durable binding, the session registers with a new `epoch`, a paused relay's backoff ran out or its session registered, a consumer call or a pull failed) reads the consumer's ack floor, deletes the consumer and creates it again at the sequence after the floor with the current filter (`bus.SessionConsumers.RestartAtFloor`;
+- **Restart at the ack floor:** every start of a session's relay (the listener starts or gains the receive term, the session registers with a new `epoch`, a paused relay's backoff ran out or its session registered, a consumer call or a pull failed) reads the consumer's ack floor, deletes the consumer and creates it again at the sequence after the floor with the current filter (`bus.SessionConsumers.RestartAtFloor`;
   nats-server 2.10.29 has no consumer reset).
   So after any break the session takes its messages again in stream order, and its plugin's ledger drops the ones it already wrote.
   nats-server 2.10.29 reports a consumer's ack floor as 0 until an ack moves it, so the floor never reads below the consumer's start sequence minus one, and, while nothing awaits an ack, never below the last sequence delivered (`ackFloor`;
@@ -3742,7 +3742,7 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   At most 32 relays of one listener restart at once (`relayRestartLimit`);
   the rest wait their turn, and a restart's 5 s call timeout starts only once it holds its turn and the session's lock.
   Registrations take no turn.
-  When the listener starts or gains the durable binding it reads every session consumer at once with the paged consumer list (`$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, 256 consumers a page;
+  When the listener starts or gains the receive term it reads every session consumer at once with the paged consumer list (`$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, 256 consumers a page;
   `bus.SessionConsumers.ListSessionConsumers`), and each relay of that burst whose listed consumer has nothing awaiting an ack, already carries the wanted filter and settings, and has no pending start takes no turn and sends no call before it pulls (`bus.SessionConsumers.KeepListed`);
   every other relay, and every relay started alone (a new `epoch`, a probe after a pause, a retry), restarts through `RestartAtFloor`.
   A grant without the list costs one log line and one info per session.

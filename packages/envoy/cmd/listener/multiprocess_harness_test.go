@@ -961,12 +961,13 @@ func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
 	}
 }
 
-// requireOnceExceptInFlight fails the test unless every message reached its session, and each
-// reached it exactly once, except that a message whose delivery was still in flight at moment -
-// the instant a pod was killed - may have reached it twice: that is the one repeat a hard
-// take-over allows (cmd/listener/README.md, "A repeat with the same event id is possible after a
-// hard take-over"), because the killed pod died between the push its session took and the
-// delivered record that would have told the pod taking over.
+// killAllowanceViolations reports, one line each, the messages that did not reach their session,
+// and those that reached it more often than the kill allowance permits: every message reaches its
+// session exactly once, except that a message whose delivery was still in flight at moment - the
+// instant a pod was killed - may have reached it twice: that is the one repeat a hard take-over
+// allows (cmd/listener/README.md, "A repeat with the same event id is possible after a hard
+// take-over"), because the killed pod died between the push its session took and the delivered
+// record that would have told the pod taking over.
 //
 // A message counts as in flight at moment when it was published before it and its session took it,
 // by its first prompt, within window on either side of it. Only such a first prompt can be the
@@ -976,11 +977,11 @@ func (s *mpServingPort) requireOnce(t *testing.T, messages []mpMessage) {
 // nothing but the successor, and a repeat of either is a fault of the take-over. The window
 // reaches past the kill too because the port records a prompt when its request arrives, and the
 // killed pod's last push can still be on its way, or in the port's handler, at the kill instant.
-// The serving port cannot tell which pod a prompt came from (every pod pushes to the one port, and
-// a prompt names no pod), so the window around the kill is what marks a first prompt as the
-// killed pod's.
-func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
-	t.Helper()
+// A prompt names no pod, and attributing one exactly would take a socket probe this harness does
+// not carry - the request's source port, its socket inode in /proc/net/tcp, and the pod holding
+// that socket under /proc/<pid>/fd - so the window around the kill is what marks a first prompt as
+// the killed pod's.
+func (s *mpServingPort) killAllowanceViolations(messages []mpMessage, moment time.Time, window time.Duration) []string {
 	counts := s.counts()
 	var wrong []string
 	for _, m := range messages {
@@ -994,7 +995,14 @@ func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMes
 		}
 		wrong = append(wrong, fmt.Sprintf("%s to %s prompted %d times, want %s", m.event, m.session, count, want))
 	}
-	if len(wrong) > 0 {
+	return wrong
+}
+
+// requireOnceExceptInFlight fails the test on any violation of the kill allowance
+// (killAllowanceViolations).
+func (s *mpServingPort) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
+	t.Helper()
+	if wrong := s.killAllowanceViolations(messages, moment, window); len(wrong) > 0 {
 		t.Fatalf("%d of %d messages were prompted neither once nor, in flight at the kill, twice: %v", len(wrong), len(messages), wrong)
 	}
 }

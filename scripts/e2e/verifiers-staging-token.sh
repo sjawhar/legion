@@ -131,13 +131,13 @@ echo "  issuer=$issuer"
 # An issuer of the same shape that answers 404: what a misconfigured deployment looks like.
 absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 
-echo "== pgvector/pgvector (pinned digest) and nats:2.15.1 on ephemeral loopback ports"
+echo "== pgvector/pgvector and nats 2.15.1 (both pinned by digest) on ephemeral loopback ports"
 docker rm -f -v "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
 docker run -d --name "$pg_name" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
   -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
-docker run -d --name "$nats_name" --cpus 1 --memory 512m -p 127.0.0.1::4222 -p 127.0.0.1::8222 nats:2.15.1 -js -m 8222 >/dev/null
+docker run -d --name "$nats_name" --cpus 1 --memory 512m -p 127.0.0.1::4222 -p 127.0.0.1::8222 mirror.gcr.io/library/nats@sha256:023a08c46caa5aff878fb86841187bebfdad9a6e3c552ba5c1a1e18938bbf88a -js -m 8222 >/dev/null
 # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the
 # socket while nothing listens on 5432 yet, and a client that connects then is reset.
 for i in $(seq 1 60); do

@@ -281,13 +281,14 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
    stop, the handler takes no more messages, the message in hand gets 3 s (`inflightGrace`)
    before its prompt is cancelled (a cancelled prompt is a retryable failure: its ledger attempt
    is cleared and the message NAKed) and a second more (`inflightCancelWait`) for its handler to
-   return, every message not handled (queued, or held by a settle hold)
+   return, the serving-port workers are given 0.5 s (`servePortTermStopWait`) to leave the term's
+   pushes, every message not handled (queued, held by a settle hold, or taken back from a worker)
    is NAKed with the 2 s hand-back delay in stream order, the lease is marked released and
    `unsettled`, the subscription stays until the next holder receives, 3 s after the NAKs at
    most and 1.25 s after the release at least (the floor that holds the deliver subject while a
    standby subscribes), then
    drains (2 s at most) and, when all of that went through, the clean-hand-back mark is written
-   (one bucket call, 2 s at most): 11 s in all, and 12.25 s when the flush (1 s) and the release
+   (one bucket call, 2 s at most): 11.5 s in all, and 12.75 s when the flush (1 s) and the release
    (2 s) both
    run to their bounds and leave that floor past the cap. The budget bounds none of those waits:
    it is how long the shutdown waits for the receive stop. Past it the shutdown goes on to the

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -8,7 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 )
 
@@ -97,5 +103,56 @@ func TestARelayHoldDelaysOnlyThatSession(t *testing.T) {
 	case body := <-heldPushes:
 		t.Fatalf("the held session's port was pushed the message a second time:\n%s", body)
 	case <-time.After(2 * time.Second):
+	}
+}
+
+// failingLedger fails its first failures Attempt calls, as a ledger whose bucket does not answer
+// does, and proceeds after them.
+type failingLedger struct {
+	dedupe.Ledger
+	failures int
+	calls    int
+}
+
+func (l *failingLedger) Attempt(string, string) (dedupe.Attempt, error) {
+	l.calls++
+	if l.calls <= l.failures {
+		return dedupe.Attempt{}, errLedgerDown
+	}
+	return dedupe.Attempt{Verdict: dedupe.Proceed}, nil
+}
+
+// A relay holding a message the ledger cannot answer for asks it again every relayHeldRecheck,
+// for as long as the outage lasts. That outage is one episode: it is warned about once, however
+// many asks fail, rather than once a second for every held session, and one INFO line says when
+// the ledger answered again.
+func TestARelayHoldWarnsOncePerLedgerEpisodeAndOnceTheLedgerIsBack(t *testing.T) {
+	const sessionID = "ses_hold_episode"
+	logs := &cmdtest.LockedBuffer{}
+	ledger := &failingLedger{failures: 3}
+	relays := &sessionRelays{cfg: listenerDeliveryHandlerConfig{logger: logging.NewWithWriter("test", logs), ledger: ledger}}
+	acker := &countingAcker{}
+	// A message on the session's own agent subject is judged by nothing but the ledger
+	// (followedTopicVerdict), so the hold here is the ledger's alone.
+	item := listenerTestEnvelope(contracts.AgentSubject(sessionID), "hold-episode-"+id.New())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	verdict, _ := relays.holdWhilePushedElsewhere(ctx, sessionID, item, bus.SessionMessage{SessionAcker: acker})
+
+	if verdict != relayPushesIt {
+		t.Fatalf("the hold ended on verdict %d, want the relay pushing the message once the ledger answered", verdict)
+	}
+	if ledger.calls != ledger.failures+1 {
+		t.Fatalf("the hold asked the ledger %d times, want %d: one a recheck until it answered", ledger.calls, ledger.failures+1)
+	}
+	if acker.progressed != ledger.failures {
+		t.Fatalf("the hold kept the message in progress %d times, want one a recheck (%d)", acker.progressed, ledger.failures)
+	}
+	if got := strings.Count(logs.String(), `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
+		t.Fatalf("the hold logged %d %q WARNs over %d failed asks, want one for the episode:\n%s", got, ledgerUnavailableLine, ledger.failures, logs.String())
+	}
+	if got := strings.Count(logs.String(), `"msg":"delivery ledger answered again"`); got != 1 {
+		t.Fatalf("the ledger coming back logged %d lines, want one:\n%s", got, logs.String())
 	}
 }

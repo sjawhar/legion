@@ -18,7 +18,7 @@ body: |-
     until the lease record says the next holder is `receiving` (3 s at most after the NAKs, and
     1.25 s after its release at least, the floor that holds the deliver subject while a standby
     subscribes: a stop whose
-    flush and release both run to their bounds takes 12.25 s rather than the 11 s a stop takes
+    flush and release both run to their bounds takes 12.75 s rather than the 11.5 s a stop takes
     otherwise, and its 10 s budget bounds none of that: it is how long the shutdown waits for the
     stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS drains
     and the listener's own exit: the drain of its NATS connection ends a hand-back still lingering

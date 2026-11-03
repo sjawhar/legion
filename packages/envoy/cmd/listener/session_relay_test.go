@@ -27,8 +27,8 @@ import (
 )
 
 // relayRig is a listener's /v1 routes over the in-process server, its session consumers relayed as
-// main relays them, by a listener holding its machine's durable binding (relays, which a test that
-// orders the paths itself hands the binding to when it chooses).
+// main relays them, by a listener serving its machine's receive term (relays, which a test that
+// orders the paths itself hands that term to when it chooses).
 type relayRig struct {
 	*sessionConsumerRig
 	relays *sessionRelays
@@ -958,7 +958,7 @@ func TestServePortRelayPushesAFollowedTopicTheDurablePathAlsoReads(t *testing.T)
 		{name: "the relay runs first", relayFirst: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// The relay gains the durable binding when this test says so: unowned, no relay runs,
+			// The relay gains the receive term when this test says so: unowned, no relay runs,
 			// so the durable path below runs first by construction rather than by timing.
 			rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
 			if tc.relayFirst {
@@ -1260,7 +1260,7 @@ func TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// The relay gains the durable binding only once the worker's push is pinned below:
+			// The relay gains the receive term only once the worker's push is pinned below:
 			// unowned, no relay runs, so the push this test hands to the worker is the worker's
 			// by construction rather than by timing. With a relay running from the first
 			// registration, its pull and the entry's flip to core delivery race, and a relay that

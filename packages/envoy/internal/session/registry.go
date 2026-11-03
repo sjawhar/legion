@@ -460,6 +460,21 @@ func (r *SessionRegistry) applyChangeLocked(sessionID string, revision uint64, c
 	return applied && (revision > cachedRevision || isCached != wasCached)
 }
 
+// applyChange takes r.mu, makes the cache move one revision of sessionID's key asks for under the
+// registry's one rule (applyChangeLocked), releases the lock, and calls OnChange's functions when
+// the result is one to report. Every path that applies a revision outside a decode goes through
+// it - this registry's own write, and the reconciliation after a delete - so none of them reports
+// a revision another path has applied already. A path that must decode under the lock applies
+// through applyEntry, which ends the same way.
+func (r *SessionRegistry) applyChange(sessionID string, revision uint64, change func() bool) {
+	r.mu.Lock()
+	report := r.applyChangeLocked(sessionID, revision, change)
+	r.mu.Unlock()
+	if report {
+		r.notifyChanged(sessionID)
+	}
+}
+
 // expiryFor computes the local TTL deadline for a cached entry. It prefers the
 // KV revision's Created() timestamp (the JetStream MaxAge clock), falling back
 // to the SessionEntry.UpdatedAt set by Put when no KV metadata is available
@@ -620,14 +635,13 @@ func (r *SessionRegistry) write(ctx context.Context, sessionID string, merge fun
 		if err != nil {
 			return err
 		}
-		r.mu.Lock()
-		applied := r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
-		r.mu.Unlock()
-		// The watcher's copy of this write finds the revision already cached and reports nothing
-		// (applyWatched), so the write reports its own change, as OnChange promises.
-		if applied {
-			r.notifyChanged(sessionID)
-		}
+		// The write applies its own revision under the one rule every path applies one by
+		// (applyChange): whichever of the write and the watcher's copy of it reaches the cache
+		// first reports the change, and the other, finding the revision cached already, reports
+		// nothing, so OnChange hears this write once.
+		r.applyChange(sessionID, written, func() bool {
+			return r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
+		})
 		r.recordSeen(ctx, kv, sessionID, written)
 		return nil
 	}
@@ -863,12 +877,7 @@ func (r *SessionRegistry) reconcileDeleted(ctx context.Context, kv bus.KeyValue,
 		return
 	}
 	fence := revision + 1
-	r.mu.Lock()
-	report := r.applyChangeLocked(sessionID, fence, func() bool { return r.evictCachedSessionLocked(sessionID, fence) })
-	r.mu.Unlock()
-	if report {
-		r.notifyChanged(sessionID)
-	}
+	r.applyChange(sessionID, fence, func() bool { return r.evictCachedSessionLocked(sessionID, fence) })
 }
 
 // ListEntry is a single entry from List(), keyed by session ID.
