@@ -265,8 +265,11 @@ func pluginsLine(cfg config.Config) string {
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed. After it, one line per deployment capability the file alone leaves open, in the words
-// boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// the seed. After it, one line per configured repository rename (`repository_renames`), so an
+// operator reads back what the daemon will treat as one repository before a transfer moves the
+// events onto the new name; a file that configures none prints no such line. Then one line per
+// deployment capability the file alone leaves open, in the words boot logs it with
+// (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
 // `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
@@ -300,6 +303,10 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
+	for _, rename := range cfg.RepositoryRenames.Pairs() {
+		fmt.Fprintf(stdout, "repository rename: %s and %s are one repository wherever the daemon compares a name; keep the pair configured for as long as any record names %s\n",
+			rename.From, rename.To, rename.From)
+	}
 	deployment := daemon.Deployment(cfg)
 	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())

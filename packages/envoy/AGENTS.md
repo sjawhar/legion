@@ -84,7 +84,7 @@ Each item below names a task and where its code is, then notes on it.
   `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
   the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
   A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
-  INFRA-493 extends that sweep to GitHub's 3-day redelivery window.
+  the sweep asks until GitHub records the delivery or 72 hours after its first failed attempt, GitHub's redelivery window.
   Unset, the stream is created with no limit and a start keeps a deployed one.
   Set, a start and the keeper raise a smaller deployed limit, or none, to it and never lower one, as for the copies, so an operator's raise of a full stream stands;
   lowering a limit is an operator step once every program's setting is lowered.
@@ -1291,6 +1291,24 @@ Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 21474
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
 
+An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `20261101162254`).
+Each decision is one `##` section of it: its heading block and every block after it up to the next heading of its level or higher, the heading naming the choice, the blocks giving the reason and the options weighed, and each spec block it shaped linked `dispatch://KEY/spec#b-<id>`, which the block index records as a link from the decision's own block to that spec block.
+The section headed exactly `## Replaced` holds replaced decisions as `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's decision links its answered ask, which is what makes it theirs rather than the agent's.
+A decision's changed version and time are the greatest of its blocks' (`refs.BlockChanges`), and a spec block X linked from decision D by link L is out of date exactly when D's own text changed after it first linked X and X has not changed since D did, both read from the document's text at a version rather than from that changed version:
+D's text at L's `created_version` differs from its text now, and D's text at the version of this document that stood when X last changed differs from it too.
+The changed version cannot answer either, since it is the greatest of the blocks D holds now and so does not move when a block is removed from D or moved into or out of it, where the text changes and every remaining block keeps its version;
+a stored version holds no block id, so each version is cut into its decisions by the rule the block walk cuts the document that stands by (`decisionSums` beside `decisionSections`: a `##` heading outside `## Replaced` and a `###` under it opens a decision, a heading of its own level or higher closes it, `#` included, which opens none, and a deeper heading is text of the decision it stands in), and each decision is named across versions by its heading and how many decisions before it carry that heading, so a document that carries one heading twice - a decision made again beside the replaced one of its name - names each of them, while a renamed heading, and a version that carried fewer decisions of that heading, give that decision no sum there and read as text that differs from the text now, which it is.
+A new decision marks nothing, and neither does the block index's first pass over a document, which gives every block and every pair one version;
+a version this document does not hold and a spec block Dispatch records no change for leave a link as it is, and a spec block whose last change is older than the document's first version is out of date by the first half alone, since every change of the decision came after it.
+`GET /api/v1/issues/{key}/decisions` serves that view - the document's `dispatch://` address (null, with no decisions, when the issue has no `decisions.md`), the issue's open asks whose block is in its spec in the shape every ask read has, and each decision in document order with its links read through `refs.BlockLinks`, the read `GET /api/v1/block-links` already serves.
+`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (a person's) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
+the sum is the decision's own `text_sha256`, which the view serves beside its `text`, and a decision whose text changed since is `409 DECISION_CHANGED` with nothing written, as an answer to an ask reworded since is `409 ASK_EDITED` - a Keep over text nobody read is what Keep exists to prevent - while a body with no sum is `400 INVALID_KEEP`.
+Keep records that the decision has been reviewed and not who reviewed it, so a second person's Keep moves the row, and the row holds that sum beside the version the decision then stood at.
+The sum, not the version, is what the view's `waiting_review` compares - an agent's decision, not replaced, whose text no Keep holds as it stands - since a decision's changed version is the greatest of the blocks it holds now and so does not move when a block is removed from the decision or moved into or out of it, where the text changes and every remaining block keeps its version.
+The document Keep takes is its issue's `decisions.md` resolved as the view resolves it, by slug and then by filename; any other document, and any other block - one that is no decision heading, or a decision under `## Replaced` - is `404 TARGET_NOT_FOUND`.
+It appends `decision.kept` (`{artifact_id, block_id, changed_version}`) on the decision's issue, which wakes nobody (`events.Quiet`): a Keep asks its agent for nothing.
+`GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, and announce nothing.
+
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
 `itemblocks.Split` reads a body as the document parser reads a document (`pmdoc.ParseWithSourceStarts`) and cuts it at its top-level blocks, each block the body's own text from the start of the line where it starts to where the next one starts, less the spaces, tabs and line endings that end it, so its stored text, its excerpt and its identity are what its author wrote, never the canonical rendering.
 A body the parser refuses (one holding block HTML), or one whose block starts it cannot place, splits at blank lines into blocks of type `text`, so no body is refused for its shape;
@@ -2419,7 +2437,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the source's previous projection, and every other source's, stays up.
   `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`.
 
-- Every sync runs under a two-minute deadline.
+- Every sync runs under a two-minute deadline of its own, counted from when its flight began rather than from when a caller arrived.
+  A flight runs on a context detached from whichever caller started it (`context.WithoutCancel`), so one caller hanging up fails none of the others.
+  Only the process stopping ends a flight early:
+  `Importer.Close`, which `cmd/dispatch/main.go` runs inside the shutdown's background wait, before `waitUntilIdle` and `pool.Close`, cancels every flight and waits for it.
   `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing.
   What orders writes across processes is the source row's version, PostgreSQL's `xmin`, which a sync loads (as text) with the row before its fetch:
   every write of the row by any build changes it
@@ -2429,7 +2450,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A re-resolved installation id is written only on the row as loaded (`xmin` unchanged), and the sync carries that write's `xmin` on.
   Writes are thus ordered by when each sync read the branch head, never by commit date:
   a process held mid-fetch never records an older head, or a failure it met, over another process's newer import, and a force-push back to an older commit still imports.
-  The per-project mutex only saves duplicate GitHub fetches inside one process.
+  The callers of one source, one project's one repository, share one flight (`singleflight` keyed on both), so two Refresh clicks cost one set of GitHub calls.
+  No lock is held across a GitHub call, so a slow source holds up no other source, of its project or of any other.
+  A caller takes a flight's answer only when that flight issued its branch-head lookup no earlier than the moment the caller asked.
+  Otherwise it joins the next flight, which necessarily began after it asked (`singleflight` deletes the key before it sends a result), so a push followed by a Refresh is never answered the pre-push commit.
+  Every import failure is recorded on the source row whatever its callers did, the sync's own deadline included, which is written on a cancel-free context;
+  only the process stopping suppresses that record.
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
@@ -2446,8 +2472,6 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`.
   `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`);
   every other source's components stay, and snapshots remain as history.
-  A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
-  a caller that has gone away records nothing.
   The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent;
   a sync held by a recorded GitHub rate limit fails with text that names the limit by when it was recorded, never by its remaining wait, so one limit is one `sync_failed`.
   A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
@@ -3232,7 +3256,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   nats-server answers the refused publish with API error 10077 (`JSStreamStoreFailedF`) `maximum bytes exceeded`, which nats.go returns as `nats: maximum bytes exceeded` and the bus wraps as `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`;
   `publishJetStream` and a window's send, `streamFull`).
   It is not a `bus.ErrRefused`, so every publisher treats it as a failure to retry:
-  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (five times, over about half an hour);
+  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt);
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
@@ -3417,7 +3441,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   — both of `roles.ResolveHolder`'s attempts spent on a supersession (`roles.Churned`), `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
-  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so.
+  It answers `404 {"error":…,"reason":"unclaimed","claim_revision":0}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), and the same `claim_revision` a lookup reports (`0` for a claim the resolution released), whether the first resolution or a later attempt's finds it so.
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
@@ -3484,6 +3508,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   a role store call that did not answer within its cap or that budget (the claim read, the holder's session read or the conditional release) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
   and a claim record no read can decode is, as on the publish route, `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After`.
+  Every holder answer, the 200 and the 404 alike, carries `claim_revision`: the `envoy_roles` revision of the role's claim record as this lookup leaves it, which `/v1/roles/set` takes back as `if_claim_revision` (the 503s and the unreadable-record 500 above carry an error alone, as they always did).
+  It is the revision the live holder's claim was read at, the revision of a lapsed claim this lookup kept (a restored claim still inside its restart grace), and `0` for a role no record claims — an unclaimed one, and a lapsed holder whose claim this lookup released.
 
 - `/v1/roles/set` (POST)
 
@@ -3495,6 +3521,12 @@ Each item below names an endpoint and its method, then its contract, and an item
   A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
   The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
   The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
+  A claim carrying `if_claim_revision` is conditional: it lands only while the role's claim record is still at that revision, the one a `/v1/roles/<role>` lookup reported as `claim_revision`, and `0` names a role with no claim record at all, so such a claim lands only while none exists.
+  Any other revision in the bucket, a record where the claim names none, or none where it names one is `409 {error, role, holder, claim_revision}`, where `claim_revision` is the revision the bucket does hold (`0` for no record) and `holder` the session its claim names (empty for none), and so is a claim that passed that check and then lost its conditional write to a claim that landed in between.
+  **No claim record is written**, so the role keeps the holder the standing claim gave it: the precondition is weighed before the claimant's interest record is touched, and a claim that lost the conditional write rolls that record's topic back unless the winning claim names that same session, whose record then keeps the lane topic of the role it now holds (`store.Registry.SetRoleWithPrevious`, `store.ErrRoleClaimRevisionMismatch`).
+  The claimant's own session registration is refreshed before any of this, as it is on every claim this route takes, conditional or not.
+  A claim with no `if_claim_revision` is weighed by the soft and last-claim-wins rules alone, exactly as before the field.
+  It is how a scheduler turns a lookup of a role and the claim that follows into one decision, which neither last-claim-wins nor a soft claim can do: a claim that landed in between refuses this one rather than being overwritten by it.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
@@ -3854,7 +3886,8 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`, so a handler that runs past its limit holds its key one lease longer at most.
   A client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its stored answer, and only a run whose process died is taken over.
   A handler cut off with its client would roll its transactions back and leave every retry to start over, so a write that takes the server longer than the client waits could never land.
-  Every handler that reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync` among them.
+  Every handler that reads `r.Context()` for its work gets this detached context.
+  The architecture importer's `Sync` detaches one of its own from it (the importer section above), so the flight it shares outlives the caller that started it and ends only when the process stops.
 
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it.
   A 2xx or a 4xx is stored and the row finished in one statement;
