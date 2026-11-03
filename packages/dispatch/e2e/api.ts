@@ -8,6 +8,8 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -745,6 +747,21 @@ export function requestApproval(
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** Reviews the document's latest settled version as a person does from its header, with no
+ *  approval request needed: Approve, or Request changes with a reason. */
+export function reviewArtifact(
+  id: string,
+  input: { state: ArtifactReviewState; reason?: string },
+  options: ApiOptions = {}
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
     "POST",
     input,
     options

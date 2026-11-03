@@ -139,8 +139,9 @@ type bootConfig struct {
 	// by the broker client on each call, never here: a projected token rotates.
 	AgentSecretsURL       string
 	AgentSecretsTokenFile string
-	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in.
-	// Empty keeps them in Postgres.
+	// FileStoreBucket is DISPATCH_FILE_STORE_BUCKET: the bucket uploaded files are stored in,
+	// gs://<bucket> for Cloud Storage or an S3 bucket's name (files.Open). Empty keeps them in
+	// Postgres.
 	FileStoreBucket string
 	// ListenAddr is the address the server serves on: the inherited socket's own address with
 	// DISPATCH_LISTEN_FD, else the one main binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
@@ -733,7 +734,14 @@ func main() {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, background.Wait, waitIntakes,
+	// The importer's flights outlive the ticker's context, so they are closed inside the
+	// background wait: shutdown runs it before waitUntilIdle and pool.Close, and a sync still
+	// fetching then would write into a closing pool.
+	waitBackground := func() {
+		background.Wait()
+		appCtx.Architecture().Close()
+	}
+	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitBackground, waitIntakes,
 		deregisterAfterDrain(registration), registration.Lost(), outboxStopped); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -1361,18 +1369,15 @@ func parsePort(name, raw string) (int, error) {
 	return port, nil
 }
 
-// openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is
-// unset, which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's
-// nil check reads the setting: NewS3's (*S3)(nil) on failure is not passed through as a Store.
+// openFileStore is the uploaded-file store boot names (files.Open: gs://<bucket> is a Cloud
+// Storage bucket, a bare name an S3 bucket), or nil when DISPATCH_FILE_STORE_BUCKET is unset,
+// which keeps every file in Postgres. A nil interface, never a typed nil, so every caller's nil
+// check reads the setting.
 func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	if boot.FileStoreBucket == "" {
 		return nil, nil
 	}
-	bucketStore, err := files.NewS3(ctx, boot.FileStoreBucket)
-	if err != nil {
-		return nil, err
-	}
-	return bucketStore, nil
+	return files.Open(ctx, boot.FileStoreBucket)
 }
 
 // serverBus is the options every NATS connection of the server is made with: it connects in the
