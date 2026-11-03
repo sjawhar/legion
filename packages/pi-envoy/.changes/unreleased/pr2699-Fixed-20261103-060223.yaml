@@ -15,13 +15,11 @@ body: |-
   subjects open while its caller read the failure as "nothing opened": a notice subject a role had
   been marked for was unmarked by that caller, confirmed by a later pass, and then carried into the
   next registration as an ordinary interest, which the end of the role never closed, so a
-  controller that had been replaced went on taking its topic's wakes. An open is all or nothing now
-  - it closes every subject it opened before it fails, and it fails only on a connection closed for
-  good or a session shutting down - and a second open of a subject whose answer is still
-  outstanding waits for that answer instead of reporting the subject already open. The relay's
-  delivery subject, which took no round trip at all, now takes the same one as every other subject,
-  so the listener's first relayed frames are no longer published to a subscription the server has
-  yet to take.
+  controller that had been replaced went on taking its topic's wakes. An open is all or nothing
+  now: it closes every subject it opened before it fails, and it fails only on a connection closed
+  for good or a session shutting down. The relay's delivery subject, which took no round trip at
+  all, now takes the same one as every other subject, so the listener's first relayed frames are no
+  longer published to a subscription the server has yet to take.
 time: 2026-11-03T06:02:23.689284344Z
 custom:
     Issue: pr2699
