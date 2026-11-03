@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	ompsessions "github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -128,5 +131,81 @@ func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t
 	}
 	if held := r2.driftedInPod(pod, claim.RoleController); len(held) > 0 {
 		t.Fatalf("the replaced controller pod holds %+v, which a pod created now is not handed", held)
+	}
+}
+
+// The controller of a project with no GitHub owner to mint for runs with gh acting as nobody and
+// its gh volume an empty directory rather than a projection of its Secret
+// (TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory, volumes: a projection with no items
+// would project every key of the Secret, the launcher token among them). That state is ordinary
+// and transient: a project whose mapping names no repository both Apps are installed on yet, and
+// a daemon whose read of an installation GitHub did not answer, which leaves that repository out
+// for now and reads it again.
+//
+// When the project then gains its first owner, that pod is in exactly the state this issue is
+// about: /var/run/legion/gh holds no directory of that owner's name, the refresher's Update
+// reaches the Secret and never the projection, and every `gh` call of the controller against
+// that owner's repositories runs unauthenticated. movedGhOwners reads an empty gh directory as
+// lacking nothing, so nothing says so: driftedInPod is empty, the observation is Alive, and the
+// controller's next launch keeps the pod — for the life of the deployment, since only a new pod
+// projects an owner's files.
+//
+// The controller's pod is the one pod no round covers and it holds no issue disk, so the remedy
+// is the one this issue already built: movedGhOwners must read a gh volume that is an empty
+// directory as holding no owner, so a served owner makes it a moved address and its next launch
+// replaces it. A pod with no gh volume at all is still no pod of this runtime's making and must
+// stay unmoved, and the comparison must stay one way: an owner the pod holds that the daemon no
+// longer serves is a stale directory and no reason to remake a pod.
+func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing.T) {
+	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.GitHubCredential = noOwner
+		o.GitHubOwners = func() []string { return nil }
+	}))
+	spec := controllerSpec(t)
+	loc := g.spawn(spec)
+	ghVolumeName := roleVolume(ghVolume, claim.RoleController)
+	at := slices.IndexFunc(g.pod(loc.Sandbox.Name).Spec.Volumes, func(v corev1.Volume) bool { return v.Name == ghVolumeName })
+	if at < 0 || g.pod(loc.Sandbox.Name).Spec.Volumes[at].EmptyDir == nil {
+		t.Fatalf("the ownerless controller's %s volume is %+v, want the empty directory its launch makes", ghVolumeName, g.pod(loc.Sandbox.Name).Spec.Volumes)
+	}
+
+	r2 := secondRuntime(t, g, func(o *Options) {
+		o.GitHubCredential = staticCredential
+		o.GitHubOwners = func() []string { return staticOwners }
+	})()
+	g.connectRunning(controllerToken, loc.Sandbox.Generation)
+	g.eventually("the controller's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	want := (movedAddress{ghVolumeName, ghOwnersName(nil), ghOwnersName(staticOwners)}).String()
+	held := r2.driftedInPod(g.pod(loc.Sandbox.Name), claim.RoleController)
+	if !slices.ContainsFunc(held, func(m movedAddress) bool { return m.String() == want }) {
+		t.Errorf("the controller's pod holds %+v, want %q among it", held, want)
+	}
+	obs := readopt(t, g.ctx, r2, loc)[0]
+	if obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, want) {
+		t.Errorf("%s (%s), want StaleAddress naming %q: no round is opened over the controller's pod, so its launch is what replaces it",
+			obs.Kind, obs.Detail, want)
+	}
+
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-controller-g2", controllerSession
+	next, err := r2.Resume(g.ctx, &loc, spec)
+	if err != nil {
+		t.Fatalf("Resume the controller: %v", err)
+	}
+	if next.Sandbox.PodUID == loc.Sandbox.PodUID {
+		t.Fatalf("the launch kept pod %s, whose gh directory is empty while the daemon serves %q, and no round will ever replace it",
+			loc.Sandbox.PodUID, staticOwners)
+	}
+	pod := g.pod(loc.Sandbox.Name)
+	if items := ghItems(t, pod, claim.RoleController); !slices.Equal(items, ghItemsFor(staticOwners...)) {
+		t.Errorf("the replaced controller pod's gh volume projects %+v, want the two files of each of %q", items, staticOwners)
+	}
+	if drifted := r2.driftedInPod(pod, claim.RoleController); len(drifted) > 0 {
+		t.Errorf("the replaced controller pod holds %+v, which a pod created now is not handed", drifted)
 	}
 }
