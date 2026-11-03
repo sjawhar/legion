@@ -1695,6 +1695,82 @@ func TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce
 	}
 }
 
+// A lane's lease of a catch-up and a ready's drop of the root's queued catch-ups (DropCatchUps)
+// meet on the row. The drop keeps a catch-up that carries kept decisions while a row of its telling
+// is under a live lease, but that check is a subquery over the outbox: Postgres rechecks a
+// concurrently updated row's new version against the where clause, never a subquery over other
+// rows, so a drop whose delete read the row before the lease committed would delete it after. The
+// lane then publishes the row from memory, its re-hold copies the text naming the decisions the
+// drop released, and the fresh catch-up the drop's transaction wrote names them too: told twice
+// (the kept-decision model's seed 262). So the drop locks the issue's catch-ups first and reads the
+// leases after: a lease a moment from committing is seen, and a lease taken after the lock finds
+// the row gone and claims nothing.
+func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	ref := "dispatch://LEGION-1/ask/ask-1"
+	kept := KeptDecisions{Decisions: []DecisionMark{{Ref: ref, At: at, Issue: "LEGION-1"}}}
+	var catchUp int64
+	inTx(t, st, func(tx pgx.Tx) {
+		putRoot(t, ctx, records, tx, "LEGION-1")
+		must(t, records.AddParkedDecision(ctx, tx, ParkedDecision{Issue: "LEGION-1", Ref: ref, Decision: DecisionAskAnswered,
+			Actor: "user:alice", At: at}))
+		row, err := NewOutboxRow("LEGION-1", Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "the tree of LEGION-1",
+			CatchUp: &CatchUp{Generation: 1, Launch: 1, Decided: ref, Kept: &kept}}, now)
+		must(t, err)
+		catchUp, err = records.EnqueueID(ctx, tx, row)
+		must(t, err)
+		must(t, records.ClaimKeptDecisions(ctx, tx, "LEGION-1", kept, catchUp))
+	})
+
+	// The lane's lease of the catch-up, a moment from committing.
+	txLane, err := st.BeginTx(ctx, pgx.TxOptions{})
+	must(t, err)
+	if _, leased, err := records.ClaimRow(ctx, txLane, catchUp, now, time.Minute); err != nil || !leased {
+		t.Fatalf("the lane's claim of the catch-up = %v, %v; want it leased", leased, err)
+	}
+	// The ready's drop in that moment. It runs apart: it waits on the lane's row until the lease
+	// commits, which the test does once the wait shows in pg_stat_activity, and a drop that
+	// returned before then read the row without waiting on the lane at all.
+	dropped := make(chan error, 1)
+	go func() {
+		dropped <- st.Tx(ctx, func(tx pgx.Tx) error { return records.DropCatchUps(ctx, tx, "LEGION-1", now) })
+	}()
+	returned := false
+	testwait.Eventually(t, "the drop to wait on the lane's lease or to return", func() bool {
+		select {
+		case err = <-dropped:
+			returned = true
+			return true
+		default:
+		}
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	must(t, txLane.Commit(ctx))
+	if !returned {
+		err = <-dropped
+	}
+	must(t, err)
+
+	var left int
+	var claimedBy int64
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, tx.QueryRow(ctx, "select count(*) from outbox where id = $1 and lease_until > $2", catchUp, now).Scan(&left))
+		must(t, tx.QueryRow(ctx, "select coalesce(claimed_by, 0) from parked_decisions where issue = 'LEGION-1' and ref = $1", ref).Scan(&claimedBy))
+	})
+	if left != 1 || claimedBy != catchUp {
+		t.Fatalf("after the drop the leased catch-up %d is in the outbox %d times and %s is claimed by row %d; want the row kept under its "+
+			"lease and the decision still its to tell: the lane publishes the row it leased, and a drop of it would name the decision again",
+			catchUp, left, ref, claimedBy)
+	}
+}
+
 // A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
 // role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
 // issue, a start queued before the row, and another issue's start are each due.

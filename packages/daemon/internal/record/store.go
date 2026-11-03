@@ -1833,6 +1833,17 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 }
 
 func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error {
+	// The issue's catch-ups are locked before their leases are read. The lease check below is a
+	// subquery over the outbox, and Postgres rechecks a concurrently updated row's new version
+	// against the where clause, never a subquery over other rows: a delete whose statement began
+	// before a lane's claim committed would wait on the claim's row lock and then delete the row
+	// it had read unleased. The lock waits on that claim instead, and the delete, a statement of
+	// its own, reads the lease it wrote; a claim that arrives after the lock waits on this
+	// transaction and finds the row gone (ClaimRow).
+	if _, err := tx.Exec(ctx, `select 1 from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
+		order by id for update`, string(OutboxKindNotice), issue); err != nil {
+		return fmt.Errorf("lock the queued catch-ups of %s: %w", issue, err)
+	}
 	// A catch-up that carries kept decisions and one of whose telling's rows (itself, the row it
 	// copies, or a copy of either) is under a live lease is kept: that row may be publishing now,
 	// and the decisions this one claims are that telling's to settle.
