@@ -209,6 +209,11 @@ func personalTokenHolding(t *testing.T, database *store.Store, scopes ...string)
 	if err != nil {
 		t.Fatalf("mint a personal token: %v", err)
 	}
+	if scopes == nil {
+		// A caller that names no scope wants a token holding none, and the column is not null:
+		// an empty set, as the shared token's credential holds, rather than a null one.
+		scopes = []string{}
+	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into agent_tokens (owner, name, token_hash, prefix, scopes)
 		values ($1, $2, $3, $4, $5)

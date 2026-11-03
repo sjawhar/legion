@@ -44,6 +44,10 @@ type liveStreamer interface {
 	SendWait(ctx context.Context, frame any) error
 	// Human reports whether the caller is a person (cookie identity) rather than a bearer.
 	Human() bool
+	// Holds reports whether the caller's credential holds one OAuth scope, as the socket read
+	// the scopes at the upgrade: the gate a view a person's credential alone may watch uses,
+	// since requireScope gates a route and no frame carries a credential.
+	Holds(scope string) bool
 }
 
 // runningSubscription is an events or agent subscription whose whole life runs on a goroutine of
@@ -139,6 +143,8 @@ func (stream *liveSubscriptionStream) ended(ctx context.Context) error {
 }
 
 func (stream *liveSubscriptionStream) Human() bool { return stream.socket.human }
+
+func (stream *liveSubscriptionStream) Holds(scope string) bool { return stream.socket.holds(scope) }
 
 // subscribeLive answers one subscribe frame: it starts the subscription the frame's view's kind
 // names in place of any the socket holds under the frame's sub, or answers the error frame refusing

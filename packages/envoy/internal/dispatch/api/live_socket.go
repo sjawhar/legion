@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -81,6 +82,10 @@ type liveSocket struct {
 	cancel context.CancelFunc
 	// human is whether the caller is a person, signed in by cookie, rather than a bearer.
 	human bool
+	// scopes are the OAuth scopes the caller's credential held at the upgrade, which is where
+	// every socket's authorization is decided: a frame carries no credential of its own, so a
+	// view the socket serves reads what the caller proved when it opened (holds).
+	scopes []string
 	// queue holds the hub's frames and the socket's own refusals (Send).
 	queue chan any
 	// stream holds the frames of the events and agent subscriptions (SendWait).
@@ -114,13 +119,14 @@ type liveSocket struct {
 	beforePick func(socket *liveSocket, takesStream bool)
 }
 
-func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool) *liveSocket {
+func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool, scopes []string) *liveSocket {
 	ctx, cancel := context.WithCancel(ctx)
 	return &liveSocket{
 		conn:   conn,
 		ctx:    ctx,
 		cancel: cancel,
 		human:  human,
+		scopes: scopes,
 		queue:  make(chan any, liveSocketQueue),
 		stream: make(chan liveStreamFrame, liveSocketStream),
 		full:   make(chan struct{}),
@@ -128,6 +134,12 @@ func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool) *liveSocket 
 		closed: make(chan struct{}),
 		subs:   map[string]*liveSub{},
 	}
+}
+
+// holds reports whether the caller's credential holds scope, as model.Credential.Holds reports it
+// of a request's: the socket's own test of what the caller may watch.
+func (socket *liveSocket) holds(scope string) bool {
+	return slices.Contains(socket.scopes, scope)
 }
 
 // liveSocketAge is how long a socket opening now lives: Deps.LiveSocketAge's, or
@@ -314,13 +326,19 @@ func (socket *liveSocket) writeFrame(frame any) bool {
 }
 
 // serveLiveSocket serves GET /ws/live to a signed-in person or an agent's bearer, recording which
-// it is. The upgrade keeps gorilla's same-origin check, so another site's page cannot open the
-// socket with a person's cookie.
+// it is and what its credential may do: a frame carries no credential, so the scopes the caller
+// proved here are what each of its views is answered against (liveSocket.scopes). The upgrade
+// keeps gorilla's same-origin check, so another site's page cannot open the socket with a
+// person's cookie.
 func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
-	_, human, err := s.optionalActor(r)
+	actor, human, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
+	}
+	var scopes []string
+	if actor.Credential != nil {
+		scopes = actor.Credential.Scopes
 	}
 	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: liveSocketReadBuffer}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -328,7 +346,7 @@ func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 		return // the upgrader has answered the request
 	}
 	age := s.liveSocketAge()
-	socket := newLiveSocket(r.Context(), conn, human)
+	socket := newLiveSocket(r.Context(), conn, human, scopes)
 	socket.beforePick = s.liveWriterBeforePick
 	s.liveSockets.add(socket)
 	defer s.liveSockets.remove(socket)
