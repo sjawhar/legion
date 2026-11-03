@@ -256,9 +256,9 @@ const tabWidth = 4
 // tabs up to three characters, at one to three quotes and every indentation typed can carry: a
 // line holding the markers and a tab alone (markerTabEndsLine), where the quote takes one column
 // of the tab and only a line it leaves nothing of is typed's, whatever indentation typed carries;
-// and a run ending in a tab one of whose tabs begins before the list item's content starts and
-// ends past it (tabCrossesItemContent), which the item cannot strip in part, so the line is the
-// item's whatever indentation typed carries.
+// and a run of a whole tab's columns or more whose last tab begins before the list item's content
+// starts and ends past it (lastTabCrossesItemContent), which the item cannot strip in part, so the
+// line is the item's whatever indentation typed carries.
 func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective) bool {
 	if line < 0 || leadingQuoteMarkers(l.text(line)) != depth {
 		return false
@@ -273,20 +273,31 @@ func (l sourceLines) holdsOnlyBlockIndent(line, depth int, typed *typedDirective
 		if l.markerTabEndsLine(start, depth) {
 			return columns == 0
 		}
-		if l.whitespaceEndsInTab(line) && l.tabCrossesItemContent(start, depth, typed) {
+		if columns >= tabWidth && l.lastTabCrossesItemContent(start, depth, typed) {
 			return false
 		}
 	}
-	indent := l.textColumn(startOf(typed)) - l.quoteContentColumn(startOf(typed), depth)
-	return columns <= indent
+	return columns <= l.blockIndentColumns(typed, depth)
 }
 
-// tabCrossesItemContent reports whether a tab in the whitespace past count quote markers on
-// position's line begins before the content of the list item around typed starts and ends past it.
-// A list item strips the columns before its content from every line it continues, and that parser
-// strips no part of a tab, so such a line keeps columns of its own however far typed is indented.
-// With no list item around typed, or one holding nothing, no column answers and none crosses.
-func (l sourceLines) tabCrossesItemContent(position, count int, typed *typedDirective) bool {
+// blockIndentColumns is how many columns typed's own opening line holds past its quotes' content:
+// its list item's indentation and the block's own among them. It is read from that line's first
+// character past the quote markers rather than from typed's own position, which goldmark records
+// two bytes into the fence where a tab indents the line.
+func (l sourceLines) blockIndentColumns(typed *typedDirective, depth int) int {
+	line := l.lineOf(startOf(typed))
+	start := l.starts[line]
+	return l.textColumn(l.pastQuoteMarkers(start, depth)) - l.quoteContentColumn(start, depth)
+}
+
+// lastTabCrossesItemContent reports whether the whitespace past count quote markers on position's
+// line ends in a tab that begins before the content of the list item around typed starts and ends
+// past it. A list item strips the columns before its content from every line it continues, and
+// that parser strips no part of a tab: where the line's last tab is the one straddling that column
+// and the line measures a whole tab or more past the quote's content, the line keeps columns of
+// its own however far typed is indented. With no list item around typed, or one holding nothing,
+// no column answers and none crosses.
+func (l sourceLines) lastTabCrossesItemContent(position, count int, typed *typedDirective) bool {
 	item, ok := ancestor[*ast.ListItem](typed)
 	if !ok || item.FirstChild() == nil {
 		return false
@@ -302,14 +313,13 @@ func (l sourceLines) tabCrossesItemContent(position, count int, typed *typedDire
 		}
 		column, index = column+1, index+1
 	}
+	crosses := false
 	for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
 		next := advanceColumn(column, l.source[index])
-		if l.source[index] == '\t' && column < content && content < next {
-			return true
-		}
+		crosses = l.source[index] == '\t' && column < content && content < next
 		column, index = next, index+1
 	}
-	return false
+	return crosses
 }
 
 // advanceColumn is the column a character takes the line to, a tab reaching the next multiple of
