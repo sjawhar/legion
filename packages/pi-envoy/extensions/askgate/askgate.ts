@@ -63,6 +63,9 @@ export interface AskGateHost {
   readonly logger: { warn(message: string): void };
   /** The host's plain log, for a warning one session's gated calls raise while it runs. */
   readonly runtimeLogger: { warn(message: string): void };
+  /** The session this process is acting as now, read at each call: what a broker trade for the
+   * gate's own Dispatch reads writes under (`currentSessionID`, extensions/envoy.ts). */
+  readonly session: () => string;
 }
 
 // The core passes the host's objects through untyped: ctx is the ExtensionContext, whose
@@ -128,7 +131,7 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
     env: process.env,
     now: Date.now,
     dispatchClient: (directory, signal) =>
-      sessionDispatchClient(host.configFile, directory, signal),
+      sessionDispatchClient(host.configFile, directory, signal, host.session),
   });
   const loading = loadAskGate(pi, host, record);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
@@ -323,7 +326,7 @@ async function loadAskGate(
     runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
     dispatchClient: (directory, signal) =>
-      sessionDispatchClient(host.configFile, directory, signal),
+      sessionDispatchClient(host.configFile, directory, signal, host.session),
     recordDecision: record,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,

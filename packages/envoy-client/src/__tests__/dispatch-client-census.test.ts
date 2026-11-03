@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_HEADER, IDEMPOTENCY_KEY_PATTERN } from "@legion/contracts";
+import { bearerCredential } from "../bearer";
 import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
 
 // Every write the `dispatch` command makes carries one key because every request DispatchClient
@@ -121,7 +122,7 @@ test("every DispatchClient method reaches Dispatch through its one request funct
       }) as typeof fetch;
       const client = new DispatchClient(
         "http://dispatch.test",
-        "secret",
+        bearerCredential("secret"),
         recording,
         undefined,
         DISPATCH_WRITE_RETRY

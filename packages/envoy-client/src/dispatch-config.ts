@@ -1,11 +1,16 @@
 import {
   type BearerSource,
+  bearerCredential,
   bearerSource,
   type FileBearer,
   fileBearer,
   type RequestCredential,
 } from "./bearer";
-import { brokerCredential, brokerRouteConfigured } from "./broker-credential";
+import {
+  type BrokerSessionName,
+  brokerCredential,
+  brokerRouteConfigured,
+} from "./broker-credential";
 import {
   type CheckoutEnvoyConfig,
   type CommandMode,
@@ -39,33 +44,14 @@ export type DispatchEnvironment = EnvoyConfigEnvironment & {
 export interface ActiveDispatchConfig {
   readonly enabled: true;
   readonly url: string;
-  /** The bearer a variable or a file gave, and "" when this machine traded its own identity at
-   * the secrets broker instead: that credential is no bearer, and `brokered` holds it. */
-  readonly token: string;
   /**
-   * The credential when it is not the bearer in `token`: an access token the secrets broker
-   * minted for this machine's identity, presented under the `DPoP` scheme with a proof of this
-   * process's key on every request. Undefined for every bearer route, which is every route a
-   * deployment configures today. `dispatchCredential` is what a caller presents.
+   * What every request presents: the bearer a variable or a file gave (`bearerCredential`), or
+   * the access token this machine traded its own identity for at the secrets broker, presented
+   * under the `DPoP` scheme with a fresh proof of this process's key on each request
+   * (`brokerCredential`). One field, so no caller can present half of it.
    */
-  readonly brokered?: RequestCredential | undefined;
+  readonly credential: RequestCredential;
   readonly publicUrl?: string;
-}
-
-/** What a caller needs of a resolved Dispatch to present its credential: the bearer, and the
- * broker credential where that is what this machine holds. `ActiveDispatchConfig` is one. */
-export interface DispatchCredentialSource {
-  readonly token: string;
-  readonly brokered?: RequestCredential | undefined;
-}
-
-/**
- * What a client presents for `config`: the broker credential when this machine traded for one,
- * and otherwise the bearer, which `DispatchClient` and the `dispatch` command take as they always
- * have.
- */
-export function dispatchCredential(config: DispatchCredentialSource): string | RequestCredential {
-  return config.brokered ?? config.token;
 }
 
 /** Dispatch on, or off with the one notice or error that says why (`SectionOff`). */
@@ -175,30 +161,35 @@ export function lostDispatchUrlNotice(
  * Dispatch is on when its URL resolves and a credential does: one of those bearers, or — when no
  * bearer is configured at all — this machine's own identity traded at the secrets broker
  * (`AGENT_SECRETS_URL` with `AGENT_SECRETS_MACHINE_IDENTITY`, `brokerCredential`), which is a
- * DPoP-bound access token rather than a bearer. The bearers are resolved first and unchanged, so
- * a session that has one keeps behaving exactly as it did. Off, it says why: a `notice` when
- * nothing names it or a file turns it off, an `error` otherwise. Nothing naming it while a token
- * variable is set is said as the `DISPATCH_URL` the shell lost (`lostDispatchUrlNotice`).
+ * DPoP-bound access token rather than a bearer, traded under `options.session`. The bearers are
+ * resolved first and unchanged, so a session that has one keeps behaving exactly as it did. Off,
+ * it says why: a `notice` when nothing names it or a file turns it off, an `error` otherwise.
+ * Nothing naming it while a token variable is set is said as the `DISPATCH_URL` the shell lost
+ * (`lostDispatchUrlNotice`).
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
   config: EnvoyConfig,
-  options: { readonly commands?: CommandMode | undefined } = {}
+  options: {
+    readonly commands?: CommandMode | undefined;
+    /** The session a broker trade writes under (`BrokerSessionName`), for a caller that acts as
+     * one. Nothing else reads it: a bearer route resolves the same whatever it says. */
+    readonly session?: BrokerSessionName | undefined;
+  } = {}
 ): DispatchConfigResolution {
   const target = dispatchTarget(env, config);
   if (!target.enabled) return target;
   const { url, source } = target;
-  let token = "";
-  let brokered: RequestCredential | undefined;
+  let credential: RequestCredential;
   try {
-    if (source.kind === "broker") {
-      brokered = brokerCredential(env);
-    } else {
-      token =
-        source.kind === "variable"
-          ? source.token
-          : fileBearer(source, url, "DISPATCH", env, options.commands);
-    }
+    credential =
+      source.kind === "broker"
+        ? brokerCredential(env, options.session)
+        : bearerCredential(
+            source.kind === "variable"
+              ? source.token
+              : fileBearer(source, url, "DISPATCH", env, options.commands)
+          );
   } catch (error) {
     return offWithError(messageFor(error));
   }
@@ -213,8 +204,7 @@ export function dispatchSettings(
   return {
     enabled: true,
     url,
-    token,
-    ...(brokered === undefined ? {} : { brokered }),
+    credential,
     ...(publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }),
   };
 }

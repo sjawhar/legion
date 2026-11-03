@@ -26,7 +26,7 @@ test("sends a direct message through Envoy's HTTP API, with no bearer for a list
   requests.length = 0
   await sendEnvoyMessage({
     baseUrl: `http://127.0.0.1:${server.port}`,
-    token: undefined,
+    credential: undefined,
     targetSession: "ses_receiver",
     message: "adapter send proof",
   })

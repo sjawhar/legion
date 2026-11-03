@@ -188,6 +188,39 @@
       }
     },
     {
+      "name": "the broker's token endpoint is out of bucket",
+      "about": "The one refusal a later trade may be answered differently: the endpoint spends a bucket per source address, and a bucket refills. A client with nothing live in hand still fails the call, and says what the broker said; a client holding a live token keeps writing with it instead (expect.permanent is false).",
+      "subject": {
+        "kind": "kubernetes-projected-file",
+        "token": "projected.service.account.token",
+        "token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account"
+      },
+      "session": "example-worker-session",
+      "form": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "client_id": "dispatch-token-exchange",
+        "subject_token": "${subject_token}",
+        "subject_token_type": "urn:envoy:params:oauth:token-type:kubernetes-service-account",
+        "session": "${session}"
+      },
+      "proof": {
+        "header": { "typ": "dpop+jwt", "alg": "ES256", "jwk": "${public_jwk}" },
+        "claims": { "jti": "${jti}", "htm": "POST", "htu": "${token_endpoint}", "iat": "${iat}" }
+      },
+      "answer": {
+        "status": 429,
+        "body": {
+          "error": "invalid_request",
+          "error_description": "too many token requests; try again later"
+        }
+      },
+      "expect": {
+        "outcome": "refuse",
+        "permanent": false,
+        "error_contains": "too many token requests; try again later"
+      }
+    },
+    {
       "name": "an answer that carries a refresh token",
       "about": "This grant issues none: a renewal is a fresh subject token traded again. A client that kept one would hold a credential the contract says is never minted, so an answer carrying one is refused.",
       "subject": {

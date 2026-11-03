@@ -9,10 +9,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { forgetBrokerClients } from "../broker-credential";
-import { type DispatchEnvironment, dispatchCredential, dispatchSettings } from "../dispatch-config";
+import { type DispatchEnvironment, dispatchSettings } from "../dispatch-config";
 import { DispatchClient } from "../dispatch-http";
 import { readEnvoyConfig } from "../envoy-config";
-import { envoyCredential, envoySettings } from "../envoy-settings";
+import { envoySettings } from "../envoy-settings";
 
 afterEach(forgetBrokerClients);
 
@@ -92,7 +92,9 @@ function projectedFile(token: string): string {
   return file;
 }
 
-/** The environment of a pod that has an identity to trade and no Dispatch bearer at all. */
+/** The environment of a pod that has an identity to trade and no Dispatch bearer at all. It
+ * names no `AGENT_SECRETS_SESSION`: nothing in a plugin's environment sets one, and the session
+ * a trade writes under is the one the caller passes. */
 function podEnvironment(brokerUrl: string, dispatchUrl: string): DispatchEnvironment {
   return {
     HOME: tempDir(),
@@ -101,7 +103,6 @@ function podEnvironment(brokerUrl: string, dispatchUrl: string): DispatchEnviron
     AGENT_SECRETS_URL: brokerUrl,
     AGENT_SECRETS_MACHINE_IDENTITY: "kubernetes",
     AGENT_SECRETS_MACHINE_TOKEN_FILE: projectedFile("projected.service.account.token"),
-    AGENT_SECRETS_SESSION: "example-worker-session",
   };
 }
 
@@ -109,22 +110,23 @@ test("a configured bearer is still the credential, whatever this machine could t
   const broker = stubBroker(600);
   const env = { ...podEnvironment(broker.url, "http://dispatch.test"), DISPATCH_TOKEN: "written" };
   const resolution = dispatchSettings(env, noFile(env));
-  expect(resolution).toEqual({ enabled: true, url: "http://dispatch.test", token: "written" });
-  expect(dispatchCredential(resolution as { token: string })).toBe("written");
+  if (!resolution.enabled) throw new Error(`Dispatch is off: ${resolution.error}`);
+  expect(resolution.credential.scheme).toBe("Bearer");
+  expect(resolution.credential.secret()).toBe("written");
 });
 
 test("with no bearer at all, the session's credential is its own identity traded at the broker", async () => {
   const broker = stubBroker(600);
   const dispatch = stubDispatch();
   const env = podEnvironment(broker.url, dispatch.url);
-  const resolution = dispatchSettings(env, noFile(env));
+  const resolution = dispatchSettings(env, noFile(env), { session: "example-worker-session" });
   if (!resolution.enabled) throw new Error(`Dispatch is off: ${resolution.error}`);
-  expect(resolution.token).toBe("");
-  expect(resolution.brokered?.scheme).toBe("DPoP");
+  expect(resolution.credential.scheme).toBe("DPoP");
 
-  await new DispatchClient(resolution.url, dispatchCredential(resolution)).listAllIssues({});
+  await new DispatchClient(resolution.url, resolution.credential).listAllIssues({});
 
-  // One trade of the pod's own token, under the session the deployment named.
+  // One trade of the pod's own token, under the session this caller named: nothing in the
+  // environment does.
   expect(broker.trades.length).toBe(1);
   expect(broker.trades[0]?.form.get("subject_token")).toBe("projected.service.account.token");
   expect(broker.trades[0]?.form.get("session")).toBe("example-worker-session");
@@ -150,9 +152,9 @@ test("a session past its token's life trades again, with nothing restarted", asy
   const broker = stubBroker(1);
   const dispatch = stubDispatch();
   const env = podEnvironment(broker.url, dispatch.url);
-  const resolution = dispatchSettings(env, noFile(env));
+  const resolution = dispatchSettings(env, noFile(env), { session: "example-worker-session" });
   if (!resolution.enabled) throw new Error(`Dispatch is off: ${resolution.error}`);
-  const client = new DispatchClient(resolution.url, dispatchCredential(resolution));
+  const client = new DispatchClient(resolution.url, resolution.credential);
 
   await client.listAllIssues({});
   await client.listAllIssues({});
@@ -164,22 +166,67 @@ test("a session past its token's life trades again, with nothing restarted", asy
   ]);
 });
 
+test("each session of one process trades under its own name, read at every trade", async () => {
+  // One Oh My Pi process holds several sessions over its life, and Claude Code mints a new id on
+  // /clear. A token names one session, and the listener answers 403 to a session presenting
+  // another's, so the name is read when the trade happens rather than fixed at resolution.
+  const broker = stubBroker(600);
+  const dispatch = stubDispatch();
+  const env = podEnvironment(broker.url, dispatch.url);
+  let current = "session-one";
+  const resolution = dispatchSettings(env, noFile(env), { session: () => current });
+  if (!resolution.enabled) throw new Error(`Dispatch is off: ${resolution.error}`);
+
+  await new DispatchClient(resolution.url, resolution.credential).listAllIssues({});
+  current = "session-two";
+  await new DispatchClient(resolution.url, resolution.credential).listAllIssues({});
+  // Back to the first: its client is the one this process already made, so no third trade.
+  current = "session-one";
+  await new DispatchClient(resolution.url, resolution.credential).listAllIssues({});
+
+  expect(broker.trades.map((trade) => trade.form.get("session"))).toEqual([
+    "session-one",
+    "session-two",
+  ]);
+  expect(dispatch.asked.map((one) => one.authorization)).toEqual([
+    "DPoP broker-access-token-1",
+    "DPoP broker-access-token-2",
+    "DPoP broker-access-token-1",
+  ]);
+});
+
 test("the listener takes the same credential, and a configured bearer still wins", () => {
   const broker = stubBroker(600);
   const env = podEnvironment(broker.url, "http://listener.test");
-  const brokered = envoySettings(env, noFile(env), { nats: false });
+  const brokered = envoySettings(env, noFile(env), { nats: false, session: "session-one" });
   if (!brokered.enabled) throw new Error("Envoy is off");
-  expect(brokered.token).toBeUndefined();
-  expect(envoyCredential(brokered)).toBe(brokered.brokered as never);
+  expect(brokered.credential?.scheme).toBe("DPoP");
 
   const written = envoySettings({ ...env, ENVOY_TOKEN: "listener-token" }, noFile(env), {
     nats: false,
   });
   if (!written.enabled) throw new Error("Envoy is off");
-  expect(written.brokered).toBeUndefined();
-  expect(envoyCredential(written)).toBe("listener-token");
+  expect(written.credential?.scheme).toBe("Bearer");
+  expect(written.credential?.secret()).toBe("listener-token");
 });
 
-test("a client given an empty credential is refused rather than sending `Bearer `", () => {
-  expect(() => new DispatchClient("http://dispatch.test", "")).toThrow("needs a credential");
+test("a pool identity is a machine with no TypeScript route, not an error", () => {
+  // Only the Go client federates at a workload identity pool. Reading this as a mistake would
+  // turn Envoy off on a machine whose listener asks for no credential at all.
+  const broker = stubBroker(600);
+  const env = {
+    ...podEnvironment(broker.url, "http://listener.test"),
+    AGENT_SECRETS_MACHINE_IDENTITY: "pool",
+  };
+  const envoy = envoySettings(env, noFile(env), { nats: false, session: "session-one" });
+  if (!envoy.enabled) throw new Error(`Envoy is off: ${envoy.error ?? envoy.notice}`);
+  expect(envoy.credential).toBeUndefined();
+
+  // An identity this client cannot prove at all is still a mistake in the deployment.
+  const unknown = envoySettings(
+    { ...env, AGENT_SECRETS_MACHINE_IDENTITY: "nonsense" },
+    noFile(env),
+    { nats: false }
+  );
+  expect(unknown.enabled).toBe(false);
 });

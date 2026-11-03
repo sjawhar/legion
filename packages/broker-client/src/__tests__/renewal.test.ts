@@ -127,6 +127,40 @@ test("a refusal of the identity stops at once, whatever is in hand", async () =>
   }
 });
 
+test("the broker's rate limit leaves the token in hand working until it lapses", async () => {
+  // The broker's token endpoint spends a bucket per source address, and a bucket refills: a 429
+  // is the one refusal a later trade may be answered differently, so a client that holds a live
+  // token keeps writing with it rather than failing every call through the renewal window.
+  const broker = stubBroker((_trade, count) =>
+    count === 1
+      ? { body: accepted("token-1", 600) }
+      : {
+          status: 429,
+          body: { error: "invalid_request", error_description: "too many token requests" },
+        }
+  );
+  const clock = { now: Date.now() };
+  const client = await clientAt(broker.url, clock, countingSource());
+  try {
+    expect((await client.token()).accessToken).toBe("token-1");
+    clock.now += 560_000;
+    expect((await client.token()).accessToken).toBe("token-1");
+    expect(broker.trades.length).toBe(2);
+    // Past its expiry there is nothing live left, so the caller is told rather than writing with
+    // no identity, and the refusal says a later trade may be answered differently.
+    clock.now += 60_000;
+    const refusal = await client.token().then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(refusal).toBeInstanceOf(BrokerRefusedError);
+    expect((refusal as BrokerRefusedError).permanent).toBe(false);
+    expect((refusal as Error).message).toContain("too many token requests");
+  } finally {
+    broker.stop();
+  }
+});
+
 test("a broker asking for a nonce is answered with one in the next proof", async () => {
   const broker = stubBroker((trade, count) => {
     if (count === 1) {

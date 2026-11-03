@@ -2,9 +2,9 @@ kind: Added
 body: |
   An Oh My Pi session gets its Dispatch token and its listener credential from the secrets
   broker when no bearer is configured: `src/dispatch-session.ts`, the extension's listener
-  client and the AskGate report reader all present what `dispatchCredential` and
-  `envoyCredential` resolve, which is a DPoP-bound access token traded for this machine's own
-  identity. A session configured with a bearer is unaffected.
+  client and the AskGate report reader all present the one credential a resolved section
+  carries, which is a DPoP-bound access token traded for this machine's own identity. A session
+  configured with a bearer is unaffected.
 time: 2026-11-02T15:46:00.000000000Z
 custom:
   Issue: pr2636

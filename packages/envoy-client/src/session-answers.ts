@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
-import { type DispatchConfigResolution, dispatchCredential } from "./dispatch-config";
+import type { DispatchConfigResolution } from "./dispatch-config";
 import { DispatchClient, isNoRoute } from "./dispatch-http";
 import { ownerTitle } from "./dispatch-owner";
 import { sessionDirectory, writeAtomically } from "./dispatch-session-directory";
@@ -461,11 +461,7 @@ export async function readSessionAnswers(
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(
-      url,
-      dispatchCredential(dispatch),
-      options.fetchImpl ?? fetch
-    );
+    const client = new DispatchClient(url, dispatch.credential, options.fetchImpl ?? fetch);
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,

@@ -1,0 +1,13 @@
+kind: Fixed
+body: |
+  Three ways the secrets broker could take a working session down are closed. The broker's `429`
+  no longer drops the access token in hand: it is the one refusal a later trade may answer
+  differently, so a client that holds a live token keeps writing with it until that token lapses,
+  as the Go client does, and the shared wire corpus both clients replay now carries a `429`
+  exchange. `AGENT_SECRETS_MACHINE_IDENTITY=pool` reads as a machine with no TypeScript route
+  rather than an error, so Envoy stays on where only the Go client can federate. And a credential
+  this machine could not mint no longer fails a listener that asks for none: the request goes
+  without it, and only a `401` or `403` reports the failed trade.
+time: 2026-11-03T09:16:00.000000000Z
+custom:
+  Issue: pr2636

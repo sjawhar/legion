@@ -1,0 +1,12 @@
+kind: Changed
+body: |
+  A resolved Dispatch and a resolved Envoy carry one credential, not two: `ActiveDispatchConfig`
+  and `EnabledEnvoySettings` have a single `credential` field, and `DispatchClient` and the
+  listener client take only a `RequestCredential`. The `token` and `brokered` fields, the
+  `dispatchCredential` and `envoyCredential` helpers and the empty-string guard are gone, so a
+  caller can no longer present half of a credential and the compiler names every call site. Both
+  resolvers take the session a broker trade writes under, as a name or as a function read at every
+  trade, since one process holds more than one session over its life.
+time: 2026-11-03T09:15:00.000000000Z
+custom:
+  Issue: pr2636

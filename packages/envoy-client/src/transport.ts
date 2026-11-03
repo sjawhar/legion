@@ -5,8 +5,9 @@ import {
   MINTED_DEDUPE_KEY_PATTERN,
 } from "@legion/contracts";
 import { z } from "zod";
-import { bearerCredential, type RequestCredential } from "./bearer";
+import type { RequestCredential } from "./bearer";
 import { normalizeEnvoyUrl } from "./envoy-settings";
+import { messageFor } from "./errors";
 import { machineID } from "./machine";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -146,12 +147,12 @@ export type EnvoyClientConfig = {
    * true; false for a best-effort read that must not hold its caller past one timeout. */
   readonly retry?: boolean;
   /**
-   * What every call presents (`envoyCredential`): the listener's bearer, as it always was; or a
-   * `RequestCredential`, which is this machine's identity traded at the secrets broker and
-   * presented under the `DPoP` scheme with a proof of this process's key on each request; or none
-   * at all, which sends no `Authorization` header, for a loopback listener that asks for none.
+   * What every call presents (`EnabledEnvoySettings.credential`): the listener's bearer, as it
+   * always was; or this machine's identity traded at the secrets broker, presented under the
+   * `DPoP` scheme with a proof of this process's key on each request; or none at all, which
+   * sends no `Authorization` header, for a loopback listener that asks for none.
    */
-  readonly token?: string | RequestCredential | undefined;
+  readonly credential?: RequestCredential | undefined;
 };
 
 export type Interest = z.infer<typeof InterestWireSchema>;
@@ -522,15 +523,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const attempts = config.retry === false ? 1 : 2;
 
-  // A bearer is the credential it has always been, and an empty one is no credential, as it was
-  // before: a loopback listener that asks for none gets no `Authorization` header. A
-  // `RequestCredential` signs a proof of its own for each request, so each attempt asks it again.
-  const credential: RequestCredential | undefined =
-    typeof config.token === "string"
-      ? config.token === ""
-        ? undefined
-        : bearerCredential(config.token)
-      : config.token;
+  const credential = config.credential;
 
   const attemptOnce = async (
     url: string,
@@ -538,14 +531,24 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     deadlineMs: number
   ): Promise<AttemptOutcome> => {
     let response: Response;
+    // What a credential that could not mint said, where one could not. A listener that asks for
+    // no credential answers the same with or without one, so a broker that is down or refused
+    // this machine's trade must not take those calls down: the request goes without the headers
+    // and stands or falls on the listener's own answer. A listener that did want one answers 401
+    // or 403, and that is reported as the failed trade it really is, below.
+    let unminted: unknown;
     try {
       const headers = new Headers(init.headers);
       // Awaited only when the credential answers with a promise. A bearer answers at once, and
       // an awaited microtask here would let whatever the caller does next — the plugin's NATS
-      // drain at shutdown — start before this request leaves. A credential that cannot mint is
-      // no answer from the listener, so it retries like any other unanswered attempt.
-      const ready = credential?.headers(init.method ?? "GET", url);
-      const presented = ready instanceof Promise ? await ready : ready;
+      // drain at shutdown — start before this request leaves.
+      let presented: Readonly<Record<string, string>> | undefined;
+      try {
+        const ready = credential?.headers(init.method ?? "GET", url);
+        presented = ready instanceof Promise ? await ready : ready;
+      } catch (error) {
+        unminted = error;
+      }
       for (const [name, value] of Object.entries(presented ?? {})) headers.set(name, value);
       response = await config.fetch(url, {
         ...init,
@@ -554,6 +557,17 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       });
     } catch (error) {
       return { unanswered: error };
+    }
+    if (unminted !== undefined && (response.status === 401 || response.status === 403)) {
+      // The listener wanted the credential this machine could not mint. That is no answer about
+      // the call itself, so it retries like any other unanswered attempt — the broker may have
+      // come back — and the error names both halves.
+      return {
+        unanswered: new Error(
+          `${init.method ?? "GET"} ${url} answered ${response.status}, and this machine's Envoy credential could not be minted: ${messageFor(unminted)}`,
+          { cause: unminted }
+        ),
+      };
     }
     // The body is read under the same deadline. A refusal whose body does not arrive is still the
     // listener's refusal; any other answer whose body does not arrive is no answer.

@@ -17,6 +17,7 @@ import {
 } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { bearerCredential } from "../bearer";
 import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
@@ -77,7 +78,12 @@ function repoExec(repo: string): ExecFn {
   };
 }
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const config = {
+  enabled: true,
+  url: "http://dispatch.test",
+  credential: bearerCredential("secret"),
+  error: null,
+};
 const releaseQuestion = "The release is ready. How should we proceed?";
 const changedReleaseQuestion =
   "The change is ready but needs a release decision. How should we proceed?";
@@ -12645,7 +12651,11 @@ test("an issue document reference resolves to the document's id as the Dispatch 
       ],
     });
   };
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec", "artifact-42"],
     ["spec-md", "artifact-42"],
@@ -12684,7 +12694,11 @@ test("a reference that is one document's slug and another's filename is the slug
         },
       ],
     });
-  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  const client = new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
   for (const [reference, id] of [
     ["spec-v2", "artifact-v2"],
     ["spec v2", "artifact-v2"],

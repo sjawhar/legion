@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import {
   readSessionAnswers,
   SESSION_ANSWERS_MARKER,
@@ -232,7 +233,11 @@ test("two copies of the extension and an empty list: one HTTP read, under one se
     (
       await readSessionAnswers({
         session: "ses_two_copies_empty",
-        dispatch: { enabled: true, url: "http://dispatch.test", token: "token" },
+        dispatch: {
+          enabled: true,
+          url: "http://dispatch.test",
+          credential: bearerCredential("token"),
+        },
         env: { DISPATCH_STATE_DIR: stateRoot },
         fetchImpl,
       })

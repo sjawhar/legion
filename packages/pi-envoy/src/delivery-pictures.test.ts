@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { transcriptPictures, withDeliveredPictures } from "./delivery-pictures";
 
@@ -32,7 +33,11 @@ function client(): DispatchClient {
     }
     throw new Error(`unexpected request: ${pathname}`);
   };
-  return new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  return new DispatchClient(
+    "http://dispatch.test",
+    bearerCredential("secret"),
+    fetchImpl as typeof fetch
+  );
 }
 
 const image = {

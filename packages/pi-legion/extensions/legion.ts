@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { activeDispatchSettings, dispatchCredential } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state";
-import { envoyCredential } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
   sessionConfigFile,
@@ -62,6 +61,14 @@ let exitProcess: (code: number) => never = (code) => process.exit(code) as never
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
 }
+
+/**
+ * The session this pane is acting as now: the id pi-envoy's plugin bound for this process
+ * (`DISPATCH_SESSION_ID`, `currentSessionID` in packages/pi-envoy/extensions/envoy.ts), which
+ * this plugin shares. A broker trade writes under it, so the token a Legion read presents names
+ * the session making it rather than the one this process started on.
+ */
+const currentSessionID = (): string => process.env.DISPATCH_SESSION_ID ?? "";
 
 // The host the claim session's capability report measures through: Oh My Pi's own modules and
 // the pane's `dispatch` and `gh`. A test substitutes a fake, since the production host reaches
@@ -172,11 +179,15 @@ export default function legionExtension(pi: PiApi): void {
         const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {
           cwd: process.cwd(),
           nats: false,
+          session: currentSessionID,
         });
         architectPublisher = {
           publish: envoy.enabled
-            ? createEnvoyClient({ baseUrl: envoy.url, token: envoyCredential(envoy), fetch })
-                .publish
+            ? createEnvoyClient({
+                baseUrl: envoy.url,
+                credential: envoy.credential,
+                fetch,
+              }).publish
             : undefined,
         };
       }
@@ -431,13 +442,15 @@ export default function legionExtension(pi: PiApi): void {
           paneHandoffReport(
             sessionConfigFile("omp", process.env),
             process.env,
-            process.cwd()
+            process.cwd(),
+            currentSessionID()
           )(phase, role),
         resolveDocument: async (issue, reference) => {
           // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
           const config = activeDispatchSettings(
             sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
               cwd: process.cwd(),
+              session: currentSessionID,
             }).dispatch
           );
           if (config === null) {
@@ -447,7 +460,7 @@ export default function legionExtension(pi: PiApi): void {
           }
           try {
             return await resolveIssueDocumentId(
-              new DispatchClient(config.url, dispatchCredential(config), fetch),
+              new DispatchClient(config.url, config.credential, fetch),
               issue,
               reference
             );

@@ -68,7 +68,7 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
-import { envoyCredential, MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
+import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
@@ -551,12 +551,22 @@ process.env.DISPATCH_HOST = "omp";
 const CONFIG_FILE = sessionConfigFile("omp", process.env);
 if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
 /**
+ * The session this process is acting as now: the id this instance last bound
+ * (`bindDispatchSession`, which writes it for the session's shell commands too). Every caller
+ * that trades at the secrets broker passes this rather than a name fixed when a configuration
+ * resolved, because one Oh My Pi process moves between sessions over its life and a token names
+ * one session: the listener answers 403 to a session presenting another's.
+ */
+const currentSessionID = (): string => process.env.DISPATCH_SESSION_ID ?? "";
+
+/**
  * The session's Dispatch for one request of this extension's own, which has `ms` to answer: the
  * one builder (`sessionDispatchClient`), resolved again per call, so a Dispatch that moved takes
  * effect without a reload. Undefined when the session has no Dispatch configuration.
  */
 const timedDispatchClient = (ms: number) =>
-  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms))?.client;
+  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms), currentSessionID)
+    ?.client;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -570,11 +580,15 @@ export default function envoyExtension(pi: PiApi): void {
   // (`currentDispatchConfig`), so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
   // takes effect without /reload-plugins, and a file that has since broken fails with its own
   // error instead of quietly using the stale endpoint.
-  const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+  const atStart = sessionSettings(CONFIG_FILE, process.env, {
+    cwd: process.cwd(),
+    session: currentSessionID,
+  });
   const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
     const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, {
       cwd: process.cwd(),
+      session: currentSessionID,
     }).dispatch;
     const config = activeDispatchSettings(resolution);
     if (config === null) {
@@ -646,7 +660,7 @@ export default function envoyExtension(pi: PiApi): void {
         client: createEnvoyClient({
           baseUrl: envoy.url,
           fetch: serverClock.observing(fetch),
-          token: envoyCredential(envoy),
+          credential: envoy.credential,
         }),
       }
     : undefined;
@@ -3285,6 +3299,7 @@ export default function envoyExtension(pi: PiApi): void {
         dispatch: sessionDispatchSettings(CONFIG_FILE, process.env, {
           cwd: process.cwd(),
           commands: "kept",
+          session: currentSessionID,
         }).dispatch,
         env: process.env,
       });
@@ -3668,6 +3683,7 @@ export default function envoyExtension(pi: PiApi): void {
       configFile: gateFile,
       logger: gateLogger,
       runtimeLogger: logger,
+      session: currentSessionID,
     });
     askgateRecorder = registration;
     askgateLoad = registration.loaded.catch((error: unknown) => {

@@ -1,3 +1,4 @@
+import type { BrokerSessionName } from "./broker-credential";
 import {
   type DispatchConfigResolution,
   type DispatchEnvironment,
@@ -121,6 +122,13 @@ function startNotice(
   return parts.length === 0 ? null : parts.join("; ");
 }
 
+/** The session a caller acts as, where it has one: the name a broker trade writes under, and
+ * nothing else. A plugin passes its own session id — a function where that id changes over the
+ * process's life, as Claude Code's does on `/clear` — so the token this session presents names
+ * this session (`BrokerSessionName`, src/broker-credential.ts). A command that acts as no
+ * session passes nothing, and a trade names whatever `AGENT_SECRETS_SESSION` does. */
+export type SessionNameOption = { readonly session?: BrokerSessionName | undefined };
+
 /** Both sections from `file` (`dispatchSettings`, `envoySettings`), each resolved on its own, and
  * the session's start notice. A file whose location could not be worked out turns both off with
  * that error. `nats: false` is for a session that opens no NATS connection (`envoySettings`), whose
@@ -128,15 +136,15 @@ function startNotice(
 export function sessionSettings(
   file: SessionConfigFile,
   env: EnvoyEnvironment,
-  options: { readonly cwd: string; readonly nats?: boolean | undefined }
+  options: { readonly cwd: string; readonly nats?: boolean | undefined } & SessionNameOption
 ): SessionSettings {
   if (file.path === null) {
     const off = offWithError(file.error);
     return { dispatch: off, envoy: off, notice: `${file.error}: Dispatch and Envoy are off` };
   }
   const config = readEnvoyConfig(file.path, env, options);
-  const dispatch = dispatchSettings(env, config);
-  const envoy = envoySettings(env, config, { nats: options.nats });
+  const dispatch = dispatchSettings(env, config, { session: options.session });
+  const envoy = envoySettings(env, config, { nats: options.nats, session: options.session });
   return {
     dispatch,
     envoy,
@@ -170,13 +178,16 @@ export interface SessionDispatch {
 export function sessionDispatchSettings(
   file: SessionConfigFile,
   env: DispatchEnvironment,
-  options: { readonly cwd: string; readonly commands?: CommandMode | undefined }
+  options: { readonly cwd: string; readonly commands?: CommandMode | undefined } & SessionNameOption
 ): SessionDispatch {
   if (file.path === null)
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config, { commands: options.commands }),
+    dispatch: dispatchSettings(env, config, {
+      commands: options.commands,
+      session: options.session,
+    }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null,
   };
@@ -201,8 +212,11 @@ export function sessionDispatchUrl(
 export function sessionEnvoySettings(
   file: SessionConfigFile,
   env: EnvoyEnvironment,
-  options: { readonly cwd: string; readonly nats?: boolean | undefined }
+  options: { readonly cwd: string; readonly nats?: boolean | undefined } & SessionNameOption
 ): EnvoySettings {
   if (file.path === null) return offWithError(file.error);
-  return envoySettings(env, readEnvoyConfig(file.path, env, options), { nats: options.nats });
+  return envoySettings(env, readEnvoyConfig(file.path, env, options), {
+    nats: options.nats,
+    session: options.session,
+  });
 }

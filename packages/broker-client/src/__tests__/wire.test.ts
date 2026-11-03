@@ -345,8 +345,8 @@ test("the wire corpus holds this client", async () => {
     );
     expect((refusal as Error).message).toContain(exchange.expect.error_contains as string);
     expect(
-      refusal instanceof BrokerRefusedError,
-      `${exchange.name}: only a refusal the broker made of the identity stops a renewal loop`
+      refusal instanceof BrokerRefusedError && refusal.permanent,
+      `${exchange.name}: only a refusal no later trade can cure stops a renewal loop, and the broker's 429 is not one`
     ).toBe(exchange.expect.permanent as boolean);
   }
 });

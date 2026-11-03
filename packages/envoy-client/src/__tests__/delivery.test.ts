@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dispatchIssueSubject, type Envelope } from "@legion/contracts";
 import { decode } from "@toon-format/toon";
+import { bearerCredential } from "../bearer";
 import {
   type DispatchDelivery,
   postDeliveryReply,
@@ -403,7 +404,7 @@ describe("renderInbound dispatch events", () => {
       if (rejected === undefined) throw new Error("missing recoverable rejected delivery");
 
       await postDeliveryReply(
-        { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+        { url: `http://127.0.0.1:${server.port}`, credential: bearerCredential("reply-token") },
         reader,
         rejected,
         { error: "Invalid Dispatch targeted delivery frame" }
@@ -451,7 +452,10 @@ describe("renderInbound dispatch events", () => {
         );
         if (rendered.delivery !== undefined) {
           await postDeliveryReply(
-            { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+            {
+              url: `http://127.0.0.1:${server.port}`,
+              credential: bearerCredential("reply-token"),
+            },
             reader,
             rendered.delivery,
             { error: "Invalid Dispatch targeted delivery frame" }
@@ -500,7 +504,10 @@ describe("renderInbound dispatch events", () => {
     try {
       for (const delivery of deliveries) {
         await postDeliveryReply(
-          { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+          {
+            url: `http://127.0.0.1:${server.port}`,
+            credential: bearerCredential("reply-token"),
+          },
           reader,
           delivery,
           { error: "Invalid Dispatch targeted delivery frame" }
@@ -550,7 +557,10 @@ describe("renderInbound dispatch events", () => {
       issueKey: null,
       body: "status?",
     };
-    const config = { url: `http://127.0.0.1:${server.port}`, token: "reply-token" };
+    const config = {
+      url: `http://127.0.0.1:${server.port}`,
+      credential: bearerCredential("reply-token"),
+    };
 
     try {
       await postDeliveryReply(config, reader, delivery, { body: "green" });

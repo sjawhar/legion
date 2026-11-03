@@ -3,7 +3,7 @@
 // — no access to the machine a gated session ran on — can read. The session-file report is the
 // other program, in `askgate-report.ts`, which owns the command line of both; what they count with
 // is in `askgate-report-common.ts`.
-import { activeDispatchSettings, dispatchCredential } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import {
@@ -394,5 +394,5 @@ export function sessionDispatch(): DispatchClient {
   if (config === null) {
     throw new Error(`Dispatch is not configured: ${dispatch.enabled ? "" : dispatch.notice}`);
   }
-  return new DispatchClient(config.url, dispatchCredential(config), fetch);
+  return new DispatchClient(config.url, config.credential, fetch);
 }

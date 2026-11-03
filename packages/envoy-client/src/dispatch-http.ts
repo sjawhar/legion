@@ -70,7 +70,7 @@ import {
 } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
-import { bearerCredential, type RequestCredential } from "./bearer";
+import type { RequestCredential } from "./bearer";
 
 export type { DispatchServiceErrorShape } from "@legion/contracts";
 
@@ -748,9 +748,10 @@ function excerpt(text: string, token: string): string {
  * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
  * `writeRetry` paces it.
  *
- * `credential` is a bearer, as it has always been, or a `RequestCredential` — what this machine
- * trades its own identity for at the secrets broker, presented under the `DPoP` scheme with a
- * fresh proof of this process's key on every request (`dispatchCredential`, src/bearer.ts).
+ * `credential` is what every request presents: a bearer (`bearerCredential`, src/bearer.ts), or
+ * what this machine trades its own identity for at the secrets broker, presented under the
+ * `DPoP` scheme with a fresh proof of this process's key on every request. A resolved Dispatch
+ * holds exactly one of them (`ActiveDispatchConfig.credential`), so no caller chooses.
  */
 export class DispatchClient {
   readonly #baseUrl: string;
@@ -766,20 +767,12 @@ export class DispatchClient {
 
   constructor(
     baseUrl: string,
-    credential: string | RequestCredential,
+    credential: RequestCredential,
     readonly fetchImpl: typeof fetch = fetch,
     signal?: AbortSignal,
     readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
-    if (credential === "") {
-      // The one credential that can only be a mistake: a caller reading a resolution's `token`
-      // where the credential is the broker's would send `Bearer ` and be refused by Dispatch with
-      // nothing to say why.
-      throw new Error(
-        "DispatchClient needs a credential: this Dispatch's is the secrets broker's access token, which `dispatchCredential` answers"
-      );
-    }
-    this.#credential = typeof credential === "string" ? bearerCredential(credential) : credential;
+    this.#credential = credential;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
     this.#madeAt = this.#now();

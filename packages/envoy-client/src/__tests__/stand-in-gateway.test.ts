@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { bearerCredential } from "../bearer";
 import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { parseStandInArguments, standInAnswer } from "../stand-in-gateway";
 
@@ -38,8 +39,11 @@ describe("standInAnswer", () => {
   // gateway's answer under the configured status.
   test("gives every kind of answer under the status, and the client reads each as a gateway's", async () => {
     for (const body of ["html", "empty", "text", "json"] as const) {
-      const client = new DispatchClient("http://dispatch.test", "secret", (async () =>
-        standInAnswer(504, body)) as unknown as typeof fetch);
+      const client = new DispatchClient(
+        "http://dispatch.test",
+        bearerCredential("secret"),
+        (async () => standInAnswer(504, body)) as unknown as typeof fetch
+      );
 
       const error = await client.getIssue("DSP-1").then(
         () => undefined,

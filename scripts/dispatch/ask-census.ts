@@ -7,10 +7,7 @@ import type {
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
-import {
-  type ActiveDispatchConfig,
-  dispatchCredential,
-} from "../../packages/envoy-client/src/dispatch-config";
+import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
 import {
   sessionConfigFile,
@@ -25,7 +22,7 @@ export const ISSUE_CONCURRENCY = 8;
 
 type Code = (typeof CODES)[number];
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token" | "brokered">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "credential">;
 
 /** The fields of an ask the census reads. */
 export type CensusAsk = Pick<
@@ -392,12 +389,8 @@ async function get<T>(config: DispatchConfig, path: string): Promise<T> {
   const url = `${config.url}${path}`;
   // The bearer, or the access token this machine traded its own identity for, with the proof
   // that goes with it: this read goes around DispatchClient, so it presents the credential itself.
-  const credential = dispatchCredential(config);
   const response = await fetch(url, {
-    headers:
-      typeof credential === "string"
-        ? { Authorization: `Bearer ${credential}` }
-        : await credential.headers("GET", url),
+    headers: await config.credential.headers("GET", url),
   });
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
@@ -436,7 +429,7 @@ async function censusIssue(
   const toTime = date(options.to, "to");
   // A client's deadline (DISPATCH_TOOL_DEADLINE_MS) runs from its construction, so each issue's
   // reads get one of their own, never what is left of the whole run's.
-  const client = new DispatchClient(config.url, dispatchCredential(config));
+  const client = new DispatchClient(config.url, config.credential);
   const issueAsks = await client.listIssueAsks(issue);
   const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
   const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);

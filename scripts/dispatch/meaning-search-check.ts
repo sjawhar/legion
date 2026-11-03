@@ -1,10 +1,7 @@
 import { parseArgs } from "node:util";
 import { SQL } from "bun";
 import { z } from "zod";
-import {
-  type ActiveDispatchConfig,
-  dispatchCredential,
-} from "../../packages/envoy-client/src/dispatch-config";
+import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import {
   DISPATCH_TOOL_DEADLINE_MS,
   DispatchClient,
@@ -206,7 +203,7 @@ type CoverageResult =
       readonly reads: number;
     };
 
-type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token" | "brokered">;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "credential">;
 
 function parsePair(value: string): Pair {
   const split = value.indexOf("=");
@@ -584,7 +581,7 @@ export function liveDispatch(config: DispatchConfig): DispatchReads {
   // `dispatchSettings` already trimmed the URL's trailing slashes.
   // The bearer, or the access token this machine traded its own identity for, with the proof
   // that goes with it; the coverage read goes around DispatchClient, so it presents it itself.
-  const credential = dispatchCredential(config);
+  const credential = config.credential;
   // A client's deadline runs from its construction, so each read gets a client of its own.
   const client = () => new DispatchClient(config.url, credential);
   return {
@@ -597,9 +594,7 @@ export function liveDispatch(config: DispatchConfig): DispatchReads {
       const url = `${config.url}/api/v1/search/coverage`;
       return readJson(
         url,
-        typeof credential === "string"
-          ? { Authorization: `Bearer ${credential}` }
-          : await credential.headers("GET", url),
+        await credential.headers("GET", url),
         (status) => status >= 200 && status < 300
       );
     },

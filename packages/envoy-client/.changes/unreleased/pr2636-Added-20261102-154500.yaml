@@ -7,8 +7,8 @@ body: |
   names one. That token is bound to a key this process makes, so every request carries
   `Authorization: DPoP <token>` and a proof of that key naming the request and hashing the
   token (RFC 9449); `src/bearer.ts` holds a bearer and that credential as one
-  `RequestCredential`, and `dispatchCredential` and `envoyCredential` answer what a caller
-  presents. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
+  `RequestCredential`, and a resolved section carries exactly one of them in its `credential`
+  field. `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN`, `ENVOY_TOKEN_FILE` and an
   envoy.json's own token are resolved first and unchanged, so a session that has one behaves
   exactly as it did.
 time: 2026-11-02T15:45:00.000000000Z

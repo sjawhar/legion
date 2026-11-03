@@ -13,9 +13,9 @@
 // trade rather than once.
 //
 // What it refuses to do: hand out a token it could not renew. `token()` answers the token in hand
-// while that token is live and the broker is merely unreachable, and throws once the broker has
-// refused the identity or the token in hand has run out, so a caller that writes only with what
-// `token()` gave it never writes with no identity.
+// while that token is live and the broker is merely unreachable or busy (its 429), and throws once
+// the broker has refused the identity in a way no retry can cure or the token in hand has run out,
+// so a caller that writes only with what `token()` gave it never writes with no identity.
 
 import {
   allowInsecureRequests,
@@ -63,10 +63,14 @@ export interface BrokerToken {
   readonly credentialExpiresAt: Date | null;
 }
 
+/** The broker's rate limit, the one refusal a later trade may be answered differently. */
+const TOO_MANY_REQUESTS = 429;
+
 /**
- * A trade the broker refused: a plain error naming what it said, which no retry can cure — an
- * identity no entry lists, a sign-in a person revoked, a token of the wrong audience. A renewal
- * stops on it rather than asking again.
+ * A trade the broker refused: a plain error naming what it said. Almost every refusal is one no
+ * retry can cure — an identity no entry lists, a sign-in a person revoked, a token of the wrong
+ * audience — and a renewal stops on it rather than asking again. The one exception is the
+ * broker's 429 (`permanent`).
  */
 export class BrokerRefusedError extends Error {
   constructor(
@@ -80,6 +84,18 @@ export class BrokerRefusedError extends Error {
         : `the secrets broker refused this machine's identity: HTTP ${status} ${code}: ${description}`
     );
     this.name = "BrokerRefusedError";
+  }
+
+  /**
+   * Whether this refusal is one no retry can cure, which every refusal is but the broker's 429:
+   * its token endpoint spends a bucket per source address, and a bucket refills. A client that
+   * dropped the token in hand on a 429 would write with no identity through a burst — its own, or
+   * another process's on the same machine — while the token it already held was still good. The
+   * Go client reads it the same way (`RefusedError.Permanent`,
+   * packages/envoy/internal/brokerclient/brokerclient.go).
+   */
+  get permanent(): boolean {
+    return this.status !== TOO_MANY_REQUESTS;
   }
 }
 
@@ -161,10 +177,11 @@ export class BrokerTokenClient {
 
   /**
    * A live access token: the one in hand while it is good for longer than the renewal window, and
-   * otherwise a fresh trade. A trade the broker did not answer while the token in hand is still
-   * live answers that token, since a client that already holds an identity need not stop for a
-   * broker that is merely down; a refusal, and a failure with nothing live left, throw, so no
-   * caller writes with no identity.
+   * otherwise a fresh trade. A trade the broker did not answer, or answered 429, while the token
+   * in hand is still live answers that token, since a client that already holds an identity need
+   * not stop for a broker that is merely down or busy; a refusal no retry can cure
+   * (`BrokerRefusedError.permanent`), and a failure with nothing live left, throw, so no caller
+   * writes with no identity.
    */
   async token(signal?: AbortSignal): Promise<BrokerToken> {
     const held = this.#held;
@@ -188,7 +205,7 @@ export class BrokerTokenClient {
     } catch (error) {
       const held = this.#held;
       if (
-        !(error instanceof BrokerRefusedError) &&
+        !(error instanceof BrokerRefusedError && error.permanent) &&
         held !== null &&
         this.#now() < held.expiresAt.getTime()
       ) {

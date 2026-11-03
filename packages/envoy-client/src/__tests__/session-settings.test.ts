@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ActiveDispatchConfig, DispatchConfigResolution } from "../dispatch-config";
+import type { SectionOff } from "../envoy-config";
+import type { EnabledEnvoySettings, EnvoySettings } from "../envoy-settings";
 import {
   handedConfigFile,
   sessionConfigFile,
@@ -9,6 +12,30 @@ import {
   sessionEnvoySettings,
   sessionSettings,
 } from "../session-settings";
+
+// Each section resolves one `credential` object. What this file is about is which file and which
+// variable a section reads, so a resolution is compared with that credential flattened to the
+// bearer it presents, under the name the section used to carry it: `token`.
+
+/** Dispatch as these tests compare it. */
+type DispatchWithToken =
+  | SectionOff
+  | (Omit<ActiveDispatchConfig, "credential"> & { readonly token: string });
+
+/** Envoy the same way; a listener that asks for no credential has no token. */
+type EnvoyWithToken =
+  | SectionOff
+  | (Omit<EnabledEnvoySettings, "credential"> & { readonly token: string | undefined });
+
+function withToken(resolution: DispatchConfigResolution): DispatchWithToken;
+function withToken(resolution: EnvoySettings): EnvoyWithToken;
+function withToken(
+  resolution: DispatchConfigResolution | EnvoySettings
+): DispatchWithToken | EnvoyWithToken {
+  if (!resolution.enabled) return resolution;
+  const { credential, ...rest } = resolution;
+  return { ...rest, token: credential?.secret() } as DispatchWithToken | EnvoyWithToken;
+}
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "session-settings-"));
@@ -76,7 +103,7 @@ describe("sessionSettings", () => {
     });
     const missing = path.join(tempDir(), "envoy.json");
     const settings = sessionSettings({ path: missing, error: null }, { HOME: tempDir() }, { cwd });
-    expect(settings.dispatch).toEqual({
+    expect(withToken(settings.dispatch)).toEqual({
       enabled: true,
       url: "https://repo.internal.example",
       token: "repo-token",
@@ -257,7 +284,7 @@ describe("sessionSettings", () => {
       { ENVOY_NATS_URL: "nats://elsewhere.internal.example:4222" },
       { cwd: tempDir() }
     );
-    expect(settings.envoy).toMatchObject({
+    expect(withToken(settings.envoy)).toMatchObject({
       enabled: true,
       url: envoyOn.url,
       token: "listener-token",
@@ -341,7 +368,8 @@ describe("sessionDispatchSettings", () => {
     const cwd = tempDir();
     const old = writeFile(path.join(cwd, ".opencode", "envoy.json"), { dispatch: dispatchOn });
     const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
-    expect(sessionDispatchSettings({ path: file, error: null }, {}, { cwd })).toEqual({
+    const read = sessionDispatchSettings({ path: file, error: null }, {}, { cwd });
+    expect({ ...read, dispatch: withToken(read.dispatch) }).toEqual({
       dispatch: { enabled: true, url: "https://dispatch.example", token: "file-token" },
       warnings: [
         `${old} is not read: mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`,
@@ -382,11 +410,13 @@ describe("sessionDispatchSettings", () => {
       error: `${file}: dispatch.token's command has not run in this process yet, and this read does not run it`,
     });
     expect(existsSync(runs)).toBe(false);
-    expect(sessionDispatchSettings(chosen, env, { cwd: tempDir() }).dispatch).toMatchObject({
+    expect(
+      withToken(sessionDispatchSettings(chosen, env, { cwd: tempDir() }).dispatch)
+    ).toMatchObject({
       token: "kept-token",
     });
     expect(
-      sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch
+      withToken(sessionDispatchSettings(chosen, env, { cwd: tempDir(), commands: "kept" }).dispatch)
     ).toMatchObject({ enabled: true, token: "kept-token" });
   });
 });
@@ -465,7 +495,8 @@ describe("the OpenCode-era file", () => {
 
     // A neutral file that exists is read, and nothing is said about the old one.
     writeFile(neutral, { dispatch: { enabled: true, token: "new-token" } });
-    expect(sessionSettings(chosen, { HOME: home }, { cwd: tempDir() })).toMatchObject({
+    const read = sessionSettings(chosen, { HOME: home }, { cwd: tempDir() });
+    expect({ ...read, dispatch: withToken(read.dispatch) }).toMatchObject({
       dispatch: { token: "new-token" },
       notice: null,
     });
@@ -481,7 +512,7 @@ describe("the OpenCode-era file", () => {
       envoy: envoyOn,
     });
     const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
-    expect(settings.dispatch).toEqual({
+    expect(withToken(settings.dispatch)).toEqual({
       enabled: true,
       url: "https://dispatch.example",
       token: "file-token",

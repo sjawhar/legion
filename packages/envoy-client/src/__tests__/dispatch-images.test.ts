@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ASK_QUESTION_MAX, overCapMessage } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { bearerCredential } from "../bearer";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
 import { DISPATCH_WRITE_RETRY, DispatchClient, forgetKeyedLayerMemory } from "../dispatch-http";
 import {
@@ -16,7 +17,12 @@ import {
 import { pictureAddresses } from "../dispatch-pictures";
 import { ToolInputError } from "../tool-input-errors";
 
-const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const config = {
+  enabled: true,
+  url: "http://dispatch.test",
+  credential: bearerCredential("secret"),
+  error: null,
+};
 const session = "01a1058e-f14f-7684-87eb-3dc885955551";
 const directory = mkdtempSync(path.join(os.tmpdir(), "dispatch-images-"));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
@@ -1050,7 +1056,11 @@ describe("reading pictures", () => {
         artifacts,
         Object.fromEntries(artifacts.map((artifact) => [artifact.id, png(16)]))
       );
-      const client = new DispatchClient("http://dispatch.test", "secret", server.fetchImpl);
+      const client = new DispatchClient(
+        "http://dispatch.test",
+        bearerCredential("secret"),
+        server.fetchImpl
+      );
       const address = (n: number) => `dispatch://agent/${session}/artifact/p${n}-png@v1`;
       const shown = new Set([address(1)]);
 

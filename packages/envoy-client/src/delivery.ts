@@ -30,7 +30,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
-import { type DispatchCredentialSource, dispatchCredential } from "./dispatch-config";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
@@ -114,12 +114,12 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
  * and throws Dispatch's refusal as a `DispatchServiceError`.
  */
 export async function postDeliveryReply(
-  config: { readonly url: string } & DispatchCredentialSource,
+  config: Pick<ActiveDispatchConfig, "url" | "credential">,
   sessionId: string,
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  const client = new DispatchClient(config.url, dispatchCredential(config));
+  const client = new DispatchClient(config.url, config.credential);
   await client.deliveryReply(delivery.resource, delivery.id, {
     actor: { kind: "session", id: sessionId },
     attempt: delivery.attempt,

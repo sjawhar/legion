@@ -100,33 +100,43 @@ export const pathJj: JjRunner = async (args, cwd) => {
  * The pane's Dispatch as its `dispatch` command reaches it: `file` is the session's envoy.json (the
  * one its plugin hands its shell as `ENVOY_CONFIG_FILE`), read again on each call with `env`, so a
  * file that moved its server takes effect without a restart. A pane whose Dispatch is off throws
- * why.
+ * why. `session` is the session this pane acts as, which a broker trade writes under.
  */
 export function paneLatestHandoff(
   file: SessionConfigFile,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  session: string,
   fetchImpl: typeof fetch = fetch
 ): LatestHandoff {
   return async (issue, word) => {
-    const { dispatch } = sessionDispatchSettings(file, env, { cwd });
+    const { dispatch } = sessionDispatchSettings(file, env, { cwd, session });
     if (!dispatch.enabled) {
       throw new Error(`Dispatch is off for this pane: ${dispatch.error ?? dispatch.notice}`);
     }
-    return new DispatchClient(dispatch.url, dispatch.token, fetchImpl).latestHandoff(issue, word);
+    return new DispatchClient(dispatch.url, dispatch.credential, fetchImpl).latestHandoff(
+      issue,
+      word
+    );
   };
 }
 
 /** What a completion of `phase` by `role` reports in the pane (`findHandoffReport` with the pane's
- * environment `env` and its Dispatch, `paneLatestHandoff(file, env, cwd)`), as each harness's
- * `legion` tool asks it. */
+ * environment `env` and its Dispatch, `paneLatestHandoff(file, env, cwd, session)`), as each
+ * harness's `legion` tool asks it. */
 export function paneHandoffReport(
   file: SessionConfigFile,
   env: NodeJS.ProcessEnv,
-  cwd: string
+  cwd: string,
+  session: string
 ): (phase: LegionPhase, role: LegionRole) => Promise<HandoffReport> {
   return (phase, role) =>
-    findHandoffReport({ phase, role, env, latestHandoff: paneLatestHandoff(file, env, cwd) });
+    findHandoffReport({
+      phase,
+      role,
+      env,
+      latestHandoff: paneLatestHandoff(file, env, cwd, session),
+    });
 }
 
 function requiredVariable(env: NodeJS.ProcessEnv, name: string): string {

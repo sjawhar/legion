@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { ArtifactBlock } from "@legion/contracts";
 
+import { bearerCredential } from "../bearer";
 import { readDocumentBlocks } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
 
 const SERVER = "https://dispatch.example";
+const CREDENTIAL = bearerCredential("token");
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -91,7 +93,7 @@ const context = { cwd: "/", env: {}, serverUrls: [SERVER] };
 describe("readDocumentBlocks", () => {
   test("each block's text is the UTF-8 byte range Dispatch reports, multi-byte text before it included", async () => {
     const { fetchImpl, requests } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     expect(await readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)).toEqual(
       {
         name: "spec.md",
@@ -127,7 +129,7 @@ describe("readDocumentBlocks", () => {
         ]);
       }
     });
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     const read = await readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context);
     expect(read === "not-found" ? undefined : read.blocks[1]).toEqual({
       id: "p-far",
@@ -146,7 +148,7 @@ describe("readDocumentBlocks", () => {
         token: `t-${reads}`,
       });
     });
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     await expect(
       readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)
     ).rejects.toThrow("spec.md changed while its blocks were read");
@@ -154,7 +156,7 @@ describe("readDocumentBlocks", () => {
 
   test("an issue with no document of that name has none: a first upload", async () => {
     const { fetchImpl, requests } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     expect(await readDocumentBlocks(client, { issue: "DSP-1", artifact: "new.md" }, context)).toBe(
       "not-found"
     );
@@ -165,7 +167,7 @@ describe("readDocumentBlocks", () => {
     const { fetchImpl } = dispatch((path) =>
       path === "/api/v1/projects/CORE/artifacts?unlinked=true" ? json([]) : undefined
     );
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     expect(await readDocumentBlocks(client, { project: "CORE", artifact: "new.md" }, context)).toBe(
       "not-found"
     );
@@ -175,7 +177,7 @@ describe("readDocumentBlocks", () => {
     const { fetchImpl } = dispatch((path) =>
       path === "/api/v1/artifacts/doc-spec/blocks" ? json({ error: "boom" }, 500) : undefined
     );
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     await expect(
       readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)
     ).rejects.toThrow();
@@ -185,7 +187,7 @@ describe("readDocumentBlocks", () => {
   // the reference is the slug's document, as Dispatch's own routes resolve it.
   test("a reference that is one document's slug and another's filename reads the slug's document", async () => {
     const { fetchImpl } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     const read = await readDocumentBlocks(client, { issue: "DSP-1", artifact: "plan" }, context);
     expect(read === "not-found" ? read : [read.name, read.slug, read.blocks[0]?.id]).toEqual([
       "plan.md",
@@ -216,7 +218,7 @@ describe("readDocumentBlocks", () => {
   ] as const) {
     test(`the document ${name} names`, async () => {
       const { fetchImpl } = dispatch();
-      const client = new DispatchClient(SERVER, "token", fetchImpl);
+      const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
       const read = await readDocumentBlocks(client, target, context);
       expect(read === "not-found" ? read : [read.name, read.blocks[0]?.id]).toEqual([
         document,
@@ -230,7 +232,7 @@ describe("readDocumentBlocks", () => {
   // which of the two the reference matched.
   test("an upload named spec reads the primary document, and names it by its own name and slug", async () => {
     const { fetchImpl } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     const read = await readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context);
     expect(read === "not-found" ? read : [read.name, read.slug]).toEqual(["spec.md", "spec"]);
   });
@@ -244,7 +246,7 @@ describe("readDocumentBlocks", () => {
     const { fetchImpl, requests } = dispatch((path) =>
       path === "/api/v1/projects/CORE/artifacts/notes" ? json(notes) : undefined
     );
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     expect(
       await readDocumentBlocks(client, { ref: "dispatch://CORE/artifact/notes" }, context)
     ).toEqual({ name: "notes.md", slug: "notes", blocks: [{ id: "b-1", text: "The brief." }] });
@@ -253,7 +255,7 @@ describe("readDocumentBlocks", () => {
 
   test("the issue LEGION_ISSUE names, when the target names no owner", async () => {
     const { fetchImpl } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     const read = await readDocumentBlocks(
       client,
       { artifact: "brief.md" },
@@ -264,7 +266,7 @@ describe("readDocumentBlocks", () => {
 
   test("a target that names no owner is refused before any request", async () => {
     const { fetchImpl, requests } = dispatch();
-    const client = new DispatchClient(SERVER, "token", fetchImpl);
+    const client = new DispatchClient(SERVER, CREDENTIAL, fetchImpl);
     await expect(readDocumentBlocks(client, { artifact: "spec" }, context)).rejects.toThrow(
       "issue is required"
     );
@@ -288,7 +290,7 @@ describe("readDocumentBlocks", () => {
         }),
       { preconnect: fetch.preconnect }
     );
-    const client = new DispatchClient(SERVER, "token", waiting, stop.signal);
+    const client = new DispatchClient(SERVER, CREDENTIAL, waiting, stop.signal);
     await expect(
       readDocumentBlocks(client, { issue: "DSP-1", artifact: "spec" }, context)
     ).rejects.toThrow("the gate stopped");

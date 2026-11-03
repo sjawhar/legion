@@ -13,25 +13,56 @@
 import {
   type BrokerEnvironment,
   brokerTokenClient,
+  IDENTITY_POOL,
+  IDENTITY_VAR,
   machineIdentity,
+  SESSION_VAR,
 } from "@legion/broker-client/environment";
 import type { BrokerTokenClient } from "@legion/broker-client/token-client";
 import type { RequestCredential } from "./bearer";
 
 /**
- * Whether this machine can trade for one of the broker's access tokens: a broker to trade at and
- * an identity to trade. An identity named with its own variables missing throws here, naming
- * them, rather than reading as a machine that has none.
+ * The session a trade writes under, which the broker records the minted token against and the
+ * listener checks a subscribe, an unsubscribe, a role claim and a send's own `source_session`
+ * against. A caller that holds one name passes it; a caller whose session changes over the life
+ * of its process — Claude Code mints a new id on `/clear`, and one Oh My Pi process switches
+ * between sessions — passes a function, which is read at every trade rather than fixed when the
+ * configuration resolved. A caller that acts as no session at all passes nothing, and the trade
+ * names whatever `AGENT_SECRETS_SESSION` does, which is how a daemon names its own.
  */
-export function brokerRouteConfigured(env: BrokerEnvironment): boolean {
-  return (env.AGENT_SECRETS_URL ?? "").trim() !== "" && machineIdentity(env) !== undefined;
+export type BrokerSessionName = string | (() => string);
+
+/** `naming` as one name, trimmed; "" when it names none. */
+function sessionName(naming: BrokerSessionName | undefined): string {
+  if (naming === undefined) return "";
+  return (typeof naming === "string" ? naming : naming()).trim();
 }
 
 /**
- * The clients this process has made, by the variables that describe them. One process makes one
- * key per broker and identity and keeps one token live under it, which both Dispatch and the
- * listener present: two keys would be two credentials for one session, and the broker records the
- * key the token is bound to.
+ * Whether this machine can trade for one of the broker's access tokens: a broker to trade at and
+ * an identity this client can prove. An identity named with its own variables missing throws
+ * here, naming them, rather than reading as a machine that has none.
+ *
+ * `AGENT_SECRETS_MACHINE_IDENTITY=pool` is a machine with no TypeScript route rather than a
+ * mistake: only the Go client federates at a workload identity pool (`agent-secrets`), and the
+ * Go side of such a machine works. Reading it as an error here would turn Dispatch and Envoy off
+ * on a machine whose listener asks for no credential at all.
+ */
+export function brokerRouteConfigured(env: BrokerEnvironment): boolean {
+  if ((env.AGENT_SECRETS_URL ?? "").trim() === "") return false;
+  if ((env[IDENTITY_VAR] ?? "").trim() === IDENTITY_POOL) return false;
+  return machineIdentity(env) !== undefined;
+}
+
+/**
+ * The clients this process has made, by the variables that describe them and the session they
+ * trade under. One process makes one key per broker, identity and session, and keeps one token
+ * live under it, which both Dispatch and the listener of that session present: two keys would be
+ * two credentials for one session, and the broker records the key the token is bound to. The
+ * session is part of the identity, not of the process: a token names one session, and the
+ * listener answers 403 to a session presenting another's, so two sessions of one process hold
+ * two clients. An entry is one key pair and one token, made only for a session this process
+ * actually traded for.
  */
 const CLIENTS = new Map<string, Promise<BrokerTokenClient | undefined>>();
 
@@ -40,24 +71,34 @@ export function forgetBrokerClients(): void {
   CLIENTS.clear();
 }
 
-/** The client `env` describes, made once per process. */
-function clientFor(env: BrokerEnvironment): Promise<BrokerTokenClient | undefined> {
+/** The client `env` describes for `session`, made once per process. */
+function clientFor(
+  env: BrokerEnvironment,
+  session: string
+): Promise<BrokerTokenClient | undefined> {
   const key = JSON.stringify([
     env.AGENT_SECRETS_URL,
     env.AGENT_SECRETS_MACHINE_IDENTITY,
     env.AGENT_SECRETS_MACHINE_TOKEN_FILE,
     env.AGENT_SECRETS_MACHINE_AUDIENCE,
-    env.AGENT_SECRETS_SESSION,
+    session,
   ]);
-  const made = CLIENTS.get(key) ?? brokerTokenClient(env);
+  const made =
+    CLIENTS.get(key) ??
+    brokerTokenClient(session === "" ? env : { ...env, [SESSION_VAR]: session });
   CLIENTS.set(key, made);
   return made;
 }
 
 /**
- * This machine's broker credential: `Authorization: DPoP <access token>` and a proof of this
- * process's key naming the request's method, its target URI and the token it is presented beside
- * (`ath`), so a copy of the token taken off the wire buys nothing.
+ * This machine's broker credential for `session`: `Authorization: DPoP <access token>` and a
+ * proof of this process's key naming the request's method, its target URI and the token it is
+ * presented beside (`ath`), so a copy of the token taken off the wire buys nothing.
+ *
+ * The token names `session` (`BrokerSessionName`), which is what a fleet entry that fixes no
+ * session requires and what the listener checks each call against. The name is read at every
+ * trade, so a process that moves from one session to another trades afresh under the new name
+ * rather than presenting the old one.
  *
  * The trade happens at the first request that needs it and at every renewal after, both inside
  * `headers`, so nothing of the caller's restarts when a token lapses. Dispatch and the listener
@@ -66,12 +107,15 @@ function clientFor(env: BrokerEnvironment): Promise<BrokerTokenClient | undefine
  * own token endpoint, which may ask for one, is where that retry lives
  * (`@legion/broker-client/token-client`).
  */
-export function brokerCredential(env: BrokerEnvironment): RequestCredential {
+export function brokerCredential(
+  env: BrokerEnvironment,
+  session?: BrokerSessionName | undefined
+): RequestCredential {
   let held = "";
   return {
     scheme: "DPoP",
     async headers(method: string, url: string): Promise<Readonly<Record<string, string>>> {
-      const client = await clientFor(env);
+      const client = await clientFor(env, sessionName(session));
       if (client === undefined) {
         throw new Error(
           "AGENT_SECRETS_URL and AGENT_SECRETS_MACHINE_IDENTITY no longer name a broker and an identity to trade"

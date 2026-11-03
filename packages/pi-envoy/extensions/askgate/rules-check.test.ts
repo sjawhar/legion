@@ -2,6 +2,7 @@
 // request renders, and `runRulesCheck` with the walk and the Dispatch the core lends it. The gate
 // tests of the same check — a refusal, the breaker, the notice — are in `askgate.test.ts`.
 import { describe, expect, test } from "bun:test";
+import { bearerCredential } from "@legion/envoy-client/bearer";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
   describeAsks,
@@ -259,7 +260,12 @@ describe("runRulesCheck: which asks a call opens", () => {
       ]);
     }) as typeof fetch;
     return (_directory: string, signal: AbortSignal) => ({
-      client: new DispatchClient("https://dispatch.example", "token", fetchImpl, signal),
+      client: new DispatchClient(
+        "https://dispatch.example",
+        bearerCredential("token"),
+        fetchImpl,
+        signal
+      ),
       serverUrls: ["https://dispatch.example"],
     });
   };

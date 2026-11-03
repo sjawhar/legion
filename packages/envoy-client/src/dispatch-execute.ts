@@ -68,7 +68,7 @@ import { z } from "zod";
 import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
-import { type ActiveDispatchConfig, dispatchCredential } from "./dispatch-config";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import {
   type DispatchHost,
   type DispatchOrigin,
@@ -172,9 +172,9 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  /** The resolved Dispatch (`activeDispatchSettings`): the server, the bearer it takes, and the
-   *  public dashboard its printed links point at when there is one. */
-  readonly config: Pick<ActiveDispatchConfig, "url" | "token" | "publicUrl">;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server, the credential every request
+   *  presents, and the public dashboard its printed links point at when there is one. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "credential" | "publicUrl">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -3414,8 +3414,7 @@ export async function checkDispatchCall(input: DispatchCallCheckInput): Promise<
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
-  const { url: configUrl } = input.config;
-  const credential = dispatchCredential(input.config);
+  const { url: configUrl, credential } = input.config;
   // Every link the command prints is to Dispatch's dashboard as people open it: the public URL when
   // the session has one (a pod reaches Dispatch at an in-cluster address nobody else can open), and
   // the API's URL otherwise.

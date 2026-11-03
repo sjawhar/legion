@@ -1,0 +1,11 @@
+kind: Fixed
+body: |
+  A broker-minted token now names the session that is using it. The plugin passes the session it
+  last bound, read again at every trade, to Dispatch, to the listener client and to AskGate's own
+  reads, so a fleet entry that fixes no session accepts the trade and the listener accepts a
+  subscribe, an unsubscribe, a role claim and a send naming this session. Nothing has to set
+  `AGENT_SECRETS_SESSION`, and a session the process switched to presents its own name rather
+  than the one the process started on.
+time: 2026-11-03T09:17:00.000000000Z
+custom:
+  Issue: pr2636
