@@ -312,8 +312,9 @@ const noDatabasePassword = "the broker substitutes no password into BROKER_DATAB
 // and its tier.
 const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
 
-// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses a shorter lifetime, or
-// its grant lasts until the requesting session ends.
+// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses its lifetime with --ttl;
+// with none its grant lasts 12 hours, or until the requesting session ends when every requested
+// secret carries default-grant=session.
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
