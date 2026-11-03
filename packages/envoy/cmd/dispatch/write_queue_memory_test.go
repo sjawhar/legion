@@ -261,7 +261,7 @@ const writeQueueHeapMargin = 64 << 20
 // it, and nothing closed the socket for a budget within the two minutes the drive waits.
 func TestASocketThatNeverReadsIsClosedWithinItsWriteQueueBudget(t *testing.T) {
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	source, _ := memory.storedDocument(t, proseMarkdown(t, pmdoc.MaxDocumentBytes))
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
@@ -370,7 +370,7 @@ func runOfWords(t *testing.T, size int) string {
 func TestTwentySocketsThatNeverReadStayUnderThePodsMemory(t *testing.T) {
 	const sockets = 20
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	rooms, _ := memory.documentCopies(t, runOfWords(t, pmdoc.MaxDocumentBytes), sockets)
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
@@ -610,7 +610,7 @@ func (s *throttledReader) leave() {
 // why both sockets run in one room: what the budget must tell apart is which of them it ends.
 func TestAThrottledReaderIsNotClosedByTheWriteQueueBudget(t *testing.T) {
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	source, _ := memory.storedDocument(t, proseMarkdown(t, pmdoc.MaxDocumentBytes))
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)

@@ -59,16 +59,18 @@ const (
 	// under to 1,832,882 over; and the heaviest applies beside full copy bounds, whose frames and
 	// copies run to tens of MiB each, 5,240,914, 15,501,378 and 34,453,570 over. The 128 MiB this
 	// was then - three and a half times the worst of those - rested on three readings of that
-	// heaviest step, whose overshoot spreads far wider. Over ten runs of it at
-	// this branch's head on 2026-11-03, alone on this pod, it read 2,210, 137,298, 2,476,098,
-	// 2,615,362, 5,138,530, 14,796,882, 48,175,186, 63,137,858, 95,455,330 and 173,549,698 bytes
-	// past the limit. The same spread stands at the commits before it, so none of it is new: 653,362
-	// at 713d2fe8, the last commit before the merge with main's load that no longer replays a
-	// document's whole edit history, and 28,547,106 and 90,572,882 at c6ccc5bf, the commit whose
-	// 2026-11-01 figures this drive's comment quoted; a run at 713d2fe8 whose server sampled its
-	// own live heap, and so collected far more often, read the worst of all, 187,308,018.
+	// heaviest step, whose overshoot spreads far wider. Over ten runs of it at 5f70eeee on
+	// 2026-11-03, alone on this pod, it read 2,210, 137,298, 2,476,098, 2,615,362, 5,138,530,
+	// 14,796,882, 48,175,186, 63,137,858, 95,455,330 and 173,549,698 bytes past the limit. The same
+	// spread stands at the commits before it, so none of it is new: 653,362 at 713d2fe8, the last
+	// commit before the merge with main's load that no longer replays a document's whole edit
+	// history, and 28,547,106 and 90,572,882 at c6ccc5bf, the commit whose 2026-11-01 figures this
+	// drive's comment quoted; a run at 713d2fe8 whose server sampled its own live heap, and so
+	// collected far more often, read the worst of all, 187,308,018. Ten more runs the same day
+	// at a65dac4f, after the merge with main's observer that renders only the blocks a keystroke
+	// changed, read 4,221,026 to 78,747,778 past it, charging 3,675 to 3,739 MiB.
 	//
-	// 256 MiB is 1.55 times the worst of the ten runs at head and 1.43 times the worst of every
+	// 256 MiB is 1.55 times the worst of the ten runs at 5f70eeee and 1.43 times the worst of every
 	// run measured, and still a bound on what a pod is charged: a step within it holds
 	// 4,133,906,022 bytes of the pod's 4,294,967,296, leaving 161,061,274 - 153 MiB - for memory
 	// outside the runtime, which these steps read at 25 to 41 MiB - their charged peak less their
@@ -168,6 +170,16 @@ const (
 	// content at the densest price at both copies, none of it re-based by a count.
 	keystrokeChargeForTest = bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest + bytesOfHeapAByteAtTheDensestForTest*roomCopiesForTest
 )
+
+// podServerEnv is the environment a drive that judges a server against the pod adds to its
+// harness (memoryHarness.env): the pod's Go memory limit, and the collector's ratio named rather
+// than inherited. Dispatch reads and sets no GOGC, so a pod runs at the runtime's default of 100,
+// and every figure these drives quote - the room budget's refusals, the charged peaks and the
+// overshoot podGoMemoryLimitMargin was measured from - was read there. Naming it here keeps them
+// there whatever ratio the harness's own environment gives every other memory test.
+func podServerEnv() []string {
+	return []string{"GOMEMLIMIT=" + strconv.Itoa(podGoMemoryLimit), "GOGC=100"}
+}
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
 // (Service.weighPeerUpdate): an update that would
@@ -951,7 +963,7 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	fleet := memory.mebibyteFleet(t, func(int64) int { return burst + 4 })
 	rooms := int(roomBudgetBytesForTest / fleet.reserved)
 	t.Logf("a mebibyte of prose makes %d elements and reserves %d bytes at admission: the %d-byte budget holds %d such rooms", fleet.elements, fleet.reserved, roomBudgetBytesForTest, rooms)
@@ -1320,7 +1332,7 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 	const keystrokes, runs, pasteBytes, together, budget = 200, 10, 4 << 10, 2, 480 << 20
 	building := time.Now()
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	// One copy more than the budget can admit: every admission charges at least what it reserves,
 	// so budget/reserved bounds the admissions and leaves the drive a room for the refusal.
 	fleet := memory.mebibyteFleet(t, func(reserved int64) int { return int(budget/reserved) + 1 })
@@ -1555,7 +1567,7 @@ func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int
 func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T) {
 	const pasteBytes, leaveAt, probeText, pasted = 64 << 10, 256 << 10, " Probe.", "## Pasted section 0\n"
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	// proseMarkdown writes whole sections of about 1,740 bytes, so three of them are the 5 KiB.
 	source, state := memory.storedDocument(t, proseMarkdown(t, 6<<10))
 	small := memory.storedShape(t, "the 5 KiB document", source)
@@ -1792,7 +1804,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	// first mark until the drive ends, so a mark of alice's would never age.
 	const markAuthor = "user:bob"
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	fleet := memory.mebibyteFleet(t, func(reserved int64) int { return int(roomBudgetBytesForTest/reserved) + 4 })
 	small, smallState := memory.smallDocuments(t, growers)
 	// Rounds a growing room can take while it stays under the element bound every server write
@@ -2164,7 +2176,7 @@ const gcFloodClient = 5_000_000
 func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
 	const rooms, framesARoom, runLength = 8, 3, 128
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	copies, _ := memory.smallDocuments(t, rooms)
 	small := memory.storedShape(t, "the small document", copies[0])
 	// Each frame stays 4 KiB short of what the byte bound admits into a room rendering the small
@@ -2591,7 +2603,7 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 	const copiesOfEach, ordinary = 8, "a mebibyte of prose"
 	building := time.Now()
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	longEdited := memory.storedShape(t, "the long-edited document at the decode cap",
 		memory.storedStates(t, longEditedTypedTo(t, maxUpdateItemsForTest))[0])
 	agent := memory.storedShape(t, "the agent-rewritten document", memory.agentRewrittenDocument(t))
@@ -2767,7 +2779,7 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	const folds = 4
 	building := time.Now()
 	memory := newMemoryHarness(t)
-	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	memory.env = append(memory.env, podServerEnv()...)
 	stored := memory.storedStates(t, longEditedTypedTo(t, maxUpdateItemsForTest),
 		paddedToTheHeaviestFrame(t, longEditedTypedTo(t, maxUpdateItemsForTest-4_096)))
 	longEdited := memory.storedShape(t, "the long-edited document at the decode cap", stored[0])
