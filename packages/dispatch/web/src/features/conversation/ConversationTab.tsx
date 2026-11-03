@@ -126,11 +126,15 @@ function recipientOf(deliveries: readonly MessageDelivery[], target: string | nu
 }
 
 /** The mark an unread conversation carries: its newest activity is at or after the reader's
- *  watermark (`user_issue_state.last_read_seq`). */
+ *  watermark (`user_issue_state.last_read_seq`). It is exactly as tall as the `text-sm` line it
+ *  sits in (`h-5`, that line's 20 px box) and centred in it rather than aligned on its own
+ *  baseline, which in an `items-baseline` byline would push the pill down and grow the row by a
+ *  pixel. So a byline holding the mark is already the height it will be once the read mark
+ *  clears it a second later, and no card moves under a reader's finger. */
 function UnreadMark(): ReactNode {
   return (
     <span
-      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${surfaceMutedBg} ${linkText}`}
+      className={`inline-flex h-5 shrink-0 items-center self-center rounded-full px-2 text-xs leading-none font-semibold ${surfaceMutedBg} ${linkText}`}
     >
       New
     </span>
