@@ -20,10 +20,25 @@ interface TargetHighlights {
   active: ReadonlySet<string>;
   pulsed: ReadonlyMap<string, number>;
 }
+/** A class, and optionally a title, a host draws on one block by its stable `blockId` for as long
+ *  as it keeps the mark in the set it last handed `setBlockMarks`. */
+export interface BlockMark {
+  readonly blockId: string;
+  readonly className: string;
+  readonly title?: string;
+}
+
+/** One block's marks, merged: every class, and every title, in the order the host named them. */
+interface BlockMarkDrawing {
+  readonly classes: readonly string[];
+  readonly titles: readonly string[];
+}
 
 interface EditorHighlights {
   mark: TargetHighlights;
   block: TargetHighlights;
+  /** The host's block marks by block id (`setBlockMarks`). */
+  blockMarks: ReadonlyMap<string, BlockMarkDrawing>;
   /** The token of this editor's latest pulse; each pulse takes the next one. */
   lastPulse: number;
   decorations: DecorationSet;
@@ -32,13 +47,15 @@ interface EditorHighlights {
 type HighlightChange =
   | { kind: "active"; target: HighlightTarget; ids: ReadonlySet<string> }
   | { kind: "pulse"; target: HighlightTarget; id: string }
-  | { kind: "pulse-end"; target: HighlightTarget; id: string; token: number };
+  | { kind: "pulse-end"; target: HighlightTarget; id: string; token: number }
+  | { kind: "block-marks"; marks: ReadonlyMap<string, BlockMarkDrawing> };
 
 const highlightsKey = new PluginKey<EditorHighlights>("dispatch-editor-highlights");
 const noTargetHighlights: TargetHighlights = { active: new Set(), pulsed: new Map() };
 const noHighlights: EditorHighlights = {
   mark: noTargetHighlights,
   block: noTargetHighlights,
+  blockMarks: new Map(),
   lastPulse: 0,
   decorations: DecorationSet.empty,
 };
@@ -60,6 +77,10 @@ function withTarget(
 }
 
 function applyChange(value: EditorHighlights, change: HighlightChange): EditorHighlights {
+  if (change.kind === "block-marks") {
+    if (value.blockMarks.size === 0 && change.marks.size === 0) return value;
+    return { ...value, blockMarks: change.marks };
+  }
   const current = value[change.target];
   switch (change.kind) {
     case "active":
@@ -80,8 +101,11 @@ function applyChange(value: EditorHighlights, change: HighlightChange): EditorHi
 }
 
 function hasHighlights(value: EditorHighlights): boolean {
-  return [value.mark, value.block].some(
-    (highlights) => highlights.active.size > 0 || highlights.pulsed.size > 0
+  return (
+    value.blockMarks.size > 0 ||
+    [value.mark, value.block].some(
+      (highlights) => highlights.active.size > 0 || highlights.pulsed.size > 0
+    )
   );
 }
 
@@ -107,18 +131,27 @@ function markClasses(node: ProseMirrorNode, value: EditorHighlights): string[] {
   return targetClasses(value, "mark", ids);
 }
 
-function blockClasses(node: ProseMirrorNode, value: EditorHighlights): string[] {
+/** The classes a block draws - active, pulsing, and the host's marks - and the titles of its
+ *  marks. */
+function blockDrawing(node: ProseMirrorNode, value: EditorHighlights): BlockMarkDrawing {
   const id = blockIdOf(node);
-  return id === null ? [] : targetClasses(value, "block", [id]);
+  if (id === null) return { classes: [], titles: [] };
+  const marks = value.blockMarks.get(id);
+  return {
+    classes: [...targetClasses(value, "block", [id]), ...(marks?.classes ?? [])],
+    titles: marks?.titles ?? [],
+  };
 }
 
 function highlightDecorations(doc: ProseMirrorNode, value: EditorHighlights): DecorationSet {
   if (!hasHighlights(value)) return DecorationSet.empty;
   const decorations: Decoration[] = [];
   doc.descendants((node, pos) => {
-    const blockClass = blockClasses(node, value).join(" ");
-    if (blockClass !== "") {
-      decorations.push(Decoration.node(pos, pos + node.nodeSize, { class: blockClass }));
+    const block = blockDrawing(node, value);
+    if (block.classes.length > 0) {
+      const attrs: { class: string; title?: string } = { class: block.classes.join(" ") };
+      if (block.titles.length > 0) attrs.title = block.titles.join("\n");
+      decorations.push(Decoration.node(pos, pos + node.nodeSize, attrs));
     }
     if (!node.isInline) return true;
     const markClass = markClasses(node, value).join(" ");
@@ -135,7 +168,7 @@ function holdsHighlightedTarget(content: Fragment, value: EditorHighlights): boo
   let found = false;
   content.descendants((node) => {
     found ||=
-      blockClasses(node, value).length > 0 ||
+      blockDrawing(node, value).classes.length > 0 ||
       (node.isInline && markClasses(node, value).length > 0);
     return !found;
   });
@@ -150,7 +183,8 @@ function holdsHighlightedTarget(content: Fragment, value: EditorHighlights): boo
  *  decoration whose closing token it deleted, though the block and its id remain. */
 function mapsHighlights(transaction: Transaction, value: EditorHighlights): boolean {
   if (!hasHighlights(value)) return true;
-  const blockHighlighted = value.block.active.size > 0 || value.block.pulsed.size > 0;
+  const blockHighlighted =
+    value.blockMarks.size > 0 || value.block.active.size > 0 || value.block.pulsed.size > 0;
   return transaction.steps.every((step, index) => {
     if (!(step instanceof ReplaceStep) || holdsHighlightedTarget(step.slice.content, value)) {
       return false;
@@ -165,9 +199,10 @@ function dispatchHighlightChange(view: EditorView, change: HighlightChange): voi
 }
 
 /**
- * Presentation-only highlights owned by ProseMirror: the selected margin item and the brief pulse
- * after focusing one. A host that writes classes into mark or block DOM makes ProseMirror read that
- * DOM back as a document edit, so these classes are decorations computed from editor state.
+ * Presentation-only highlights owned by ProseMirror: the selected margin item, the brief pulse
+ * after focusing one, and the marks a host draws on blocks (`setBlockMarks`). A host that writes
+ * classes into mark or block DOM makes ProseMirror read that DOM back as a document edit, so these
+ * classes are decorations computed from editor state.
  */
 export const editorHighlightsPlugin = $prose(
   () =>
@@ -208,6 +243,22 @@ export function setActiveHighlights(
   const current = (highlightsKey.getState(view.state) ?? noHighlights)[target].active;
   if (sameIds(current, next)) return;
   dispatchHighlightChange(view, { kind: "active", target, ids: next });
+}
+
+/** Draws `marks` on their blocks and drops every mark the last call drew: one call carries the
+ *  host's whole set. Two marks of one block draw both classes and both titles, a line apart. */
+export function setBlockMarks(view: EditorView, marks: readonly BlockMark[]): void {
+  const drawings = new Map<string, { classes: string[]; titles: string[] }>();
+  for (const { blockId, className, title } of marks) {
+    let drawing = drawings.get(blockId);
+    if (drawing === undefined) {
+      drawing = { classes: [], titles: [] };
+      drawings.set(blockId, drawing);
+    }
+    if (!drawing.classes.includes(className)) drawing.classes.push(className);
+    if (title !== undefined && !drawing.titles.includes(title)) drawing.titles.push(title);
+  }
+  dispatchHighlightChange(view, { kind: "block-marks", marks: drawings });
 }
 
 export function pulseHighlight(view: EditorView, target: HighlightTarget, id: string): void {

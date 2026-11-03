@@ -75,6 +75,9 @@ export type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  Decision,
+  DecisionKeep,
+  DecisionLink,
   DeliveryCapability,
   DeliveryColorFacet,
   DeliveryComponent,
@@ -125,6 +128,7 @@ export type {
   DispatchEvent,
   DispatchUser,
   DocEditOp,
+  DocumentRead,
   DocumentReferenceSummary,
   DuplicateCandidate,
   EditAskInput,
@@ -149,6 +153,7 @@ export type {
   IssueClaimEventPayload,
   IssueComponents,
   IssueComponentsInput,
+  IssueDecisions,
   IssueDetails,
   IssuePriority,
   IssueProgress,
@@ -281,10 +286,6 @@ export interface CredentialRecord {
   requested_at: string;
   decided: CredentialDecisionEvent | null;
   session?: CredentialSession;
-  /** An `agent_secret` record's page on the secrets broker, where a person signed in to the
-   *  broker decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's
-   *  record, and on every record from a broker older than that page. */
-  approve_url?: string;
 }
 
 export interface CredentialApproval {

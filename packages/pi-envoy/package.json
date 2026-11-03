@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-envoy",
-  "version": "15.1.0",
+  "version": "15.5.1",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
@@ -9,6 +9,9 @@
     ],
     "skills": [
       "dist/skills"
+    ],
+    "bin": [
+      "bin"
     ]
   },
   "repository": {
