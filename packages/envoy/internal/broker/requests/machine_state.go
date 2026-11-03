@@ -711,12 +711,27 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
+	// A record that names no lifetime gets the default the current policy gives its names: a
+	// request pending from before the 12-hour default, or one whose names were all
+	// default-grant=session when it was made, is held to the policy as it stands at approval.
+	lifetime := parsed.LifetimeSeconds
+	if approve && lifetime == nil {
+		requested, err := requestedSecrets(ctx, tx, requestID)
+		if err != nil {
+			return Decision{}, err
+		}
+		names := make([]string, len(requested))
+		for i, g := range requested {
+			names[i] = g.name
+		}
+		lifetime = defaultLifetime(m.Policy.Get(), names, nil)
+	}
 	if approve {
 		requester, err := m.requester(ctx, tx, enr)
 		if err != nil {
 			return Decision{}, err
 		}
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, parsed.LifetimeSeconds); err != nil {
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, lifetime); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -756,8 +771,8 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var grantID string
 	if next == "granted" {
-		// The grant lasts the lifetime the approved record names, the text its approver decided.
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, parsed.LifetimeSeconds); err != nil {
+		// The grant lasts the lifetime the approved record names, or the default above.
+		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, lifetime); err != nil {
 			return Decision{}, err
 		}
 	}

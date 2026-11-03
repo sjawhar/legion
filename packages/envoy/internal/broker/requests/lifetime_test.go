@@ -378,3 +378,26 @@ func TestAMixedNoTTLRequestLastsTwelveHours(t *testing.T) {
 		t.Fatalf("Create(mixed, no TTL) = %+v, %v; want lifetime 43200", got, err)
 	}
 }
+
+// TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours: a request that named no
+// lifetime while its secret was default-grant=session, still pending when the tag is removed (as
+// one pending across the deploy of the 12-hour default is), is granted 12 hours on approval.
+func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "pending", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil || pending.LifetimeSeconds != nil {
+		t.Fatalf("Create = %+v, %v; want pending with no lifetime", pending, err)
+	}
+	retag(t, m, policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"))
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil || approved.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v", approved, err)
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil ||
+		expires == nil || time.Until(*expires) < 11*time.Hour || time.Until(*expires) > 13*time.Hour {
+		t.Fatalf("grant expires_at = %v, %v; want about 12 hours from now", expires, err)
+	}
+}
