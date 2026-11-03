@@ -26,9 +26,7 @@ import (
 // route, to its selected agent subject (contracts.RoleForwardDedupePrefix). A role lane that takes
 // one again (an operator re-publishing a received frame) does not re-enter the arbiter with it,
 // and a session's dedupe reads it as a forward. The durable acknowledges the stored forward copy
-// by its subject (listenerDeliveryHandler) for every holder that has it another way; a
-// serving-port holder of this listener has no subscriber, so its copy is its delivery
-// (roleForwardCopyDelivery).
+// by its subject (listenerDeliveryHandler): every holder has the forward another way.
 const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
 const roleReceiptTimeout = 2 * time.Second
@@ -50,20 +48,16 @@ type listenerDeliveryHandlerConfig struct {
 	// the server and no receipt arrived inside timeout; bus.ErrForwardNotStored that the stream
 	// did not acknowledge storing it; any other error — a raw nats.ErrTimeout from the flush
 	// included, returned by the publish or the wait — means the forward is not known to have
-	// reached the holder. storedOnly asks for a forward that counts as delivered on the stream's
-	// acknowledgement alone (roleForwardStoredOnly).
-	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (wait func() error, err error)
-	// roleForwards runs the role lane's forwards off its handler (roleForwarder), and servePorts
-	// pushes the durable path's messages to serving-port sessions off its handler, one worker per
-	// session (servePortWorkers); every delivery path hands its forwards and pushes to them, so
-	// both are always set: wireDeliveryWorkers starts them from the configuration they report
-	// through, once it is otherwise built, and main.go and every test alike wire them there.
+	// reached the holder.
+	forwardRole func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (wait func() error, err error)
+	// roleForwards runs the role lane's forwards off its handler (roleForwarder); every delivery
+	// path hands its forwards to it, so it is always set: wireRoleForwarder builds it from the
+	// configuration it reports through, once that configuration is otherwise built, and main.go
+	// and every test alike wire it there.
 	roleForwards      *roleForwarder
-	servePorts        *servePortWorkers
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
-	deliverer         *session.Deliverer
 	dedupeCache       *dedupe.Cache
 	attemptCache      *dedupe.Cache
 	logger            *logging.Logger
@@ -89,17 +83,14 @@ type listenerDeliveryHandlerConfig struct {
 	deferredUnplaceable *unplaceableDeferrals
 }
 
-// wireDeliveryWorkers starts the workers every delivery path hands its work to and returns cfg
-// carrying them, with the stop that ends them. Each worker keeps the configuration it is built
-// from by value, so a caller wires them last, once every seam of cfg is set: a seam set after this
-// is one the workers do not have. The role forwarder is built from a configuration that already
-// carries the serving-port workers, since the stored copy of a forward it publishes is pushed by
-// them. Stopping ends the serving-port workers; the forwarder has no loop of its own, and the role
-// lane's drain waits for the forwards it holds (roleLane.drain).
-func wireDeliveryWorkers(cfg listenerDeliveryHandlerConfig) (listenerDeliveryHandlerConfig, func(context.Context)) {
-	cfg.servePorts = startServePortWorkers(cfg)
+// wireRoleForwarder builds the role forwarder every delivery path hands its forwards to and
+// returns cfg carrying it. The forwarder keeps the configuration it is built from by value, so a
+// caller wires it last, once every seam of cfg is set: a seam set after this is one the forwarder
+// does not have. It has no loop to stop; the role lane's drain waits for the forwards it holds
+// (roleLane.drain).
+func wireRoleForwarder(cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
 	cfg.roleForwards = newRoleForwarder(cfg)
-	return cfg, cfg.servePorts.stop
+	return cfg
 }
 
 type deliveryMode uint8
@@ -107,34 +98,31 @@ type deliveryMode uint8
 const (
 	coreDelivery deliveryMode = iota
 	durableDelivery
-	// liveDelivery is a message the live lane took off core NATS (liveDeliveryHandler). Like
-	// coreDelivery it is delivered to whoever is there and never retried; unlike it, its envelope
-	// must name the subject it arrived on as its topic.
-	liveDelivery
 )
+
+// durableRetryDelay is how long the server waits to deliver again a durable message whose
+// delivery asked for a retry.
+const durableRetryDelay = 30 * time.Second
 
 type deliveryMessage struct {
 	data []byte
 	mode deliveryMode
-	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
-	// which reads its subject.
+	// msg is the NATS message: set for durableDelivery, which acknowledges it and reads its
+	// subject.
 	msg *nats.Msg
 	// metadata is a durable message's JetStream metadata, read once by its handler: its stream
 	// sequence, which says which session consumers hold it (storedSeq) and keys an unplaceable
-	// deferral, and its delivery count, which bounds that retry. It is nil for a core or live
+	// deferral, and its delivery count, which bounds that retry. It is nil for a core
 	// message, and for a durable one whose metadata will not parse, which can be bounded by
 	// nothing (unplaceableAgentDelivery) and is in no consumer's window as far as this listener
 	// can tell (storedSeq 0).
 	metadata *nats.MsgMetadata
-	// settle acknowledges a durable message once its handler and the pushes it handed to
-	// serving-port workers have ended.
-	settle *durableSettle
 }
 
 // storedSeq is the stream sequence of a durable message, which decides whether a session's
-// consumer holds it (session.SessionEntry.ConsumerHoldsStored): 0 for a core or live message, and
-// for a durable one whose metadata will not parse, so such a message is delivered rather than left
-// to a consumer that may not hold it.
+// consumer holds it (session.SessionEntry.ConsumerHoldsStored): 0 for a core message, and for a
+// durable one whose metadata will not parse, so such a message is delivered rather than left to a
+// consumer that may not hold it.
 func (message deliveryMessage) storedSeq() uint64 {
 	if message.metadata == nil {
 		return 0
@@ -143,26 +131,28 @@ func (message deliveryMessage) storedSeq() uint64 {
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
-// durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
-// message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
-// A durable message is settled once the pushes its handler handed over have ended too. A retry
-// takes the standard delay; a path that needs its own asks for it through finalizeAfter.
+// durable JetStream message receives an acknowledgement or retry request. A role-lane message is
+// core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
+// A retry takes the standard delay; a path that needs its own asks for it through finalizeAfter.
 func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
 		return
 	}
-	message.settle.end(retry)
+	if retry {
+		_ = message.msg.NakWithDelay(durableRetryDelay)
+		return
+	}
+	_ = message.msg.Ack()
 }
 
 // finalizeAfter asks the stream to redeliver this message after delay, for a path whose own
 // bound sets the pace of its retries rather than finalize's standard one. Like finalize, it
-// does nothing to a core message: nothing redelivers one, so there is no request to make; and
-// it settles a durable message only once the pushes its handler handed over have ended too.
+// does nothing to a core message: nothing redelivers one, so there is no request to make.
 func (message deliveryMessage) finalizeAfter(delay time.Duration) {
 	if message.mode != durableDelivery {
 		return
 	}
-	message.settle.retryAfter(delay)
+	_ = message.msg.NakWithDelay(delay)
 }
 
 // jetStreamDeliveryHandler is the durable's handler. It reads the message's JetStream metadata
@@ -173,7 +163,7 @@ func (message deliveryMessage) finalizeAfter(delay time.Duration) {
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		message := deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg, settle: newDurableSettle(msg)}
+		message := deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg}
 		if metadata, err := msg.Metadata(); err == nil {
 			message.metadata = metadata
 		}
@@ -380,24 +370,13 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 			message.finalize(false)
 			return
 		}
-		// The live lane chose this message by its subject, so an envelope naming another topic would
-		// be routed past that choice: to a role lane or an agent's inbox, or to sessions subscribed
-		// to a topic nobody published on.
-		if message.mode == liveDelivery && item.Topic != message.msg.Subject {
-			cfg.logger.Warn("listener live envelope names a topic other than its subject", slog.String("subject", message.msg.Subject), slog.String("topic", item.Topic), slog.String("event_id", item.EventID))
-			return
-		}
 		// The stream captures every agent subject, so it also stores each forward a sender made to
 		// a session's agent subject while keeping the envelope's own topic: a role message the
 		// lane or the publish route forwarded to its holder, an ad-hoc topic message the route
 		// forwarded to each self-subscribed recipient. The forward reached its session over core
 		// NATS, or its sender learned it did not; the stored copy is not a message for this
-		// listener to deliver again, to the role's holder or to the topic's serve-port sessions.
-		// A serving-port holder of this listener is the one exception: it answers no receipt, so
-		// its forward was sent for the stream to store (roleForwardStoredOnly) and this copy is
-		// its delivery, which the path below pushes to its port.
-		if message.mode == durableDelivery && strings.HasPrefix(message.msg.Subject, contracts.AgentTopicPrefix) && item.Topic != message.msg.Subject &&
-			!storedForwardCopyIsDelivery(cfg, strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), message.storedSeq()) {
+		// listener to deliver again.
+		if message.mode == durableDelivery && strings.HasPrefix(message.msg.Subject, contracts.AgentTopicPrefix) && item.Topic != message.msg.Subject {
 			cfg.logger.DeliveryLog(slog.LevelDebug, "listener acknowledged a stored forward copy", strings.TrimPrefix(message.msg.Subject, contracts.AgentTopicPrefix), item.Topic, item.EventID, "forward_copy", slog.String("subject", message.msg.Subject))
 			message.finalize(false)
 			return
@@ -532,8 +511,11 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // (finishRoleForward), so the role lane's handler returns without waiting for
 // the holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
+	// An envelope the arbiter, or the publish route, already sent to its holder's agent subject
+	// (roleForwardDedupePrefix) is not arbitrated again: the holder has it, and a lane that takes
+	// the frame once more - an operator re-publishing it - disposes of it here.
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
-		roleForwardCopyDelivery(cfg, message, item)
+		message.finalize(false)
 		return
 	}
 	role := strings.TrimPrefix(item.Topic, contracts.RoleTopicPrefix)
@@ -576,38 +558,8 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
-	cfg.roleForwards.enqueue(roleForward{item: item, sessionID: sessionID, storedOnly: roleForwardStoredOnly(holder)})
+	cfg.roleForwards.enqueue(roleForward{item: item, sessionID: sessionID})
 	message.finalize(false)
-}
-
-// handOverPush hands push to its session's serving-port worker (servePortWorkers) and reports
-// true; the push's outcome is reported when it ends. When the workers cannot take it (they stopped,
-// or are full) it clears push's attempt and reports false: the caller gives the message back to the
-// durable for a retry.
-func handOverPush(cfg listenerDeliveryHandlerConfig, push servePortPush) bool {
-	if cfg.servePorts.enqueue(push) {
-		return true
-	}
-	applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
-		sessionID: push.sessionID,
-		log: func(logger *logging.Logger) {
-			logger.DeliveryLog(slog.LevelWarn, "listener serving-port workers cannot take the push; the message goes back to the durable", push.sessionID, push.item.Topic, push.item.EventID, "retrying",
-				slog.Int("worker_limit", servePortWorkerLimit), slog.Int("queue_limit", servePortQueueLimit))
-		},
-		clearAttempt: true,
-	})
-	return false
-}
-
-// handOverOrRetry hands push to its session's serving-port worker (handOverPush), or, when the
-// workers cannot take it, gives message back to the durable for a retry.
-func handOverOrRetry(cfg listenerDeliveryHandlerConfig, message deliveryMessage, push servePortPush) {
-	if handOverPush(cfg, push) {
-		message.finalize(false)
-		return
-	}
-	cfg.messagesNAKed.Inc()
-	message.finalize(true)
 }
 
 // finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
@@ -659,13 +611,11 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 // and the alternative - taking the cache's miss for an answer - ACKs the message away.
 const deliverySessionReadTimeout = 2 * time.Second
 
-// agentSubjectDelivery delivers directly to the session named by the topic
-// (notifications.agent.<session>), pushing over HTTP/WebSocket when the
-// session is live and falling back to whatever session.HandleAgentMessage
-// decides (e.g. queuing) otherwise. A session another listener owns is that
-// listener's to deliver, so this one acknowledges the message silently. On the
-// durable path a push to a serving port is handed to the session's worker
-// (servePortWorkers), which acknowledges the message once the port accepts it.
+// agentSubjectDelivery delivers to the session named by the topic
+// (notifications.agent.<session>), which takes the message from its own consumer or off its own
+// subscription as session.HandleAgentMessage decides. A session another listener owns is that
+// listener's to deliver, so this one acknowledges the message silently; a session that records no
+// way of receiving at all is held and retried, then given up (unplaceableAgentDelivery).
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata the durable's handler read carries everything unplaceableAgentDelivery
@@ -710,7 +660,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	if err == nil {
 		interestPtr = &interest
 	}
-	// The session record delivery pushes through is read from the session bucket itself, as the
+	// The session record delivery acts on is read from the session bucket itself, as the
 	// send route reads it: this listener's cache trails the bucket it follows, and is still being
 	// refilled after its bus connection came back, so a session registered a moment ago, or one
 	// this listener has not re-read since the reconnect, is in the bucket before it is in the
@@ -719,10 +669,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// read that did not answer, which is no evidence of absence at all - the bucket was never
 	// consulted, so nothing about this session was learned, and an attempt that learned nothing
 	// can never be the ground for giving a message up. Neither needs to be told from the other
-	// below: both leave this delivery with no entry to push through, and an entry-less attempt
-	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
-	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
-	// path NAKs with an error, which never reaches that branch).
+	// below: both leave this delivery with no entry to deliver through, and an attempt with no
+	// entry is held and retried for the whole window before it is given up
+	// (unplaceableAgentDelivery), while the interest path's own failures NAK with an error
+	// instead and never reach that branch.
 	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, roles.Registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
@@ -730,21 +680,15 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
-	// The durable path hands a serving-port session's push to its worker (servePortWorkers), and
-	// its message's stream sequence says whether that session's consumer already holds it; the
-	// core and live paths push the session themselves.
-	var result session.HandleAgentResult
-	if message.mode == durableDelivery {
-		result = session.ResolveStoredAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer, message.storedSeq())
-	} else {
-		result = session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
-	}
+	// The durable path's message carries the stream sequence that says whether the session's
+	// consumer already holds it, and the core path's message is in no consumer (storedSeq 0).
+	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, message.storedSeq())
 	if result.Relayed {
 		// The session's own consumer holds this message and the relay of that consumer delivers it
 		// (session.SessionEntry.ConsumerRelaysStored), as on the fan-out path below. The attempt
-		// recorded above is rolled back and no dedupe key is written: a record this path left for a
-		// session it never pushed to is one the relay reads as a push in flight, or as a copy the
-		// session already has, and the message waits on, or is acked by, a push nobody made.
+		// recorded above is rolled back and no dedupe key is written: this path handed the
+		// message to nobody, and a record of it would have the next copy of the same event, or a
+		// redelivery of this one, skipped as already taken or already on its way.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "skipped",
@@ -752,10 +696,6 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			clearAttempt: true,
 		})
 		message.finalize(false)
-		return
-	}
-	if result.Push {
-		handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: sessionID, settle: message.settle, storedSeq: message.storedSeq(), logLine: "listener agent delivered", timer: deliveryTimer})
 		return
 	}
 	if result.OwnedElsewhere {
@@ -783,8 +723,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		deliveryStatus := "delivered"
 		deliveryLog := "listener agent delivered"
 		if result.Skipped {
+			// The session holds its own NATS subscription and the message reaches it there
+			// (session.Resolve): this listener handed it to nobody.
 			deliveryStatus = "skipped"
-			deliveryLog = "listener agent skipped push"
+			deliveryLog = "listener agent session takes the message off its own subscription"
 		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
@@ -796,7 +738,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
-		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result)
+		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
 		return
 	}
 	if result.ShouldNAK {
@@ -840,14 +782,23 @@ const (
 )
 
 // judgeFollowedTopic is the durable path fan-out's (fanoutDelivery) judgement of a message on a
-// topic sessionID follows: judgeFollowedTopicWithoutAttempt, the judgement the relay of a
-// serving-port session's consumer applies too (sessionRelays.followedTopicVerdict), so each refusal
-// holds whichever route a session's message takes, and then the attempt cache, which the fan-out
-// alone reads as a refusal. A copy the session already took is refused by the dedupe cache, and,
-// on the fan-out's route, one already on its way to it by the attempt cache; both are keyed on the
-// envelope's dedupe key, so one upstream event published on several of a session's topics
-// (contracts/normalize.go) reaches it once. An echo of the session's own message, and a delivery
-// mode its entry does not advertise, are refused too.
+// topic sessionID follows: the verdict the session's own state earns the message -- a copy it
+// already took, an echo of its own message, a delivery mode it does not advertise or one that
+// cannot be read, or the message it is given -- and then the attempt cache, which the fan-out
+// alone reads as a refusal. A copy the session already took is refused by the dedupe cache, and
+// one already on its way to it by the attempt cache; both are keyed on the envelope's dedupe key,
+// so one upstream event published on several of a session's topics (contracts/normalize.go)
+// reaches it once.
+//
+// The refusals are ranked, each outranking the ones below it. The dedupe cache's outranks every
+// other: the session has the message already, so nothing else about this copy is worth weighing,
+// and it is the one verdict an attempt record does not override. The attempt record comes next,
+// which is why it is read after the verdict the session's own state earns and replaces it: a copy
+// read while a delivery of the same event, or an exception for it, is in flight is one
+// attempt-dedupe skip rather than a second delivery or a second exception. An echo of the
+// session's own message outranks the two mode refusals, being refused whether or not an entry was
+// read at all. A mode that cannot be read unambiguously outranks a mode the entry does not
+// advertise, since a mode nobody can name cannot be matched against any entry.
 //
 // mode is the delivery mode the envelope targets, "" when it targets none, and modeErr the failure
 // of reading it (envelopeDeliveryMode): both are read once per message rather than once per
@@ -858,53 +809,30 @@ const (
 // the fan-out decides from it whether the session's own consumer relays this message, which it
 // must know for a refusal as much as for a delivery (fanoutDelivery). It returns the error behind
 // a mode refusal too, for the caller to report.
-//
-// An attempt record outranks every verdict but the dedupe one, so a copy read while a push of the
-// same event, or an exception for it, is in flight is one attempt-dedupe skip rather than a
-// second push or a second exception. The relay judges without that record and reads it on its own
-// (judgeFollowedTopicWithoutAttempt, sessionRelays.followedTopicVerdict).
 func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
-	verdict, target, err := judgeFollowedTopicWithoutAttempt(rules, sessionID, item, mode, modeErr)
-	if verdict != followedTopicDeduped && rules.attemptCache.Seen(item.DedupeKey, sessionID) {
-		return followedTopicAttempted, target, nil
-	}
-	return verdict, target, err
-}
-
-// judgeFollowedTopicWithoutAttempt is judgeFollowedTopic as if no attempt record of the message
-// existed: the verdict the message earns from the session itself -- a copy it already took, an
-// echo of its own message, a delivery mode it does not advertise or one that cannot be read, or
-// the message it is given.
-//
-// The relay of a serving-port session's consumer judges by this one
-// (sessionRelays.followedTopicVerdict) and reads the record separately, which is how it tells the
-// one thing a record can mean for it -- a push of a message it would otherwise push itself is in
-// flight, and it holds its copy while that lasts (holdWhilePushedElsewhere) -- from a refusal the
-// fan-out recorded as it reported it, which it acks unreported. So no refusal record holds the
-// relay, whatever the session's entry said when the fan-out wrote it.
-func judgeFollowedTopicWithoutAttempt(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
 	var target *session.SessionEntry
 	if entry, err := rules.sessions.Get(sessionID); err == nil {
 		target = &entry
 	}
-	if rules.dedupeCache.Seen(item.DedupeKey, sessionID) {
-		return followedTopicDeduped, target, nil
+	verdict := takeFollowedTopic
+	var err error
+	switch {
+	case rules.dedupeCache.Seen(item.DedupeKey, sessionID):
+		verdict = followedTopicDeduped
+	case item.SourceSession != "" && item.SourceSession == sessionID:
+		verdict = followedTopicEcho
+	case modeErr != nil:
+		verdict, err = followedTopicModeUnreadable, modeErr
+	// No entry is no refusal: the delivery path decides what to do with a session it cannot
+	// read, and a mode nobody advertises cannot be judged against an entry there is none of, so
+	// the mode test below is reached only for a session whose entry was read.
+	case target != nil && mode != "" && !hasCapability(target.Capabilities, mode):
+		verdict, err = followedTopicModeNotAdvertised, errors.New("the session does not advertise delivery mode "+mode)
 	}
-	if item.SourceSession != "" && item.SourceSession == sessionID {
-		return followedTopicEcho, target, nil
+	if verdict != followedTopicDeduped && rules.attemptCache.Seen(item.DedupeKey, sessionID) {
+		return followedTopicAttempted, target, nil
 	}
-	if modeErr != nil {
-		return followedTopicModeUnreadable, target, modeErr
-	}
-	if target == nil {
-		// No entry is no refusal: the delivery path decides what to do with a session it cannot
-		// read, and a mode nobody advertises cannot be judged against an entry there is none of.
-		return takeFollowedTopic, nil, nil
-	}
-	if mode != "" && !hasCapability(target.Capabilities, mode) {
-		return followedTopicModeNotAdvertised, target, errors.New("the session does not advertise delivery mode " + mode)
-	}
-	return takeFollowedTopic, target, nil
+	return verdict, target, err
 }
 
 // fanoutRefusalOutcome is how the fan-out reports a refusal judgeFollowedTopic returned, each
@@ -913,11 +841,8 @@ func judgeFollowedTopicWithoutAttempt(rules followedTopicRules, sessionID string
 // delivers to itself records the attempt, so an identical redelivery inside the attempt window is
 // the attempt-dedupe skip above rather than a second exception. A refusal whose resolution failed,
 // and one of a session whose own consumer relays the message, records nothing and gives that
-// dedupe up. A record of a refusal is written only together with the exception that reports it,
-// which is what lets the relay of a serving-port session's consumer tell the two meanings of a
-// record apart: it acks such a message unreported rather than reporting it again
-// (sessionRelays.followedTopicVerdict). A refusal the caches themselves made records nothing
-// either way.
+// dedupe up. A record of a refusal is written only together with the exception that reports it.
+// A refusal the caches themselves made records nothing either way.
 func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, mode string, recorded bool) deliveryOutcome {
 	switch verdict {
 	case followedTopicDeduped:
@@ -973,9 +898,7 @@ func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict fol
 
 // fanoutDelivery delivers a general-topic envelope to every session that
 // registered interest in it (registry.Match), aggregating per-recipient
-// failures into a single NAK/ACK decision for the underlying message. On the
-// durable path a push to a serving port is handed to the session's worker
-// (servePortWorkers), and the message is acknowledged once every push ends.
+// failures into a single NAK/ACK decision for the underlying message.
 func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	items := cfg.registry.Match(cfg.machineID, item.Topic)
 	if len(items) == 0 {
@@ -993,59 +916,31 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 	for _, interest := range items {
 		verdict, target, _ := judgeFollowedTopic(cfg.followedTopicRules(), interest.SessionID, item, mode, modeErr)
 		deliveryTimer := metrics.NewTimer()
-		// One resolution per recipient decides every outcome below, this path's push included: it
-		// reads the entry the judgement above returned for every verdict, its refusals among
-		// them, and makes no call of its own.
-		delivery, err := cfg.deliverer.Resolve(item, interest, target, item.Topic, message.storedSeq())
+		// One resolution per recipient decides every outcome below: it reads the entry the
+		// judgement above returned for every verdict, its refusals among them, and makes no call
+		// of its own.
+		delivery, err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
-		// relayJudges names the session whose own relay applies these same rules to what it
-		// pushes (sessionRelays.followedTopicVerdict) and reports a refusal of it itself, which
-		// is a serving-port session's. A portless session's relay publishes every frame unjudged
-		// (sessionRelays.relayNATS), and the plugin drops a frame whose delivery mode it cannot
-		// read without a word, so that session's refusals are reported here instead.
-		relayJudges := relayed && target.Port > 0
 		// Refusals are decided before the take case, since the session whose own consumer relays
-		// the message is one this path still reports a refusal of unless that relay judges it.
-		if verdict != takeFollowedTopic && !relayJudges {
+		// the message is one this path still reports a refusal of: that relay judges nothing it
+		// publishes, and the plugin drops a frame whose delivery mode it cannot read without a
+		// word.
+		if verdict != takeFollowedTopic {
 			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode, err == nil && !delivery.Relayed))
 			continue
 		}
 		if relayed {
-			// The session's own consumer holds the message, and the relay of that consumer pushes
-			// it and records the dedupe key on the port's 204: this path pushes nothing and
-			// records nothing for it, a refusal that relay judges included. A dedupe record
-			// written here would have the relay ack a copy the session never received
-			// (session.SessionEntry.ConsumerRelaysStored).
+			// The session's own consumer holds the message and the relay of that consumer
+			// delivers it: this path delivers nothing and records nothing for it, its refusals
+			// included. A dedupe key written here would have the next copy of the same event
+			// skipped as one the session already has, on the word of a path that handed it to
+			// nobody (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    interest.SessionID,
 				metricStatus: "skipped",
 				duration:     &deliveryTimer,
 			})
 			continue
-		}
-		if err == nil {
-			// The attempt is recorded before the push is made or handed over, so another copy of
-			// the same event read while it is in flight is a dedupe skip rather than a second
-			// push. A resolution that failed records none: it names a push that was never made.
-			// This is the record that can hold the relay of a session on a serving port by the
-			// time it reads the message: the relay holds its copy while the push this record
-			// names is in flight, and pushes it itself once the record is gone (session_relay.go's
-			// holdWhilePushedElsewhere).
-			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-			if delivery.Push {
-				if message.mode == durableDelivery {
-					// The durable path's push waits behind the session's earlier messages in its
-					// own worker, and the message is acknowledged once that push ends.
-					if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {
-						failed = true
-					}
-					continue
-				}
-				// The live and core paths push here, in the handler, as
-				// session.Deliverer.DeliverWithResultForEntry pushes for them elsewhere: their
-				// message is sent once to whoever is there, with nothing to acknowledge or retry.
-				err = cfg.deliverer.Push(context.Background(), item, interest.SessionID, delivery.Entry)
-			}
 		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(target != nil, err)
@@ -1059,15 +954,20 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				// A push that failed clears the attempt it recorded above, so the next copy of
-				// the same event is pushed rather than skipped as one already on its way; a
-				// resolution that failed recorded none to clear.
+				// A resolution that failed records no attempt -- only the success arm below
+				// does -- so there is none to clear for the session whose entry is still to
+				// come; the field stands for the retry this outcome asks for.
 				clearAttempt: retryable,
 				retry:        retryable,
 			}) {
 				failed = true
 			}
 		} else {
+			// The attempt is recorded before the outcome is applied, so another copy of the same
+			// event read while this one is in flight is a dedupe skip rather than a second
+			// delivery. A resolution that failed records none: it names a delivery that was
+			// never made.
+			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 			deliveryStatus := "delivered"
 			if delivery.Skipped {
 				deliveryStatus = "skipped"
