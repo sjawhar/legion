@@ -336,7 +336,7 @@ func (s *Service) reconcileAskBlocks(
 			// The new ask's parts, beside its own references: both named by the ask.opened. The
 			// parts are planned here and written after the row's own insert, which this
 			// transaction has queued (createAskBlock), since every part row names its ask.
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, false, changes)
+			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
 			}
@@ -366,7 +366,7 @@ func (s *Service) reconcileAskBlocks(
 			// back is a part again, and the event names what that moved. The parts are written
 			// after the restoring update, which this transaction has queued.
 			restoredAt := refs.AskPartsAt(ask)
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, false, model.ReferenceChanges{})
+			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
 			}
@@ -426,9 +426,9 @@ func (s *Service) reconcileAskBlocks(
 			}
 			// The block's wording is now the row's: its parts are that wording too, and the
 			// ask.edited names what they moved beside the ask's own references. The parts are
-			// written after the queued update that gives the row that wording, and the plan is
-			// told the ask is edited, which that same queued update makes true.
-			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, true, changes)
+			// written after the queued update that gives the row that wording, which the row this
+			// plans from carries already (edited_at).
+			changes, parts, err := planAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}

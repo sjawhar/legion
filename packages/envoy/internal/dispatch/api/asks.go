@@ -264,7 +264,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	// The ask's parts, beside the ask's own references: the row's insert is queued above, so the
 	// index's statements follow it and its state row comes after the row they name, and the event
 	// below names what both moved.
-	askChanges, err = s.queueAskParts(r.Context(), tx, ledger, ask, ask.CreatedAt, false, askChanges)
+	askChanges, err = s.queueAskParts(r.Context(), ledger, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -491,10 +491,9 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The edit writes the question and the options, so it is a revision of the ask's parts: plan
-	// them at the edited_at the queued update writes, with the ask marked edited since that
-	// update has not run, queue the index after that update, and name what they moved beside the
-	// rest.
-	askChanges, err = s.queueAskParts(documentCtx, tx, ledger, ask, editedAt, true, askChanges)
+	// them at the edited_at the queued update writes, which the row above carries already, queue
+	// the index after that update, and name what they moved beside the rest.
+	askChanges, err = s.queueAskParts(documentCtx, ledger, ask, editedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -92,7 +92,11 @@ func indexAskPartsAt(t *testing.T, tx pgx.Tx, ask model.Ask, index int) []Target
 	t.Helper()
 	ctx := context.Background()
 	at := time.Date(2026, 10, 30, 12, 0, index, 0, time.UTC)
-	indexing, err := PlanAskParts(ctx, tx, nil, ask, askPartServer, at, false)
+	stored, err := ReadItemIndex(ctx, tx, ItemAsk, ask.ID)
+	if err != nil {
+		t.Fatalf("read the part index of ask %s: %v", ask.ID, err)
+	}
+	indexing, err := PlanAskParts(stored, ask, askPartServer, at)
 	if err != nil {
 		t.Fatalf("index the parts of ask %s: %v", ask.ID, err)
 	}

@@ -275,8 +275,8 @@ func TestAnAsksPartsAreIndexedOnEveryWrite(t *testing.T) {
 // which seeds each of them owed at revision 0 - takes its first index from whichever write lands
 // first. When that write is an edit, its parts were made at a time the ask never recorded, so
 // each records none, as a comment's blocks do at the first indexing of a comment already edited.
-// The edit's own update of edited_at is queued and has not run when the plan reads the row, so
-// the plan has to be told the ask is edited.
+// The edit's own update of edited_at is queued and has not run when the plan reads the index, so
+// the ask is planned as edited from the edited_at the route holds on its row.
 func TestAnEditThatFirstIndexesAnAsksPartsRecordsNoMakingTime(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "First indexed by an edit", "A spec")

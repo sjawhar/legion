@@ -21,7 +21,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -38,34 +37,19 @@ func (s *server) replaceReferences(
 // queueAskParts is queueItemReferences' shape for an ask, whose parts - its question, its options
 // and its answer - are its blocks: it plans the parts this transaction's write leaves, as they
 // stand at `at`, writing nothing, resolves the counted targets the plan moves and merges them
-// into beside, what the same write already holds (refs.PlanAskPartsCounted), and queues the
-// index's statements on ledger, where the route makes the write, so the event it appends names
-// them all. The route queues the ask's own row write before calling: every part table references
-// the ask's row, so the index's statements have to follow that write in the batch.
-//
-// The plan runs against the index the ledger's own queued writes of the same ask leave, where it
-// holds one, and records what it leaves in turn. edited marks the ask edited for an edit, whose
-// update of edited_at is queued and has not run when the plan reads the row.
+// into beside, what the same write already holds, and queues the index's statements on ledger,
+// where the route makes the write, so the event it appends names them all
+// (docs.Ledger.QueueAskParts). The route queues the ask's own row write before calling: every
+// part table references the ask's row, so the index's statements have to follow that write in the
+// batch.
 func (s *server) queueAskParts(
 	ctx context.Context,
-	tx pgx.Tx,
 	ledger *docs.Ledger,
 	ask model.Ask,
 	at time.Time,
-	edited bool,
 	beside model.ReferenceChanges,
 ) (model.ReferenceChanges, error) {
-	indexing, changes, err := refs.PlanAskPartsCounted(ctx, tx, ledger, ask, s.deps.ServerURL, at, edited, beside)
-	if err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	if err := ledger.Queue(func(b *store.WriteBatch) error {
-		indexing.Queue(b)
-		return nil
-	}); err != nil {
-		return model.ReferenceChanges{}, err
-	}
-	return changes, nil
+	return ledger.QueueAskParts(ctx, ask, s.deps.ServerURL, at, beside)
 }
 
 // referencesSinceWait bounds how long a since read waits for the safe horizon to pass every event

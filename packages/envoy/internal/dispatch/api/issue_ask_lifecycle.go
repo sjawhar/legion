@@ -168,7 +168,7 @@ func (s *server) prepareRestoration(ctx context.Context, tx pgx.Tx, issueKey str
 // asks prepareRestoration wrote back open, and queues one ask.opened event for each, whose actor
 // is actor, the reopener, as settlement's own restoration of an ask appends. It answers the
 // events, filled in once Commit has run the write phase.
-func (s *server) recordRestoredAsksTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
+func (s *server) recordRestoredAsksTx(ctx context.Context, ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
 	appended := make([]*model.Event, 0, len(restored))
 	restoredAt := time.Now().UTC()
 	for _, ask := range restored {
@@ -176,7 +176,7 @@ func (s *server) recordRestoredAsksTx(ctx context.Context, tx pgx.Tx, ledger *do
 		// queued after the row write that took it off (prepareRestoration), and the ask.opened
 		// names what that moved and stamps the part rows the index leaves with its own id, so a
 		// ?since= read lists them.
-		changes, err := s.queueAskParts(ctx, tx, ledger, ask, restoredAt, false, model.ReferenceChanges{})
+		changes, err := s.queueAskParts(ctx, ledger, ask, restoredAt, model.ReferenceChanges{})
 		if err != nil {
 			return nil, err
 		}

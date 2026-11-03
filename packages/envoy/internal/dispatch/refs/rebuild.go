@@ -361,7 +361,11 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 				return err
 			}
 			if held {
-				if indexing, err = PlanAskParts(ctx, tx, nil, ask, serverURL, writtenAt, false); err != nil {
+				index, err := ReadItemIndex(ctx, tx, ItemAsk, item.ID)
+				if err != nil {
+					return fmt.Errorf("index the parts of ask %s: %w", item.ID, err)
+				}
+				if indexing, err = PlanAskParts(index, ask, serverURL, writtenAt); err != nil {
 					return err
 				}
 				indexed = true

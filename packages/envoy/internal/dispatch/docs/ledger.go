@@ -119,7 +119,7 @@ type Ledger struct {
 	blockIndexes map[string]refs.BlockIndex
 	// askParts holds, per ask this transaction has planned the parts of, what its part index
 	// holds once that plan is written: what a later plan of the same ask's parts in this
-	// transaction runs against (refs.PendingAskParts, planAskPartsCounted).
+	// transaction runs against (planAskPartIndex).
 	askParts map[string]refs.ItemIndex
 	// askBlocks holds, per document, the block asks whose rows this transaction has queued writes
 	// of, by block id, as they will stand (recordAskBlock, loadAskBlocks).
@@ -494,24 +494,36 @@ func (l *Ledger) RegisterPendingArtifact(artifactID, refKey string) {
 	l.artifacts[artifactID] = refKey
 }
 
-// AskPartIndex is ask askID's part index as this transaction's queued writes of it leave it, held
-// false when the transaction has planned none of its parts yet: what a second plan of the same
-// ask's parts runs against, so it sees the rows the first plan queued rather than the stored ones
-// (refs.PendingAskParts). A version write that moves an open approval request and then answers it
-// with the carry plans one ask's parts twice, and without this the answer would land in the
-// revision the move took.
-func (l *Ledger) AskPartIndex(askID string) (refs.ItemIndex, bool) {
-	index, held := l.askParts[askID]
-	return index, held
-}
-
-// RecordAskPartIndex records what the plan just made of ask askID's parts leaves, which the next
-// plan of the same ask's parts in this transaction runs against (AskPartIndex).
-func (l *Ledger) RecordAskPartIndex(askID string, index refs.ItemIndex) {
-	if l.askParts == nil {
-		l.askParts = make(map[string]refs.ItemIndex)
+// QueueAskParts queues the index of an ask's parts for a route that writes the ask itself,
+// outside the document service: it plans the parts the ask holds at `at`, against what this
+// transaction's own queued writes of the same ask leave (planAskPartsCounted), queues the
+// statements that write them, and returns the targets they moved merged into beside, what the
+// same write moved elsewhere, so the event the route appends names them all. The route queues the
+// ask's own row write first: every part table references the ask's row, so the index's statements
+// have to follow that write in the batch. The plan runs on this ledger whatever context the
+// caller holds, as QueueVersion does, and it refuses a ledger no caller joined and a sealed one
+// (ErrQueueSealed).
+func (l *Ledger) QueueAskParts(
+	ctx context.Context,
+	ask model.Ask,
+	serverURL string,
+	at time.Time,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, error) {
+	if l.writer == nil {
+		return model.ReferenceChanges{}, errUnjoined
 	}
-	l.askParts[askID] = index
+	if l.sealed {
+		return model.ReferenceChanges{}, ErrQueueSealed
+	}
+	changes, parts, err := planAskPartsCounted(withLedger(ctx, l), l.writer, ask, serverURL, at, beside)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if err := l.Queue(parts); err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, nil
 }
 
 // pendingRefKey is the reference key registered for artifactID on ctx's ledger

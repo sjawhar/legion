@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -250,7 +249,7 @@ func (s *Service) restoreDocumentDecidedWordings(ctx context.Context, tx pgx.Tx,
 // restoreWordings gives the decided asks ids names, or every decided ask when ids is nil, their
 // decided wording back, and indexes each restored ask again, as every write of an ask's question
 // and options does: its own references (planAskReferences, refs.ReplaceCounted's read half) and
-// its parts (refs.PlanAskParts), the parts read from the plan's row - the restored wording with
+// its parts (planAskPartIndex), the parts read from the plan's row - the restored wording with
 // the answer the decision left on it. The parts are planned against what this transaction's own
 // queued writes of the same ask leave, so a settlement that restores a wording and then settles
 // the block reads the rows this plan queued. They are indexed at the time this restoration
@@ -324,7 +323,7 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 			Options:  wording.wording.Options,
 			Answer:   wording.answer,
 		}
-		indexing, err := refs.PlanAskParts(ctx, tx, pendingAskParts(ctx, tx), ask, s.serverURL, at, false)
+		indexing, err := planAskPartIndex(ctx, tx, ask, s.serverURL, at)
 		if err != nil {
 			return nil, fmt.Errorf("index the parts of the restored ask %s: %w", wording.ask, err)
 		}

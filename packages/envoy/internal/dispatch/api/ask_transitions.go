@@ -108,11 +108,11 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			if selected == nil {
 				selected = []string{}
 			}
-			// The transaction's now(), read under the issue's owner lock, which this route took
-			// before its reads (transitionAskTx), so it is
-			// the created_at of this answer's ask.answered event too. Each process's host keeps
-			// its own clock, and this `at` is compared with times the database stamped: the carry
-			// rule holds it against an approval's created_at (docs.carryVerdict).
+			// The transaction's now(), read under the ask's owner lock, which this route took
+			// before its reads (transitionAskTx), so it is the created_at of this answer's
+			// ask.answered event too. Each process's host keeps its own clock, and this `at` is
+			// compared with times the database stamped: the carry rule holds it against an
+			// approval's created_at (docs.carryVerdict).
 			var answeredAt time.Time
 			if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
 				return model.Ask{}, err
@@ -380,7 +380,7 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger,
 	// wrote is queued before the event, so the ask's Replies rows are read by the event's insert,
 	// after it.
 	at := refs.AskPartsAt(ask)
-	changes, err := s.queueAskParts(ctx, tx, ledger, ask, at, false, model.ReferenceChanges{})
+	changes, err := s.queueAskParts(ctx, ledger, ask, at, model.ReferenceChanges{})
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
