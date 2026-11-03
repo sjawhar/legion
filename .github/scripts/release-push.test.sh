@@ -117,6 +117,11 @@ set -euo pipefail
 # core.hooksPath, rerere, rebase.*) must not reach the seed repos or the script
 # under test. Needs git >= 2.32.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# Nor may the Oh My Pi session it runs in, if any: CI runs it in no session,
+# and a session's tools act on the variables that name one (a commit made with
+# OMP_SESSION_ID set can carry a session trailer, which push-fold's check of the
+# commit's exact message would read as part of the message).
+unset OMP_SESSION_ID PI_SESSION_FILE
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 release_push="$script_dir/release-push.sh"
