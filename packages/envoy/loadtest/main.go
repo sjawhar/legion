@@ -27,6 +27,8 @@ commands:
   loop-seed-write  write that plan to a Dispatch through its API, resumably (loadtest.loop_ids maps
                    each planned object to the one it created); writes loopseed.meta.json
   loop-seed-check  compare a written loop seed with its plan over Postgres; exit 1 on a failed line
+  loop-seed-export read loadtest.loop_ids and that plan into loopseed.seed.json: the ids, quote rows
+                   and search terms a run needs to drive the loop (run -loop-seed)
   plan-docs        print, without a stack, the documents a step's in-window edits and uploads write
                    the most versions to (the run's own plan of the same flags, seed.json)
   tables           render TABLES.md and pprof tops from step directories
@@ -87,6 +89,8 @@ func main() {
 		err = runLoopSeedWrite(os.Args[2:])
 	case "loop-seed-check":
 		err = runLoopSeedCheck(os.Args[2:])
+	case "loop-seed-export":
+		err = runLoopSeedExport(os.Args[2:])
 	case "plan-docs":
 		err = runPlanDocs(os.Args[2:])
 	case "tables":

@@ -40,6 +40,11 @@ type runConfig struct {
 	allowForeign bool
 	name, out    string
 	seedPath     string
+	// loopSeedPath is the -loop-seed file and loop what it holds: the Verified Linux spec loop's
+	// own seed, whose proposals are the step's issues (loopseed_export.go). Both are empty
+	// without the flag, where every path is seed.json's.
+	loopSeedPath string
+	loop         *loopSeed
 	sessions     int
 	events       float64
 	requests     float64
@@ -81,6 +86,14 @@ func (c runConfig) sourceName() string {
 	return sourceRequests
 }
 
+// loopPlanID is the plan the step's loop seed was exported from, "" without -loop-seed.
+func (c runConfig) loopPlanID() string {
+	if c.loop == nil {
+		return ""
+	}
+	return c.loop.PlanID
+}
+
 func runLoad(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var ef endpointFlags
@@ -100,6 +113,7 @@ func runLoad(args []string) error {
 	out := fs.String("out", "", "output directory (required)")
 	name := fs.String("name", "", "step name (default: the -out directory's name)")
 	seedPath := fs.String("seed", "", "seed.json path (default $LOADTEST_ROOT/seed.json)")
+	loopSeedPath := fs.String("loop-seed", "", "the Verified Linux spec loop's own seed (loadgen loop-seed-export): the step's issues are its proposals, and a read or a write lands on one in proportion to its requirement ids")
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
@@ -147,6 +161,10 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-sessions does not apply to -source replay: -replay-roster sets the sessions")
 	case !replay && len(replayOnly) > 0:
 		return fmt.Errorf("%s applies only to -source replay", strings.Join(replayOnly, ", "))
+	case replay && *loopSeedPath != "":
+		return fmt.Errorf("-loop-seed applies only to -source %s: a replay sends the bundle's own writes", sourceRequests)
+	case *loopSeedPath != "" && *seedPath != "":
+		return fmt.Errorf("-seed applies only without -loop-seed: a loop step's issues are the loop seed's proposals, and seed.json is not read")
 	case !replay && *sessions < 1:
 		return fmt.Errorf("-sessions is required and must be at least 1")
 	case *human < 0 || *human > 1 || !finite(*human):
@@ -172,8 +190,10 @@ func runLoad(args []string) error {
 		}
 	}
 	var sf seedFile
+	var loop *loopSeed
 	var rs *replaySetup
-	if replay {
+	switch {
+	case replay:
 		// The window is the sub-window; the roster is the sessions; seed.json is not read.
 		o, err := rf.options(*rngSeed)
 		if err != nil {
@@ -187,7 +207,19 @@ func runLoad(args []string) error {
 		if *live < 0 {
 			*live = 2
 		}
-	} else {
+	case *loopSeedPath != "":
+		// The loop's own seed: its proposals are the step's issues, and seed.json is not read.
+		if loop, err = readLoopSeed(*loopSeedPath); err != nil {
+			return err
+		}
+		if dropped := loop.prepare(); dropped > 0 {
+			fmt.Fprintf(os.Stderr, "loadgen run: loop seed %s: %d proposals have no issue key and are left out\n", *loopSeedPath, dropped)
+		}
+		if err := checkSeedMix(loop, mix, *loopSeedPath); err != nil {
+			return err
+		}
+		sf = loop.seedFile()
+	default:
 		if *seedPath == "" {
 			*seedPath = filepath.Join(loadtestRoot(), "seed.json")
 		}
@@ -195,6 +227,11 @@ func runLoad(args []string) error {
 			return err
 		}
 		if err := checkSeedMix(sf, mix, *seedPath); err != nil {
+			return err
+		}
+	}
+	if !replay {
+		if err := checkRouteMixSeed(routes, loop); err != nil {
 			return err
 		}
 	}
@@ -209,6 +246,7 @@ func runLoad(args []string) error {
 	}
 	return execute(runConfig{
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
+		loopSeedPath: *loopSeedPath, loop: loop,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns, sessionDelivery: *delivery,
@@ -297,12 +335,17 @@ type summaryConfig struct {
 	Dashboard string   `json:"dashboard"`
 	EventMix  eventMix `json:"event_mix"`
 	RouteMix  string   `json:"route_mix"`
-	Human     float64  `json:"human"`
-	WarmupS   float64  `json:"warmup_s"`
-	DurationS float64  `json:"duration_s"`
-	GraceS    float64  `json:"grace_s"`
-	RNGSeed   uint64   `json:"rng_seed"`
-	NATSConns int      `json:"nats_conns"`
+	// LoopSeed is the -loop-seed file the step's proposals and their records came from, and
+	// LoopPlanID the plan those records were written from (loopPlanID): a step's summary says
+	// which seed it ran against. Both are absent without the flag.
+	LoopSeed   string  `json:"loop_seed,omitempty"`
+	LoopPlanID string  `json:"loop_plan_id,omitempty"`
+	Human      float64 `json:"human"`
+	WarmupS    float64 `json:"warmup_s"`
+	DurationS  float64 `json:"duration_s"`
+	GraceS     float64 `json:"grace_s"`
+	RNGSeed    uint64  `json:"rng_seed"`
+	NATSConns  int     `json:"nats_conns"`
 	// SessionDelivery is the delivery the sessions asked for (-session-delivery): core or
 	// consumer. sessions.delivery says how many got consumer delivery.
 	SessionDelivery string `json:"session_delivery"`
@@ -336,8 +379,11 @@ type summary struct {
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
-	// Replay is the replay's record under -source replay (replay_record.go).
+	// Replay is the replay's record under -source replay (replay_record.go), and Loop what the
+	// loop's writes sent under -loop-seed (events.go loopRun): the requests of each class, which
+	// are not the writes, since a status change sends a reply and a resolve.
 	Replay *replayRecord `json:"replay,omitempty"`
+	Loop   *loopRun      `json:"loop,omitempty"`
 }
 
 type metaFile struct {
@@ -395,6 +441,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	nonce := newMarkerNonce()
 	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d session-delivery=%s marker-nonce=%s",
 		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, cfg.sessionDelivery, formatNonce(nonce))
+	if cfg.loop != nil {
+		lg.Printf("loop seed %s: %d proposals of project %s, plan %s", cfg.loopSeedPath, len(cfg.loop.Proposals), cfg.loop.Project, cfg.loop.PlanID)
+	}
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -433,7 +482,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	live := st.startDashboard(ctx, dashURL)
-	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
+	wr := newWriter(a, sf, cfg.loop, nonce, lg)
+	writes, eventsDone := st.runEvents(ctx, wr)
 	var reqs *requestLoad
 	var requestsDone <-chan struct{}
 	if cfg.replay != nil {
@@ -456,7 +506,7 @@ func execute(cfg runConfig, sf seedFile) error {
 		ns.relay.writeFrames(cfg.out, st.sessions, lg)
 	}
 
-	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
+	sum := st.buildSummary(ns, reg, wr, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	end := readPGClock(context.Background(), cfg.ep.pg)
 	logPGClock(lg, "end", end)
@@ -652,8 +702,7 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 		defer wg.Wait()
 		var inflight atomic.Int64
 		openLoop(ctx, st.cfg.rngSeed, 2, st.cfg.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, in bool) {
-			rt := st.cfg.routes.pick(r.Float64())
-			path := rt.render(st.sf.Issues[r.IntN(st.active)], st.sf.Projects[r.IntN(len(st.sf.Projects))])
+			rt, path := st.requestPath(r)
 			id := who{}
 			if rt.Person {
 				id.person = fmt.Sprintf("person-%d", r.IntN(7))
@@ -676,6 +725,19 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 		})
 	}()
 	return load, closed
+}
+
+// requestPath draws one request of the route mix: the route, and the path it reads. Under a loop
+// seed the request lands on a proposal drawn in proportion to its requirement ids, among those
+// that hold the record the route reads (loopSeed.pick); otherwise on an issue of the seed and a
+// project of it, each drawn evenly, as a step has always drawn them. Every draw is from the one
+// stream, in this order, so one -rng-seed gives one schedule of reads.
+func (st *step) requestPath(r *rand.Rand) (*route, string) {
+	rt := st.cfg.routes.pick(r.Float64())
+	if st.cfg.loop != nil {
+		return rt, rt.renderLoop(st.cfg.loop, st.cfg.loop.pick(rt.need, r.Float64()), r)
+	}
+	return rt, rt.render(st.sf.Issues[r.IntN(st.active)], st.sf.Projects[r.IntN(len(st.sf.Projects))])
 }
 
 // probes are the 5 s sampler, the lock probe (20 ms), the ungranted-lock sampler (1 s), the
@@ -749,7 +811,7 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, wr *writer, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
 	frames := live.frames.snapshot()
@@ -774,6 +836,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			Dashboard: cfg.dashboard,
 			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
+			LoopSeed: cfg.loopSeedPath, LoopPlanID: cfg.loopPlanID(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			SessionDelivery: cfg.sessionDelivery, MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
@@ -788,6 +851,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		Live:            summarizeLive(frames, ws, commits),
 		LiveBytes:       live.bytes.Load(),
 	}
+	sum.Loop = wr.loopRecord()
 	if ns.relay != nil {
 		d := ns.relay.summary()
 		sum.Sessions.Delivery = &d

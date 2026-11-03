@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-// The five write kinds, each on its real route.
+// The five write kinds of a seed.json step, each on its real route.
 const (
 	kindComment  = "comment"  // POST /api/v1/issues/{key}/comments {body}
 	kindAnchored = "anchored" // the same with anchor {artifact: "spec", quote: <requirement cell>}
@@ -22,8 +24,26 @@ const (
 	kindUpload   = "upload"   // GET /api/v1/artifacts/{id}/text, then POST /api/v1/issues/{key}/artifacts {name, content, summary}
 )
 
-// eventKinds is every kind in the fixed order the mix picks in.
-var eventKinds = []string{kindComment, kindAnchored, kindReply, kindEdit, kindUpload}
+// The three write kinds of the Verified Linux spec loop, which a step sends against its own seed
+// (-loop-seed, loopseed_export.go) and no other.
+const (
+	// kindVerdict is a new version of one function's review page: POST /api/v1/artifacts/{id}/edits
+	// on a review page of the proposal. The version Dispatch stores is the whole page, which the
+	// loop's pages average loopPageMean (9,954) bytes of, wherever in it the op writes.
+	kindVerdict = "verdict"
+	// kindRequirement is a new requirement: an anchored thread on the proposal's last part
+	// document, on a spare quote row of that document (loopSpareRow).
+	kindRequirement = "requirement"
+	// kindStatus is a status change: a reply in an open thread and then its resolve, two
+	// requests, or - for loopReopenShare of them - a reply alone in a resolved thread, which
+	// reopens it.
+	kindStatus = "status"
+)
+
+// eventKinds is every kind in the fixed order the mix picks in. The loop's three follow the five,
+// so a mix of the five picks exactly as it always has.
+var eventKinds = []string{kindComment, kindAnchored, kindReply, kindEdit, kindUpload,
+	kindVerdict, kindRequirement, kindStatus}
 
 // primaryEventType is the event type each kind's write appends with its marker, the one the
 // delivery join times. A write can append others (an anchored comment's document snapshot, a
@@ -40,7 +60,29 @@ var primaryEventType = map[string]string{
 	// internal/dispatch/api/artifacts.go:493 (storeArtifact: an upload to an existing document is
 	// artifact.version; artifact.created only for a new one).
 	kindUpload: evArtifactVersion,
+	// internal/dispatch/api/artifacts.go:751 again: an edit of a review page with a summary
+	// writes a named version and commits artifact.version for it.
+	kindVerdict: evArtifactVersion,
+	// internal/dispatch/api/comment_create.go:856 (the comment.created every created comment
+	// appends). A status change's reply in a resolved thread appends comment.reopened at :829
+	// first, in the same transaction; that one is counted, not timed.
+	kindRequirement: evCommentCreated,
+	kindStatus:      evCommentCreated,
 }
+
+// The Verified Linux spec loop's own write sizes and shares, measured on the loop of 2026-10-26
+// (the counts of proposals-64796913-byid.tsv and the issue's plan):
+//
+//   - a requirement line's body averages 1,205 bytes, the loop's measured per-line mean;
+//   - a status note averages 124 bytes;
+//   - 1.2% of status changes are a reply alone in a resolved thread, which reopens it
+//     (internal/dispatch/api/comment_create.go:737-760 clears resolved in the reply's own
+//     transaction, and :829 and :856 append comment.reopened and comment.created in it).
+const (
+	loopRequirementMeanBytes = 1_205
+	loopStatusMeanBytes      = 124
+	loopReopenShare          = 0.012
+)
 
 // replyAnchoredShare is the share of replies made in anchored threads: production had 1,217 of
 // 1,576 replies in anchored threads (the 2026-10-26 production write counts, §2 of their replay
@@ -55,6 +97,10 @@ var eventMixPresets = map[string]string{
 	"production-2026-10-26": "comment=3,anchored=33,reply=35,edit=22,upload=7",
 	// The root report's mix, so its 1x row can be compared.
 	"report-2026-10-27": "comment=50,anchored=30,edit=20",
+	// The Verified Linux spec loop's own writes over a driver day, as the issue's plan counts
+	// them: 106 verdicts and 48 requirement lines for every 50 status changes. A step drives it
+	// against the loop's own seed (-loop-seed), which is the only seed these kinds read.
+	"spec-loop-2026-11-03": "verdict=106,requirement=48,status=50",
 }
 
 const defaultEventMix = "production-2026-10-26"
@@ -121,18 +167,51 @@ func parseEventMix(s string) (eventMix, error) {
 	return m, nil
 }
 
-// checkSeedMix refuses a seed that the mix cannot draw from: a reply needs a root comment to
-// answer and an anchored comment a quote to anchor on, in every issue. path names the seed.
-func checkSeedMix(sf seedFile, mix eventMix, path string) error {
-	for _, is := range sf.Issues {
-		if mix.Weights[kindReply] > 0 && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
-			return fmt.Errorf("seed %s: issue %s has no root comment ids for replies; reseed with this loadgen", path, is.Key)
+// mixSeed is the seed an event mix is checked against: today's seed.json (seedFile) or the
+// Verified Linux spec loop's own exported seed (loopSeed, loopseed_export.go). Each says why it
+// cannot serve one write kind, which is all the check asks of it.
+type mixSeed interface {
+	refuseKind(kind string) string
+}
+
+// checkSeedMix refuses a seed the mix cannot draw from, naming the kind and the record it holds
+// none of. path names the seed. The kinds are walked in eventKinds order, so a seed that cannot
+// serve two of them is refused by the first.
+func checkSeedMix(s mixSeed, mix eventMix, path string) error {
+	for _, kind := range eventKinds {
+		if mix.Weights[kind] <= 0 {
+			continue
 		}
-		if mix.Weights[kindAnchored] > 0 && len(is.Quotes) == 0 {
-			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", path, is.Key)
+		if why := s.refuseKind(kind); why != "" {
+			return fmt.Errorf("seed %s: %s", path, why)
 		}
 	}
 	return nil
+}
+
+// refuseKind says why seed.json cannot serve one write kind, "" when it can (mixSeed). A reply
+// needs a root comment to answer and an anchored comment a quote to anchor on, in every issue,
+// since a write lands on any issue the step uses. The loop's three kinds read records of the
+// loop's own seed - a review page, a spare quote row, a resolved requirement thread - which no
+// issue of seed.json holds.
+func (sf seedFile) refuseKind(kind string) string {
+	switch kind {
+	case kindVerdict:
+		return "seed.json holds no review page to write a verdict on: the loop's kinds need the loop's own seed (-loop-seed)"
+	case kindRequirement:
+		return "seed.json holds no spare quote row to anchor a requirement thread on: the loop's kinds need the loop's own seed (-loop-seed)"
+	case kindStatus:
+		return "seed.json holds no resolved thread for a status change: the loop's kinds need the loop's own seed (-loop-seed)"
+	}
+	for _, is := range sf.Issues {
+		if kind == kindReply && len(is.AnchoredCommentIDs)+len(is.PlainCommentIDs) == 0 {
+			return fmt.Sprintf("issue %s has no root comment ids for replies; reseed with this loadgen", is.Key)
+		}
+		if kind == kindAnchored && len(is.Quotes) == 0 {
+			return fmt.Sprintf("issue %s has no quotes for anchored comments", is.Key)
+		}
+	}
+	return ""
 }
 
 // pick maps x in [0, 1) to a kind in proportion to the weights.
@@ -163,16 +242,27 @@ type eventPlan struct {
 	human   bool
 	quote   string
 	replyTo string
+	// The loop mix's own draws, all zero without -loop-seed: artifact is the review page a
+	// verdict writes a new version of, body the byte size of the write's text, and reopen makes
+	// a status change the reply-alone form that reopens a resolved thread.
+	artifact string
+	body     int
+	reopen   bool
 }
 
 // planEvent draws one write from the event stream: a session, one of its watched issues, a
-// person or the session as author, a kind, and the kind's quote or reply root.
+// person or the session as author, a kind, and the kind's quote or reply root. Under a loop seed
+// the kind's draws are the loop's (planLoopEvent), which replace the watched issue with the
+// proposal the kind's own weighted draw lands on.
 func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
 	sIdx := r.IntN(len(sessions))
 	s := sessions[sIdx]
 	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))]}
 	p.human = r.Float64() < cfg.human
 	p.kind = cfg.mix.pick(r.Float64())
+	if cfg.loop != nil {
+		return planLoopEvent(r, cfg.loop, p)
+	}
 	is := sf.Issues[p.issue]
 	switch p.kind {
 	case kindAnchored:
@@ -186,6 +276,47 @@ func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, mar
 		p.replyTo = roots[r.IntN(len(roots))]
 	}
 	return p
+}
+
+// planLoopEvent draws the loop mix's write: the proposal it lands on, in proportion to its
+// requirement ids among the proposals that hold what the kind needs (loopSeed.pick), and what the
+// kind reads of that proposal. checkSeedMix has refused a mix whose kinds no proposal can serve,
+// so every draw below has something to draw from.
+func planLoopEvent(r *rand.Rand, ls *loopSeed, p eventPlan) eventPlan {
+	switch p.kind {
+	case kindVerdict:
+		p.issue = ls.pick(loopNeedReviewPage, r.Float64())
+		pages := ls.Proposals[p.issue].ReviewPages
+		p.artifact = pages[r.IntN(len(pages))]
+	case kindRequirement:
+		p.issue = ls.pick(loopNeedLastPart, r.Float64())
+		p.body = loopDrawBytes(r, loopRequirementMeanBytes)
+	case kindStatus:
+		p.reopen = r.Float64() < loopReopenShare
+		need := loopNeedOpenThread
+		if p.reopen {
+			need = loopNeedResolvedThread
+		}
+		p.issue = ls.pick(need, r.Float64())
+		roots := ls.Proposals[p.issue].OpenThreads
+		if p.reopen {
+			roots = ls.Proposals[p.issue].ResolvedThreads
+		}
+		p.replyTo = roots[r.IntN(len(roots))]
+		p.body = loopDrawBytes(r, loopStatusMeanBytes)
+	default:
+		p.issue = ls.pick(loopNeedAny, r.Float64())
+	}
+	return p
+}
+
+// loopDrawBytes draws one body size whose mean is mean, from the lognormal the planner draws the
+// seed's own body sizes from (loopBodySigma): a measured mean is the mean of a spread, and the
+// loop's lines are spread. A draw is at least one byte and at most loopBodyCap, which a longer
+// body is refused by (400 CAP_EXCEEDED).
+func loopDrawBytes(r *rand.Rand, mean float64) int {
+	median := mean / math.Exp(loopBodySigma*loopBodySigma/2)
+	return min(max(int(math.Round(median*math.Exp(loopBodySigma*r.NormFloat64()))), 1), loopBodyCap)
 }
 
 func revisionToken(n int) string { return fmt.Sprintf("Revision token r%d", n) }
@@ -208,18 +339,146 @@ func currentRevision(text string) (int, bool) {
 
 // writer sends planned writes, each with the run's marker nonce. Edits and uploads to one issue
 // are serialized, and each issue's revision token is tracked from r0 (the seed's), re-read from
-// the document when a response was lost.
+// the document when a response was lost. Under a loop seed it also holds each proposal's
+// inventory of spare quote rows, which the requirement kind takes one of per write.
 type writer struct {
 	a     *api
 	sf    seedFile
+	loop  *loopSeed
 	nonce int64
 	locks []sync.Mutex
 	revs  []int
 	lg    *log.Logger
+	// quotes is the requirement kind's state per proposal, by the index of the step's issues.
+	quotes []loopQuotes
+
+	// mu guards what the loop's writes record beyond their one writeRec: the requests each class
+	// sent, since a status change sends two, and what the run met on the way.
+	mu          sync.Mutex
+	reqs        map[string]*loopRequests
+	lat         map[string][]float64
+	reopens     int
+	capExceeded int
+	newParts    int
 }
 
-func newWriter(a *api, sf seedFile, nonce int64, lg *log.Logger) *writer {
-	return &writer{a: a, sf: sf, nonce: nonce, locks: make([]sync.Mutex, len(sf.Issues)), revs: make([]int, len(sf.Issues)), lg: lg}
+// loopQuotes is the requirement kind's inventory on one proposal: the part document its threads
+// anchor in and the spare quote rows of that document no write has taken yet. It starts as the
+// seed's last part document and the 64 rows the planner reserved on it (loopSpareQuotes); a
+// document that answers 413 CAP_EXCEEDED, or whose rows are all taken, is replaced by a part
+// document this run opens, with a fresh inventory of its own.
+type loopQuotes struct {
+	doc   string
+	rows  []string
+	parts int
+	full  bool
+}
+
+// The classes of request the loop's writes send. A write kind's own request and the extra
+// request it sometimes needs are classes of their own, so what a step sent is read as it was
+// sent: summary.json's events.by_kind counts one write per arrival and times the event its
+// marker names, and these count the requests.
+const (
+	loopClassVerdict         = "verdict"
+	loopClassRequirement     = "requirement"
+	loopClassRequirementPart = "requirement-part"
+	loopClassStatusReply     = "status-reply"
+	loopClassStatusResolve   = "status-resolve"
+)
+
+// loopClasses is every class, in the order summary.json lists them.
+var loopClasses = []string{loopClassVerdict, loopClassRequirement, loopClassRequirementPart,
+	loopClassStatusReply, loopClassStatusResolve}
+
+// loopRequests is one class of request the loop's writes sent: how many, how many were refused,
+// the codes the refusals named, and how long the requests took from arrival to response.
+type loopRequests struct {
+	Class     string         `json:"class"`
+	Requests  int            `json:"requests"`
+	Failures  int            `json:"failures"`
+	Codes     map[string]int `json:"codes,omitempty"`
+	LatencyMs stat           `json:"latency_ms"`
+}
+
+// loopRun is what summary.json records of a loop step beyond its events: the requests each class
+// sent, and what the requirement and status kinds met.
+type loopRun struct {
+	Requests []loopRequests `json:"requests"`
+	// Reopens counts the status changes sent as a reply alone in a resolved thread
+	// (loopReopenShare), which reopens it.
+	Reopens int `json:"reopens"`
+	// CapExceeded counts the requirement writes a part document refused with 413, and NewParts
+	// the part documents those refusals, and the inventories they exhausted, made this run open.
+	CapExceeded int `json:"cap_exceeded"`
+	NewParts    int `json:"new_parts"`
+}
+
+func newWriter(a *api, sf seedFile, loop *loopSeed, nonce int64, lg *log.Logger) *writer {
+	w := &writer{a: a, sf: sf, loop: loop, nonce: nonce, locks: make([]sync.Mutex, len(sf.Issues)),
+		revs: make([]int, len(sf.Issues)), lg: lg,
+		reqs: map[string]*loopRequests{}, lat: map[string][]float64{}}
+	if loop == nil {
+		return w
+	}
+	w.quotes = make([]loopQuotes, len(loop.Proposals))
+	for i := range loop.Proposals {
+		pr := &loop.Proposals[i]
+		// A proposal whose last part document the seed does not hold starts with no inventory:
+		// its first requirement write opens a part document of its own.
+		if pr.serves(loopNeedLastPart) {
+			w.quotes[i] = loopQuotes{doc: pr.Parts[pr.LastPart].ArtifactID, rows: pr.SpareQuotes}
+		}
+	}
+	return w
+}
+
+// record counts one request of a class and times it from its arrival in Dispatch's socket, as
+// the request generator times a read (summarizeRequests).
+func (w *writer) record(class string, res callResult) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c := w.reqs[class]
+	if c == nil {
+		c = &loopRequests{Class: class}
+		w.reqs[class] = c
+	}
+	c.Requests++
+	w.lat[class] = append(w.lat[class], float64(res.end-res.arrival())/1e6)
+	if res.ok() {
+		return
+	}
+	c.Failures++
+	if c.Codes == nil {
+		c.Codes = map[string]int{}
+	}
+	code := strconv.Itoa(res.status) + " " + res.errorCode()
+	if res.err != nil {
+		code = errClass(res.err)
+	}
+	c.Codes[strings.TrimSpace(code)]++
+}
+
+// loopRecord is what the loop's writes sent, for summary.json; nil for a step without a loop
+// seed, which sends none of these classes.
+func (w *writer) loopRecord() *loopRun {
+	if w.loop == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := &loopRun{Requests: []loopRequests{}, Reopens: w.reopens,
+		CapExceeded: w.capExceeded, NewParts: w.newParts}
+	for _, class := range loopClasses {
+		c := w.reqs[class]
+		if c == nil {
+			continue
+		}
+		row := *c
+		row.Codes = maps.Clone(c.Codes)
+		row.LatencyMs = mkStat(w.lat[class])
+		out.Requests = append(out.Requests, row)
+	}
+	return out
 }
 
 // do sends one write and returns its record.
@@ -266,6 +525,36 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		path = "/api/v1/issues/" + is.Key + "/artifacts"
 		body = map[string]any{"name": specName, "content": content, "summary": fmt.Sprintf("%s upload revision %d", tag, old+1)}
 		w.revs[p.issue] = old
+	case kindVerdict:
+		// The op is small and the version Dispatch writes is the whole review page, which is
+		// where the write's cost is: the loop's pages average loopPageMean bytes. An insert at
+		// the document's end lands whatever the page holds already, so a page a step writes a
+		// second verdict on takes it as the first did.
+		path = "/api/v1/artifacts/" + p.artifact + "/edits"
+		body = map[string]any{
+			"ops":     []map[string]any{{"op": "insert", "after": "end", "markdown": tag + " verdict: " + sentence(r, 20)}},
+			"summary": tag + " verdict",
+		}
+	case kindRequirement:
+		// The proposal's inventory is one write's at a time: two requirement writes must not
+		// anchor on one row, and the part document a refusal replaces must be replaced once.
+		w.locks[p.issue].Lock()
+		defer w.locks[p.issue].Unlock()
+		doc, quote, opened, ok := w.requirementTarget(ctx, p, id, tag)
+		if !ok {
+			rec.Sent, rec.Arrival, rec.Response, rec.Status = opened.start, opened.arrival(), opened.end, opened.status
+			rec.TransportErr = fmt.Sprintf("open a part document for a requirement thread: status %d, %v", opened.status, opened.err)
+			w.lg.Printf("write %s %s: %s", p.kind, is.Key, rec.TransportErr)
+			return rec
+		}
+		path = "/api/v1/issues/" + is.Key + "/comments"
+		body = map[string]any{
+			"body":   loopWriteText(tag+" requirement: ", p.body),
+			"anchor": map[string]any{"artifact": doc, "quote": quote},
+		}
+	case kindStatus:
+		path = "/api/v1/issues/" + is.Key + "/comments"
+		body = map[string]any{"body": loopWriteText(tag+" status: ", p.body), "reply_to": p.replyTo}
 	}
 	if !p.human {
 		body["actor"] = sessionActor(sessionID(p.session))
@@ -282,10 +571,119 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 			w.resync(ctx, p.issue)
 		}
 	}
+	switch p.kind {
+	case kindVerdict:
+		w.record(loopClassVerdict, res)
+	case kindRequirement:
+		w.record(loopClassRequirement, res)
+		// A part document whose margin is full answers 413: the next requirement write on this
+		// proposal opens a new one rather than sending this refusal again. The proposal's lock
+		// is still held, so the flag and the inventory move together.
+		if res.status == http.StatusRequestEntityTooLarge {
+			w.quotes[p.issue].full = true
+			w.mu.Lock()
+			w.capExceeded++
+			w.mu.Unlock()
+		}
+	case kindStatus:
+		w.record(loopClassStatusReply, res)
+		if p.reopen {
+			w.mu.Lock()
+			w.reopens++
+			w.mu.Unlock()
+		} else if res.ok() {
+			w.resolveThread(ctx, p, id)
+		}
+	}
 	if !res.ok() {
 		w.lg.Printf("write %s %s: %d %s %v", p.kind, is.Key, res.status, trunc(res.body), res.err)
 	}
 	return rec
+}
+
+// loopWriteText is the text of one loop write of n bytes: the marker and what the write is,
+// then filler (loopFillText). A size under the head's own length would cut the marker off, and
+// a write the run cannot find its event by is a write it cannot time, so the head is the floor.
+func loopWriteText(head string, n int) string {
+	return loopFillText(head, max(n, len(head)))
+}
+
+// requirementTarget is the part document a requirement thread anchors in and the spare quote row
+// it takes. It opens a new part document on the proposal when the document it was anchoring in
+// answered 413 or its spare rows are all taken; opened is that write's answer when it failed,
+// which is why there is nothing to anchor on. The proposal's lock is the caller's.
+func (w *writer) requirementTarget(ctx context.Context, p eventPlan, id who, tag string) (doc, quote string, opened callResult, ok bool) {
+	q := &w.quotes[p.issue]
+	if q.doc == "" || q.full || len(q.rows) == 0 {
+		if opened, ok = w.openPart(ctx, p, id, tag, q); !ok {
+			return "", "", opened, false
+		}
+	}
+	quote, q.rows = q.rows[0], q.rows[1:]
+	return q.doc, quote, opened, true
+}
+
+// openPart opens one part document on the proposal, carrying a fresh inventory of spare quote
+// rows for the requirement threads this run writes into it. Its rows name the run's nonce, so
+// they are rows of this document alone and an anchor resolves on exactly one line.
+func (w *writer) openPart(ctx context.Context, p eventPlan, id who, tag string, q *loopQuotes) (callResult, bool) {
+	pr := &w.loop.Proposals[p.issue]
+	rows := make([]string, loopSpareQuotes)
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s, run part %03d\n\n", pr.Name, q.parts+1)
+	for i := range rows {
+		rows[i] = loopRunSpareRow(w.nonce, pr.Index, q.parts, i)
+		b.WriteString(rows[i])
+		b.WriteString("\n\n")
+	}
+	body := map[string]any{
+		"name":    loopRunPartName(w.nonce, q.parts),
+		"content": b.String(),
+		"summary": fmt.Sprintf("%s part document %d of the run", tag, q.parts+1),
+	}
+	if !p.human {
+		body["actor"] = sessionActor(sessionID(p.session))
+	}
+	res := w.a.call(ctx, "POST", "/api/v1/issues/"+w.sf.Issues[p.issue].Key+"/artifacts", id, body)
+	w.record(loopClassRequirementPart, res)
+	if !res.ok() {
+		w.lg.Printf("write %s %s: open a part document: %d %s %v", p.kind, w.sf.Issues[p.issue].Key, res.status, trunc(res.body), res.err)
+		return res, false
+	}
+	q.doc, q.rows, q.full = idOf(res.body), rows, false
+	q.parts++
+	w.mu.Lock()
+	w.newParts++
+	w.mu.Unlock()
+	return res, true
+}
+
+// loopRunPartName names a part document a run opened, and loopRunSpareRow one of its quote rows.
+// Both carry the run's marker nonce, so two runs against one seed write their own documents and
+// anchor on their own lines.
+func loopRunPartName(nonce int64, part int) string {
+	return fmt.Sprintf("part-run-%s-%03d.md", formatNonce(nonce), part+1)
+}
+
+func loopRunSpareRow(nonce int64, proposal, part, row int) string {
+	return fmt.Sprintf("REQ-%04d-run-%s-%03d-%02d is a free line for a requirement written during the run.",
+		proposal, formatNonce(nonce), part, row)
+}
+
+// resolveThread sends the second request of a status change: the resolve of the thread its reply
+// answered. The resolve carries no text, so the comment.resolved it appends holds no marker and
+// the delivery join cannot time it (commit-trigger.sql reads the marker out of the payload); the
+// request is counted and timed as a class of its own instead (summary.json loop.requests).
+func (w *writer) resolveThread(ctx context.Context, p eventPlan, id who) {
+	body := map[string]any{}
+	if !p.human {
+		body["actor"] = sessionActor(sessionID(p.session))
+	}
+	res := w.a.call(ctx, "POST", "/api/v1/comments/"+p.replyTo+"/resolve", id, body)
+	w.record(loopClassStatusResolve, res)
+	if !res.ok() {
+		w.lg.Printf("write %s resolve %s: %d %s %v", p.kind, w.sf.Issues[p.issue].Key, res.status, trunc(res.body), res.err)
+	}
 }
 
 // specText reads the issue's spec text: the GET's result and the document's markdown, "" when

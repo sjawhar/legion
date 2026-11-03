@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"maps"
 	"math"
@@ -320,5 +321,101 @@ func TestSummarizeRequestsCodesAndTolerated(t *testing.T) {
 	}
 	if code := (callResult{status: 400, body: []byte(`{"error":"x","code":"INVALID_OP"}`)}).errorCode(); code != "INVALID_OP" {
 		t.Fatalf("errorCode %q", code)
+	}
+}
+
+// TestLoopStepPlansTheSameWritesAndReadsTwice: a loop step's writes and reads are a pure function
+// of its flags and -rng-seed, as a seed.json step's are (TestOpenLoopSchedule): one seed gives one
+// plan of writes and one of reads, and another seed gives another.
+func TestLoopStepPlansTheSameWritesAndReadsTwice(t *testing.T) {
+	ls := loopTestSeed(t)
+	mix, err := parseEventMix("spec-loop-2026-11-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, err := loadRouteMix(specLoopRouteMixName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runConfig{
+		sessions: 3, events: 60, requests: 90, warmup: 10 * time.Second, duration: 30 * time.Second,
+		mix: mix, routes: routes, human: 0.1, rngSeed: 5, loop: ls, loopSeedPath: "loopseed.seed.json",
+	}
+	plan := func(c runConfig) ([]eventPlan, []string) {
+		st := newStep(c, ls.seedFile(), log.New(io.Discard, "", 0), 0)
+		// Any start gives the same plan, as plan-docs relies on (planVersionDocs).
+		st.openWindow(time.Time{})
+		var writes []eventPlan
+		st.planWrites(func(p eventPlan, in bool) {
+			if in {
+				writes = append(writes, p)
+			}
+		})
+		var reads []string
+		openLoopPlan(c.rngSeed, 2, c.requests, st.start, st.winStart, st.winEnd, func(r *rand.Rand, _ time.Time, in bool) bool {
+			_, path := st.requestPath(r)
+			if in {
+				reads = append(reads, path)
+			}
+			return true
+		})
+		return writes, reads
+	}
+	writes, reads := plan(cfg)
+	if len(writes) == 0 || len(reads) == 0 {
+		t.Fatalf("the step plans %d writes and %d reads", len(writes), len(reads))
+	}
+	again, againReads := plan(cfg)
+	if !slices.Equal(writes, again) || !slices.Equal(reads, againReads) {
+		t.Fatal("one -rng-seed gave two plans")
+	}
+	other := cfg
+	other.rngSeed = 6
+	otherWrites, otherReads := plan(other)
+	if slices.Equal(writes, otherWrites) || slices.Equal(reads, otherReads) {
+		t.Fatal("another -rng-seed gave the same plan")
+	}
+	// What it planned is the loop's: the three kinds, on proposals the kind can be sent to, and
+	// reads of the loop's own records with no placeholder left in them.
+	for _, p := range writes {
+		if p.kind != kindVerdict && p.kind != kindRequirement && p.kind != kindStatus {
+			t.Fatalf("the loop mix planned a %s write", p.kind)
+		}
+		if p.issue < 0 || p.issue >= len(ls.Proposals) {
+			t.Fatalf("a write landed on proposal %d of %d", p.issue, len(ls.Proposals))
+		}
+	}
+	for _, path := range reads {
+		if strings.ContainsAny(path, "{}") || !strings.HasPrefix(path, "/api/v1/") {
+			t.Fatalf("the step planned the read %q", path)
+		}
+	}
+}
+
+// TestLoopSummaryConfigNamesItsSeed: a loop step's summary.json says which seed it ran against and
+// which plan that seed was exported from; a step without one carries neither key.
+func TestLoopSummaryConfigNamesItsSeed(t *testing.T) {
+	ls := loopTestSeed(t)
+	cfg := runConfig{loop: ls, loopSeedPath: "/loadtest/loopseed.seed.json"}
+	if cfg.loopPlanID() != ls.PlanID {
+		t.Fatalf("the step names plan %q, want %q", cfg.loopPlanID(), ls.PlanID)
+	}
+	if id := (runConfig{}).loopPlanID(); id != "" {
+		t.Fatalf("a step without a loop seed names plan %q", id)
+	}
+	b, err := json.Marshal(summaryConfig{LoopSeed: cfg.loopSeedPath, LoopPlanID: cfg.loopPlanID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"loop_seed":"/loadtest/loopseed.seed.json"`) ||
+		!strings.Contains(string(b), `"loop_plan_id":"`+ls.PlanID+`"`) {
+		t.Fatalf("summary.json's config does not name the seed it ran against:\n%s", b)
+	}
+	plain, err := json.Marshal(summaryConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "loop_seed") || strings.Contains(string(plain), "loop_plan_id") {
+		t.Fatalf("a step without a loop seed records one:\n%s", plain)
 	}
 }
