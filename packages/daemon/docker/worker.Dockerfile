@@ -740,7 +740,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi, /opt/omp: packages/coding-agent/THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-coding-agent-THIRD-PARTY-NOTICES.txt \
-      "Oh My Pi's native module, /home/legion/.omp/natives: packages/natives/THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-natives-THIRD-PARTY-NOTICES.txt \
+      "Oh My Pi's native module, embedded in /opt/omp/bin/omp and extracted into /home/legion/.omp/natives: packages/natives/THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-natives-THIRD-PARTY-NOTICES.txt \
       "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
       "jj: the Rust crates it links" /in/jj-crates \
       "GitHub CLI, /usr/local/bin/gh: LICENSE of github.com/cli/cli at ${gh_tag}" /in/gh-LICENSE \
