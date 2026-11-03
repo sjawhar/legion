@@ -245,20 +245,21 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 // (updateStruct.content) - two bytes for a keystroke, 4,098 for a paste - at both copies, and
 // nothing for the delete set each update carries, which the room holds.
 //
-// Measured on 2026-10-31 under sjawhar/ygo v1.54.1-sami.3, in a process of its own that peaked at
-// 231 MiB resident: a mebibyte of prose, 1,048,359 bytes of markdown making 57,600 elements,
-// loaded and given its 2,010 updates in 8 m 31 s. The typed room renders 1,091,319 bytes, still
-// 57,600 elements, from 79,720 structs, and holds 58,735,880 bytes of heap at both copies,
-// 1,932,320 more than the same room loaded and not typed into (56,803,560); dropping it frees
-// 58,730,488, 5,392 bytes from that reading. It is charged 62,000,920 bytes: its count's
+// Measured on 2026-11-03 under sjawhar/ygo v1.54.1-sami.3, in a process of its own that peaked at
+// 233 MiB resident: a mebibyte of prose, 1,048,359 bytes of markdown making 57,600 elements,
+// loaded and given its 2,010 updates in 8 m 46 s. The typed room renders 1,091,319 bytes, still
+// 57,600 elements, from 79,720 structs, and holds 58,740,176 bytes of heap at both copies,
+// 1,936,368 more than the same room loaded and not typed into (56,803,808); dropping it frees
+// 58,730,712, 9,464 bytes from that reading. It is charged 62,000,920 bytes: its count's
 // 57,600,000 beside a structure part of 4,400,920, which is what its updates are priced at, 1.056
-// times the heap it holds. The same run under sjawhar/ygo v1.51.3-sami.7 read the typed room at
-// 55,591,872 bytes and charged it 58,424,320, 1.051 times that, and the reading of 2026-10-29,
-// taken before this test cross-checked its heap, when the state and updates could be freed
-// between the readings, read 52,347,472 bytes and a charge of 1.116 times it. At the price the
-// structure part charged a split before bytesOfHeapASplit, the heaviest kind's, that run was
-// charged 61,801,120 bytes, 1.179 times that reading's heap, which is what that price was
-// measured again for.
+// times the heap it holds. The reading of 2026-10-31 read the same charge against 58,735,880
+// bytes of heap, 1.056 times it too. The same run under sjawhar/ygo v1.51.3-sami.7 read the
+// typed room at 55,591,872 bytes and charged it 58,424,320, 1.051 times that, and the reading
+// of 2026-10-29, taken before this test cross-checked its heap, when the state and updates could
+// be freed between the readings, read 52,347,472 bytes and a charge of 1.116 times it. At the
+// price the structure part charged a split before bytesOfHeapASplit, the heaviest kind's, that
+// run was charged 61,801,120 bytes, 1.179 times that reading's heap, which is what that price
+// was measured again for.
 func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {
 	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.85
 	if os.Getenv(typedRoomHeapMeasurement) == "" {

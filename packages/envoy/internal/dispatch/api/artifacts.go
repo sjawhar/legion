@@ -1769,8 +1769,10 @@ func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
 }
 
 // maxAdmissionHold is the longest a test may hold a document's next socket before its admission
-// (holdArtifactAdmission): two minutes, the longest a browser of the room budget's burst of fifty
-// measured waited to be answered (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
+// (holdArtifactAdmission): two minutes, about the longest a browser of the room budget's burst of
+// fifty has measured waiting to be answered - 1m15.2s on 2026-11-01 with the pod to itself, and
+// 2m17.2s on 2026-11-03 beside another role's tests on it
+// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
 const maxAdmissionHold = 2 * time.Minute
 
 // holdArtifactAdmission makes the document's next socket wait the request's ms before its

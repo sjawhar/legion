@@ -882,19 +882,22 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // holds adds nothing to its charge (deletedRuns) and each room's second copy was charged before
 // the edit made it.
 //
-// What the fifty wait for is that bound. Measured on 2026-11-01 under sjawhar/ygo
-// v1.54.1-sami.3 on this two-processor pod, the server at the pod's Go memory limit and the
-// collector at the runtime's own ratio, the only one Dispatch runs at, with bytesOfHeapAnElement
-// at 500: a mebibyte of prose reserves 57,600,000 bytes at both copies and the
-// 2,147,483,648-byte budget holds 37 such rooms. One after another, the first refusal came with
-// 37 rooms held by browsers that stayed, once the five whose browsers went were closed for it,
-// and so did the last; the peak a pod's kernel would charge was 3,629 MiB and the runtime held
-// 3,760,039,608 bytes of the 3,865,470,566 its limit bounds, VmRSS 3,644 MiB. Fifty at once, 37
-// handed their state back and edited, the slowest answered after 1m15.215s, 13 were refused at
-// admission, the slowest after 10.471s, and none was answered 503; the burst logged 120 grants
-// of the copy bound, none holding all of it, the longest wait 37.506 s and the longest hold
-// 4.359 s; it charged 3,730 MiB and held 3,859,998,408 bytes, VmRSS 3,735 MiB, the whole drive
-// in 338 s.
+// What the fifty wait for is that bound. Measured on 2026-11-03 under sjawhar/ygo
+// v1.54.1-sami.3 on this two-processor pod, beside another role's tests on it, the server at the
+// pod's Go memory limit and the collector at the runtime's own ratio, the only one Dispatch runs
+// at, with bytesOfHeapAnElement at 500: a mebibyte of prose reserves 57,600,000 bytes at both
+// copies and the 2,147,483,648-byte budget holds 37 such rooms. One after another, the first
+// refusal came with 37 rooms held by browsers that stayed, once the five whose browsers went
+// were closed for it, and so did the last; the peak a pod's kernel would charge was 3,638 MiB
+// and the runtime held 3,759,040,168 bytes of the 3,865,470,566 its limit bounds, VmRSS 3,656
+// MiB. Fifty at once, 37 handed their state back and edited, the slowest answered after
+// 2m17.234s, 13 were refused at admission, the slowest after 26.439s, and none was answered 503;
+// the burst logged 121 grants of the copy bound, none holding all of it, the longest wait
+// 54.141 s and the longest hold 7.865 s; it charged 3,721 MiB and held 3,848,718,024 bytes,
+// VmRSS 3,770 MiB, the whole drive in 443 s. The same drive on 2026-11-01, with the pod to
+// itself, refused the thirteen by 10.471s and answered the last of the thirty-seven at
+// 1m15.215s, charging 3,629 and 3,730 MiB by step and holding 3,760,039,608 and 3,859,998,408
+// bytes, in 338 s.
 //
 // Measured on 2026-10-29 over four runs on a three-processor sandbox, with the element price at
 // 470, where the same budget held 39 such rooms: 39 admitted and 11 refused every time, the last
@@ -1246,11 +1249,12 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // 3,865,470,566-byte Go limit bounds, 2.1 GiB under it; the 1,490 to 1,518 MiB the earlier runs
 // recorded were read before or without that second reading (requireUnderThePod), the older of
 // them as VmRSS alone, which on this sandbox counts the pages the runtime has released as well
-// (peakResident). Run at 480 MiB on 2026-11-01 under sjawhar/ygo v1.54.1-sami.3 the drive passed
-// in 459 s: the first refusal came at room 9, the arithmetic's, the largest structure part the
+// (peakResident). Run at 480 MiB on 2026-11-03 under sjawhar/ygo v1.54.1-sami.3 the drive passed
+// in 528 s: the first refusal came at room 9, the arithmetic's, the largest structure part the
 // budget read as it closed the eight rooms was the 440,092 bytes their updates are priced at, and
-// the server charged 1,681 MiB of a pod's memory, of 1,683 MiB of VmRSS, holding 1,705,782,168
-// bytes of what that limit bounds, 2.0 GiB under it. The same drive against the real 2 GiB
+// the server charged 1,776 MiB of a pod's memory, of 1,781 MiB of VmRSS, holding 1,806,531,496
+// bytes of what that limit bounds, 1.9 GiB under it; the run of 2026-11-01 took 459 s and
+// charged 1,681 MiB, holding 1,705,782,168 bytes. The same drive against the real 2 GiB
 // budget was 39 rooms at the element price of 470, and is 37 at 500: it passed in 2,511 s on
 // this sandbox on 2026-10-29, 41 m 2 s of that from its first admission
 // to the refusal, where CI runs each shard of the memory suite under a 40-minute deadline
@@ -1272,8 +1276,9 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // What the drive costs in time is what the collector does with the garbage each update leaves -
 // each costs the server a render of the whole document
 // (renderedReplica.observe) - at the runtime's own ratio of garbage to live heap, the
-// only one the server runs at: a pair of rooms takes 1 m 18 s to 1 m 45 s for its 201 updates
-// alone on this sandbox under sjawhar/ygo v1.54.1-sami.3 on 2026-11-01, 0.39 to 0.52 s an update,
+// only one the server runs at: a pair of rooms takes 1 m 42 s to 1 m 48 s for its 201 updates
+// alone on this pod under sjawhar/ygo v1.54.1-sami.3 on 2026-11-03, 0.51 to 0.54 s an update,
+// 1 m 18 s to 1 m 45 s in the run of 2026-11-01, 0.39 to 0.52 s an update,
 // 1 m 42 s to 2 m 9 s in the run of 2026-10-29 that took 561 s, and 1 m 59 s to 2 m 53 s beside
 // five other containers. A collector held to a tighter
 // ratio costs this drive dearly and buys its eight rooms nothing, since what they charge,
@@ -2242,8 +2247,8 @@ func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
 // (countRoomStructs) - are each refused with 4413 and
 // DOC_TOO_LARGE, and the room is left as it was. Each GC struct counts itself and the two splits its
 // integration can cause against the cap; each delete range of a client the room does not hold
-// counts the two ends it can split and the parked range its tail leaves (peerWeighing.walkedDelete,
-// :625-644). The stored document then loads in a new room of a new server, holding what the room
+// counts the two ends it can split and the parked range its tail leaves (peerWeighing.walkedDelete).
+// The stored document then loads in a new room of a new server, holding what the room
 // held before the refusals, within the cap.
 func TestABrowserCannotPushADocumentPastTheDecodeCap(t *testing.T) {
 	const nearStructs = 340_000
@@ -2525,9 +2530,10 @@ const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_d
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
 // Go limit a 4 GiB pod gives the server and at the runtime's own collector ratio, which the
 // server leaves alone, keeps the memory a pod's kernel would charge it under the pod's 4 GiB and
-// what the Go limit bounds within that limit (requireUnderThePod): 3,658 MiB charged on
-// 2026-11-01 under sjawhar/ygo v1.54.1-sami.3, of 3,665 MiB of VmRSS, with 3,808,812,536 bytes
-// held of what the 3,865,470,566-byte limit bounds, 54 MiB under it, in a drive of 316 s. A
+// what the Go limit bounds within that limit (requireUnderThePod): 3,675 MiB charged on
+// 2026-11-03 under sjawhar/ygo v1.54.1-sami.3, of 3,692 MiB of VmRSS, with 3,809,254,920 bytes
+// held of what the 3,865,470,566-byte limit bounds, 54 MiB under it, in a drive of 287 s; the
+// run of 2026-11-01 charged 3,658 MiB, of 3,665 MiB of VmRSS, with 3,808,812,536 bytes held. A
 // run of the same drive on 2026-10-29 charged 3,584 MiB, of 3,604 MiB of VmRSS, with
 // 3,722,661,352 bytes held, 136 MiB under the limit, another that day 3,708 MiB and 14 MiB under
 // it, and one before the held reading was asserted read
@@ -2671,15 +2677,18 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // the Go memory limit it took from its container (requirePodGoMemoryLimit). At that default the
 // heap goal of a server whose budget is full is the limit itself, so the collector keeps every
 // byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
-// what the runtime holds less what it has released. Measured on 2026-11-01 under sjawhar/ygo
-// v1.54.1-sami.3 on a two-processor sandbox, the three steps below charged 2,856, 3,620 and
-// 3,237 MiB of the pod's 4,096, 476 MiB under it at their worst, in a drive of 405 s, and the
-// keystrokes a person typed through the two heavy steps were answered in 99th percentiles of 30
-// and 105 ms. Of what the Go limit bounds the same steps held 2,962,410,680, 3,743,481,336 and
-// 3,865,538,280 bytes, the last past the limit, which is the step that reads past it: it read
-// 67,714 bytes over, the allocation of a frame or a copy of tens of MiB
-// mapped before the cycle it triggers can hand anything back (podGoMemoryLimitMargin). VmRSS over
-// that run read 2,862, 3,625 and 3,749 MiB, each above what the pod would be
+// what the runtime holds less what it has released. Measured on 2026-11-03 under sjawhar/ygo
+// v1.54.1-sami.3 on this two-processor pod, over five runs of 344 to 357 s, the three steps
+// below charged 2,724 to 2,878, 3,608 to 3,661 and 3,670 to 3,840 MiB of the pod's 4,096, 256
+// MiB under it at their worst, and the keystrokes a person typed through the two heavy steps
+// were answered in 99th percentiles of 57 to 125 ms and 121 to 259 ms. Of what the Go limit
+// bounds the heaviest step held 3,865,472,776 to 4,039,020,264 bytes, 2,210 to 173,549,698 past
+// the limit, which is the step that reads past it: an allocation of a frame or a copy of tens
+// of MiB is mapped before the cycle it triggers can hand anything back
+// (podGoMemoryLimitMargin), and in one of the five runs that overshoot passed the margin, which
+// the run of 2026-11-01 read at 67,714 bytes while charging 2,856, 3,620 and 3,237 MiB with the
+// keystrokes answered in 30 and 105 ms. VmRSS over the five runs read 2,727 to 2,895, 3,610 to
+// 3,663 and 4,333 to 4,639 MiB, each above what the pod would be
 // charged: the difference
 // is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
 // charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
@@ -3927,6 +3936,16 @@ func (h *memoryHarness) storedStates(t *testing.T, states ...[]byte) []string {
 // each write a new version of the same document of 16,384 headings of fresh text at both halves of
 // the byte and element bounds, until the decode cap refuses a write. Its history then stands at
 // the cap, about a million structs rendering a mebibyte.
+//
+// The rows those writes store are then re-stored as the one state they make, as a rebuild stores
+// its seed (storedStates, docs' PgVersioned.RebuildTx). The rows do not sum to the structs of
+// the state they make: integration splits items that no row holds, and a compaction's fold of
+// them carries those splits where the rows do not. Measured on 2026-11-03, the writes' 27 rows
+// held 950,272 structs and the 14 rows the fold of the room's close left held 1,012,416, against
+// the 1,048,576 of the state at the decode cap. A room is charged the structs of what it loads
+// (docs' storedRoomReservation), so the re-stored state is both the heavier room and the one
+// this fixture is built to stand at the cap with (requireAtTheDecodeCap), as the long-edited
+// document stored beside it does.
 func (h *memoryHarness) agentRewrittenDocument(t *testing.T) string {
 	t.Helper()
 	const headingBytes = 64
@@ -3956,6 +3975,19 @@ func (h *memoryHarness) agentRewrittenDocument(t *testing.T) string {
 	}
 	h.waitForSettled(t, artifactID)
 	setup.stop(t)
+	state := h.storedState(t, artifactID)
+	ctx := context.Background()
+	tx, err := h.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin re-storing the agent-rewritten document's state: %v", err)
+	}
+	if _, err := docs.NewPgVersioned(h.database).RebuildTx(ctx, tx, artifactID, state); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("re-store the agent-rewritten document's %d-byte state: %v", len(state), err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the agent-rewritten document's state: %v", err)
+	}
 	return artifactID
 }
 
