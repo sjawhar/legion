@@ -317,3 +317,71 @@ test("changing a decision block's answer rewrites the block in the document", as
     await alice.close();
   }
 });
+
+// R6: a reply on the answers page is Markdown its author wrote, formatted and then cut, rather
+// than a first block with every later one flattened behind it. Three rendered lines, clamped by
+// the browser, so a long reply says there is more without the row growing to hold it.
+test("the answers page formats a reply and clamps it to three lines", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Build question" });
+  const ask = await createAsk(
+    issue.key,
+    { options: shipOrHold, question: "Which build?" },
+    session
+  );
+  // Long enough that its rendered text runs past three lines at any width this project uses, so
+  // the clamp has something to cut.
+  const reply = [
+    "**Nightly** counts, with these caveats:",
+    "",
+    "- the nightly job starts at 02:00 UTC and tags nothing it builds, so a tag you see on",
+    "  one of its artefacts was put there by somebody else afterwards",
+    "- a tagged build is a release, never a nightly, however it was started and whoever",
+    "  started it, and the release notes name it as such",
+    "- a rerun keeps the first run's number, so a rerun of last night's build is that build",
+    "  again and not a second one to count",
+    "- a build from a branch other than main is nobody's nightly, even on the nightly",
+    "  schedule, because the schedule names the branch it builds",
+    "",
+    "```sh",
+    "bun run build --nightly --branch main",
+    "```",
+    "",
+    "Ask the release owner before any of that changes, and say here what they answered, so",
+    "the next person reading this thread does not have to ask them again.",
+  ].join("\n");
+  await createComment(issue.key, { ask_id: ask.id, body: reply });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/answers");
+    const row = page.locator(`[data-answer-row="${ask.id}"]`).first();
+    await expect(row).toContainText("Replied:");
+    // The row's previews are the question and then the reply, so the reply is the last of them.
+    const quoted = row.locator("[data-markdown-preview]").last();
+    await expect(quoted).toContainText("Nightly counts");
+    await expect(quoted.locator("strong")).toHaveText("Nightly");
+
+    // Every block is in it, formatted: no source character of the bold, the list or the fence.
+    await expect(quoted).toContainText("a tagged build is a release");
+    await expect(quoted).toContainText("bun run build --nightly");
+    await expect(row).not.toContainText("**");
+    await expect(row).not.toContainText("```");
+    await expect(row).not.toContainText("- the nightly job");
+
+    // Three lines, and there is more behind the cut.
+    await expect(quoted).toHaveCSS("-webkit-line-clamp", "3");
+    await expect
+      .poll(() => quoted.evaluate((element) => element.scrollHeight > element.clientHeight))
+      .toBe(true);
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`answers-clamped-reply-${testInfo.project.name}.png`),
+    });
+  } finally {
+    await alice.close();
+  }
+});

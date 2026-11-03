@@ -3,7 +3,8 @@ import { capabilityLabel } from "../conversation/delivery";
 import { type AgentPart, askResolutionParts } from "../refs/AgentName";
 
 /** An event's line in the Pinned tab, as `AgentPart`s: an agent it names keeps its identity
- *  until `EventBody` draws it through `AgentName`. */
+ *  until `EventBody` draws it through `AgentName`, and a question it quotes is a part of its
+ *  own, drawn as the Markdown its author wrote rather than as that source. */
 export function eventDescription(event: Event): AgentPart[] {
   const description = describe(event);
   return typeof description === "string" ? [description] : description;
@@ -44,13 +45,14 @@ function describe(event: Event): string | AgentPart[] {
     case "ask.resolved":
       return askResolutionParts(event.payload.resolution);
     case "ask.answered":
-      return event.payload.previous_answer === undefined
-        ? `Ask answered: ${event.payload.question}`
-        : `Answer changed: ${event.payload.question}`;
+      return [
+        event.payload.previous_answer === undefined ? "Ask answered: " : "Answer changed: ",
+        { markdown: event.payload.question },
+      ];
     case "ask.edited":
-      return `Ask edited: ${event.payload.question}`;
+      return ["Ask edited: ", { markdown: event.payload.question }];
     case "ask.handed_back":
-      return `Ask handed back: ${event.payload.question}`;
+      return ["Ask handed back: ", { markdown: event.payload.question }];
     case "comment.resolved":
       return "Comment resolved";
     case "comment.reopened":
@@ -69,7 +71,7 @@ function describe(event: Event): string | AgentPart[] {
     case "message.accepted":
       return "Message taken as the session's own turn";
     case "ask.opened":
-      return `Ask opened: ${event.payload.question}`;
+      return ["Ask opened: ", { markdown: event.payload.question }];
     case "ask.anchor_refreshed":
       return event.payload.anchor?.orphaned
         ? "Ask lost its quote"

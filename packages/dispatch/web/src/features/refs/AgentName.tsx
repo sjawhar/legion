@@ -231,7 +231,8 @@ export interface AgentText {
   /** The full label: name plus ` (for <owner>)` / ` (as ns/name)`. */
   label(actor: Actor): string;
   /** An `AgentPart` as text: a text part as is, an agent part by the rule `AgentParts` draws it
-   *  by. */
+   *  by, an artifact part its name, and a quoted passage the source its author wrote, which is
+   *  all a place that holds only a string can say of it. */
   part(part: AgentPart): string;
   /** A bare session id's name: its registry title, else `storedTitle`, else its short id. */
   sessionText(sessionId: string, storedTitle: string | undefined): string;
@@ -256,7 +257,14 @@ export function useAgentText(): AgentText {
     return {
       initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),
       label: (actor: Actor) => label({ actor }),
-      part: (part: AgentPart) => (typeof part === "string" ? part : label(part)),
+      part: (part: AgentPart) =>
+        typeof part === "string"
+          ? part
+          : isQuoted(part)
+            ? part.markdown
+            : "artifact" in part
+              ? part.artifact
+              : label(part),
       sessionText: (sessionId: string, storedTitle: string | undefined) =>
         resolveAgent({ sessionId, storedTitle }, registry).name,
     };
@@ -293,36 +301,79 @@ export function AskResolutionLine({
 }
 
 /**
- * A sentence that names agents, kept as parts until it is rendered: text, or an agent that
- * `AgentParts` draws through `AgentName`. A builder that describes an event returns these, so
- * the agent keeps its identity (its current name, state and live link) instead of being
- * flattened into a label. A role address is text; only a recorded session is an agent part.
+ * A sentence that names agents, kept as parts until it is rendered: text, an agent that
+ * `AgentParts` draws through `AgentName`, an artifact the sentence is about, or a passage
+ * somebody wrote that it quotes. A builder that describes an event returns these, so the agent
+ * keeps its identity (its current name, state and live link) instead of being flattened into a
+ * label, the artifact keeps the link its host can give it instead of being found again inside
+ * the text, and the quoted passage keeps its Markdown instead of being shown as its source. A
+ * role address is text; only a recorded session is an agent part.
  */
-export type AgentPart = string | AgentRef;
+export type AgentPart = string | AgentRef | ArtifactPart | QuotedPart;
 
-/** Draws `AgentPart`s in a line of text: each text part as is (or through `text`, which the
- *  host uses to mark up its own text), each agent part as an inline `AgentName`. */
+/** The artifact a sentence is about, by name: `AgentParts` draws it as its name, or through
+ *  `artifact`, which a host that knows the artifact's route (`ActivityLine`) passes to link it. */
+type ArtifactPart = { artifact: string };
+
+/** A passage somebody wrote that a sentence quotes - an ask's question, the question a reply
+ *  answers - as its author wrote it: `AgentParts` hands it to `quote`, which draws it formatted
+ *  (`MarkdownPreview` at one line), so `**held**` reads as bold `held` rather than as its
+ *  source. The drawing is the host's because this module sits under `MarkdownPreview`'s own
+ *  imports and cannot import it back. */
+type QuotedPart = { markdown: string };
+
+function isQuoted(part: AgentPart): part is QuotedPart {
+  return typeof part !== "string" && "markdown" in part;
+}
+
+/**
+ * Draws `AgentPart`s in a line of text: each text part as is, each agent part as an inline
+ * `AgentName`, each artifact part as its name (or through `artifact`, which a host that can
+ * link it passes), and each quoted passage through `quote` (or, without one, as the source its
+ * author wrote).
+ *
+ * A sentence that quotes a passage is drawn as a row of its parts: the quote is drawn in a box
+ * of its own, which cannot sit inside a run of text, so the sentence's own words sit beside it
+ * and keep their spaces (`whitespace-pre-wrap`, which a flex item's text would otherwise
+ * collapse at its edges). A sentence without one is the run of text it always was.
+ */
 export function AgentParts({
+  artifact,
   parts,
-  text,
+  quote,
 }: {
+  artifact?: (name: string) => ReactNode;
   parts: readonly AgentPart[];
-  text?: (part: string, index: number) => ReactNode;
+  quote?: (markdown: string) => ReactNode;
 }): ReactNode {
-  return parts.map((part, index) => (
+  const quotes = parts.some(isQuoted);
+  const drawn = parts.map((part, index) => (
     // biome-ignore lint/suspicious/noArrayIndexKey: the parts are one fixed sentence, in order.
     <Fragment key={index}>
       {typeof part === "string" ? (
-        text === undefined ? (
-          part
+        quotes ? (
+          <span className="whitespace-pre-wrap">{part}</span>
         ) : (
-          text(part, index)
+          part
+        )
+      ) : isQuoted(part) ? (
+        quote === undefined ? (
+          part.markdown
+        ) : (
+          quote(part.markdown)
+        )
+      ) : "artifact" in part ? (
+        artifact === undefined ? (
+          part.artifact
+        ) : (
+          artifact(part.artifact)
         )
       ) : (
         <AgentName {...part} inline />
       )}
     </Fragment>
   ));
+  return quotes ? <span className="inline-flex max-w-full items-baseline">{drawn}</span> : drawn;
 }
 
 /** `Resolved by <agent> - <reason>` / `Retracted by <agent> - <reason>` / `Withdrawn when <agent>

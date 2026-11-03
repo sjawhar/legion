@@ -7,6 +7,7 @@ import { eventDescription } from "../issue/event-description";
 import { AgentParts, AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
+import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
@@ -96,9 +97,14 @@ export function EventBody({
   ) {
     return <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />;
   }
+  // A question the line quotes is Markdown its author wrote, so the margin shows it formatted
+  // and cut to the line, as the Activity tab's own line does.
   return (
     <p className={`font-medium ${textPrimaryOnSurface}`}>
-      <AgentParts parts={eventDescription(event)} />
+      <AgentParts
+        parts={eventDescription(event)}
+        quote={(markdown) => <MarkdownPreview className="min-w-0" lines={1} markdown={markdown} />}
+      />
     </p>
   );
 }

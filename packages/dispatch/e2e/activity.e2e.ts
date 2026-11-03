@@ -9,6 +9,7 @@ import {
   createIssueArtifact,
   createMessage,
   createProject,
+  editAsk,
   getIssueEvents,
   patchIssue,
   putIssueState,
@@ -191,6 +192,62 @@ test("an Activity row pins into the review margin and unpins from it @phone", as
       await page.getByRole("button", { name: /Close review panel/ }).click();
     }
     await expect(row.getByRole("button", { name: "Pin" })).toHaveAttribute("aria-pressed", "false");
+  } finally {
+    await alice.close();
+  }
+});
+
+// R6: a question an agent wrote is Markdown wherever the reader meets it. The Activity line and
+// the margin's event line for the edit both format it, each at one line, so neither leaks the
+// `**` its author typed.
+test("the activity line and the margin's pinned event line format a quoted question", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Formatted questions" });
+  const ask = await createAsk(issue.key, { question: "**Ship** the release tonight?" }, agent);
+  await editAsk(ask.id, { question: "**Hold** the release until Monday?" }, agent);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/activity`);
+    const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
+    const asked = rows.filter({ hasText: "asked" });
+    const edited = rows.filter({ hasText: "edited the question" });
+    await expect(asked).toHaveCount(1);
+    await expect(edited).toHaveCount(1);
+
+    // The bold words are bold, the app's own words around them are still the app's, and the
+    // source characters are gone from both lines.
+    await expect(asked.locator("strong")).toHaveText("Ship");
+    await expect(edited.locator("strong")).toHaveText("Hold");
+    await expect(asked).toContainText("asked “Ship the release tonight?”");
+    await expect(edited).toContainText('edited the question "Hold the release until Monday?"');
+    for (const row of [asked, edited]) {
+      await expect(row).not.toContainText("**");
+      // One line, cut by the browser rather than by the words: the quote is a clamped preview.
+      await expect(row.locator("[data-markdown-preview]")).toHaveCSS("-webkit-line-clamp", "1");
+    }
+
+    // The margin draws the same quote the same way, through `eventDescription`'s event line.
+    await edited.getByRole("button", { name: "Pin" }).click();
+    await expect(edited.getByRole("button", { name: "Unpin" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    const pinned = margin.getByText("Ask edited:");
+    await expect(pinned).toBeVisible();
+    await expect(margin.locator("strong")).toHaveText("Hold");
+    await expect(margin).toContainText("Ask edited: Hold the release until Monday?");
+    await expect(margin).not.toContainText("**");
+    await expect(margin.locator("[data-markdown-preview]")).toHaveCSS("-webkit-line-clamp", "1");
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`activity-quoted-question-${testInfo.project.name}.png`),
+    });
   } finally {
     await alice.close();
   }

@@ -579,7 +579,8 @@ test("an answer that replaced an earlier one reads as a change in the activity l
     seq: 5,
     type: "ask.answered",
   } as Event;
-  expect(activityDescription(answered)).toEqual(["answered “Ship it?”"]);
+  // The question is a part of its own, so the line draws it as the Markdown its author wrote.
+  expect(activityDescription(answered)).toEqual(["answered “", { markdown: "Ship it?" }, "”"]);
   expect(
     activityDescription({
       ...answered,
@@ -590,5 +591,5 @@ test("an answer that replaced an earlier one reads as a change in the activity l
         state: "answered",
       },
     } as Event)
-  ).toEqual(["changed the answer to “Ship it?”"]);
+  ).toEqual(["changed the answer to “", { markdown: "Ship it?" }, "”"]);
 });

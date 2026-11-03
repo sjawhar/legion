@@ -33,7 +33,9 @@ function sameActor(left: Actor, right: Actor): boolean {
 }
 
 /** One line of the Activity tab, as `AgentPart`s: an agent it names keeps its identity until
- *  `ActivityLine` draws it through `AgentName`. */
+ *  `ActivityLine` draws it through `AgentName`, the artifact a line is about is the part
+ *  `ActivityLine` links, and a question it quotes is a part of its own, drawn as the Markdown
+ *  its author wrote rather than as that source. */
 export function activityDescription(event: Event, previousStatus?: string): AgentPart[] {
   const description = describe(event, previousStatus);
   return typeof description === "string" ? [description] : description;
@@ -98,14 +100,14 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
     case "handoff.recorded":
       return `recorded the ${event.payload.phase} handoff, version ${event.payload.version}`;
     case "artifact.created":
-      return `added ${event.payload.artifact.name}`;
+      return ["added ", { artifact: event.payload.artifact.name }];
     case "artifact.version":
-      return `saved ${event.payload.name} v${event.payload.version.number}`;
+      return ["saved ", { artifact: event.payload.name }, ` v${event.payload.version.number}`];
     case "artifact.human_edited":
       return `edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
     case "comment.created":
       if (event.payload.ask_id !== null) {
-        return `replied to “${event.payload.ask_question ?? "an ask"}”`;
+        return ["replied to “", { markdown: event.payload.ask_question ?? "an ask" }, "”"];
       }
       if (event.payload.reply_to !== null) return "replied to a comment";
       return `commented on ${event.payload.artifact_name}: “${event.payload.anchor?.quote ?? ""}”`;
@@ -134,19 +136,19 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
     case "ask.resolved":
       return askResolutionParts(event.payload.resolution);
     case "ask.opened":
-      return `asked “${event.payload.question}”`;
+      return ["asked “", { markdown: event.payload.question }, "”"];
     case "ask.anchor_refreshed":
       return event.payload.anchor?.orphaned
-        ? `made an ask lose its quote: “${event.payload.question}”`
-        : `re-anchored an ask after an edit: “${event.payload.question}”`;
+        ? ["made an ask lose its quote: “", { markdown: event.payload.question }, "”"]
+        : ["re-anchored an ask after an edit: “", { markdown: event.payload.question }, "”"];
     case "ask.edited":
-      return `edited the question "${event.payload.question}"`;
+      return ['edited the question "', { markdown: event.payload.question }, '"'];
     case "ask.handed_back":
-      return `handed “${event.payload.question}” back for approval`;
+      return ["handed “", { markdown: event.payload.question }, "” back for approval"];
     case "ask.answered":
       return event.payload.previous_answer === undefined
-        ? `answered “${event.payload.question}”`
-        : `changed the answer to “${event.payload.question}”`;
+        ? ["answered “", { markdown: event.payload.question }, "”"]
+        : ["changed the answer to “", { markdown: event.payload.question }, "”"];
     case "message.created":
       return "sent a message";
     case "message.delivery":

@@ -70,8 +70,10 @@ test("eventDescription labels an edited comment", () => {
   expect(eventDescription(commentEvent("comment.edited"))).toEqual(["Comment edited"]);
 });
 
+// The question is a part of its own, so `EventBody` draws it as the Markdown its author wrote
+// rather than as that source.
 test("eventDescription labels an edited ask with its new question", () => {
-  expect(eventDescription(editedAskEvent())).toEqual(["Ask edited: Publish?"]);
+  expect(eventDescription(editedAskEvent())).toEqual(["Ask edited: ", { markdown: "Publish?" }]);
 });
 
 function answeredAskEvent(
@@ -106,7 +108,10 @@ function answeredAskEvent(
 }
 
 test("eventDescription says an answer changed when it replaced an earlier one", () => {
-  expect(eventDescription(answeredAskEvent())).toEqual(["Ask answered: Publish?"]);
+  expect(eventDescription(answeredAskEvent())).toEqual([
+    "Ask answered: ",
+    { markdown: "Publish?" },
+  ]);
   expect(
     eventDescription(
       answeredAskEvent({
@@ -116,7 +121,7 @@ test("eventDescription says an answer changed when it replaced an earlier one", 
         user: "alice",
       })
     )
-  ).toEqual(["Answer changed: Publish?"]);
+  ).toEqual(["Answer changed: ", { markdown: "Publish?" }]);
 });
 
 test("eventDescription labels a malformed decision", () => {
