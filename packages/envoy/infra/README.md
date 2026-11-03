@@ -66,7 +66,10 @@ pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/le
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
-`envoy-infra-v<version>`. `pulumi package add` records the package in `Pulumi.yaml`:
+`envoy-infra-v<version>`. The address after `--server` is the one the release built into the
+plugin from the repository it ran in,
+`https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
+`pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
 packages:
@@ -1586,8 +1589,6 @@ Its environment comes from the inputs:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL in `natsUrls` names a host other than `localhost` or a loopback address. The URL is read, never resolved. |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when set |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true`; unset otherwise |
 | `NATS_NKEY_SEED` | `seed`, when set. The whole environment is then a secret in the stack's state. |
 
 The listener serves on the host's loopback, `127.0.0.1:<port>`. This version sets no listen host,
@@ -1605,8 +1606,6 @@ The listener's outputs are `containerName` and `port`.
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
 | `port` | `9020` | The port the listener serves and the health check calls. |
-| `hostBridge` | unset | The address the listener delivers to this machine's sessions at: those registered through it, and those recording `machineId` as their host. Unset, the listener uses the host each session recorded, then `host.docker.internal`. Sessions that serve on the host's loopback are at `127.0.0.1`, since the container shares the host's network. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`: the listener also subscribes to every notification topic, so a session served on this machine receives a topic the stream does not store. Only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, such as a `gcp:NatsHub` user with `machineId` or `listenerMachineId`; under any other grant the server refuses the subscription and the listener's start ends. See [Permission sets](#permission-sets). |
 | `seed` | unset | A secret: the nkey seed of the NATS user the listener connects as. May come from another resource or stack. |
 | `waitForHealthy` | `true` | Whether `pulumi up` waits on the container's health check. See [Readiness](#readiness). |
 | `watchdog` | unset | `{host}`: deploys the watchdog on that SSH address. See [The watchdog](#the-watchdog). |
@@ -1628,7 +1627,7 @@ The listener refuses these before it registers anything, with an error naming wh
 
 - an nkey seed of any type, in any spelling listed under "What `check` and `verify` print",
   anywhere in its name or in any input but `seed`: `machineId`, `image`, `containerName`,
-  `hostBridge`, `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
+  `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
   names the input and never the value, as `envoy-infra:host:Listener example-host-a: image holds an
   nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
   `seed` is the one input that is a seed;
@@ -1636,9 +1635,7 @@ The listener refuses these before it registers anything, with an error naming wh
   `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be used
   the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>` the
   listener uses;
-- a `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
-- a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
@@ -1800,7 +1797,6 @@ resources:
       natsUrls:
         - nats://nats.internal.example:4222
       image: ghcr.io/sjawhar/legion/envoy:<tag>
-      hostBridge: 127.0.0.1
       seed: ${natsSeed}
     options:
       providers:
@@ -1847,7 +1843,6 @@ const listener = new envoyInfra.host.Listener(
     machineId: "example-host-a",
     natsUrls: nats.requireOutput("natsUrls"),
     image: "ghcr.io/sjawhar/legion/envoy:<tag>",
-    hostBridge: "127.0.0.1",
     watchdog: { host: "example-host-a.internal.example" },
   },
   { providers: [dockerHost, commandHost] }
@@ -1973,8 +1968,6 @@ environment, in this order:
 | `ENVOY_MACHINE_ID` | `machineId` |
 | `NATS_URLS` | `natsUrls`, joined with commas |
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
-| `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
-| `ENVOY_SUBSCRIBE_ALL_TOPICS` | `1` when `subscribeAllTopics` is `true` |
 | `ENVOY_NATS_REPLICAS` | `natsReplicas` |
 | `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
 | `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
@@ -2027,9 +2020,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `family`, `cpu`, `memory` | required | The task definition's family and size. |
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
-| `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
 | `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
-| `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions` or `ListenerHostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
 | `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
@@ -2058,9 +2049,9 @@ the input:
   counts as missing) or given while it does not, each input checked before the list; then a
   `webhooks` other than `[]` or exactly `["github", "slack"]`; an empty `machineId`, one with
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
-  whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
-  control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
+  whitespace other than an interior ordinary space, or one over 246 bytes; a `listenHost` holding
+  a control character; a blank `listenHost`; a `natsReplicas` below 1 or above 5; an empty
+  `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2279,7 +2270,6 @@ listener = envoy_infra.aws.WebhookListener(
     cpu="256",
     memory="512",
     listen_host="0.0.0.0",
-    host_bridge="127.0.0.1",
     nats_replicas=1,
     alarm_topic_arn=f"arn:aws:sns:{region}:000000000000:example-alarms",
     base_tags=base_tags,
@@ -2368,7 +2358,7 @@ authorization {
 ### webhook-listener-env
 
 ```text
-envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n> [--subscribe-all-topics]
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --nats-replicas <n>
 ```
 
 Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
@@ -2376,13 +2366,12 @@ container's order. The secrets ECS injects are not printed. It refuses what the 
 these inputs, and a value holding a line break, which no line could carry:
 
 ```text
-$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1
+$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --nats-replicas 1
 PORT=9020
 ENVOY_LISTEN_HOST=0.0.0.0
 ENVOY_MACHINE_ID=example-fargate
 NATS_URLS=nats://example-bus.example-namespace.internal.example:4222
 ENVOY_ALLOW_REMOTE_NATS=1
-ENVOY_HOST_BRIDGE=127.0.0.1
 ENVOY_NATS_REPLICAS=1
 ENVOY_WEBHOOKS=github,slack
 ENVOY_GITHUB_MENTION_TRIGGER=@legion
@@ -2391,9 +2380,6 @@ ENVOY_REVIEWER_APP_ID=1234567
 
 With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
 none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
-
-With `--subscribe-all-topics`, the component's `subscribeAllTopics: true`, it prints
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` right after the `ENVOY_HOST_BRIDGE` line; without it, no such line.
 
 Without `--reviewer-app-id`, it prints
 `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
@@ -2913,30 +2899,16 @@ lane queue groups, and the session user's refusal of a consumer create; `AGENTS.
 directory says how.
 
 `ListenerHostPermissions(machineID)` is the grant of a listener's own NATS user, one no session
-shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then the plain
-`notifications.>` subscribe `ENVOY_SUBSCRIBE_ALL_TOPICS` needs. It is the one set under which a
-listener both keeps its sessions' consumers and subscribes to every notification topic. A
-`gcp:NatsHub` user with `listenerMachineId` holds it, for a listener whose process is the only
-thing holding that seed: a session connecting as it could create, pull and delete any session's
-consumer. A host whose sessions share the listener's user takes `machineId` and
-`HostPermissions` instead, and keeps its sessions on the core path. This repository's listener
-runs under this set, opted in, against the real servers below: it answers a registration
-`consumer`, relays a send on the session's relay subject, and pushes a topic the stream does not
-store to a session's serving port, with no refusal.
-
-`HostPermissions` and `ListenerHostPermissions` are the sets under which a listener may set
-`ENVOY_SUBSCRIBE_ALL_TOPICS=1` (`host:Listener`'s and `aws:WebhookListener`'s
-`subscribeAllTopics`). The listener then holds a core subscription on `notifications.>` in its
-machine's queue group `envoy-listener-live-<m>`, so a session served on its machine receives a
-topic the stream does not store, which the sets' plain `notifications.>` subscribe entry allows in
-any queue group. `ListenerPermissions` and `DispatchPermissions` subscribe only to the role lanes
-and `_INBOX.>`, so the server refuses that subscription, and the listener's start ends with exit 1
-and an ERROR naming `ENVOY_SUBSCRIBE_ALL_TOPICS`. A `gcp:NatsHub`'s own `listener` and
-`gcp:Dispatch`'s listener therefore never set it, and neither component takes the input. Both
-outcomes are checked against the real servers above: the listener opted in as a user holding
-`HostPermissions` delivers an ad-hoc topic to a session's serving port with no refusal, and opted
-in as a user holding `ListenerPermissions` ends its start, the server's one refusal its
-subscription to `notifications.>`.
+shares: `ListenerPermissions(machineID)`, the session consumers' calls included, then a plain
+`notifications.>` subscribe that no Envoy program uses any more. A `gcp:NatsHub` user with
+`listenerMachineId` holds it, for a listener whose process is the only thing holding that seed: a
+session connecting as it could create, pull and delete any session's consumer. A host whose
+sessions share the listener's user takes `machineId` and `HostPermissions` instead, and keeps its
+sessions on the core path. The two sets therefore allow the same calls a listener makes; the
+subscribe stays rather than being dropped because a change to a set rewrites every hub's rendered
+authorization, which replaces a VM hub's instance and reaches a clustered hub only as a live
+reload. This repository's listener runs under this set against the real servers below: it answers
+a registration `consumer` and relays a send on the session's relay subject, with no refusal.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, its stored-message get

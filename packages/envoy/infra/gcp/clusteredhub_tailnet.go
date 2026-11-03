@@ -18,7 +18,7 @@ const (
 	// holds the containers' shutdowns, which run side by side from the start of the termination:
 	// the tailscale container's preStop hook and containerboot's shutdown (tailnetShutdownSeconds,
 	// 55 s), and the listener's preStop wait and its own shutdown
-	// (clusteredHubListenerPreStopSeconds + clusteredHubListenerShutdownSeconds, 51 s). The
+	// (clusteredHubListenerPreStopSeconds + clusteredHubListenerShutdownSeconds, 53 s). The
 	// advertiser exits on its SIGTERM at once (tailnetAdvertiserBody's trap), so the pod is gone
 	// when the slower of the two is, not at the grace period's SIGKILL.
 	clusteredHubTailnetGraceSeconds = 60
@@ -28,10 +28,11 @@ const (
 	// Service, and only then takes its SIGTERM.
 	clusteredHubListenerPreStopSeconds = tailnetPreStopDrainSeconds + tailnetPreStopWaitSeconds
 	// clusteredHubListenerShutdownSeconds is the longest the session listener takes to stop on its
-	// SIGTERM: the HTTP server's 10 s, the live lane's 3 s drain and the NATS connection's 13 s
-	// drain, run one after another (packages/envoy/cmd/listener/main.go:978,1011,1021, its sum
-	// stated at :1018-1020).
-	clusteredHubListenerShutdownSeconds = 10 + 3 + 13
+	// SIGTERM: the HTTP server's 10 s, the role lane's 5 s (a 3 s drain of the lane's own client,
+	// and the 2 s receipt window for the forwards its handler handed over, roleLane.drain) and the
+	// NATS connection's 13 s drain, run one after another
+	// (packages/envoy/cmd/listener/main.go:1225,1263,1270, its sum stated at :1267-1269).
+	clusteredHubListenerShutdownSeconds = 10 + 5 + 13
 
 	// clusteredHubTailnetUID is the one uid every container of a tailnet host pod runs as
 	// (tailnetPodSecurity says why one). It is the listener image's own user: the image creates

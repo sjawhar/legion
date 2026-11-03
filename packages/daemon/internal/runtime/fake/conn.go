@@ -110,6 +110,12 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 	return c.failures["AdoptWorkingCopy"]
 }
 
+// RescueUnpushed answers a disk with no workspace on it: the daemon asks the push check through
+// its runtime (runtime.Runtime.RescueUnpushed), whose fake answers what a test scripts there.
+func (c *Conn) RescueUnpushed(context.Context, runtime.RescueRequest) ([]runtime.WorkspaceRescue, error) {
+	return nil, nil
+}
+
 // AgentSecretsEnrollment records the enrollment id the daemon asked the agent's shim to keep.
 func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) error {
 	c.mu.Lock()

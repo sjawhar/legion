@@ -4,6 +4,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { YAML } from "bun";
+import { repoPaths } from "../repo-paths.ts";
 
 const contentDir = process.argv[2];
 if (!contentDir) throw new Error("usage: legion-skills.ts <content dir>");
@@ -44,7 +45,7 @@ const page = [
     "",
     description.replaceAll("<", "&lt;"),
     "",
-    `Source: [\`${path}\`](https://github.com/sjawhar/legion/blob/main/${path})`,
+    `Source: [\`${path}\`](${repoPaths.repository_url}/blob/main/${path})`,
     "",
   ]),
 ].join("\n");

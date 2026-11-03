@@ -43,8 +43,8 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 // bindBoundDurable binds consumer to handler as the listener's start does, then waits, as a
 // rebuild does (awaitDurableBound), until the server reports the durable delivering to client's own
 // subscription. A consumer info read right after the bind can still find the durable unbound: a
-// /healthz read did once on CI, failing TestHealthzNamesTheLiveTopicsLane with "not bound to this
-// listener's subscription". Every test that reads /healthz over a freshly bound durable binds it
+// /healthz read did once on CI, failing with "not bound to this listener's subscription". Every
+// test that reads /healthz over a freshly bound durable binds it
 // here.
 func bindBoundDurable(t *testing.T, client *bus.Client, consumer string, handler natsgo.MsgHandler) *natsgo.Subscription {
 	t.Helper()
