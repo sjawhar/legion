@@ -389,12 +389,12 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 // (askFirst), and every drop of a delivery runs it in the same step as the drop: sendPending's
 // phase drop, and dropUpdateTask, which makes it of its own for the three drops a round that is
 // over makes through it (leaveRound, endPodUpdate, openPodUpdate's round switch) and for
-// sendPending's drop of a left round's ask. The one drop that does not run it is currentRootTask's
-// retirement of a root architect's held task that names nothing any more: sendPending's asksRoot
-// branch clears askFirst before it, without asking, so no question is left to answer. Left armed over nothing pending, the question would
-// make the claim's next task the running turn's — confirmed by a turn of another cause, never
-// prompted, and retired unsent by that turn's end — and the worker would never receive that
-// task at all.
+// sendPending's drop of a left round's ask. The one drop that does not run it is
+// currentRootTask's retirement of a root architect's held task that names nothing any more:
+// sendPending's asksRoot branch clears askFirst before it, without asking, so no question is left
+// to answer. Left armed over nothing pending, the question would make the claim's next task the
+// running turn's — confirmed by a turn of another cause, never prompted, and retired unsent by
+// that turn's end — and the worker would never receive that task at all.
 //
 // It asks what a send would have asked, and confirms nothing: no delivery is left to confirm, so
 // an agent the ask finds in a turn only moves the claim to working, with the turn marked one this
