@@ -23,7 +23,8 @@ import type { Ctx } from '@milkdown/kit/ctx';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { Node as ProseMirrorNode, DOMOutputSpec, TagParseRule } from '@milkdown/kit/prose/model';
 import type { Transaction } from '@milkdown/kit/prose/state';
-import { Mapping } from '@milkdown/kit/prose/transform';
+import { AttrStep, Mapping } from '@milkdown/kit/prose/transform';
+import type { Step } from '@milkdown/kit/prose/transform';
 import type { NodeSchema } from '@milkdown/kit/transformer';
 import { $prose } from '@milkdown/kit/utils';
 import type { $NodeSchema } from '@milkdown/kit/utils';
@@ -143,7 +144,7 @@ export const blockIdSchemas = [
   footnoteDefinitionSchema,
 ].map(extend);
 
-export const blockIdsPluginKey = new PluginKey('proof-block-ids');
+export const blockIdsPluginKey = new PluginKey<BlockIdCounts>('proof-block-ids');
 
 /** Receives the number of nodes a stamping pass read - see `createBlockIdsPlugin`. */
 export type BlockIdVisitCounter = (read: number) => void;
@@ -159,21 +160,149 @@ export function setBlockIdVisitCounter(next: BlockIdVisitCounter | null): void {
   visitCounter = next;
 }
 
-/** How many nodes a stamping pass has visited so far; shared by the two walks of one pass. */
+/** How many nodes a pass has visited so far; shared by every walk of one pass. */
 interface VisitCount {
   read: number;
 }
 
-/** `node.descendants`, counting every node the walk visits - blocks, inline nodes and text alike. */
-function descendantsCounted(
-  node: ProseMirrorNode,
+/** A span of one document, in that document's own positions, as `nodesBetween` takes it. */
+interface Span {
+  from: number;
+  to: number;
+}
+
+/** The spans a batch changed: `before` in the old document, `after` in the new one. */
+interface ChangedSpans {
+  before: Span[];
+  after: Span[];
+}
+
+/** `spans` clamped to a document of `size`, sorted, and joined where they meet or overlap. */
+function mergeSpans(spans: Span[], size: number): Span[] {
+  const clamp = (pos: number): number => Math.min(Math.max(pos, 0), size);
+  const sorted = spans
+    .map(({ from, to }) => ({ from: clamp(Math.min(from, to)), to: clamp(Math.max(from, to)) }))
+    .sort((a, b) => a.from - b.from);
+  const merged: Span[] = [];
+  for (const span of sorted) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && span.from <= last.to) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+/**
+ * Every node `spans` touch and every ancestor of one, each handed to `f` once however many
+ * spans reach it. Every visit is counted, the repeats included: that is the work done.
+ */
+function forEachInSpans(
+  doc: ProseMirrorNode,
+  spans: readonly Span[],
   visits: VisitCount,
-  f: (node: ProseMirrorNode, pos: number) => boolean | void,
+  f: (node: ProseMirrorNode, pos: number) => void,
 ): void {
-  node.descendants((child, pos) => {
-    visits.read += 1;
-    return f(child, pos);
+  const seen = new Set<number>();
+  for (const { from, to } of spans) {
+    doc.nodesBetween(from, to, (node, pos) => {
+      visits.read += 1;
+      if (seen.has(pos)) return;
+      seen.add(pos);
+      f(node, pos);
+    });
+  }
+}
+
+/**
+ * Where two documents differ, for a batch y-prosemirror applied: it writes a remote change as
+ * one replace whose step map is of no finer grain than the region it covers, so the documents'
+ * own content diff names the spans instead.
+ */
+function diffSpans(before: ProseMirrorNode, after: ProseMirrorNode): ChangedSpans {
+  const start = before.content.findDiffStart(after.content);
+  const end = start === null ? null : before.content.findDiffEnd(after.content);
+  if (start === null || end === null) return { before: [], after: [] };
+  // The two ends may run back past the shared start; the overlap is pushed onto both.
+  const overlap = start - Math.min(end.a, end.b);
+  const grow = overlap > 0 ? overlap : 0;
+  return {
+    before: [{ from: start, to: end.a + grow }],
+    after: [{ from: start, to: end.b + grow }],
+  };
+}
+
+/**
+ * The spans `transactions` changed, each expressed against the one old and the one new
+ * document the pass compares: every `[oldStart, oldEnd, newStart, newEnd]` a step's own map
+ * reports, the old end mapped back through the steps before it and the new end forward
+ * through the steps after it.
+ */
+function changedSpans(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  transactions: readonly Transaction[],
+): ChangedSpans {
+  if (transactions.some(isRemote)) return diffSpans(before, after);
+  const steps: Step[] = [];
+  for (const tr of transactions) steps.push(...tr.steps);
+  const mapping = new Mapping(steps.map((step) => step.getMap()));
+  const oldSpans: Span[] = [];
+  const newSpans: Span[] = [];
+  steps.forEach((step, index) => {
+    const back = mapping.slice(0, index).invert();
+    const forward = mapping.slice(index + 1);
+    let moved = false;
+    mapping.maps[index].forEach((oldStart, oldEnd, newStart, newEnd) => {
+      moved = true;
+      oldSpans.push({ from: back.map(oldStart, -1), to: back.map(oldEnd, 1) });
+      newSpans.push({ from: forward.map(newStart, -1), to: forward.map(newEnd, 1) });
+    });
+    // An `AttrStep` moves nothing, so its map reports no span: the node it changes is the
+    // span. A `DocAttrStep` changes the root, which carries no block id, and needs none.
+    if (!moved && step instanceof AttrStep) {
+      oldSpans.push({ from: back.map(step.pos, -1), to: back.map(step.pos + 1, 1) });
+      newSpans.push({ from: forward.map(step.pos, -1), to: forward.map(step.pos + 1, 1) });
+    }
   });
+  return {
+    before: mergeSpans(oldSpans, before.content.size),
+    after: mergeSpans(newSpans, after.content.size),
+  };
+}
+
+/**
+ * How many blocks of the document carry each id, with what the plugin has read to keep it.
+ *
+ * `counts` is mutated from one value into the next rather than copied: a copy of every id of
+ * the document on every transaction would cost what this plugin's walk no longer does. The
+ * value that gave its map away is `spent`, and a second transaction applied from the same
+ * state - a branch the editor almost never takes - rebuilds the counts rather than read a map
+ * another document now describes.
+ */
+interface BlockIdCounts {
+  counts: Map<string, number>;
+  /** Nodes visited since the state was created; a pass reads its own cost as the difference. */
+  read: number;
+  spent: boolean;
+}
+
+function adjustCount(counts: Map<string, number>, node: ProseMirrorNode, by: number): void {
+  if (!isIdentifiedBlock(node)) return;
+  const id = blockIdOf(node);
+  if (id === null) return;
+  const next = (counts.get(id) ?? 0) + by;
+  if (next > 0) counts.set(id, next);
+  else counts.delete(id);
+}
+
+/** The blocks-per-id of a whole document: the load's walk, and the rebuild of a spent value. */
+function countEveryBlock(doc: ProseMirrorNode, visits: VisitCount): Map<string, number> {
+  const counts = new Map<string, number>();
+  doc.descendants((node) => {
+    visits.read += 1;
+    adjustCount(counts, node, 1);
+  });
+  return counts;
 }
 
 interface MissingBlock {
@@ -181,28 +310,39 @@ interface MissingBlock {
   node: ProseMirrorNode;
 }
 
+/** No position of a document: the id's holder is a block outside every changed span. */
+const OUTSIDE = -1;
+
 /**
- * Blocks with no id, or with an id another block of the document keeps. Of the blocks
- * sharing one id, the one `keeper` names keeps it; any other id stays with its first
- * block in document order, which is where a split leaves it (the first half keeps the
- * attrs both halves were copied from).
+ * Blocks of the changed spans with no id, or with an id `counts` shows on another block too.
+ * Of the blocks sharing one id, the one `keeper` names keeps it; an id whose count reaches
+ * past the spans is held by a block the edit did not touch, so every copy in the spans gets a
+ * new one; otherwise the id stays with its first block in document order, which is where a
+ * split leaves it (the first half keeps the attrs both halves were copied from). A block
+ * outside every span is never stamped: the edit did not put its id on two blocks.
  */
 function blocksNeedingIds(
   doc: ProseMirrorNode,
+  spans: readonly Span[],
+  counts: ReadonlyMap<string, number>,
   keeper: (id: string) => number | undefined,
   visits: VisitCount,
 ): MissingBlock[] {
   const blocks: { pos: number; node: ProseMirrorNode; id: string | null }[] = [];
-  const count = new Map<string, number>();
-  descendantsCounted(doc, visits, (node, pos) => {
+  const here = new Map<string, number>();
+  forEachInSpans(doc, spans, visits, (node, pos) => {
     if (!isIdentifiedBlock(node)) return;
     const id = blockIdOf(node);
     blocks.push({ pos, node, id });
-    if (id !== null) count.set(id, (count.get(id) ?? 0) + 1);
+    if (id !== null) here.set(id, (here.get(id) ?? 0) + 1);
   });
   const kept = new Map<string, number>();
   for (const { pos, id } of blocks) {
-    if (id === null || count.get(id) === 1 || kept.has(id)) continue;
+    if (id === null || (counts.get(id) ?? 0) < 2 || kept.has(id)) continue;
+    if ((counts.get(id) ?? 0) > (here.get(id) ?? 0)) {
+      kept.set(id, OUTSIDE);
+      continue;
+    }
     const held = keeper(id);
     const holderHere = held !== undefined && blocks.some((block) => block.id === id && block.pos === held);
     kept.set(id, holderHere ? held : pos);
@@ -215,10 +355,13 @@ function blocksNeedingIds(
 /**
  * Where, in the document `transactions` produced, the block that held `id` in `before`
  * now starts: its old position mapped through every step, leaning past anything
- * inserted right at its start, so a copy inserted above it does not take its place.
+ * inserted right at its start, so a copy inserted above it does not take its place. Only
+ * the changed spans of `before` are read, and only when a duplicated id needs them: a block
+ * outside them reaches the new document unchanged, where its copy is found instead.
  */
 function holderAfter(
   before: ProseMirrorNode,
+  spans: readonly Span[],
   transactions: readonly Transaction[],
   visits: VisitCount,
 ): (id: string) => number | undefined {
@@ -228,7 +371,7 @@ function holderAfter(
   return (id) => {
     if (held === undefined) {
       const holders = new Map<string, number>();
-      descendantsCounted(before, visits, (node, pos) => {
+      forEachInSpans(before, spans, visits, (node, pos) => {
         if (!isIdentifiedBlock(node)) return;
         const blockId = blockIdOf(node);
         if (blockId !== null && !holders.has(blockId)) holders.set(blockId, pos);
@@ -280,25 +423,57 @@ function isRemote(tr: Transaction): boolean {
  * Stamps ids on blocks created by local transactions. Remote transactions and the
  * initial document load are left to their origin (the peer or the server).
  *
- * The pass reports what it costs: `read` is the number of nodes it visited while deciding
- * what to stamp - every node of `blocksNeedingIds`'s walk of the new document plus every
- * node of `holderAfter`'s walk of the old one, which only runs when an id is duplicated.
- * Nodes visited, not blocks found: a walk that reads less is the point. The count reaches
- * a stamping pass's transaction as the meta `{ stamped, read }` under `blockIdsPluginKey`,
- * and every pass, stamping or not, through `setBlockIdVisitCounter`.
+ * The plugin reads only what an edit changed. Its state holds how many blocks of the
+ * document carry each id: `init` counts them over the whole document, which is the load and
+ * happens once, and `apply` lowers the counts for the blocks of the changed spans of the old
+ * document and raises them for those of the new one. A pass then stamps within those spans
+ * alone - a block with no id, and a copy of an id the counts show on another block, which
+ * the old holder keeps (`holderAfter`). A block outside them is left as it is, a peer's
+ * block with no id included: no local edit created it, and the server stamps it.
+ *
+ * The pass reports what it costs: `read` is the number of nodes it visited, its state's
+ * walks for this batch included. Nodes visited, not blocks found: a walk that reads less is
+ * the point. The count reaches a stamping pass's transaction as the meta `{ stamped, read }`
+ * under `blockIdsPluginKey`, and every pass, stamping or not, through
+ * `setBlockIdVisitCounter`.
  */
-export function createBlockIdsPlugin(): Plugin {
-  return new Plugin({
+export function createBlockIdsPlugin(): Plugin<BlockIdCounts> {
+  return new Plugin<BlockIdCounts>({
     key: blockIdsPluginKey,
+    state: {
+      init(_config, state) {
+        const visits: VisitCount = { read: 0 };
+        return { counts: countEveryBlock(state.doc, visits), read: visits.read, spent: false };
+      },
+      apply(tr, value) {
+        if (!tr.docChanged) return value;
+        const visits: VisitCount = { read: 0 };
+        if (value.spent) {
+          const counts = countEveryBlock(tr.doc, visits);
+          return { counts, read: value.read + visits.read, spent: false };
+        }
+        const spans = changedSpans(tr.before, tr.doc, [tr]);
+        forEachInSpans(tr.before, spans.before, visits, (node) => adjustCount(value.counts, node, -1));
+        forEachInSpans(tr.doc, spans.after, visits, (node) => adjustCount(value.counts, node, 1));
+        value.spent = true;
+        return { counts: value.counts, read: value.read + visits.read, spent: false };
+      },
+    },
     appendTransaction(transactions, oldState, newState) {
       if (!transactions.some((tr) => tr.docChanged)) return null;
-      if (transactions.some((tr) => isRemote(tr) || tr.getMeta('document-load'))) return null;
-      const visits: VisitCount = { read: 0 };
-      const missing = blocksNeedingIds(
-        newState.doc,
-        holderAfter(oldState.doc, transactions, visits),
-        visits,
-      );
+      const before = blockIdsPluginKey.getState(oldState);
+      const after = blockIdsPluginKey.getState(newState);
+      // This plugin's own state, so both are there; the key's type does not know it.
+      if (before === undefined || after === undefined) return null;
+      // What the state's walks have already read for this batch.
+      const visits: VisitCount = { read: after.read - before.read };
+      if (transactions.some((tr) => isRemote(tr) || tr.getMeta('document-load'))) {
+        visitCounter?.(visits.read);
+        return null;
+      }
+      const spans = changedSpans(oldState.doc, newState.doc, transactions);
+      const keeper = holderAfter(oldState.doc, spans.before, transactions, visits);
+      const missing = blocksNeedingIds(newState.doc, spans.after, after.counts, keeper, visits);
       visitCounter?.(visits.read);
       if (missing.length === 0) return null;
       let tr = newState.tr;

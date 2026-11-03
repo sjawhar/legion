@@ -19,20 +19,27 @@ function assert(condition: boolean, message: string): asserts condition {
 const BLOCKS = 10_000;
 
 /**
- * What one single-character edit of a 10,000-block document makes the plugin read, today.
+ * What one single-character edit of a 10,000-block document makes the plugin read.
  *
- * The base reads the whole new document on every local edit: every paragraph and its text
- * node, 2 nodes per block. `holderAfter`'s walk of the old document is lazy and this edit
- * duplicates no id, so it does not run; an edit that does duplicate one reads the old
- * document whole as well. The commit that makes the plugin read only the ranges an edit
- * changed lowers this to the nodes of those ranges and their ancestors, so this literal
- * changes with it.
+ * The head reads the changed spans and their ancestors only. The measured 5: the edited
+ * paragraph in the old document, where the insertion point is a point and reaches no text
+ * node, and the paragraph and its text node in the new one, as the plugin state lowers and
+ * raises its counts; then that new pair again, as the pass looks there for a block to stamp.
+ * The whole document is read once, at the load, and never again. The base read it on every
+ * edit instead - 20,000 nodes here, every block and its text, the measured number this line
+ * held before - so the measured cost of this edit no longer follows the document's size.
+ *
+ * A bound, where the base asserted equality: the base read a fixed whole document, so its
+ * count was the document's. The head's count follows the shape of the edit - which spans a
+ * step's map reports, and which ancestors they reach - so what the criterion holds the
+ * plugin to is "at most the nodes of the changed spans and their ancestors". The measured
+ * number travels in the failure message, so a regression says how far it went over.
  */
-const BASE_VISITS = 20_000;
+const MOST_VISITS = 5;
 
 console.log('\n=== Block ids cost ===');
 
-await test('one character into a 10,000-block document reads the whole document', async () => {
+await test('one character into a 10,000-block document reads only what it changed', async () => {
   const { schema } = await createHeadlessProof();
   const paragraphs: ProseMirrorNode[] = [];
   for (let i = 1; i <= BLOCKS; i += 1) {
@@ -65,7 +72,7 @@ await test('one character into a 10,000-block document reads the whole document'
     assert(blockIdOf(next.doc.child(middle)) === `b-${middle + 1}`, 'the edited block lost its id');
     assert(read !== null, 'the plugin did not report what it read');
     console.log(`  10,000 blocks, one character inserted: ${read} nodes read in ${elapsed.toFixed(1)}ms`);
-    assert(read === BASE_VISITS, `nodes read = ${read}, expected ${BASE_VISITS}`);
+    assert(read <= MOST_VISITS, `nodes read = ${read}, expected at most ${MOST_VISITS}`);
   } finally {
     setBlockIdVisitCounter(null);
     setBlockIdGenerator(null);
