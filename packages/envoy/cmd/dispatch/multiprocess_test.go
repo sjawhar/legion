@@ -2105,15 +2105,23 @@ func TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables(t *testing.T
 	fake := startGitHubFake(t)
 	fake.Release()
 	app := githubAppEnv(t, fake.URL())
-	peer := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey})
+	// Every step from the refused process's first refusal to its stop runs inside the budget that
+	// wait is given: a live window and a heartbeat (processes.Register, 20 s). Past it the process
+	// gives up on its own, exits 1 and releases both durables on the way out -- not the stop this
+	// row is about, and the standby then binds them rather than standing by, which fails the
+	// stand-by wait below. A `go build` of envoy-dispatch took 14 s on an idle two-core host and
+	// over 30 s on a loaded one, so the three starts share one binary built here, before the refusal,
+	// and the standby's own boot is all that budget spends.
+	binary := cmdtest.Build(t, "envoy-dispatch")
+	peer := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Binary: binary})
 	peer.waitHealthy(t)
 
-	waiting := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-the-peer-does-not-share", Env: app})
+	waiting := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-the-peer-does-not-share", Env: app, Binary: binary})
 	waiting.waitForLog(t, 30*time.Second, "a live server process refuses this one's signing keys; waiting for its heartbeat to lapse")
 	for _, durable := range deliveryDurables {
 		waiting.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer bound"`, "name="+durable)
 	}
-	standby := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: app})
+	standby := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: app, Binary: binary})
 	for _, durable := range deliveryDurables {
 		standby.waitForLog(t, 10*time.Second, `msg="dispatch delivery: NATS consumer held by another process; standing by"`, "name="+durable)
 	}
@@ -2133,6 +2141,14 @@ func TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables(t *testing.T
 	}
 	if waiting.logged(`msg="dispatch: listening"`) {
 		t.Fatalf("the process refused admission serves; the row needs it still waiting:\n%s", waiting.Output.String())
+	}
+	// A process that gave up that wait never served either, and released its durables as it
+	// exited, so there would be nothing left for the stop below to release.
+	select {
+	case <-waiting.Exited:
+		t.Fatalf("the process refused admission %s before the row stopped it, having outlasted the %v its admission wait is given:\n%s",
+			waiting.Cmd.ProcessState, processes.LiveWindow+processes.HeartbeatInterval, waiting.Output.String())
+	default:
 	}
 
 	waiting.Terminate(t)
