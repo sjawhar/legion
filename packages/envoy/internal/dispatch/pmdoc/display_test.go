@@ -96,17 +96,16 @@ func TestReadForDisplayMatchesItsFixtures(t *testing.T) {
 	}
 }
 
-// displayReading is the display read of markdown in mode, as JSON, with the block ids minted in
-// document order so two runs write the same bytes.
+// displayReading is the display read of markdown in mode, encoded as a response carries it
+// (toDisplayJSON): the attributes the browser's schema supplies itself are no part of the
+// golden, and neither is a block id the markdown did not name, since the read mints none.
 func displayReading(t *testing.T, markdown string, mode DisplayMode) json.RawMessage {
 	t.Helper()
-	SetBlockIDGenerator(counterBlockIDs())
-	defer SetBlockIDGenerator(nil)
 	doc := ReadForDisplay(markdown, mode)
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("the display read is outside the schema: %v", err)
 	}
-	encoded, err := doc.JSON()
+	encoded, err := json.Marshal(doc.toDisplayJSON())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +143,6 @@ func TestReadForDisplayRefusesNothingTheWriterRefuses(t *testing.T) {
 			if _, err := Parse(string(markdown)); err == nil {
 				t.Fatalf("%s is stored by the writer, so it belongs in testdata/corpus", path)
 			}
-			installCounterBlockIDs(t)
 			doc := ReadForDisplay(string(markdown), DisplayLatest)
 			if err := doc.Validate(); err != nil {
 				t.Fatalf("the display read is outside the schema: %v", err)
@@ -161,7 +159,6 @@ func TestReadForDisplayShowsADocumentPastTheElementLimitAsItsText(t *testing.T) 
 	if _, err := Parse(markdown); !errors.Is(err, ErrTooManyElements) {
 		t.Fatalf("Parse() = %v, want ErrTooManyElements", err)
 	}
-	installCounterBlockIDs(t)
 	doc := ReadForDisplay(markdown, DisplayLatest)
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("the display read is outside the schema: %v", err)
@@ -187,7 +184,6 @@ func TestReadForDisplayShowsARefusedBlockAsItsTextAndKeepsTheOthers(t *testing.T
 	if _, err := Parse(markdown); err == nil {
 		t.Fatal("Parse() stored the document; this test wants one it refuses")
 	}
-	installCounterBlockIDs(t)
 	doc := ReadForDisplay(markdown, DisplayLatest)
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("the display read is outside the schema: %v", err)

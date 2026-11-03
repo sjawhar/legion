@@ -32,7 +32,7 @@ func DisplayJSON(markdown string, mode DisplayMode) json.RawMessage {
 	if tree, held := displayCache.get(key); held {
 		return tree
 	}
-	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toJSON())
+	tree, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
 	if err != nil {
 		slog.Warn("dispatch: display tree encoding failed", "error", err)
 		return nil
@@ -63,7 +63,7 @@ func DisplaySnippetJSON(headline, start, stop string) json.RawMessage {
 	}
 	tree := ReadForDisplay(SearchSnippetMarkdown(headline), DisplayLatest)
 	highlightSnippet(tree, start, stop, false)
-	encoded, err := json.Marshal(tree.toJSON())
+	encoded, err := json.Marshal(tree.toDisplayJSON())
 	if err != nil {
 		slog.Warn("dispatch: search snippet tree encoding failed", "error", err)
 		return nil

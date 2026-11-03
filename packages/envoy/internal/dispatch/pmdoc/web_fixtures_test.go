@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,25 +128,24 @@ var webFixtureTexts = []struct{ name, markdown string }{
 
 // TestWebDisplayFixture writes, or under --check verifies, the display trees the web app's unit
 // tests draw. Every tree is this package's own reading of the markdown beside it, in both modes
-// (ReadForDisplay), and a snippet's is the reading a search hit gets, highlight marks and all
-// (DisplaySnippetJSON), so a view's test draws exactly what the server would have sent it.
+// (ReadForDisplay), encoded as a response carries it (toDisplayJSON), and a snippet's is the
+// reading a search hit gets, highlight marks and all (DisplaySnippetJSON), so a view's test
+// draws exactly the bytes the server would have sent it.
 //
-// Each reading mints its block ids from a counter rather than at random
-// (SetBlockIDGenerator), so this writes the same file on every run and --check answers a stale
-// corpus rather than the clock. The readings go through ReadForDisplay itself rather than
-// DisplayJSON, whose cache would hand back a tree another test of this package read with other
-// ids.
+// The display read mints no block id (ReadForDisplay), so this writes the same file on every
+// run and --check answers a stale corpus rather than the clock. The readings go through
+// ReadForDisplay itself rather than DisplayJSON only to keep the kept encoding out of it.
 func TestWebDisplayFixture(t *testing.T) {
 	cases := make([]webFixtureCase, 0, len(webFixtureTexts))
 	for _, text := range webFixtureTexts {
 		built := webFixtureCase{
 			Name:     text.name,
 			Markdown: text.markdown,
-			Latest:   countedDisplayJSON(t, text.markdown, DisplayLatest),
-			Version:  countedDisplayJSON(t, text.markdown, DisplayVersion),
+			Latest:   webDisplayJSON(t, text.markdown, DisplayLatest),
+			Version:  webDisplayJSON(t, text.markdown, DisplayVersion),
 		}
 		if strings.Contains(text.markdown, webSnippetStart) {
-			built.Snippet = countedSnippetJSON(t, text.markdown)
+			built.Snippet = webSnippetJSON(t, text.markdown)
 		}
 		cases = append(cases, built)
 	}
@@ -177,33 +175,20 @@ func TestWebDisplayFixture(t *testing.T) {
 	t.Logf("wrote %d texts to %s", len(cases), webFixturePath)
 }
 
-// countingBlockIDs mints `b-000001`, `b-000002`, … from this read's start, and puts the random
-// generator back once the read is done.
-func countingBlockIDs() func() {
-	minted := 0
-	SetBlockIDGenerator(func() string {
-		minted++
-		return fmt.Sprintf("b-%06d", minted)
-	})
-	return func() { SetBlockIDGenerator(nil) }
-}
-
-// countedDisplayJSON is DisplayJSON's reading of markdown with counted block ids and no cache.
-func countedDisplayJSON(t *testing.T, markdown string, mode DisplayMode) json.RawMessage {
+// webDisplayJSON is the display tree of markdown as a response carries it.
+func webDisplayJSON(t *testing.T, markdown string, mode DisplayMode) json.RawMessage {
 	t.Helper()
-	defer countingBlockIDs()()
-	encoded, err := json.Marshal(ReadForDisplay(markdown, mode).toJSON())
+	encoded, err := json.Marshal(ReadForDisplay(markdown, mode).toDisplayJSON())
 	if err != nil {
 		t.Fatalf("encode the display tree of %q: %v", markdown, err)
 	}
 	return encoded
 }
 
-// countedSnippetJSON is DisplaySnippetJSON's reading of a search hit's snippet, with counted
-// block ids: the balancing, the read and the highlight are all the server's own.
-func countedSnippetJSON(t *testing.T, markdown string) json.RawMessage {
+// webSnippetJSON is DisplaySnippetJSON's reading of a search hit's snippet: the balancing, the
+// read and the highlight are all the server's own.
+func webSnippetJSON(t *testing.T, markdown string) json.RawMessage {
 	t.Helper()
-	defer countingBlockIDs()()
 	tree := DisplaySnippetJSON(markdown, webSnippetStart, webSnippetStop)
 	if tree == nil {
 		t.Fatalf("the snippet of %q read into no tree", markdown)

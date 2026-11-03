@@ -8,16 +8,14 @@ import (
 	"testing"
 )
 
-// The display tree a response carries is ReadForDisplay's own tree, encoded once and kept by the
-// text it was read from, so two readers of one comment are served the same bytes.
+// The display tree a response carries is ReadForDisplay's own tree as the wire encoding writes
+// it, encoded once and kept by the text it was read from, so two readers of one comment are
+// served the same bytes. The read mints no block id, so a second read of one text is the same
+// bytes without a generator being held still for it.
 func TestDisplayJSONIsTheDisplayReadsTreeAndIsKept(t *testing.T) {
-	// One id for every block the read mints, so the kept encoding and a second read of the same
-	// text are the same bytes: a minted id would differ between the two.
-	SetBlockIDGenerator(func() string { return "f0f0f0f0-0000-4000-8000-000000000001" })
-	t.Cleanup(func() { SetBlockIDGenerator(nil) })
 	const markdown = "A **bold** line nothing else in this package reads.\n"
 	tree := DisplayJSON(markdown, DisplayLatest)
-	want, err := json.Marshal(ReadForDisplay(markdown, DisplayLatest).toJSON())
+	want, err := json.Marshal(ReadForDisplay(markdown, DisplayLatest).toDisplayJSON())
 	if err != nil {
 		t.Fatalf("encode the display read: %v", err)
 	}

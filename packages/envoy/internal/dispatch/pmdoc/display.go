@@ -32,7 +32,7 @@ const (
 )
 
 // ReadForDisplay reads markdown as the tree a reader is shown, and never refuses: a document the
-// writer would not store is still a document somebody has to read. It is Parse with four
+// writer would not store is still a document somebody has to read. It is Parse with five
 // differences, the first three of them the rules of the browser's read-only engine
 // (remarkReadOnlyDirectives and remarkDecideTypedBlocks, proof-editor's read-only-directives.ts
 // and typed-block-drawing.ts), which this reading must agree with block for block:
@@ -47,6 +47,19 @@ const (
 //   - Under DisplayLatest every server-owned attribute takes its schema default.
 //   - A block Parse refuses reads as one paragraph of its literal text, and every other block
 //     keeps its formatting.
+//   - A block carries the id the markdown named for it and no other. A display tree is a thing
+//     to draw, never a thing to edit: no ask row, anchor or margin card is keyed on an id this
+//     read invented, because only a typed block's markdown writes an id (TypedBlockIDAttribute),
+//     and a paragraph's never reaches the text. A minted id was therefore of no use to any
+//     reader, cost about a tenth of a tree's bytes, and, being random, made the tree different
+//     on every read - which defeats compression and leaves the kept encoding (DisplayJSON, keyed
+//     by the SHA-256 of the text and the mode) holding a tree no second read would produce. The
+//     browser mints what it needs itself: the editor surfaces stamp every block the server's
+//     tree left unnamed as they load it (proof-editor's blockIdsPlugin, which answers the local
+//     transaction setDocumentJSON dispatches), and the drawn surfaces that read `data-block-id`
+//     (the margin's block offsets, the reading pane's section bar, a decision card's anchor and
+//     a thread's) look blocks up by ids that stand in a stored document, which are exactly the
+//     ids the markdown names.
 //
 // Which refusal can be answered for one block, and which only for the whole document:
 //
@@ -71,7 +84,6 @@ func ReadForDisplay(markdown string, mode DisplayMode) *Node {
 	if mode == DisplayLatest {
 		StripServerOwnedAttrs(doc)
 	}
-	EnsureBlockIDs(doc)
 	return doc
 }
 

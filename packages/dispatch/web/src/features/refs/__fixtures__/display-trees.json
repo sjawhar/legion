@@ -7,11 +7,6 @@
       "content": [
         {
           "type": "heading",
-          "attrs": {
-            "blockId": "b-000001",
-            "id": "",
-            "level": 1
-          },
           "content": [
             {
               "type": "text",
@@ -21,9 +16,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000002"
-          },
           "content": [
             {
               "type": "text",
@@ -62,26 +54,15 @@
         },
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000003",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -94,18 +75,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000006",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000007"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -124,11 +98,6 @@
       "content": [
         {
           "type": "heading",
-          "attrs": {
-            "blockId": "b-000001",
-            "id": "",
-            "level": 1
-          },
           "content": [
             {
               "type": "text",
@@ -138,9 +107,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000002"
-          },
           "content": [
             {
               "type": "text",
@@ -179,26 +145,15 @@
         },
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000003",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -211,18 +166,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000006",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000007"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -245,9 +193,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -262,9 +207,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -283,9 +225,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -300,9 +239,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -321,9 +257,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -336,8 +269,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/design",
-                    "title": null
+                    "href": "https://example.com/design"
                   }
                 }
               ]
@@ -355,9 +287,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -370,8 +299,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/design",
-                    "title": null
+                    "href": "https://example.com/design"
                   }
                 }
               ]
@@ -393,9 +321,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "image",
@@ -414,9 +339,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "image",
@@ -439,9 +361,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -452,7 +371,6 @@
         {
           "type": "code_block",
           "attrs": {
-            "blockId": "b-000002",
             "language": "mermaid"
           },
           "content": [
@@ -464,9 +382,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000003"
-          },
           "content": [
             {
               "type": "text",
@@ -481,9 +396,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -494,7 +406,6 @@
         {
           "type": "code_block",
           "attrs": {
-            "blockId": "b-000002",
             "language": "mermaid"
           },
           "content": [
@@ -506,9 +417,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000003"
-          },
           "content": [
             {
               "type": "text",
@@ -527,26 +435,16 @@
       "content": [
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000001",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000002",
                 "checked": true,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000003"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -559,18 +457,12 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
                 "checked": false,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -589,26 +481,16 @@
       "content": [
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000001",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000002",
                 "checked": true,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000003"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -621,18 +503,12 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
                 "checked": false,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -655,9 +531,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -672,9 +545,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -702,9 +572,6 @@
           "content": [
             {
               "type": "paragraph",
-              "attrs": {
-                "blockId": "b-000001"
-              },
               "content": [
                 {
                   "type": "text",
@@ -714,26 +581,15 @@
             },
             {
               "type": "bullet_list",
-              "attrs": {
-                "blockId": "b-000002",
-                "spread": false
-              },
               "content": [
                 {
                   "type": "list_item",
                   "attrs": {
-                    "blockId": "b-000003",
-                    "checked": null,
-                    "label": "•",
-                    "listType": "bullet",
                     "spread": false
                   },
                   "content": [
                     {
                       "type": "paragraph",
-                      "attrs": {
-                        "blockId": "b-000004"
-                      },
                       "content": [
                         {
                           "type": "text",
@@ -769,9 +625,6 @@
           "content": [
             {
               "type": "paragraph",
-              "attrs": {
-                "blockId": "b-000001"
-              },
               "content": [
                 {
                   "type": "text",
@@ -781,26 +634,15 @@
             },
             {
               "type": "bullet_list",
-              "attrs": {
-                "blockId": "b-000002",
-                "spread": false
-              },
               "content": [
                 {
                   "type": "list_item",
                   "attrs": {
-                    "blockId": "b-000003",
-                    "checked": null,
-                    "label": "•",
-                    "listType": "bullet",
                     "spread": false
                   },
                   "content": [
                     {
                       "type": "paragraph",
-                      "attrs": {
-                        "blockId": "b-000004"
-                      },
                       "content": [
                         {
                           "type": "text",
@@ -825,9 +667,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -842,9 +681,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -859,9 +695,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -906,9 +739,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -921,8 +751,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/d",
-                    "title": null
+                    "href": "https://example.com/d"
                   }
                 }
               ]
@@ -940,9 +769,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -955,8 +781,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/d",
-                    "title": null
+                    "href": "https://example.com/d"
                   }
                 }
               ]
@@ -974,9 +799,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -989,8 +811,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/d",
-                    "title": null
+                    "href": "https://example.com/d"
                   }
                 }
               ]
@@ -1002,8 +823,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/d",
-                    "title": null
+                    "href": "https://example.com/d"
                   }
                 },
                 {
@@ -1028,9 +848,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1045,9 +862,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1062,9 +876,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1096,9 +907,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1111,8 +919,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "dispatch://CORE-1",
-                    "title": null
+                    "href": "dispatch://CORE-1"
                   }
                 }
               ]
@@ -1130,9 +937,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1145,8 +949,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "dispatch://CORE-1",
-                    "title": null
+                    "href": "dispatch://CORE-1"
                   }
                 }
               ]
@@ -1164,9 +967,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1179,8 +979,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "dispatch://CORE-1",
-                    "title": null
+                    "href": "dispatch://CORE-1"
                   }
                 }
               ]
@@ -1192,8 +991,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "dispatch://CORE-1",
-                    "title": null
+                    "href": "dispatch://CORE-1"
                   }
                 },
                 {
@@ -1218,9 +1016,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1260,9 +1055,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1302,9 +1094,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1367,9 +1156,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1384,9 +1170,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1401,9 +1184,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1435,9 +1215,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1452,9 +1229,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1469,9 +1243,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1512,9 +1283,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1554,9 +1322,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1600,9 +1365,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1617,9 +1379,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1638,9 +1397,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1665,9 +1421,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1696,9 +1449,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1720,27 +1470,15 @@
         },
         {
           "type": "ordered_list",
-          "attrs": {
-            "blockId": "b-000002",
-            "order": 1,
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000003",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000004"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -1753,18 +1491,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000005",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000006"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -1783,9 +1514,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -1807,27 +1535,15 @@
         },
         {
           "type": "ordered_list",
-          "attrs": {
-            "blockId": "b-000002",
-            "order": 1,
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000003",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000004"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -1840,18 +1556,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000005",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000006"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -1875,8 +1584,6 @@
         {
           "type": "heading",
           "attrs": {
-            "blockId": "b-000001",
-            "id": "",
             "level": 2
           },
           "content": [
@@ -1888,9 +1595,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000002"
-          },
           "content": [
             {
               "type": "text",
@@ -1928,8 +1632,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/docs",
-                    "title": null
+                    "href": "https://example.com/docs"
                   }
                 }
               ]
@@ -1942,26 +1645,15 @@
         },
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000003",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -1974,18 +1666,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000006",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000007"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -2005,8 +1690,6 @@
         {
           "type": "heading",
           "attrs": {
-            "blockId": "b-000001",
-            "id": "",
             "level": 2
           },
           "content": [
@@ -2018,9 +1701,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000002"
-          },
           "content": [
             {
               "type": "text",
@@ -2058,8 +1738,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/docs",
-                    "title": null
+                    "href": "https://example.com/docs"
                   }
                 }
               ]
@@ -2072,26 +1751,15 @@
         },
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000003",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -2104,18 +1772,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000006",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000007"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -2135,8 +1796,6 @@
         {
           "type": "heading",
           "attrs": {
-            "blockId": "b-000001",
-            "id": "",
             "level": 2
           },
           "content": [
@@ -2148,9 +1807,6 @@
         },
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000002"
-          },
           "content": [
             {
               "type": "text",
@@ -2191,8 +1847,7 @@
                 {
                   "type": "link",
                   "attrs": {
-                    "href": "https://example.com/docs",
-                    "title": null
+                    "href": "https://example.com/docs"
                   }
                 }
               ]
@@ -2205,26 +1860,15 @@
         },
         {
           "type": "bullet_list",
-          "attrs": {
-            "blockId": "b-000003",
-            "spread": false
-          },
           "content": [
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000004",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000005"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -2237,18 +1881,11 @@
             {
               "type": "list_item",
               "attrs": {
-                "blockId": "b-000006",
-                "checked": null,
-                "label": "•",
-                "listType": "bullet",
                 "spread": false
               },
               "content": [
                 {
                   "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000007"
-                  },
                   "content": [
                     {
                       "type": "text",
@@ -2276,9 +1913,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -2301,9 +1935,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
@@ -2326,9 +1957,6 @@
       "content": [
         {
           "type": "paragraph",
-          "attrs": {
-            "blockId": "b-000001"
-          },
           "content": [
             {
               "type": "text",
