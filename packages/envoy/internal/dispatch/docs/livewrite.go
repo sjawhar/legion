@@ -54,7 +54,8 @@ type liveWrite struct {
 	artifactID string
 	state      *roomState
 	// clientID authors every item the transaction writes, on fork: the document as the
-	// transaction's one read of it found it, with the transaction's updates applied (forkLive).
+	// transaction's one read of it found it, with the transaction's updates applied (forkLive). A
+	// rebuilt fork authors under a new one (rebuildFork), which replaces it.
 	clientID crdt.ClientID
 	fork     *crdt.Doc
 	// point is the room the transaction's read of the document found, at an exact commit position
@@ -419,6 +420,12 @@ func (s *Service) rebuildFork(ctx context.Context, write *liveWrite) (*crdt.Doc,
 			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
 		}
 	}
+	// Those updates are the write's own, so applying them - not a local transaction - advances the
+	// fork's own client clock, and ygo gives a document whose own clock a non-local transaction
+	// advanced a new client ID at commit, as Yjs's cleanupTransactions does. The transaction's
+	// later operations author their items under that ID, which the lost-write check finds them by
+	// (recordInsertedText); a batch already checked keeps the ID and clock it was recorded with.
+	write.clientID = fork.ClientID()
 	write.fork, write.forkMarkdown = fork, nil
 	return fork, nil
 }
