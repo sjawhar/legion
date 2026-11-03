@@ -28,7 +28,7 @@ The question and the recommendation, as `skill://dispatch-writing-specs` writes 
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
 - An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
-- Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note needing nothing. An approval request a newer version moved needs `request-approval` again.
+- Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` (a progress note) needs it. An approval request a newer version moved needs `request-approval` again.
 - When an answer's option and text disagree, the text wins.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
 - An ask reaches the issue's assignee; if none, name who answers.

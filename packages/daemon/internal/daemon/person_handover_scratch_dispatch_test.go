@@ -827,7 +827,7 @@ func TestAPersonsLabelOnATriageRootIsQueuedByTheDaemonAgainstScratchDispatch(t *
 //     answer wrote, in the person's name: the daemon applies it writing nothing;
 //  8. the recorded parked root of step 1, its spec revised by a session, is approved by the person
 //     at the new version: todo within 60 s, admission.waiting names it, and no design-approved
-//     notice is queued for it, since its own gate is not applied;
+//     notice is queued for it, since its own gate only records the approval;
 //  9. the root of step 3, parked again by the person and its spec revised by a session, is approved
 //     again by the person at the new version: todo again, a second queue.
 func TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDispatch(t *testing.T) {
@@ -919,7 +919,7 @@ func TestAPersonsApprovalOfAParkedRootsSpecIsQueuedByTheDaemonAgainstScratchDisp
 	}
 	r.queuedByThePerson(recorded.Key, "approval", 1)
 	if after := r.designApprovedNotices(recorded.Key); after != noticesBefore {
-		t.Fatalf("the daemon queued %d design-approved notices on %s for the approval that queued its todo; want none: a recorded parked root's own gate is not applied",
+		t.Fatalf("the daemon queued %d design-approved notices on %s for the approval that queued its todo; want none: a recorded parked root's own gate only records the approval",
 			after-noticesBefore, recorded.Key)
 	}
 	t.Logf("the person's approval of the recorded parked root %s at version %d queued it again with no design-approved notice", recorded.Key, review.Version)

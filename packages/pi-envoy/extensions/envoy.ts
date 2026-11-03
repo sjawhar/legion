@@ -4127,18 +4127,17 @@ export default function envoyExtension(pi: PiApi): void {
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          // The skip is the listener's own delivery: the role lane skips the resolved holder,
-          // and the fanout skips its push to any interest whose session is the message's source.
-          // A session with no serving port — every Oh My Pi session — takes no push at all and
-          // still gets the message: a topic the stream stores comes back on its own consumer's
-          // relay, and an ad-hoc topic on its core subscription, so its own publish, and a
-          // subagent's, does reach it. Only the role lane,
-          // which its holder does not subscribe to, actually goes undelivered: a subagent's
-          // source is its parent, so a publish to a role that parent holds is accepted, answers
-          // with that holder, and reaches nobody. Only the role case is visible here (a plain
-          // topic's subscribers are not in the answer); AGENTS.md and the envoy skill carry the
-          // general rule. A direct envoy_send is unaffected: the agent-subject lane has no such
-          // skip.
+          // The skip is the listener's own delivery: the role lane skips the holder it resolved
+          // when that holder is the message's source, and the fanout skips every interest whose
+          // session is that source. The session still gets its own publish another way — a topic
+          // the stream stores comes back on its own consumer's relay, and an ad-hoc topic on its
+          // core subscription — so its own publish, and a subagent's, does reach it. Only the
+          // role lane, which its holder does not subscribe to, actually goes undelivered: a
+          // subagent's source is its parent, so a publish to a role that parent holds is
+          // accepted, answers with that holder, and reaches nobody. Only the role case is
+          // visible here (a plain topic's subscribers are not in the answer); AGENTS.md and the
+          // envoy skill carry the general rule. A direct envoy_send is unaffected: the
+          // agent-subject lane has no such skip.
           const undelivered = source !== "" && result.holder === source && inSubagent;
           const published =
             result.holder === undefined

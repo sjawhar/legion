@@ -156,7 +156,7 @@ describe("formatZodIssues", () => {
 
   test("passes a cross-field refine message through verbatim and falls back to flag: message", () => {
     expect(problemsFor("dispatch_artifact", { issue: "DSP-42", name: "n" })).toEqual([
-      "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.",
+      "Exactly one of path or content is required.",
     ]);
     expect(problemsFor("dispatch_search", { query: "a" })).toEqual([
       "--query: Too small: expected string to have >=2 characters",
