@@ -315,7 +315,10 @@ when that box last used the sign-in. Click **Revoke** on a row and confirm.
 Revoking ends three things at once: the sign-in, so the box key it was made with trades no token
 for you again; every access token it already minted, so the sessions running there lose Dispatch
 within seconds; and the machine login that sign-in held, so every session it enrolled ends as
-[ending a session](#end-a-session) does. Your sign-ins on other machines, and the fleet's own
+[ending a session](#end-a-session) does. Dispatch serves a revoked access token for up to five
+seconds: it asks the broker whether a token is live and reuses that answer for five seconds
+(`AffirmativeCacheTTL`, `packages/envoy/internal/brokertoken/brokertoken.go`) rather than asking
+once per request. Your sign-ins on other machines, and the fleet's own
 machine login, are untouched — the machine goes on reading what its service owns. Nobody sees or
 revokes anyone else's sign-ins: Dispatch names the person from its own session, so another
 person's id is an id the broker does not have.

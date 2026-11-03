@@ -61,6 +61,17 @@ export type DispatchConfigResolution = ActiveDispatchConfig | SectionOff;
 
 type ValidCheckout = Extract<CheckoutEnvoyConfig, { readonly kind: "valid" }>;
 
+/**
+ * `url` without the slashes it ends in, counted from the right. A `/\/+$/` replace reads the same
+ * string once per position its unanchored search starts at, which costs a URL of n slashes O(n²)
+ * (CodeQL js/polynomial-redos); this reads it once.
+ */
+function withoutTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url[end - 1] === "/") end -= 1;
+  return url.slice(0, end);
+}
+
 /** A checkout's own server and the token written beside it, which only that server gets. Throws
  * when the checkout names no token. */
 function checkoutPair(checkout: ValidCheckout, serverUrl: string): BearerSource {
@@ -314,7 +325,7 @@ function dispatchTarget(
       return offWithError(messageFor(error));
     }
     if (route.traded) {
-      const brokered = (explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+      const brokered = withoutTrailingSlashes(explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL);
       return { enabled: true, url: brokered, source: { kind: "broker" } };
     }
     if (forced) {
