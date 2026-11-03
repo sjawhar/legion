@@ -950,3 +950,54 @@ func TestTwoPodsARelayedPushTheLinksDroppedUnderIsNotPushedAgainWhenTheyComeBack
 	serving.requireOnce(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
+
+// A push the active pod's relay has in flight when its receive term ends is not made again by the
+// pod that takes over. The relay's push of a message is at the session's port, not yet answered,
+// when the pod's receive connection alone is cut; the pod releases the lease 3 s later
+// (leaseReceiveLost) and its relays stop with the term, while its session-consumer and lease
+// connections - and so the delivery ledger - stay up. The port then takes the push (204). The
+// standby takes the lease over and restarts the session's consumer at its ack floor, so it is given
+// that message again. The session must take it exactly once: the pod that pushed it is alive, its
+// ledger was reachable throughout, and nothing was killed. At 892d93a5 the stopping relay records
+// nothing for the push it cut short, the pod taking over takes the former holder's attempt over at
+// once, and the message is pushed a second time. CI met this as
+// TestTwoPodsReceiveConnectionLostHandsOverWithin15s's "evt-mp-0079 to ses_mp_recvlost_one
+// prompted 2 times" (run 41589787158, job 125769769345); this row forces that order (INFRA-557
+// tester's round 27).
+func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccessor(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	const sessionID = "ses_mp_relay_term_end_once"
+	a.registerPort(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived, release := serving.gate(sessionID)
+	t.Cleanup(release)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+	}
+
+	heal := a.lanes.cut(mpReceiveConnection(a.instance))
+	t.Cleanup(heal)
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	if mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) == "" {
+		t.Fatalf("%s took no receive-lost release, so the row did not end its term that way", a.instance)
+	}
+	release() // the port takes the push the stopped relay made
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
+}
