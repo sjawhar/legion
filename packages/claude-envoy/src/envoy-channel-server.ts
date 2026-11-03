@@ -68,7 +68,7 @@ import {
   type SubscribeResult,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
-import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
+import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -1567,6 +1567,7 @@ export async function executeEnvoyTool(
         sourceSessionID: identity.id,
         targetSessionID: args.session_id,
         message: args.message,
+        ...(args.idempotency_key === undefined ? {} : { idempotencyKey: args.idempotency_key }),
         ...toMessageMetadata(args),
       })
       return {
@@ -1700,7 +1701,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   }
 
   // Only the `dispatch` command reads the stamp, so nothing is written while the session starts with
-  // Dispatch off, or under the QA override ENVOY_SESSION_ID, whose id that command never reads.
+  // Dispatch off. Nothing is written under the QA override ENVOY_SESSION_ID either, although that
+  // command acts as the override's id when it is set (`runDispatchCli` in envoy-client): a QA
+  // session's Dispatch writes carry no session title unless its shell sets DISPATCH_SESSION_TITLE.
   const stamping = dispatch.enabled && configuredValue(overrideSessionId) === undefined
   /** Stamp the title for the session id `resolveId` names, once, where nothing will register it. */
   const stampOnce = (resolveId: () => string): void => {
@@ -1821,7 +1824,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
       const legionRuntime: LegionToolRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+        // The pane's own environment and PATH's jj, and the Dispatch this session's envoy.json
+        // names, which the pane's `dispatch handoff-write` wrote the record to.
+        handoffReport: paneHandoffReport(configFile, process.env, directory),
+        branchHead: () => findPushedBranchHead({ env: process.env }),
       }
       // The request's signal aborts on the client's notifications/cancelled, which ends a wait
       // for a restarting daemon.
@@ -1829,9 +1835,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       // A call that returned without throwing: a completion, and a backward move, which hands the
       // issue to another phase. Either way this session's phase is no longer open, and the
       // reminder must stop — the same two operations the Oh My Pi host closes its phase on
-      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`).
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`). `ready_for_update` ends no
+      // phase: it answers the pod's update task, and the worker then waits for its process to be
+      // replaced, so the `Stop` of the turn it answered in blocks nothing (`updateAnswered`,
+      // `./legion-phase-hook`), as the Oh My Pi host's `onUpdateAnswered` does.
       const op = request.params.arguments?.["op"]
       if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      else if (op === "ready_for_update") phaseHook?.updateAnswered()
       return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")

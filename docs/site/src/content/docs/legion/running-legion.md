@@ -135,12 +135,10 @@ consumer, would have carried, so such an event leaves the record behind for at m
   webhook would be. When no recorded push ends at that head, the pass first rebuilds the pushes
   that took the branch there from GitHub's repository activity of the branch (its newest hundred
   entries): one push for each push, force push or branch creation not yet recorded, oldest first,
-  with its pusher and the paths GitHub's compare of its two commits lists. When that activity does
-  not lead back to the recorded head, the pass applies none of them and logs a warning, `workflow:
-  the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; …`,
-  with its `reason`. Then, or when a recorded push ends at the head, it applies the one push
-  GitHub's compare shows changed only the issue's own `.legion/<issue>/`, and leaves any other push
-  to its webhook.
+  with its pusher. When that activity does not lead back to the recorded head, the pass applies
+  none of them and logs a warning, `workflow: the pass cannot rebuild from GitHub's activity the
+  pushes that moved a pull request's head; …`, with its `reason`, and each push is left to its own
+  webhook. When a recorded push already ends at the head, the pass rebuilds none.
 - **A review.** A deciding review whose webhook never arrived is applied, whatever phase the issue
   is in.
 - **A CI settlement.** For a head no settlement from Envoy's listener stands for, the pass reads
@@ -411,9 +409,12 @@ What each part is for:
   ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
   closed issue's production check waits for its deploy before its last look, 14 days by default,
-  decimals allowed), `review_round_cap` (3), `max_fix_attempts`
-  (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
-  `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+  decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
+  a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
+  an update round runs before the controller is told it is not finishing, decimals allowed),
+  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
+  the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
+  `prompt_retire_limit` (2).
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
@@ -513,7 +514,9 @@ To stand it up:
    next apply: a forced one writes its copy back, and one without force fails on any key whose value
    differs and leaves yours. Either way, stop that tool declaring the ConfigMap first.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
-   token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
+   token audience in place of `${MODEL_TOKEN_AUDIENCE}` and the ServiceAccount your pods run as in
+   place of `${POD_SERVICE_ACCOUNT}`. `legion start --check-config` refuses either placeholder
+   unfilled.
 
 Name every role Legion's agents use in `modelRoles` (`default`, `review`, `oracle`, `deep`, `smol`,
 `slow`, and the rest the example names): the daemon refuses to boot when an agent's role has no

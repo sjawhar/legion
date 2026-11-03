@@ -85,9 +85,10 @@ func TestReadBackRefusalNamesTheTypedBlockNesting(t *testing.T) {
 	block := &Node{Type: "callout", Attrs: Attrs{"blockId": "outer", "kind": "note", "title": "T"}, Children: doc.Children}
 	refusal := fmt.Sprintf("the result nests %d typed blocks inside one another; a document nests at most %d typed blocks",
 		expectedMaxTypedNesting+1, expectedMaxTypedNesting)
-	for name, check := range map[string]func(*Node) error{"BlockReadError": BlockReadError, "BlockShapeError": BlockShapeError} {
-		if err := check(block); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
-			t.Errorf("%s of %d nested callouts: %v, want ErrSchema saying %q", name, expectedMaxTypedNesting+1, err, refusal)
+	back := ReadBackBlock(block)
+	for name, verdict := range map[string]error{"Read": back.Read, "Shape": back.Shape} {
+		if !errors.Is(verdict, ErrSchema) || !strings.Contains(verdict.Error(), refusal) {
+			t.Errorf("the read-back's %s of %d nested callouts: %v, want ErrSchema saying %q", name, expectedMaxTypedNesting+1, verdict, refusal)
 		}
 	}
 }

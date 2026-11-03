@@ -19,13 +19,17 @@ Extends docs/solutions/legion/a-mass-re-layout-of-a-file-many-pull-requests-edit
 That file's evidence names `7d024719` as the script's final version. The script changed after
 that commit; the current pin is below.
 
-- Retro removes `.legion/<issue>/`, and with it a regeneration script kept there. READY can still
-  be refused for a conflict, and the conflict needs the script again.
+- Retro is not the end of a regeneration script's use. READY can still be refused for a
+  conflict, and the conflict needs the script again. Before sjawhar/legion#2354 retro also removed
+  `.legion/<issue>/`, and with it a script kept there.
 - Fetch the script at the commit the pull request body pins. If `--strict` refuses main's new
   files, fix the script (for example, add the anchor a grown item needs), never the output.
-- Commit the fixed script back under `.legion/<issue>/` in the round's handoff push, which changes
-  only `.legion/` and carries `skip-checks: true`. Move every pin in the pull request body to that
-  commit in the same round. The next retro removes the directory again.
+- Put the fixed script where the pull request body's pin can reach it, outside the tree the merge
+  carries, and move every pin in the body to its new version in the same round. Before
+  sjawhar/legion#2354 the script went back under `.legion/<issue>/` in the round's handoff push,
+  which changed only `.legion/` and carried `skip-checks: true`, and the next retro removed the
+  directory again. Since then a handoff is a Dispatch record, no phase pushes one, and no push
+  carries the trailer.
 
 ## Evidence
 

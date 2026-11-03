@@ -10,7 +10,7 @@ import {
   test,
 } from "@playwright/test";
 
-import type { ArtifactUploadResponse, CredentialRecord } from "../web/src/api/types";
+import type { ArtifactUploadResponse } from "../web/src/api/types";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   baseUrl,
@@ -29,7 +29,6 @@ import {
 } from "./api";
 import { seedDeliveryFixture } from "./delivery-seed";
 import { connectedDot, documentEditor } from "./editor";
-import { setCredentialRecords } from "./fake-broker-helpers";
 import { seedFakeGithub } from "./fake-github-helpers";
 import {
   type DispatchProcess,
@@ -126,12 +125,21 @@ const shown = {
   agentReply: "The release notes are read.",
   child: "Split the rollout",
   comment: "The rollout waits on the canary.",
-  credentialReason: "need it for the rollout",
   document: "The handbook explains the rollout.",
   issue: "Roll out two builds",
   issueArtifact: "These notes track the rollout.",
   spec: "Both builds serve every page.",
 };
+
+/** The list the issue message carries under its diagram, long enough that the page parses the
+ *  message in the Markdown parse worker rather than on its own thread (`markdownWorkerThreshold`,
+ *  features/refs/markdown-worker-threshold.ts). It rides the message rather than the comment
+ *  because the Conversation draws a message's body whole, where a comment card shows a preview
+ *  until its thread is opened. The walk asks for every chunk a build emits, the parse worker's
+ *  among them, and a reader on a rolling deploy meets exactly this: a long body whose formatting
+ *  arrives from a worker whose code one build served and whose page another did. */
+const longListItems = 300;
+const longList = "- a rollout step\n".repeat(longListItems);
 
 /** The issue message's flowchart, from one node to the other, which draws only once the Mermaid
  *  renderer's worker has run. */
@@ -141,23 +149,6 @@ const diagram = { from: "Canary", to: "Rollout" };
 const messageAuthor = {
   actor: { id: "e2e-two-builds-agent", kind: "session" as const },
   as: "agent" as const,
-};
-
-const credentialRecord: CredentialRecord = {
-  approver: "alice",
-  decided: null,
-  enrollment: { kind: "session", operator: "alice", runtime_id: "host-alice:559:0", slot: null },
-  expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-  identifiers: ["ROLLOUT_API_KEY"],
-  kind: "agent_secret",
-  lifetime_seconds: 3600,
-  record_id: "record-two-builds",
-  requested_at: new Date().toISOString(),
-  reason: shown.credentialReason,
-  rules_version: "rules-v1",
-  service: null,
-  session: { enrollment: session.session_id, request: session.session_id },
-  state: "pending",
 };
 
 /** The 1x1 PNG e2e/artifacts.e2e.ts uploads. */
@@ -193,8 +184,7 @@ interface Seeded {
 /** What every route needs to show its own content rather than an empty or missing state: a
  *  project with an architecture source, an issue with a spec, a child, a comment, a message
  *  holding a Mermaid diagram and a document artifact, a project document, a live session with a
- *  broadcast, a replayed conversation and a picture, a credential record, and the delivery
- *  timeline's runs. */
+ *  broadcast, a replayed conversation and a picture, and the delivery timeline's runs. */
 async function seedEveryRoute(): Promise<Seeded> {
   await setLiveSessions([session]);
   await createProject({ key: "CORE", name: "Core" });
@@ -216,7 +206,7 @@ async function seedEveryRoute(): Promise<Seeded> {
   await createComment(issue.key, { body: shown.comment });
   await createMessage(
     issue.key,
-    { body: `\`\`\`mermaid\ngraph TD\n  ${diagram.from} --> ${diagram.to}\n\`\`\`\n` },
+    { body: `\`\`\`mermaid\ngraph TD\n  ${diagram.from} --> ${diagram.to}\n\`\`\`\n\n${longList}` },
     messageAuthor
   );
   const issueArtifact = await createIssueArtifact(issue.key, {
@@ -267,7 +257,6 @@ async function seedEveryRoute(): Promise<Seeded> {
     "replay"
   );
   const agentArtifact = await uploadAgentPicture(session.session_id);
-  await setCredentialRecords([credentialRecord]);
   await seedDeliveryFixture();
   return {
     agentArtifact,
@@ -372,11 +361,15 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `${issue}/spec`,
     },
     {
-      // The message's diagram is the Mermaid worker's: without it the body shows its source.
-      loads: ["mermaid"],
+      // The message's diagram is the Mermaid worker's: without it the body shows its source. The
+      // message is also longer than the worker threshold, so its list is the parse worker's: the
+      // card holds the body's text at once and the list once the worker answers. Both workers'
+      // code comes from the build that did not serve this page, which is the walk's whole point.
+      loads: ["markdown-worker", "mermaid"],
       route: "/issues/:key/*",
       shows: (page) => [
         page.locator("#issue-conversation-panel").getByText(shown.comment),
+        page.locator("#issue-conversation-panel li").nth(longListItems - 1),
         page
           .locator("#issue-conversation-panel")
           .getByRole("img", { exact: true, name: "Rendered Mermaid diagram" })
@@ -443,12 +436,9 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `/projects/CORE/documents/${seed.document}`,
     },
     {
-      route: "/credentials/:recordId",
-      shows: (page) => [
-        heading(page, "Credential request"),
-        page.getByText(shown.credentialReason, { exact: true }),
-      ],
-      url: `/credentials/${credentialRecord.record_id}`,
+      route: "/credentials/*",
+      shows: (page) => [heading(page, "Inbox")],
+      url: "/credentials/record-old-broker",
     },
     {
       route: "/credentials/machine",

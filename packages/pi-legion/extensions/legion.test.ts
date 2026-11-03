@@ -1668,6 +1668,9 @@ describe("Legion OMP extension", () => {
             return options.complete?.() ?? Response.json({});
           }
           if (url.pathname === "/legion/v1/phase/backward") return Response.json({});
+          if (url.pathname === "/legion/v1/claims/ready-for-update") {
+            return new Response(null, { status: 204 });
+          }
           return undefined;
         },
       });
@@ -2045,6 +2048,57 @@ describe("Legion OMP extension", () => {
       expect(recorded(worker).at(-1)).toEqual({ state: "closed", count: 0, reported: false });
     });
 
+    // INFRA-484: the update task arrives as the daemon's own prompt, which opens the phase as an
+    // assignment does, and `ready_for_update` closes no phase. The turn the worker answers in
+    // must still end: a continuation would do work the pod's replacement throws away, and the
+    // daemon, which waits for a turn to end before it replaces anything, would see none.
+    test("a ready_for_update answer earns no continuation: the answering turn ends, with the phase still open", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      const before = worker.requests.length;
+      const result = await worker.legionTool.execute(
+        "call-update",
+        { op: "ready_for_update", round: "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22" },
+        undefined,
+        undefined,
+        worker.context
+      );
+
+      expect(result).toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+      expect(daemonRequests(worker.requests.slice(before)).map((call) => call.path)).toEqual([
+        "/legion/v1/claims/ready-for-update",
+      ]);
+      expect(recorded(worker).at(-1)).toEqual({ state: "waiting", count: 0, reported: false });
+
+      // The host's own `message_end` for the message that held the answer: the worker ran a real
+      // tool call, which does not take the wait back.
+      await hook(worker.handlers, "message_end")(ranTool, worker.context);
+      const answered = "Pushed everything and answered; waiting for the new pod.";
+
+      expect(await worker.settles(answered)).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      // The wait the answer created arms no timer: the daemon's update round is its watchdog, and
+      // a reminder fired here would steer a real `agent_start`, which the daemon reads as a new
+      // turn and so as the answer retracted — the round would restart at every wait and never
+      // converge (INFRA-484, the `awaiting-update` state of `@legion/pi-shared/phase-stall`,
+      // which a record holds as the plain `waiting`). The WAITING reply's own wait keeps its
+      // timer, which the case above holds.
+      expect(worker.timers).toEqual([]);
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "waiting",
+        count: 0,
+        reported: false,
+        lastMessage: answered,
+      });
+
+      // A second turn in the same wait — a question answered while the pod waits to be replaced —
+      // arms none either, and steers nothing.
+      expect(await worker.settles("Still waiting for the pod.")).toBeUndefined();
+      expect(worker.timers).toEqual([]);
+      expect(steered(worker)).toEqual([]);
+    });
+
     test("a successful handoff_complete posts the completion with a fresh grant and the commit found in the pane, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
@@ -2163,7 +2217,7 @@ describe("Legion OMP extension", () => {
         complete: () =>
           Response.json(
             {
-              error: `the implementer reported commit ${ROOT_COMMIT} for its previous phase of REPO-43; write and commit this phase's handoff before completing`,
+              error: `the implementer named handoff record 11111111-1111-4111-8111-111111111111 for its previous phase of REPO-43; write this phase's handoff with \`dispatch handoff-write --issue REPO-43 --phase implement --body-file <file>\` before completing`,
               code: "HANDOFF_NOT_NEW",
             },
             { status: 409 }
@@ -2177,7 +2231,7 @@ describe("Legion OMP extension", () => {
           {
             type: "text",
             text: expect.stringContaining(
-              `POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer reported commit ${ROOT_COMMIT}`
+              "POST /legion/v1/handoff/complete failed with 409 HANDOFF_NOT_NEW: the implementer named handoff record 11111111-1111-4111-8111-111111111111"
             ),
           },
         ],
@@ -2220,7 +2274,7 @@ describe("Legion OMP extension", () => {
 
     test("the legion tool has no handoff_message: a call reaches no daemon route, and a message for another role goes through envoy_publish", async () => {
       // Nothing reads a handoff message: no operation or prompt reads `.legion/messages/`, while a
-      // role's live questions go through envoy_publish and a later phase reads the handoff files.
+      // role's live questions go through envoy_publish and a later phase reads the handoff records.
       const worker = await bootStalling({});
       const requestsBefore = worker.requests.length;
       const result = await worker.legionTool.execute(
@@ -5212,6 +5266,10 @@ describe("the recreated-workspace notice", () => {
       },
     ]);
     expect(JSON.stringify(notices(pane))).not.toMatch(/\bmain\b/);
+    // The last handoff is a record on the issue, which the recreation did not touch.
+    expect(JSON.stringify(notices(pane))).toContain(
+      "dispatch handoff-read --issue REPO-43 --phase <phase>"
+    );
   });
 
   test("a resume told false, or nothing, saves no notice", async () => {

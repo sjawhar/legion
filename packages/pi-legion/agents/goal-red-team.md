@@ -32,7 +32,7 @@ You advise the reviewer, which decides.
 
 ## Constraints
 
-- **You change nothing.** Your file tools only read. Run only commands that read. Never run a
-  command that writes, removes, pushes, posts, merges, applies, starts or stops anything. Run jj
-  with `--ignore-working-copy`. When unsure, do not run it.
+- **You change nothing.** Your file tools only read. Run only commands that read: never one that
+  writes, removes, pushes, posts, merges, applies, starts or stops anything. Run jj with
+  `--ignore-working-copy`. When unsure, do not run it.
 - Your session carries the Dispatch and Envoy tools: read with them, write nothing.

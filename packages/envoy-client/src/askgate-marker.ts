@@ -522,7 +522,7 @@ function readMarker(file: string): Marker | undefined {
 
 /**
  * Whether the CLI may post: one marker consumed, or why none was. `changed` names the first file
- * whose bytes differ from the ones AskGate reviewed, when that is why.
+ * whose bytes differ from the ones AskGate read for the call, when that is why.
  */
 export type Consumed =
   | { readonly ok: true }
@@ -593,7 +593,7 @@ export function consumeMarker(
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed,
     };
   return {

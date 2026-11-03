@@ -164,12 +164,6 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
-	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
-	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
-	// pass touches it.
-	uncarried map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -592,6 +586,37 @@ func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, rep
 	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
+// enqueueOutbox writes outbox rows of issue, due now, in one transaction of its own, which owns
+// the commit hook that write registers (projectRecords, intake.OnCommit) so each row's lane is
+// woken as it commits — exactly as the re-hold of a notice does (reholdNotice). It is what
+// supervision's update-round sweep writes its controller notice and its issue message through
+// (supervision.enqueue), and the narrowest thing that gives supervision an outbox at all: rows
+// to write, and no engine, no admission and no Dispatch client behind it. Rows given together
+// land together or not at all, so a stall is never half told.
+func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, payloads ...record.OutboxPayload) error {
+	rows := make([]record.OutboxRow, 0, len(payloads))
+	for _, payload := range payloads {
+		row, err := record.NewOutboxRow(issue, payload, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+		}
+		rows = append(rows, row)
+	}
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		for _, row := range rows {
+			if err := w.records.Enqueue(scoped, tx, row); err != nil {
+				return fmt.Errorf("enqueue a %s row of %s: %w", row.Kind, issue, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	committed()
+	return nil
+}
+
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
@@ -599,6 +624,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.enqueue = w.enqueueOutbox
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no

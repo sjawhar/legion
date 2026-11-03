@@ -158,7 +158,7 @@ copies them into the spec or the plan.
 
 A design change that leaves the Summary, Acceptance, scope and settled decisions intact — a
 planner's measurement finding a better way to the same outcome — goes in the plan (the issue's
-`plan.md` and `.legion/<issue>/plan.json`), never into the approved spec, even where the
+`plan.md` and the planner's `plan` handoff on the issue), never into the approved spec, even where the
 spec's text describes the older design; the reviewer reads the plan beside the spec. So
 when a planner's `phase-finished` names a departure, compare it with the approved spec: with
 those four unchanged the plan is the record and the tree carries on; otherwise change the root

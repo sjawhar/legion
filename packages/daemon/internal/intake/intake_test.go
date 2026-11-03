@@ -384,7 +384,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author", Sender: "author"},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", Pusher: "author", Sender: "author"},
 		},
 		{
 			name:    "comment",
@@ -778,7 +778,9 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 // fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
 // included. A push and a pull request event decode to a fact only on an issue's branch, so the
 // golden push, which is to main, and the golden pull requests, on a branch of their own, decode to
-// none, and the same event on an issue's branch decodes to its fact.
+// none, and the same event on an issue's branch decodes to its fact. The push golden's fact is
+// compared whole with the golden's own payload, so a listener change that stops sending a key the
+// daemon reads fails here.
 func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
 	if err != nil || len(goldens) == 0 {
@@ -825,22 +827,48 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 			}
 			decoded := decode()
 			kind := golden.Payload["kind"]
+			issueBranch := claim.IssueBranch("GOLDEN-1")
 			switch kind {
 			case "push":
 				if decoded.Fact != nil {
 					t.Fatalf("%s's push to %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["ref"], decoded.Fact)
 				}
-				golden.Payload["ref"] = "refs/heads/" + claim.IssueBranch("GOLDEN-1")
+				golden.Payload["ref"] = "refs/heads/" + issueBranch
 				decoded = decode()
 			case "pr":
 				if decoded.Fact != nil {
 					t.Fatalf("%s's pull request on %v decoded %#v, want no fact for a branch that is no issue's", repository, golden.Payload["head_ref"], decoded.Fact)
 				}
-				golden.Payload["head_ref"] = claim.IssueBranch("GOLDEN-1")
+				golden.Payload["head_ref"] = issueBranch
 				decoded = decode()
 			}
 			if (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
 				t.Fatalf("%s's %s event decoded no fact", repository, kind)
+			}
+			if kind == "push" {
+				// decodePush reads before, pusher and sender with `, _`, so a listener that stopped
+				// sending one of them would leave the decode above green and lose the field. The
+				// golden is the listener's own output, so comparing the whole decoded fact with the
+				// golden's payload is the cross-package contract: a key the daemon reads may not go.
+				field := func(key string) string {
+					t.Helper()
+					value, ok := golden.Payload[key].(string)
+					if !ok {
+						t.Fatalf("the push golden carries no string %q, which decodePush reads", key)
+					}
+					return value
+				}
+				want := Push{
+					Repo:   repository.String(),
+					Branch: issueBranch,
+					Before: field("before"),
+					After:  field("after"),
+					Pusher: field("pusher"),
+					Sender: field("sender"),
+				}
+				if got, ok := decoded.Fact.(Push); !ok || got != want {
+					t.Fatalf("%s's push decoded %#v, want %#v from the golden's own payload", repository, decoded.Fact, want)
+				}
 			}
 		})
 	}
@@ -1606,7 +1634,8 @@ func migratedPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(admin.Close)
 	name := "legion_intake_test_" + randomSuffix(t)
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -1802,12 +1831,11 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	}
 }
 
-// The listener's forced marker, GitHub's review id and the review's submission time reach the
-// facts: the workflow reads a push without the marker as forced and orders reviews by submission
-// time then id, so each must survive decoding exactly. A review id that is not a positive integer
-// is refused rather than read as none. A time that cannot be read is taken as none and reported,
-// since a review without one is still ordered, by its id.
-func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+// GitHub's review id and the review's submission time reach the facts: the workflow orders reviews
+// by submission time then id, so each must survive decoding exactly. A review id that is not a
+// positive integer is refused rather than read as none. A time that cannot be read is taken as none
+// and reported, since a review without one is still ordered, by its id.
+func TestDecodingCarriesTheReviewOrder(t *testing.T) {
 	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
 		t.Helper()
 		var envelope map[string]any
@@ -1833,15 +1861,8 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		}
 		return decodeMessage(subject, "CAPTURE", capturedRepositories, nil, data)
 	}
-	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
-	for _, forced := range []string{"true", "false"} {
-		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
-		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
-			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
-		}
-	}
 	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
 		"submitted_at": "2026-09-26T12:03:00+02:00"})
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)

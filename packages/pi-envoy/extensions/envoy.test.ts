@@ -21,6 +21,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -2879,6 +2880,7 @@ describe("envoy OMP extension", () => {
         urgency: "blocking",
         expects_reply: "required",
         expires_at: 1_788_956_000_000,
+        idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
       });
     expect(sent?.content[0]?.text).toBe(
       "sent evt_1 to ses_target (recipient unconfirmed by listener)"
@@ -2937,7 +2939,7 @@ describe("envoy OMP extension", () => {
           urgency: "blocking",
           expects_reply: "required",
           expires_at: 1_788_956_000_000,
-          idempotency_key: expect.any(String),
+          idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
         },
       },
       {
@@ -3062,7 +3064,7 @@ describe("envoy OMP extension", () => {
       [
         "envoy_send was not called: 2 problems",
         '- expects_reply must be one of none|optional|required; got "no"',
-        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
       ].join("\n")
     );
     expect(requests).toBe(0);
@@ -3550,6 +3552,22 @@ describe("envoy OMP extension", () => {
     expect(shim.isFile()).toBe(true);
     expect(shim.mode & 0o111).toBe(0o111);
     expect(process.env.DISPATCH_HOST).toBe("omp");
+  });
+
+  test("adds nothing to PATH when another name for its bin directory is already on it", async () => {
+    // What Oh My Pi does for the manifest's `omp.bin`: the directory goes on PATH under the
+    // plugin's installed path, a name that this module's own location (its realpath) never shows.
+    const installed = mkdtempSync(join(tmpdir(), "pi-envoy-installed-"));
+    const installedBin = join(installed, "bin");
+    symlinkSync(join(import.meta.dir, "..", "bin"), installedBin);
+    try {
+      process.env.PATH = [installedBin, "/usr/bin", "/bin"].join(delimiter);
+      await import("./envoy.ts?plugin-bin-installed-path");
+
+      expect(process.env.PATH).toBe([installedBin, "/usr/bin", "/bin"].join(delimiter));
+    } finally {
+      rmSync(installed, { recursive: true, force: true });
+    }
   });
 
   test("names the top-level session in DISPATCH_SESSION_ID at start and after a switch", async () => {
