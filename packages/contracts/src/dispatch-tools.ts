@@ -1516,8 +1516,8 @@ export const dispatchToolSpecs = [
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
       `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
-      "asked for a project, do not use it when an existing project already covers the work; file an issue " +
-      "there with dispatch issue instead.",
+      "asked for a project and an existing project already covers the work, do not create a project. File an " +
+      "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z

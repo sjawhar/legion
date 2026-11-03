@@ -312,7 +312,10 @@ describe("dispatchToolSpecs", () => {
       "When a person asks for a project, make the key from its name. Check the key with " +
         "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use."
     );
-    expect(description).toContain("When no person asked for a project, do not use it");
+    expect(description).toContain(
+      "When no person asked for a project and an existing project already covers the work, do not create a " +
+        "project. File an issue in that project with dispatch issue."
+    );
   });
 
   test("dispatch_architecture_sync takes one owner/name repository or none, refusing anything else by name", () => {
