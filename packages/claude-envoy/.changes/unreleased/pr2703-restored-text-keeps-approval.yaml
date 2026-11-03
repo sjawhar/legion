@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    An exact undo of an edit to an approved document restores its approval when no decision block
+    in it was decided since, and the plugin says so: the `dispatch-writing-specs` skill's "Approval"
+    ends "An exact undo can restore approval.", the `dispatch request-approval` help says that such
+    a version needs no request and that a document that then does not read approved needs one, and
+    the line a write prints when it superseded an approval says when a later write brings it back.
+time: 2026-11-03T03:30:04.000000000Z
+custom:
+    Issue: pr2703

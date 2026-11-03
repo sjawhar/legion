@@ -228,9 +228,10 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 // errNoEventLog is what a context built with no Store answers for the event log's head.
 var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
 
-// Architecture is the shared architecture importer the HTTP routes use, so the
-// server's five-minute sync ticker drives the same serialized Sync the Refresh
-// route and the sync tool do.
+// Architecture is the shared architecture importer the HTTP routes use, so
+// the server's five-minute sync ticker, the Refresh route and the sync tool
+// drive one importer, and so share one flight per source instead of each
+// fetching that source for itself.
 func (ctx *AppContext) Architecture() *architecture.Importer {
 	return ctx.apiDeps.Architecture
 }

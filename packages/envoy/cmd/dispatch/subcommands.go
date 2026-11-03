@@ -154,7 +154,8 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 }
 
 // backfillFiles moves every uploaded file's bytes from Postgres into the bucket
-// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows); with --verify-only it reads back every
+// DISPATCH_FILE_STORE_BUCKET names, opened by files.Open as the server opens it, so the two never
+// read one value as two stores (files.BackfillRows); with --verify-only it reads back every
 // file already moved and checks it against its row's hash, moving nothing (files.VerifyRows); with
 // --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
 // (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
@@ -185,7 +186,7 @@ func backfillFiles(ctx context.Context, args []string, databaseURL, bucket strin
 		return 1
 	}
 	defer database.Pool.Close()
-	fileStore, err := files.NewS3(ctx, bucket)
+	fileStore, err := files.Open(ctx, bucket)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-files: %v\n", err)
 		return 1

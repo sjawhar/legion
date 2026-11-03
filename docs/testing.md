@@ -61,6 +61,44 @@ A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): 
 `DISPATCH_TEST_DATABASE_URL` names can hold other databases, such as the local Dispatch's on
 `packages/envoy/scripts/dev-postgres.sh`'s container.
 
+## A test that reads `GET /api/v1/references?since=` reads again
+
+A since read answers only the edges at or below the event log's safe horizon (`getReferences` and
+`sinceHorizon` in `packages/envoy/internal/dispatch/api/references.go`), and waits at most
+`referencesSinceWait`, one second, for a horizon above the events committed before the read. Past
+that wait it answers at the horizon it has and leaves the rest to a later read: the route defers,
+it never loses an edge. The horizon is instance-wide,
+so any transaction holding a transaction id on the Postgres instance holds it back, and in
+`packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
+`create database … template … strategy file_copy` and `storetest`'s
+`drop database … with (force)` (`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
+
+So a read that answered within `referencesSinceWait` was not held back: what it listed is what it
+owed, and a wrong answer fails the test at once. Only a read held past that wait is read again,
+bounded by `eventFeedWait`. The helper is `awaitSinceRead`
+(`packages/envoy/internal/dispatch/api/references_test.go`), which takes the read as a function, so
+each call site keeps its own reader.
+
+A test that takes one read as final fails under a transaction someone else holds:
+`TestAnAnsweredAsksPartEdgesAreListedSince` failed about one run in six on main, 7 of 40 measured
+for dispatch://INFRA-592, and in this repository's own pod on 2026-11-02 it failed 15 of 40 runs
+with a transaction held 2 s of every 2.5 s; under that same pulse, reading again, it passed 40 of
+40.
+
+Prove such a test under a loop that holds the state, as
+`docs/solutions/testing/code-that-waits-on-instance-wide-database-state-is-tested-under-a-loop-that-holds-that-state-pr2392.md`
+prescribes:
+
+```sh
+while true; do
+  psql "$LEGION_TEST_PG_DSN" -Atc 'select pg_current_xact_id(), pg_sleep(2)'
+  sleep 0.5
+done
+```
+
+The holder must release each transaction: one that never commits holds the horizon back for good,
+so no bounded re-read succeeds under it and the test fails after `eventFeedWait`, naming the hold.
+
 ## A writer a test holds
 
 A test that needs a live socket's writer held, so that frames queue behind it while the test
