@@ -62,12 +62,13 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	newKind := flags.String("kind", "", "github-app, google-login or none")
 	newGitHubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>"), or none`)
 	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
+	newDefaultGrant := flags.String("default-grant", "", "session (no --ttl lasts until the session ends) or none (12 hours)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" {
-		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant or a combination is required")}
+	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" && *newDefaultGrant == "" {
+		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant, --default-grant or a combination is required")}
 	}
 	if err == nil {
 		err = checkOwnerTier(*newOwner, *newTier)
@@ -81,6 +82,9 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		err = checkMaxGrant(*newMaxGrant, true)
 	}
+	if err == nil {
+		err = checkDefaultGrant(*newDefaultGrant, true)
+	}
 	var remove []string
 	if *newKind == tagNone {
 		// The rollback guard goes with the kind: a stored secret is safe on every broker.
@@ -92,7 +96,10 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if *newMaxGrant == tagNone {
 		remove = append(remove, policy.TagMaxGrant)
 	}
-	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant)
+	if *newDefaultGrant == tagNone {
+		remove = append(remove, policy.TagDefaultGrant)
+	}
+	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant, *newDefaultGrant)
 	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
 		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}

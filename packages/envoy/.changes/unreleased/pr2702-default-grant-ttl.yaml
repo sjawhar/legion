@@ -1,0 +1,2 @@
+kind: Changed
+body: A secrets-broker grant whose request names no --ttl now lasts 12 hours; a secret tagged default-grant=session (agent-secrets secret create|retag --default-grant session) keeps grants until the session ends.

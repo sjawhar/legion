@@ -108,7 +108,7 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 // when it names one, and nothing for one left unset or set to none. A kind brings the rollback
 // guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
 // than serve its stored key or refresh token.
-func optionalTags(kind, githubOwners, maxGrant string) map[string]string {
+func optionalTags(kind, githubOwners, maxGrant string, defaultGrant ...string) map[string]string {
 	named := func(value string) bool { return value != "" && value != tagNone }
 	tags := map[string]string{}
 	if named(kind) {
@@ -120,6 +120,9 @@ func optionalTags(kind, githubOwners, maxGrant string) map[string]string {
 	}
 	if named(maxGrant) {
 		tags[policy.TagMaxGrant] = maxGrant
+	}
+	if len(defaultGrant) > 0 && named(defaultGrant[0]) {
+		tags[policy.TagDefaultGrant] = defaultGrant[0]
 	}
 	return tags
 }
@@ -133,4 +136,12 @@ func ownerTag(owner, email string) (string, error) {
 		return email, nil
 	}
 	return owner, nil
+}
+
+// checkDefaultGrant is --default-grant's rule: "session", or none where orNone allows it.
+func checkDefaultGrant(value string, orNone bool) error {
+	if value == "" || value == policy.DefaultGrantSession || (orNone && value == tagNone) {
+		return nil
+	}
+	return usageErr{fmt.Errorf("--default-grant: %q is not session", value)}
 }

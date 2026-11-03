@@ -213,7 +213,12 @@ marked with tags or annotations:
   name gets no token. A `github-app` secret without the tag, or with one that names no account, is
   refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
-  secret must use `--ttl` no longer than the tag.
+  secret must ask for a lifetime no longer than the tag; a request with no `--ttl` asks for the
+  12-hour default.
+- **`default-grant`** is optional. Its one value is `session`: a request with no `--ttl` whose
+  secrets all carry it gets a grant that lasts until its session ends instead of 12 hours. Any other
+  value is refused `default-grant-malformed`. Set it with `agent-secrets secret create|retag
+  --default-grant session`.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
   `kind-secret`, and this broker never reads it. It makes the brokers before kinds, from
   legion-envoy-v13.19.0 on, refuse a kind secret rather than serve its stored key.
@@ -371,8 +376,8 @@ reason of at most 400 characters. The broker evaluates every name
   release mints a token of that same kind from that same frozen source, never the stored value. To
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose
   `github-owners` is removed or malformed, stops releasing until the secret is served again.
-- A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
-  or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+- A secret with `max-grant` needs a lifetime no longer than that duration. A request whose `--ttl`
+  (or, with none, the 12-hour default, or session length under `default-grant=session`) is longer is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
   a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
   for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again

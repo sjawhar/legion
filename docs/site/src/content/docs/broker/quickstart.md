@@ -126,8 +126,8 @@ kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
-grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
-grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
+grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, expires 2026-10-11T03:56:07Z)
+grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, expires 2026-10-11T03:56:07Z)
 ```
 
 ## When the answer is no
