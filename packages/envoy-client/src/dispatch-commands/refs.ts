@@ -132,14 +132,16 @@ export function refOwnerName(ref: ParsedDispatchRef): string {
     : `${ref.owner.project}/${ref.artifact ?? ref.id}`;
 }
 
-/** The owner fields of an ask or comment a reference is checked against. */
+/** The owner fields of an ask or comment a reference is checked against. Each optional field
+ *  admits `undefined` as well as being absent: under `exactOptionalPropertyTypes` the two are
+ *  not the same, and an `Ask` or a `Comment` read off its zod schema carries the first. */
 interface RefItem {
   readonly id: string;
   readonly issue_key: string | null;
-  readonly artifact_id?: string | null;
-  readonly anchor?: { readonly artifact_id: string } | null;
-  readonly block_artifact?: { readonly id: string };
-  readonly approval?: { readonly artifact_id: string };
+  readonly artifact_id?: string | null | undefined;
+  readonly anchor?: { readonly artifact_id: string } | null | undefined;
+  readonly block_artifact?: { readonly id: string } | undefined;
+  readonly approval?: { readonly artifact_id: string } | undefined;
 }
 
 /**

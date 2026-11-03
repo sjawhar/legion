@@ -1,4 +1,7 @@
-import { DispatchEventSchema, SubscriptionRemovedEventPayloadSchema } from "@legion/contracts";
+import {
+  DispatchEventSchema,
+  InboundSubscriptionRemovedEventPayloadSchema as SubscriptionRemovedEventPayloadSchema,
+} from "@legion/contracts";
 import { commandLine } from "./dispatch-command";
 import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
 
