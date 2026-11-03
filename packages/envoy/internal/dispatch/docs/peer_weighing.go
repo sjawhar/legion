@@ -325,17 +325,18 @@ func frameBytes(walked updateStruct) uint64 {
 // (deletedRuns.splitEnds). The items it deletes are already priced for their deletion: by the
 // count (deletionReserve) or by the update that brought them (frameBytes). A range the room is
 // known to hold deleted adds nothing to the frame: ygo's encode writes the room's delete set from
-// its deleted items, merged where their clocks touch (buildDeleteSet, crdt/update.go:502-515), and
-// the room's parked ranges merged the same way (crdt/delete_set.go:65-104), so the clocks it names
-// are written as they were, and it leaves no split.
+// its deleted items, merged where their clocks touch (buildDeleteSet, sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:665-678), and the room's parked ranges merged the same way (DeleteSet.Merge,
+// crdt/delete_set.go:66-83), so the clocks it names are written as they were, and it leaves no
+// split.
 func deleteFrameBytes(client, clock, length, splits uint64) uint64 {
 	return deleteRangeBytes(client, clock, length) + splits*splitFrameBytes
 }
 
 // maxVarintBytes is the most bytes a lib0 varint takes for any client or clock a room holds: the
 // walk refuses a varint past 53 bits from a browser (update_walk.go), a server write's client is 32
-// bits (crdt.NewClientID, crdt/doc.go:414-421) and its clocks count its own structs, and 53 bits
-// take eight bytes of seven.
+// bits (crdt.NewClientID, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:419-426) and its clocks count
+// its own structs, and 53 bits take eight bytes of seven.
 const maxVarintBytes = 8
 
 // varintBytes is the bytes lib0 writes v in as a varint: seven bits a byte.
@@ -351,16 +352,18 @@ func varintBytes(v uint64) uint64 {
 // group of its own, should the room hold nothing of its client - the group's struct count, client
 // and first clock, and a byte more of the count of groups - or, should it park beyond a gap in its
 // client's clocks, the skip ygo writes before it, a byte and the gap's length, no more than its
-// clock (encodeStructStoreV1, crdt/merge.go:162-200), with a byte more of its group's struct count.
+// clock (encodeStructStoreV1, sjawhar/ygo v1.54.1-sami.3, crdt/merge.go:155-193), with a byte more
+// of its group's struct count.
 func placeBytes(walked updateStruct) uint64 {
 	return 2 + varintBytes(walked.client) + varintBytes(walked.clock)
 }
 
 // deleteRangeBytes is the most deleting the clocks [clock, clock+length) of client adds to the
-// room's delete set as ygo writes it (encodeDeleteSet, crdt/update.go:517-533): the range's clock
-// and length, and should the delete set hold no range of client, its client and a byte of its
-// count of ranges; and a byte more of a count, of ranges or of clients. A range that touches one
-// the delete set holds is merged with it (buildDeleteSet, :502-515) and adds less.
+// room's delete set as ygo writes it (encodeDeleteSet, sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:680-698): the range's clock and length, and should the delete set hold no range
+// of client, its client and a byte of its count of ranges; and a byte more of a count, of ranges
+// or of clients. A range that touches one the delete set holds is merged with it (buildDeleteSet,
+// :665-678) and adds less.
 func deleteRangeBytes(client, clock, length uint64) uint64 {
 	return 2 + varintBytes(client) + varintBytes(clock) + varintBytes(length)
 }
@@ -370,21 +373,21 @@ func deleteRangeBytes(client, clock, length uint64) uint64 {
 const maxDeleteRangeBytes = 2 + 3*maxVarintBytes
 
 // splitFrameBytes is the most one split of an item the room holds can add to the room's frame
-// total (splitItem, crdt/item.go:515). The right part becomes an item of its own, written with an
-// info byte, its origin - the left part's last clock - and the item's right origin, each a client
-// and a clock, and its content's length (a string's bytes, a run's values or clocks), whose bytes
-// are the item's own, moved and not added; an item with an origin names no parent; and its group's
-// struct count may take a byte more: 2 + 5 x maxVarintBytes. The right part can be deleted later,
-// a range of its own (maxDeleteRangeBytes), and the deletion of the two parts can add more than
-// the deletion of the item was priced at (deletionReserve) by the right part's length, which its
-// content no longer gives back (maxVarintBytes).
+// total (splitItem, sjawhar/ygo v1.54.1-sami.3, crdt/item.go:538). The right part becomes an item
+// of its own, written with an info byte, its origin - the left part's last clock - and the item's
+// right origin, each a client and a clock, and its content's length (a string's bytes, a run's
+// values or clocks), whose bytes are the item's own, moved and not added; an item with an origin
+// names no parent; and its group's struct count may take a byte more: 2 + 5 x maxVarintBytes. The
+// right part can be deleted later, a range of its own (maxDeleteRangeBytes), and the deletion of
+// the two parts can add more than the deletion of the item was priced at (deletionReserve) by the
+// right part's length, which its content no longer gives back (maxVarintBytes).
 const splitFrameBytes = 2 + 5*maxVarintBytes + maxDeleteRangeBytes + maxVarintBytes
 
 // deletionReserve is the most deleting walked, a struct of the room's encoded state, can add to
 // the room's frame: the range it adds to the delete set (deleteRangeBytes), less what ygo gives
 // back of its content, which it writes as a deleted run's length once the item is deleted
-// (gcTxnDeleteSet, crdt/snapshot.go:284-313, in every room, whose documents keep ygo's GC on). A
-// GC run, a deleted run and a skip are deleted already.
+// (gcTxnDeleteSet, sjawhar/ygo v1.54.1-sami.3, crdt/snapshot.go:362-393, in every room, whose
+// documents keep ygo's GC on). A GC run, a deleted run and a skip are deleted already.
 func deletionReserve(walked updateStruct) uint64 {
 	switch walked.kind {
 	case structGC, structDeleted, structSkip:

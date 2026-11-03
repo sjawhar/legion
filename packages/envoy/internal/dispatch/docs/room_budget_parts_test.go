@@ -121,9 +121,10 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 // hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is every
 // range of every update the hook admits. So a browser's whole-state handoff of a document edited
 // into 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
-// each transaction as ygo does (crdt/doc.go:597-612), are charged nothing for the runs: the
-// keystroke is charged its one struct alone. A new deletion in the middle of a run of text is
-// charged its range's two splits, and the same update sent again nothing; a new deletion of one
+// each transaction as ygo does (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3,
+// crdt/doc.go:616, crdt/update.go:388), are charged nothing for the runs: the keystroke is charged
+// its one struct alone. A new deletion in the middle of a run of text is charged its range's two
+// splits, and the same update sent again nothing; a new deletion of one
 // character between two the room holds deleted is charged nothing, since both its ends are clean
 // already (deletedRuns.splitEnds).
 func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
@@ -181,8 +182,9 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 // The room's update observer charges the content each transaction adds, whoever wrote it - here
 // the server's own writes - to the uncounted part, at the densest price at both copies, and never
 // the transaction's bytes: ygo's update for a transaction carries the room's whole delete set
-// every time (crdt/doc.go:597-612), so a keystroke into a document of 2,000 deleted runs is a
-// frame of thousands of bytes that adds two, and its structure part one struct, whatever runs the
+// every time (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:616,
+// crdt/update.go:388), so a keystroke into a document of 2,000 deleted runs is a frame of
+// thousands of bytes that adds two, and its structure part one struct, whatever runs the
 // frame carries. A transaction that only deletes adds nothing, and a whole-state handoff of the
 // document the room holds adds nothing. A count re-bases the uncounted part, here one the measurer
 // makes early, as the content passes earlyCountCharge.
@@ -925,9 +927,9 @@ func TestTheRoomBudgetAdmitsDeletesUnderPressureWithinTheReserveAndRefusesThemPa
 
 // browserTreeEdit is the update a browser holding a copy of room sends for change to its Proof
 // tree, written by the tree diff the editor's writes come to (pmdoc.Update), as ygo's update
-// observer encodes it: the transaction's structs and the copy's whole delete set
-// (crdt/doc.go:597-612). browser is the copy, made from room when nil, so successive edits build on
-// each other as one browser's do.
+// observer encodes it: the transaction's structs and the copy's whole delete set (buildPhase2 and
+// encodeV1Locked, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:616, crdt/update.go:388). browser is
+// the copy, made from room when nil, so successive edits build on each other as one browser's do.
 func browserTreeEdit(t *testing.T, room, browser *crdt.Doc, change func(tree *pmdoc.Node)) (*crdt.Doc, []byte) {
 	t.Helper()
 	if browser == nil {

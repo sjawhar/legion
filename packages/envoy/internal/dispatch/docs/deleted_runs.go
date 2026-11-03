@@ -56,8 +56,8 @@ func (d *deletedRuns) seed(set *crdt.IDSet) {
 }
 
 // covers reports whether the room is known to hold clocks [clock, clock+length) of client deleted
-// already. A range of no clocks splits nothing (crdt/delete_set.go:170), and is covered. Nil, a
-// room no load charged, covers nothing.
+// already. A range of no clocks splits nothing (sjawhar/ygo v1.54.1-sami.3,
+// crdt/delete_set.go:187-189), and is covered. Nil, a room no load charged, covers nothing.
 func (d *deletedRuns) covers(client, clock, length uint64) bool {
 	if length == 0 {
 		return true
@@ -75,41 +75,41 @@ func (d *deletedRuns) covers(client, clock, length uint64) bool {
 // splitEnds reports whether applying a delete range of clocks [clock, clock+length) of client can
 // leave split for good the item holding its start and the item holding its end, the only items
 // ygo's apply splits for it: it cleans the range's two ends (getItemCleanStart at clock and at
-// clock+length, crdt/delete_set.go:170-172 and crdt/store.go:123-140), deletes whole each item
-// between them (:182-208) and parks the part of the range past the clocks the room holds
-// (:209-215). ygo sorts and merges each client's ranges as it decodes them (crdt/update.go:1324),
-// so every range it applies ends where a range of the update ends. A range of no clocks splits
-// nothing (crdt/delete_set.go:170).
+// clock+length, sjawhar/ygo v1.54.1-sami.3, crdt/delete_set.go:199-201 and crdt/store.go:168-185),
+// deletes whole each item between them (crdt/delete_set.go:211-237) and parks the part of the
+// range past the clocks the room holds (crdt/delete_set.go:238-244). ygo sorts and merges each
+// client's ranges as it decodes them (crdt/update.go:1474), so every range it applies ends where a
+// range of the update ends. A range of no clocks splits nothing (crdt/delete_set.go:187-189).
 //
 // An end x can be left split only where the list holds neither clock x-1 nor clock x, and never at
 // clock 0, where a client's first item starts. ygo keeps an item deleted whole or not at all: a
 // delete cleans its ends first, and a merge joins only two items of one deleted state
-// (tryMergeWithLeft, crdt/transaction.go:480). So where x-1 and x are held, one deleted and the
+// (tryMergeWithLeft, crdt/transaction.go:554). So where x-1 and x are held, one deleted and the
 // other not, they lie in two items and x is clean already. Where both are held deleted, the split
 // at x cuts a deleted item into two deleted halves, which ygo merges back as the transaction ends:
-// splitItem records the right half (crdt/item.go:556-559) and tryMergeWithLefts merges it with its
-// left (crdt/transaction.go:374-402, run at commit, crdt/doc.go:820-824), since the halves share
+// splitItem records the right half (crdt/item.go:579-582) and tryMergeWithLefts merges it with its
+// left (crdt/transaction.go:448-476, run at commit, crdt/doc.go:860-864), since the halves share
 // client, parent, origins and deleted state, and an item that can split - a deleted run, or a run
-// of string, Any or JSON content - holds content that merges (crdt/transaction.go:513-544), every
+// of string, Any or JSON content - holds content that merges (crdt/transaction.go:587-618), every
 // other content being one clock long. Only an item integrated between the halves keeps them
 // apart, and ygo's integrate puts one there only when it names clock x-1 as its origin or clock x
-// as its right origin (crdt/item.go:104-106 and :152-191: past the left half, its scan always
+// as its right origin (crdt/item.go:103-105 and :155-201: past the left half, its scan always
 // passes the right half, whose origin is the left half's last clock), which its own integrate
 // cleans at x, a split its own count holds (splitsAStructCanCause).
 //
 // Where x is not held, no item holds it: a room holds each client's clocks from 0 up, and
-// integrates a struct reaching past them from the first clock it does not hold (crdt/item.go:
-// 83-91), so where x-1 is held the item that brings x starts at x. Where x-1 is not held either,
-// one item the same transaction integrates can hold both; what the list holds of them is then in
-// ranges the room keeps parked, which ygo deletes in that transaction once their clocks arrive
-// (drainParked, crdt/update.go:588). Where x-1 and x both end deleted, the halves at x merge back
-// as above; where only one does, x is where a parked run starts or ends, a split charged to the
-// range that first listed a clock beside x, which had its own end at x with neither clock listed -
-// and the room's count holds splitsAStructCanCause structs for each parked range besides
-// (structTotalOf). So each place a listed run starts or ends is split once at most, by a range
-// charged for it; and the list only grows, so a range weighed against the list before its apply is
-// charged no less than against the list its apply meets. Nil, a room no load charged, lists
-// nothing.
+// integrates a struct reaching past them from the first clock it does not hold
+// (crdt/item.go:82-90), so where x-1 is held the item that brings x starts at x. Where x-1 is not
+// held either, one item the same transaction integrates can hold both; what the list holds of them
+// is then in ranges the room keeps parked, which ygo deletes in that transaction once their clocks
+// arrive (drainParked, crdt/update.go:803). Where x-1 and x both end deleted, the halves at x
+// merge back as above; where only one does, x is where a parked run starts or ends, a split
+// charged to the range that first listed a clock beside x, which had its own end at x with neither
+// clock listed - and the room's count holds splitsAStructCanCause structs for each parked range
+// besides (structTotalOf). So each place a listed run starts or ends is split once at most, by a
+// range charged for it; and the list only grows, so a range weighed against the list before its
+// apply is charged no less than against the list its apply meets. Nil, a room no load charged,
+// lists nothing.
 func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) {
 	if length == 0 {
 		return false, false
@@ -133,12 +133,12 @@ func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) 
 // (updateTally.deletesAt), once the room has been charged its structure - a browser's update the
 // peer hook admitted, or a transaction of the server's own (roomCharge.wrote); and, where born says
 // the update carries structs that integrate deleted - a GC run, a deleted item, which the delete
-// set of every encode of the room's state lists from then on (buildDeleteSet,
-// crdt/update.go:502-515) though no delete range named them - their clocks too, from a walk of the
-// whole update rather than of its delete set alone. It walks as a room's own state is walked
-// (fromRoom), which refuses only what ygo cannot decode: the server's writes can carry what no
-// browser sends, and an update the hook admitted passed the stricter walk already. Nil records
-// nothing.
+// set of every encode of the room's state lists from then on (buildDeleteSet, sjawhar/ygo
+// v1.54.1-sami.3, crdt/update.go:665-678) though no delete range named them - their clocks too,
+// from a walk of the whole update rather than of its delete set alone. It walks as a room's own
+// state is walked (fromRoom), which refuses only what ygo cannot decode: the server's writes can
+// carry what no browser sends, and an update the hook admitted passed the stricter walk already.
+// Nil records nothing.
 func (d *deletedRuns) record(update []byte, deletesAt int, born bool) {
 	if d == nil {
 		return

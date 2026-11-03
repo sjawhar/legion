@@ -786,8 +786,8 @@ func BenchmarkPeerUpdateInsertMeasures(b *testing.B) {
 }
 
 // weighInto hands update to the hook for room, with an apply that applies it to room as ygo's own
-// does (provider/websocket/peer_update.go:84-94), and reports what the hook answered and whether it
-// called the apply.
+// does (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:109-124), and reports what
+// the hook answered and whether it called the apply.
 func weighInto(service *Service, room *crdt.Doc, update []byte) (err error, called bool) {
 	err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: update}, func() error {
 		called = true

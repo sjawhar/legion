@@ -42,10 +42,11 @@ func deliver(t *testing.T, room, browser *crdt.Doc, synced crdt.StateVector) {
 // typeAndDelete has browser type n characters one at a time at the front of text, in one edit,
 // and delete them all in another, and delivers both to room. Each character is a struct of its
 // own, in the browser and in the room, since ygo merges a struct only into the one on its left
-// with the clock before it (crdt/transaction.go:466-511), and the deletion leaves each where it
-// is, so the room's struct total grows by n and its rendering is as it was. Each insert at the
-// front walks past the deleted characters already there, so a second call on one text walks the
-// first call's n characters for each of its own.
+// with the clock before it (tryMergeWithLeft, sjawhar/ygo v1.54.1-sami.3,
+// crdt/transaction.go:540-640), and the deletion leaves each where it is, so the room's struct
+// total grows by n and its rendering is as it was. Each insert at the front walks past the
+// deleted characters already there, so a second call on one text walks the first call's n
+// characters for each of its own.
 func typeAndDelete(t *testing.T, room, browser *crdt.Doc, text *crdt.YXmlText, n int) {
 	t.Helper()
 	synced := browser.StateVector()
