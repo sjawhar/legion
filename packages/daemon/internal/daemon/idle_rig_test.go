@@ -147,6 +147,11 @@ func newIdleWakeRig(t *testing.T, issues ...string) *idleWakeRig {
 	// One admission slot per issue of the rig, and a cap with room for them all: an issue the
 	// daemon has not admitted is one its boot lingers closed.
 	cfg.AdmissionCap = len(issues) + 4
+	// Every launcher of the rig reaches that database through its generation's proxy, which
+	// carries the launcher's own startup packet to it unchanged, so the password the rig's DSN
+	// names has to be in the environment before the first launcher starts
+	// (idleRigSessionPassword).
+	idleRigSessionPassword(t, pool)
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: sandboxNamespace, Image: idleRigImage, StorageClass: "standard", IssueVolume: "1Gi",
 		Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
@@ -279,6 +284,23 @@ func idleRigDatabase(t *testing.T, pool *pgxpool.Pool) string {
 func idleRigUser(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	return pool.Config().ConnConfig.User
+}
+
+// idleRigSessionPassword puts the rig's database password where a launcher's own session client
+// finds it, libpq's PGPASSWORD, which is the only place left for one: that client builds its URL
+// from the endpoint alone (ompsessions.Endpoint.ClientURL), which carries no password, and the
+// generation's proxy is a byte copy that hands the client's startup packet to the server
+// unchanged, so a server that asks for one refuses the login (`failed SASL auth`, SQLSTATE
+// 28P01) however the proxy's upstream was dialed. A pod's Cloud SQL asks for none — the
+// connector mints the login as it dials and no password is ever written into a pod
+// (internal/sessionproxy) — so this is the rig's stand-in for that identity and no production
+// path reads it, as internal/launcher's sessionDatabaseAt is for that package's tests. A
+// trust-authenticated server, which this repository's own pod serves, names no password, and an
+// empty PGPASSWORD is no setting at all (pgx's parseEnvSettings keeps only what is non-empty),
+// so the rig runs the same against either.
+func idleRigSessionPassword(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	t.Setenv("PGPASSWORD", pool.Config().ConnConfig.Password)
 }
 
 // idleRigHostPort is the rig's Postgres as a dialable address, which the session proxy's upstream
