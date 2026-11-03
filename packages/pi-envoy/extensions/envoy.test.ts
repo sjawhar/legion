@@ -130,6 +130,11 @@ const natsState = {
   /** A `flush()` a test parks on, so what the extension does before the server confirms a
    *  subscription can be watched. */
   heldFlush: undefined as Promise<void> | undefined,
+  /** The subject whose round trip rejects: the next `flush()` taken once that subject's SUB has
+   *  been written fails and clears this, as nats.js rejects every pending flush when the
+   *  connection drops (`nats@2.29.3` `protocol.js`, `resetOutbound`). Named rather than counted,
+   *  because one pass takes a round trip per open and only one of them is a case's subject. */
+  failFlushOnSubject: undefined as string | undefined,
 };
 
 /** Reports `{ type }` to every reader of a mocked connection's `status()`. */
@@ -211,10 +216,16 @@ mock.module("nats", () => ({
           }),
         };
       },
-      // nats.js's round trip: the server has every SUB written before it when this resolves.
+      // nats.js's round trip: the server has every SUB written before it when this resolves, and
+      // every pending one of them rejects when the connection drops.
       flush: async () => {
         natsState.flushes.push([...natsState.subscriptions.keys()]);
         if (natsState.heldFlush !== undefined) await natsState.heldFlush;
+        const failing = natsState.failFlushOnSubject;
+        if (failing !== undefined && natsState.controls.has(failing)) {
+          natsState.failFlushOnSubject = undefined;
+          throw new Error(`FLUSH_FAILED ${failing}`);
+        }
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -459,6 +470,7 @@ afterEach(async () => {
   // As for `heldConnect`: a parked flush left behind would park every later test's subscribe.
   natsState.heldFlush = undefined;
   natsState.flushes.length = 0;
+  natsState.failFlushOnSubject = undefined;
   hostBuiltins.length = 0;
 });
 
@@ -5726,6 +5738,59 @@ console.log(JSON.stringify(args));
     expect(bound.active()).toBe(false);
   });
 
+  test("a role-bound notice subject whose round trip fails is closed, and no registration carries it", async () => {
+    // The open marks the subject as the role's before it subscribes, and unmarks it again when the
+    // open throws, because a caller reads a throw as "nothing opened". So the subject must be gone
+    // too: left open and unmarked it would ride the next registration as a plain interest, which
+    // `endRole` never closes, and a controller another session replaced would keep taking the
+    // role's wakes. nats.js rejects every pending flush when the connection drops, so a reconnect
+    // during a claim is the whole trigger.
+    const role = "legion-controller";
+    const notice = "notifications.legion.ACME.controller";
+    const registered: string[][] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_flush_role",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${body?.role}`],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        registered.push(Array.isArray(body?.topics) ? body.topics : []);
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-bound-flush-fails");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_flush_role");
+    await fixture.handlers.get("session_start")?.({}, context);
+    await claimEnvoyRole("ses_flush_role", role, context);
+
+    natsState.failFlushOnSubject = notice;
+    await expect(subscribeLegionNotice("ses_flush_role", notice, context, role)).rejects.toThrow(
+      `FLUSH_FAILED ${notice}`
+    );
+    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+
+    // Any later registration is the one that would have carried it.
+    registered.length = 0;
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.9"] });
+    expect(registered.length).toBeGreaterThan(0);
+    expect(registered.flat()).not.toContain(notice);
+
+    // The role's own move finds nothing of it to close, and the next open takes it afresh.
+    await subscribeLegionNotice("ses_flush_role", notice, context, role);
+    expect(natsState.controls.get(notice)?.active()).toBe(true);
+  });
+
   // A fixture holding `legion-controller`. Once `gate(role)` is called, the listener holds the
   // next claim of `role` until its `release` resolves. The model's envoy_role_set reaches the move
   // queue in the call itself, so a second call made after `reached` is queued behind the first.
@@ -10427,6 +10492,32 @@ console.log(JSON.stringify(args));
         claimAnswered.resolve();
       }
     });
+  });
+
+  test("an agent stream control subject whose round trip fails is closed, not left for no pass to reopen", async () => {
+    // `watchAgentStream` returns at once while `agentStreamControl` names the session, so a
+    // control subject left open after a failed round trip would never be opened again and never
+    // be registered: a viewer's replay request and its watch pings would reach nothing, for the
+    // life of the session.
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?control-flush-fails");
+    const fixture = createPi();
+    const control = "agentstream.ses_control_flush.control";
+
+    envoyExtension(fixture.pi);
+    natsState.failFlushOnSubject = control;
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_control_flush"));
+
+    // The agent subject's own round trip answered, so the pass reached the control subject.
+    expect(natsState.controls.get("notifications.agent.ses_control_flush")?.active()).toBe(true);
+    expect(natsState.controls.get(control)?.active() ?? false).toBe(false);
+
+    // Nothing of it is held, so the next pass opens it.
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "resume" },
+      sessionContext("ses_control_flush")
+    );
+    expect(natsState.controls.get(control)?.active()).toBe(true);
   });
 
   // A pass abandoned while its NATS dial is in flight must not put that dial in the shared
@@ -18039,6 +18130,22 @@ describe("consumer delivery", () => {
     const renewed = session.registrations.at(-1);
     expect(renewed?.delivery?.epoch).toBe(first?.delivery?.epoch ?? "");
     expect(renewed?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 7 });
+  });
+
+  test("a relay subject whose round trip fails is closed, and the next tick opens it", async () => {
+    // `retryRelay` bails while `owner.subscription` is set and `pumpRelay`'s own path runs only
+    // when the iterator ends, so a relay subject left open after a failed round trip would stay
+    // open, unregistered and unrelayed: every frame the listener would have sent goes nowhere
+    // until the connection drops.
+    natsState.failFlushOnSubject = RELAY;
+    const session = await bootConsumer("relay-flush-fails");
+
+    expect(natsState.controls.get(RELAY)?.active() ?? false).toBe(false);
+    expect(session.registrations.at(-1)?.relaySubscribed).toBe(false);
+
+    await session.tick();
+    expect(natsState.controls.get(RELAY)?.active()).toBe(true);
+    expect(session.registrations.at(-1)?.delivery?.consumer).toBe(true);
   });
 
   test("answers received before any host work and done only once each card is written, in stream order", async () => {

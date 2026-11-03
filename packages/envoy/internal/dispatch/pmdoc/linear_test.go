@@ -960,10 +960,10 @@ const perCallHangCap = 30 * time.Minute
 // cputest.Measure) that repeats its operation until a window reaches the measurement's
 // resolution, so the wall time it takes is the CPU it needs multiplied by whatever contention the
 // runner is under; a fixed wall-clock bound over a CPU-time budget fails healthy calls on a
-// loaded shared runner, which is what this file's own history records. For scale: the slowest
-// observed healthy call at this file's current sizes, under real ambient box load, was "<a"
-// rendering at parseFullTarget/renderFullTarget's race-mode size in about 0.8s, and "a_b*"
-// parsing at the non-race size in about 0.9s. A run whose deadline leaves no more than the
+// loaded shared runner, which is what this file's own history records. For scale: a healthy
+// '<a b="x;a@b.cc ">' call at the 1 MiB tag shape, measured under -race in a two-CPU gVisor pod on
+// 2026-11-03, took 50.26s - 84% of the 60s bound this replaced, which is why the bound had to go
+// rather than be raised. A run whose deadline leaves no more than the
 // margin fails once, by name: that reads like a misconfigured run, not a hang.
 func perCallDeadline(t *testing.T) time.Duration {
 	t.Helper()

@@ -1664,12 +1664,6 @@ export default function envoyExtension(pi: PiApi): void {
   // have.
   const SUBSCRIBE_FLUSH_TIMEOUT_MS = 10_000;
 
-  // Subjects whose SUB has been written but not yet confirmed by a round trip. A later
-  // `subscribe()` for such a subject opens nothing (it is already in `subscriptions`) and
-  // confirms it, so a flush that failed once does not leave a subject registered as this
-  // session's that the server never took.
-  const unconfirmed = new Set<string>();
-
   // Drop a topic we no longer want. Every marker set here is consumed again by
   // the pump end-path, the retry callback, or the next subscribe(), so the set
   // cannot accumulate topics that were never live in the first place.
@@ -1683,7 +1677,6 @@ export default function envoyExtension(pi: PiApi): void {
     intentionallyClosed.add(topic);
     subscription.unsubscribe();
     subscriptions.delete(topic);
-    unconfirmed.delete(topic);
     return true;
   };
 
@@ -1816,24 +1809,31 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<boolean> => {
     const subjects = expandSubscriptionTopics([topic]);
     const fresh = subjects.filter((candidate) => !subscriptions.has(candidate));
-    const confirming = subjects.filter(
-      (candidate) => !subscriptions.has(candidate) || unconfirmed.has(candidate)
-    );
-    if (confirming.length === 0) return false;
+    if (fresh.length === 0) return false;
     const activeConnection = await connect();
-    for (const subject of fresh) {
-      const subscription = activeConnection.subscribe(subject);
-      // A fresh subscription supersedes any earlier deliberate close of this topic.
-      intentionallyClosed.delete(subject);
-      subscriptions.set(subject, subscription);
-      void pump(subject, subscription);
+    // All or nothing. Every caller reads a throw from here as "nothing opened": subscribeNotice's
+    // catch unmarks the role-bound subjects it marked before the open, the pump's own retry bails
+    // while the subject is in `subscriptions`, and `registrationInput` registers every key of that
+    // map. So a subject this call opened and could not confirm is closed before the throw, or a
+    // role-bound notice subject outlives its role: registered as a plain interest at the next
+    // registration and never closed by `endRole`, it would keep taking a replaced holder's wakes.
+    // nats.js rejects every pending flush when the connection drops (resetOutbound), so a
+    // reconnect during a claim is all it takes, and the caller opens the topic again.
+    const opened: string[] = [];
+    try {
+      for (const subject of fresh) {
+        const subscription = activeConnection.subscribe(subject);
+        // A fresh subscription supersedes any earlier deliberate close of this topic.
+        intentionallyClosed.delete(subject);
+        subscriptions.set(subject, subscription);
+        opened.push(subject);
+        void pump(subject, subscription);
+      }
+      await confirmSubscribed(activeConnection, `the subscription to ${topic}`);
+    } catch (error) {
+      for (const subject of opened) closeIntentionally(subject);
+      throw error;
     }
-    for (const subject of confirming) unconfirmed.add(subject);
-    await confirmSubscribed(activeConnection, `the subscription to ${topic}`);
-    for (const subject of confirming) unconfirmed.delete(subject);
-    // Every subject of this call is open and confirmed, and at least one of them was not before
-    // it: a subject whose earlier round trip timed out stayed in `unconfirmed`, and the caller
-    // must still register this session's interest in it.
     return true;
   };
 
@@ -2065,9 +2065,17 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpRelay(owner, subscription);
     // The relay's own registration names this session's delivery subject the moment this returns,
     // and the listener publishes to it at once, so a SUB still in the out buffer costs the first
-    // frames. The pump is started first, so a connection that never answers still leaves a
-    // subscription the pump's own recovery path owns.
-    await confirmSubscribed(connected, `the relay subscription for ${owner.sessionID}`);
+    // frames. A round trip that fails leaves nothing open: `retryRelay` bails while
+    // `owner.subscription` is set, so a relay left open and unregistered would stay that way until
+    // the iterator ended, and the caller - the reconcile pass, or `retryRelay` itself - reopens it
+    // only because this throws with the subject gone.
+    try {
+      await confirmSubscribed(connected, `the relay subscription for ${owner.sessionID}`);
+    } catch (error) {
+      if (owner.subscription === subscription) owner.subscription = undefined;
+      subscription.unsubscribe();
+      throw error;
+    }
   };
 
   // Opens session `id`'s relay subject, closing another session's relay first.
@@ -2330,10 +2338,18 @@ export default function envoyExtension(pi: PiApi): void {
     agentStreamControl = subscription;
     void pumpAgentStreamControl(subscription, session);
     // A viewer's first ping is published as soon as the registration names this session, and one
-    // sent before the server took this SUB would be dropped, leaving the viewer to retry. The
-    // pump is started first, so a connection that never answers still leaves a subscription the
-    // pump's own recovery path owns.
-    await confirmSubscribed(connected, `the agent stream control subscription for ${session}`);
+    // sent before the server took this SUB would be dropped, leaving the viewer to retry. A round
+    // trip that fails leaves nothing open: this function returns at once while
+    // `agentStreamControl` is set for the session, so a control subject left open and
+    // unregistered would never be opened again, and the reconcile pass reopens it only because
+    // this throws with the subject gone.
+    try {
+      await confirmSubscribed(connected, `the agent stream control subscription for ${session}`);
+    } catch (error) {
+      if (agentStreamControl === subscription) agentStreamControl = undefined;
+      subscription.unsubscribe();
+      throw error;
+    }
   };
 
   /** One of this session's messages, on its way to whoever has the session open, tagged with the
