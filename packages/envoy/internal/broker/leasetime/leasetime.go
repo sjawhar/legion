@@ -9,6 +9,10 @@
 // renews it again before it runs out. That is not one wait but each renewer's whole retry
 // schedule, which this package walks.
 //
+// Each renewer calls the same steps this package's model walks — RenewAfter and NextBackoff for
+// agent-secrets renew, HelperRenewAfter for agent-secrets-helper, and RenewClientTimeout for the
+// HTTP client of each — so a change to a renewer's schedule moves the refusal with it.
+//
 // It is a leaf on purpose: the standard library and nothing else. Both renewers are client
 // binaries (cmd/agent-secrets, cmd/agent-secrets-helper), and internal/broker/config, the one
 // place that refuses a lease, pulls in the broker's API, policy, secret and Postgres packages,
@@ -23,31 +27,48 @@ const (
 	// serving, which the broker gives back to every lease that was running when it began.
 	NotServingSweeps = 3
 
-	// RenewDivisor is the share of a lease both renewers let pass before they renew: a third
-	// (cmd/agent-secrets/main.go renewLoop, internal/broker/helper/server.go renewLoop).
+	// RenewDivisor is the share of a lease both renewers let pass before they renew: a third.
+	// RenewAfter and HelperRenewAfter are the two steps that divide by it, and both renewers
+	// call them.
 	RenewDivisor = 3
 
 	// RenewBackoffInitial and RenewBackoffMax are agent-secrets renew's wait after a failed
-	// renewal: two seconds, doubling to a ten-second cap (cmd/agent-secrets/main.go nextBackoff).
+	// renewal: two seconds, doubling to a ten-second cap. NextBackoff is that step, and
+	// cmd/agent-secrets/main.go's renewLoop calls it.
 	RenewBackoffInitial = 2 * time.Second
 	RenewBackoffMax     = 10 * time.Second
 
 	// HelperMinRenew is the floor under agent-secrets-helper's renew cadence, the MinRenew its
-	// Server runs with (internal/broker/helper.Server).
+	// Server runs with (cmd/agent-secrets-helper/main.go sets it).
 	HelperMinRenew = 30 * time.Second
 
 	// RenewClientTimeout is how long one renewal that the outage black-holes — a connection a
 	// front door accepts while nothing serves behind it, or a node that is gone — holds its
-	// renewer before it gives up. It is agent-secrets' whole-call HTTP timeout
-	// (cmd/agent-secrets/client.go newClient). The helper's own client carries no deadline, so
-	// the model charges it the same thirty seconds: an unbounded wait would make no lease
-	// BROKER_LEASE_SECONDS accepts safe, and the figure is the one the two renewers share.
+	// renewer before it gives up. Both renewers' HTTP clients carry it: cmd/agent-secrets'
+	// newClient and the client cmd/agent-secrets-helper builds for helper.Broker, which is what
+	// the helper's renewals go through (internal/broker/helper/broker.go, httpClient).
 	RenewClientTimeout = 30 * time.Second
 
 	// maxSearchedLease is how far Shortest looks: an hour of the model's own seconds, which is
 	// BROKER_LEASE_SECONDS' own maximum.
 	maxSearchedLease = 3600
 )
+
+// RenewAfter is how long agent-secrets renew waits after a renewal that answered with leaseLeft
+// of lease left: a third of it, with no floor (cmd/agent-secrets/main.go, renewLoop).
+func RenewAfter(leaseLeft time.Duration) time.Duration { return Production().RenewAfter(leaseLeft) }
+
+// NextBackoff is agent-secrets renew's wait after one more failed renewal: the first is
+// RenewBackoffInitial and each after it doubles, to RenewBackoffMax
+// (cmd/agent-secrets/main.go, nextBackoff).
+func NextBackoff(current time.Duration) time.Duration { return Production().NextBackoff(current) }
+
+// HelperRenewAfter is agent-secrets-helper's own interval, kept after a renewal and after a
+// failed one alike: a third of the lease left, never below minRenew, which is HelperMinRenew in
+// production (internal/broker/helper/server.go, renewLoop).
+func HelperRenewAfter(leaseLeft, minRenew time.Duration) time.Duration {
+	return Production().HelperRenewAfter(leaseLeft, minRenew)
+}
 
 // Renewer names one of the two loops that renew an enrollment lease.
 type Renewer string
@@ -107,6 +128,32 @@ func (m Model) Scale(unit time.Duration) Model {
 	}
 }
 
+// RenewAfter is agent-secrets renew's wait after a renewal, at this model's second.
+func (m Model) RenewAfter(leaseLeft time.Duration) time.Duration { return leaseLeft / RenewDivisor }
+
+// NextBackoff is agent-secrets renew's wait after one more failed renewal, at this model's
+// second; current is zero before the first failure.
+func (m Model) NextBackoff(current time.Duration) time.Duration {
+	if current <= 0 {
+		return m.BackoffInitial
+	}
+	return min(2*current, m.BackoffMax)
+}
+
+// HelperRenewAfter is the helper's interval at this model's second.
+func (m Model) HelperRenewAfter(leaseLeft, minRenew time.Duration) time.Duration {
+	return max(minRenew, leaseLeft/RenewDivisor)
+}
+
+// Attempt is one renewal a walk launched: At is when the renewer sent it, Held whether the
+// outage black-holed it, so that it failed ClientTimeout later rather than at once, and Failed
+// the instant it failed. The renewal that got through carries a zero Failed.
+type Attempt struct {
+	At     time.Duration
+	Held   bool
+	Failed time.Duration
+}
+
 // Phase is one renewer's walk through one outage, measured from the renewal that granted the
 // lease: the broker stops serving at GapStart and serves again at GapEnd, the renewer launches
 // a renewal at each of Attempts, and the last of those, Renewed, is the one that succeeds.
@@ -114,7 +161,7 @@ type Phase struct {
 	Renewer          Renewer
 	Lease            time.Duration
 	GapStart, GapEnd time.Duration
-	Attempts         []time.Duration
+	Attempts         []Attempt
 	Renewed          time.Duration
 }
 
@@ -123,7 +170,7 @@ type Phase struct {
 func (p Phase) Survived() bool { return p.Renewed < p.Lease }
 
 // Survives answers whether a lease outlives every outage of NotServingSweeps sweeps, whatever
-// instant one begins at, for both renewers.
+// instant one begins at and whatever each renewal in it meets, for both renewers.
 func (m Model) Survives(lease, sweep time.Duration) bool {
 	for _, r := range Renewers() {
 		if !m.WorstFor(r, lease, sweep).Survived() {
@@ -133,43 +180,139 @@ func (m Model) Survives(lease, sweep time.Duration) bool {
 	return true
 }
 
-// WorstFor answers the gap start that renews latest for one renewer. Only a gap that begins at
-// or before the renewer's first attempt is walked: a later one lets that attempt through, and
-// the lease it answers with starts the walk again.
-func (m Model) WorstFor(r Renewer, lease, sweep time.Duration) Phase {
-	gap := NotServingSweeps * sweep
-	var worst Phase
-	for _, start := range m.gapStarts(r, lease, gap) {
-		if p := m.Walk(r, lease, gap, start); p.Renewed > worst.Renewed {
-			worst = p
-		}
-	}
-	return worst
-}
-
-// Walk answers what one renewer does when the broker stops serving gapStart after the renewal
-// that granted the lease and serves again gap later.
+// WorstFor answers the outage that renews latest for one renewer: the instant it begins, and
+// what each renewal it refuses met.
 //
-// A renewal launched at or after the broker serves again succeeds at once. One launched before
-// it fails, at its own instant when the connection is refused, or ClientTimeout later when the
-// outage black-holed it — which the walk charges whenever that lands past the instant the
-// broker serves again, the only phase where holding the connection costs the renewer anything.
+// Two things vary, and the worst outage is the worst over both. The first is when the gap
+// begins, which decides which renewal is the first to find a broker serving again. The second
+// is what each renewal before that one meets: a connection the outage refuses fails at once,
+// while one a front door accepts with nothing behind it, or one to a node that is gone, is held
+// to ClientTimeout — and one outage can do both, refusing while its pods are gone and hanging
+// while one starts. Holding a renewal is not always the worse of the two: a renewer refused at
+// once retries sooner, which can place a later renewal just before the broker returns, where
+// holding that one costs the whole timeout. So each renewal is searched both ways.
+//
+// The search is over the walk in which every renewal fails. Each of its renewals may be the
+// last one the outage refuses: an outage ending just after it leaves every earlier renewal
+// inside the gap and lets the next one through, so the renewal that gets through is that next
+// one. The gap must also begin after the renewal that granted the lease and no later than the
+// renewer's first attempt, which bounds which of them can be the last the outage refuses.
 // Neither renewer moves its lease when a renewal fails: agent-secrets renew keeps the expiry of
 // its last answer and the helper logs "keeping the current lease", so the lease left always
 // counts down from the renewal the walk starts at.
-func (m Model) Walk(r Renewer, lease, gap, gapStart time.Duration) Phase {
+func (m Model) WorstFor(r Renewer, lease, sweep time.Duration) Phase {
+	gap := NotServingSweeps * sweep
+	first := m.firstWait(r, lease)
+	w := &walk{m: m, r: r, lease: lease, gap: gap, last: first + gap, seen: map[walkState]walkChoice{}}
+	best := w.from(walkState{at: first})
+	if !best.found {
+		// No outage of this gap refuses a renewal of this renewer at all, so its first one gets
+		// through.
+		return Phase{Renewer: r, Lease: lease, Renewed: first}
+	}
+	p := Phase{Renewer: r, Lease: lease, GapEnd: best.gapEnd, GapStart: best.gapEnd - gap, Renewed: best.renewed}
+	s, c := walkState{at: first}, best
+	for {
+		failed := s.at
+		if c.held {
+			failed = s.at + m.ClientTimeout
+		}
+		p.Attempts = append(p.Attempts, Attempt{At: s.at, Held: c.held, Failed: failed})
+		wait := m.waitAfterFailure(r, s.wait, lease-failed)
+		if c.stop {
+			p.Attempts = append(p.Attempts, Attempt{At: failed + wait})
+			return p
+		}
+		s = walkState{at: failed + wait, wait: wait}
+		c = w.seen[s]
+	}
+}
+
+// walkState is where a search stands: the instant a renewal goes out, and the wait that
+// preceded it, which is what agent-secrets renew's next backoff doubles. The helper's next wait
+// reads the lease left instead, so for it the wait is only ever carried along.
+type walkState struct{ at, wait time.Duration }
+
+// walkChoice is the best an outage can do from one state: the renewal it ends with, the instant
+// the broker serves again that produces it, whether this state's own renewal was held, and
+// whether the gap ends just after this renewal (stop) or further down the walk.
+type walkChoice struct {
+	renewed, gapEnd time.Duration
+	held, stop      bool
+	found           bool
+}
+
+// walk searches one renewer's schedule for the outage that renews latest. last is the greatest
+// instant a refused renewal can be launched at: a gap that begins at the renewer's first
+// attempt ends there, and one beginning later would let that first attempt through.
+type walk struct {
+	m     Model
+	r     Renewer
+	lease time.Duration
+	gap   time.Duration
+	last  time.Duration
+	seen  map[walkState]walkChoice
+}
+
+// from answers the best an outage can do once a renewal has gone out at s, given that every
+// renewal up to it was refused. The states a schedule reaches inside one gap are few — the
+// instants are the first attempt plus sums of the renewer's own waits, and the walk stops at
+// last — so the search is memoised on the state and runs in that many steps rather than in two
+// to the power of the renewals.
+func (w *walk) from(s walkState) walkChoice {
+	if c, ok := w.seen[s]; ok {
+		return c
+	}
+	// Written before the branches, so a schedule that somehow revisited a state would read an
+	// answer rather than recur forever. Every wait is positive, so none does.
+	w.seen[s] = walkChoice{}
+	var best walkChoice
+	for _, held := range [...]bool{false, true} {
+		failed := s.at
+		if held {
+			failed = s.at + w.m.ClientTimeout
+		}
+		wait := w.m.waitAfterFailure(w.r, s.wait, w.lease-failed)
+		next := failed + wait
+		// This renewal is the last the outage refuses, so the next one gets through. The
+		// broker is back a moment after this renewal went out, or, when this one went out
+		// before an outage could even have begun, at the earliest instant one can end: the gap
+		// has to begin after the renewal that granted the lease, which puts its end after gap
+		// itself, and no later than the renewer's first attempt, which puts its end at last.
+		gapEnd := max(s.at+1, w.gap+1)
+		if gapEnd <= w.last && next >= gapEnd {
+			if c := (walkChoice{renewed: next, gapEnd: gapEnd, held: held, stop: true, found: true}); c.renewed > best.renewed || !best.found {
+				best = c
+			}
+		}
+		// Or a later renewal is: this one fails too, and the search goes on from the next.
+		if next < w.last {
+			if c := w.from(walkState{at: next, wait: wait}); c.found && (c.renewed > best.renewed || !best.found) {
+				best = walkChoice{renewed: c.renewed, gapEnd: c.gapEnd, held: held, found: true}
+			}
+		}
+	}
+	w.seen[s] = best
+	return best
+}
+
+// Walk answers what one renewer does when the broker stops serving gapStart after the renewal
+// that granted the lease, serves again gap later, and holds each renewal it refuses when held
+// says so, one entry per renewal, refusing at once once the entries run out.
+func (m Model) Walk(r Renewer, lease, gap, gapStart time.Duration, held ...bool) Phase {
 	p := Phase{Renewer: r, Lease: lease, GapStart: gapStart, GapEnd: gapStart + gap}
 	at, wait := m.firstWait(r, lease), time.Duration(0)
-	for {
-		p.Attempts = append(p.Attempts, at)
+	for i := 0; ; i++ {
 		if at >= p.GapEnd {
+			p.Attempts = append(p.Attempts, Attempt{At: at})
 			p.Renewed = at
 			return p
 		}
 		failed := at
-		if at+m.ClientTimeout > p.GapEnd {
+		if i < len(held) && held[i] {
 			failed = at + m.ClientTimeout
 		}
+		p.Attempts = append(p.Attempts, Attempt{At: at, Held: failed != at, Failed: failed})
 		wait = m.waitAfterFailure(r, wait, lease-failed)
 		at = failed + wait
 	}
@@ -202,11 +345,10 @@ func (m Model) shortest(survives func(lease time.Duration) bool) time.Duration {
 
 // firstWait is how long the renewer waits after a renewal that answered with lease left.
 func (m Model) firstWait(r Renewer, lease time.Duration) time.Duration {
-	wait := lease / RenewDivisor
 	if r == RenewerHelper {
-		return max(m.HelperMinRenew, wait)
+		return m.HelperRenewAfter(lease, m.HelperMinRenew)
 	}
-	return wait
+	return m.RenewAfter(lease)
 }
 
 // waitAfterFailure is how long the renewer waits after a renewal that failed, holding remaining
@@ -215,31 +357,7 @@ func (m Model) firstWait(r Renewer, lease time.Duration) time.Duration {
 // at its floor, as its own max does.
 func (m Model) waitAfterFailure(r Renewer, previous, remaining time.Duration) time.Duration {
 	if r == RenewerHelper {
-		return max(m.HelperMinRenew, remaining/RenewDivisor)
+		return m.HelperRenewAfter(remaining, m.HelperMinRenew)
 	}
-	if previous == 0 {
-		return m.BackoffInitial
-	}
-	return min(2*previous, m.BackoffMax)
-}
-
-// gapStarts are the gap starts worth walking: the renewer's first attempt, and, one nanosecond
-// before each instant an attempt of the walk that nothing holds up is launched or times out at,
-// the start that puts the broker back just after it. Which attempt is the first to find a
-// broker serving changes only at those instants, so no start between two of them walks longer
-// than the pair.
-func (m Model) gapStarts(r Renewer, lease, gap time.Duration) []time.Duration {
-	first := m.firstWait(r, lease)
-	starts := []time.Duration{first}
-	at, wait := first, time.Duration(0)
-	for at <= first+gap {
-		for _, done := range [...]time.Duration{at, at + m.ClientTimeout} {
-			if start := done + 1 - gap; start > 0 && start <= first {
-				starts = append(starts, start)
-			}
-		}
-		wait = m.waitAfterFailure(r, wait, lease-at)
-		at += wait
-	}
-	return starts
+	return m.NextBackoff(previous)
 }

@@ -31,14 +31,17 @@ import (
 const outageUnit = 10 * time.Millisecond
 
 // outageBroker is a broker that stops serving between gapStart and gapEnd, counted from the
-// renewal that granted the lease. A connection it refuses fails at once; one the outage
-// black-holes holds the renewer for the whole client timeout, which is the cost the lease bound
-// counts. Once a broker serves again it answers either a new lease or, if the enrollment's own
-// lease ran out while nothing served, ENROLLMENT_NOT_LIVE — the answer the broker's first sweep
-// leaves behind, since a gap this short counts as a broker serving and is given back to nobody.
+// renewal that granted the lease. It holds the renewals holds names to the whole client
+// timeout, the cost the lease bound counts, and refuses the rest at once: one outage can do
+// both, refusing while its pods are gone and hanging while one starts, and which renewals it
+// holds is part of the worst case the model searches. Once a broker serves again it answers
+// either a new lease or, if the enrollment's own lease ran out while nothing served,
+// ENROLLMENT_NOT_LIVE — the answer the broker's first sweep leaves behind, since a gap this
+// short counts as a broker serving and is given back to nobody.
 type outageBroker struct {
 	start            time.Time
 	gapStart, gapEnd time.Duration
+	holds            []bool
 	timeout          time.Duration
 	lease            time.Duration
 
@@ -57,11 +60,12 @@ func (b *outageBroker) renewed() bool {
 func (b *outageBroker) RoundTrip(*http.Request) (*http.Response, error) {
 	at := time.Since(b.start)
 	b.mu.Lock()
+	i := len(b.attempts)
 	b.attempts = append(b.attempts, at)
 	b.mu.Unlock()
 	switch {
 	case at >= b.gapStart && at < b.gapEnd:
-		if at+b.timeout > b.gapEnd {
+		if i < len(b.holds) && b.holds[i] {
 			time.Sleep(b.timeout)
 			return nil, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 		}
@@ -119,13 +123,33 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 			if margin := want.Lease - want.Renewed; margin < minMargin && -margin < minMargin {
 				t.Fatalf("a lease of %v renews %v from its end, closer to the boundary than the %v this row needs to decide in real time", c.lease, margin, minMargin)
 			}
+			holds := make([]bool, len(want.Attempts))
+			for i, a := range want.Attempts {
+				holds[i] = a.Held
+			}
+			// The model's worst outage ends one nanosecond after the renewal it refuses last,
+			// which no real-time rig can reproduce: the loop's own renewal lands some
+			// milliseconds late and finds the broker already back. The rig moves the whole
+			// gap, its length unchanged, shift later, so that renewal is inside it by a margin
+			// no loaded machine crosses while the renewal after it is still well outside. The
+			// two guards below are that margin, measured against this phase rather than
+			// assumed: the gap still begins at or before the first renewal, and it still ends
+			// far short of the renewal that gets through.
+			const shift = 10 * outageUnit
+			lastRefused := want.Attempts[len(want.Attempts)-2].At
+			if want.GapStart+shift > want.Attempts[0].At {
+				t.Fatalf("a gap moved %v later would begin at %v, after the first renewal at %v", shift, want.GapStart+shift, want.Attempts[0].At)
+			}
+			if slack := want.Renewed - lastRefused; shift > slack/2 {
+				t.Fatalf("a gap moved %v later leaves %v between the renewal it refuses last (%v) and the one that gets through (%v); this row needs the shift well inside that", shift, slack, lastRefused, want.Renewed)
+			}
 			sess, err := newSession(os.Getpid(), 0, "runtime-1", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			sess.setEnrolled("enrollment-1")
 			start := time.Now()
-			broker := &outageBroker{start: start, gapStart: want.GapStart, gapEnd: want.GapEnd, timeout: model.ClientTimeout, lease: c.lease}
+			broker := &outageBroker{start: start, gapStart: want.GapStart + shift, gapEnd: want.GapEnd + shift, holds: holds, timeout: model.ClientTimeout, lease: c.lease}
 			srv := &Server{
 				Broker:   &Broker{URL: "http://broker.invalid", HTTP: &http.Client{Transport: broker}},
 				Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),

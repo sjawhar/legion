@@ -25,23 +25,30 @@ import (
 // The clock's zero is the renewal that granted the lease. The renewer reads its lease from that
 // answer, so the lease it is working to is three times its own first wait — the microseconds
 // the answer took to reach it are already inside that reading — and the rig takes that, rather
-// than the lease it granted, as the instant the enrollment ends. The outage begins at the first
-// renewal, the harshest instant a gap can begin at, since a gap that began later would let that
-// renewal through and start the lease again.
+// than the lease it granted, as the instant the enrollment ends.
+//
+// The outage is the worst one the model found, and this rig reproduces the whole of it: it
+// begins gapOffset from the renewer's first renewal (which is at or before that renewal, since
+// a gap that began later would let it through and start the lease again), and holds the
+// renewals holds names, refusing the rest at once. That pattern is the half of the worst case a
+// gap start alone does not carry: a renewer refused at once retries sooner, which can place a
+// later renewal just before the broker returns, where holding that one costs the whole timeout.
 type outageRig struct {
 	mu        sync.Mutex
 	now       time.Duration
 	firstWait time.Duration
+	gapOffset time.Duration
 	gap       time.Duration
+	holds     []bool
 	timeout   time.Duration
 	lease     time.Duration
-	attempts  []time.Duration
+	attempts  []leasetime.Attempt
 	renewed   time.Duration
 	renewedOK bool
 }
 
-func (r *outageRig) gapStart() time.Duration { return r.firstWait }
-func (r *outageRig) gapEnd() time.Duration   { return r.firstWait + r.gap }
+func (r *outageRig) gapStart() time.Duration { return r.firstWait + r.gapOffset }
+func (r *outageRig) gapEnd() time.Duration   { return r.gapStart() + r.gap }
 
 // expires is when the enrollment ends on the renewer's clock: the lease the renewer itself read
 // out of the answer that granted it, which is three times the wait it then kept.
@@ -55,25 +62,29 @@ func (r *outageRig) RoundTrip(*http.Request) (*http.Response, error) {
 		// The renewal that grants the lease, before the outage and before any wait.
 		return r.granted(), nil
 	}
-	r.attempts = append(r.attempts, at)
-	switch {
-	case at < r.gapEnd():
+	i := len(r.attempts)
+	r.attempts = append(r.attempts, leasetime.Attempt{At: at, Failed: at})
+	if at >= r.gapStart() && at < r.gapEnd() {
 		// No broker serves. A connection the outage refuses fails at once; one it black-holes
-		// holds the renewer to its whole client timeout, which only costs it anything when that
-		// lands past the instant a broker serves again.
-		if at+r.timeout > r.gapEnd() {
+		// holds the renewer to its whole client timeout.
+		if i < len(r.holds) && r.holds[i] {
+			r.attempts[i].Held, r.attempts[i].Failed = true, at+r.timeout
 			r.now = at + r.timeout
 			return nil, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
 		}
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
-	case at >= r.expires():
-		// A broker serves again, and its first sweep ended this enrollment: the gap was short
-		// enough to count as a broker serving, so none of it was given back.
-		return r.notLive(), nil
-	default:
-		r.renewed, r.renewedOK = at, true
-		return r.granted(), nil
 	}
+	// A broker serves. The renewal is the one the model's walk ends on either way, so it failed
+	// at no instant; whether the broker renews it or answers ENROLLMENT_NOT_LIVE is what the
+	// lease, rather than the outage, decides.
+	r.attempts[i].Failed = 0
+	if at >= r.expires() {
+		// Its first sweep ended this enrollment: the gap was short enough to count as a broker
+		// serving, so none of it was given back.
+		return r.notLive(), nil
+	}
+	r.renewed, r.renewedOK = at, true
+	return r.granted(), nil
 }
 
 func (r *outageRig) granted() *http.Response {
@@ -97,8 +108,8 @@ func jsonResponse(status int, body any) *http.Response {
 }
 
 // after is renewLoop's wait: it advances the renewer's clock and returns at once. The first one
-// is the wait a third of the lease asks for, which is where the outage begins; the one after a
-// renewal that got through ends the row, since the loop would otherwise renew forever.
+// is the wait a third of the lease asks for, which the outage is placed against; the one after
+// a renewal that got through ends the row, since the loop would otherwise renew forever.
 func (r *outageRig) after(cancel context.CancelFunc, t *testing.T) func(time.Duration) <-chan time.Time {
 	return func(d time.Duration) <-chan time.Time {
 		r.mu.Lock()
@@ -120,8 +131,8 @@ func (r *outageRig) after(cancel context.CancelFunc, t *testing.T) func(time.Dur
 	}
 }
 
-// TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound drives the real renewLoop through an outage
-// of leasetime.NotServingSweeps sweeps, beginning at the worst instant for it, at the two
+// TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound drives the real renewLoop through the worst
+// outage of leasetime.NotServingSweeps sweeps the model found for this renewer, at the two
 // leases either side of its own boundary. At the largest lease the model refuses, the renewal
 // that gets through comes after the enrollment ended and the renewer exits 76, the exit that
 // told INFRA-487's pods their session was gone; one second more and it renews. The walk it
@@ -141,13 +152,23 @@ func TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound(t *testing.T) {
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			boundary := model.WorstFor(leasetime.RenewerAgentSecrets, c.lease, sweep)
-			if boundary.GapStart != boundary.Attempts[0] {
-				t.Fatalf("the model's worst gap for a lease of %v begins at %v, not at the first renewal (%v); this row drives the first-renewal phase", c.lease, boundary.GapStart, boundary.Attempts[0])
-			}
 			if boundary.Survived() != (c.wantExit == 0) {
 				t.Fatalf("the model says a lease of %v renews at %v and survives %v; this row expects exit %d", c.lease, boundary.Renewed, boundary.Survived(), c.wantExit)
 			}
-			rig := &outageRig{gap: leasetime.NotServingSweeps * sweep, timeout: leasetime.RenewClientTimeout, lease: c.lease}
+			holds := make([]bool, len(boundary.Attempts))
+			for i, a := range boundary.Attempts {
+				holds[i] = a.Held
+			}
+			if !slices.Contains(holds, true) {
+				t.Fatalf("the model's worst outage for a lease of %v holds no renewal; this row exists to drive one that does", c.lease)
+			}
+			rig := &outageRig{
+				gapOffset: boundary.GapStart - boundary.Attempts[0].At,
+				gap:       leasetime.NotServingSweeps * sweep,
+				holds:     holds,
+				timeout:   leasetime.RenewClientTimeout,
+				lease:     c.lease,
+			}
 			client, signer, enrollmentID, _ := renewalSession(t, "http://broker.invalid")
 			if client.http.Timeout != rig.timeout {
 				t.Fatalf("the renewer's client times out after %v, but the lease bound counts %v", client.http.Timeout, rig.timeout)
@@ -163,10 +184,10 @@ func TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound(t *testing.T) {
 			// is the model's at the lease it read, three times the wait it kept. The boundary
 			// above is two thirds of a second wide, far wider than that reading costs, so
 			// which side of it this lease falls on is the same either way.
-			if short := c.lease/leasetime.RenewDivisor - rig.firstWait; short < 0 || short > 100*time.Millisecond {
+			if short := leasetime.RenewAfter(c.lease) - rig.firstWait; short < 0 || short > 100*time.Millisecond {
 				t.Fatalf("the renewer waited %v after a lease of %v, want a third of it", rig.firstWait, c.lease)
 			}
-			walked := model.Walk(leasetime.RenewerAgentSecrets, leasetime.RenewDivisor*rig.firstWait, rig.gap, rig.firstWait)
+			walked := model.Walk(leasetime.RenewerAgentSecrets, leasetime.RenewDivisor*rig.firstWait, rig.gap, rig.gapStart(), holds...)
 			if !slices.Equal(rig.attempts, walked.Attempts) {
 				t.Errorf("the renewer launched renewals at %v, the model walked %v", rig.attempts, walked.Attempts)
 			}

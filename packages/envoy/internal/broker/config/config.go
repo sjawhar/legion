@@ -241,7 +241,9 @@ type Config struct {
 	// serving is not counted against it: a lease that ran out then stays live until a broker serves
 	// again, which gives it that time back. A gap of up to three BROKER_SWEEP_SECONDS still counts
 	// as a broker serving and is not given back, so a lease must outlive such a gap and the retries
-	// its renewer then takes to renew: 91 s at a sweep of 1 or 5 seconds, 320 s at a sweep of 60.
+	// its renewer then takes to renew, counting a renewal the outage holds to its client timeout:
+	// 91 s at a sweep of 1 or 5 seconds, 97 s at 10, 203 s at 30 and 351 s at 60. The broker
+	// refuses a shorter pair at boot and names the shortest lease that survives that sweep.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
@@ -917,8 +919,13 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	// A gap of up to leasetime.NotServingSweeps sweeps still reads as a broker serving, so none
 	// of it is given back and a lease that ran out inside it is simply over. Surviving one is
-	// not one wait but the whole retry schedule of whichever renewer holds the lease, which
+	// not one wait but the whole retry schedule of whichever renewer holds the lease, with one
+	// of its renewals held to the client timeout where that costs the renewer most, which
 	// leasetime walks for both of them.
+	//
+	// This refuses pairs an older broker booted: the rule it replaced counted only two thirds
+	// of the lease, so a deployment whose BROKER_LEASE_SECONDS is below the floor this prints
+	// has to raise it before the broker rolls, which operate.md says too.
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
 	if model := leasetime.Production(); !model.Survives(lease, sweep) {
 		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) is too short for BROKER_SWEEP_SECONDS (%d): a session must outlive a gap of %d s that still counts as a broker serving and the time its renewer then takes to renew. The shortest lease that survives both renewers at this sweep is %d s.",
