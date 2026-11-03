@@ -24,6 +24,7 @@ import type {
   ArtifactVersionEventPayload,
   BlockInvalidEventPayload,
   BlockRepairedEventPayload,
+  DecisionKeptEventPayload,
 } from "./dispatch-api-documents";
 import type {
   ChildEventPayload,
@@ -157,6 +158,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_thread_state.updated";
       readonly payload: UserThreadStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "decision.kept";
+      readonly payload: DecisionKeptEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })

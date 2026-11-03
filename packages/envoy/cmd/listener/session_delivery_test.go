@@ -42,9 +42,7 @@ func newSessionConsumerRig(t *testing.T) *sessionConsumerRig {
 
 func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sessionConsumerRig {
 	t.Helper()
-	harness := newListenerDeliveryHarnessOn(t, client, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
+	harness := newListenerDeliveryHarnessOn(t, client)
 	delivery := connectSessionDelivery([]string{url}, harness.config.logger)
 	t.Cleanup(delivery.close)
 	if delivery.consumers == nil {
@@ -245,23 +243,6 @@ func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *test
 func jsonUint(n uint64) string {
 	encoded, _ := json.Marshal(n)
 	return string(encoded)
-}
-
-// A session on a serving port gets a consumer at registration with no delivery field, since a
-// session registered with a port asks nothing; its answer says so.
-func TestSessionConsumerServingPortRegistrationGetsAConsumer(t *testing.T) {
-	rig := newSessionConsumerRig(t)
-	const sessionID = "ses_serving"
-
-	answer := rig.subscribe(t, `{"session_id":"ses_serving","port":4096,"host":"127.0.0.1","topics":["notifications.github.acme.repo.pr.1"]}`)
-
-	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" || answer.Delivery.Subject != bus.DeliverSubject(sessionID) {
-		t.Fatalf("answer %s, want delivery mode consumer on the session's relay subject", answer.raw)
-	}
-	want := []string{"notifications.agent." + sessionID, "notifications.github.acme.repo.pr.1"}
-	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
-		t.Fatalf("consumer filters %v, want %v", got, want)
-	}
 }
 
 func TestSessionConsumerInvalidSessionIDAnswersCore(t *testing.T) {

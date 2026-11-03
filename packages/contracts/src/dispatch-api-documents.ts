@@ -32,11 +32,15 @@ export type ArtifactReviewState = "approved" | "changes_requested";
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
  *  document header (`ask_id` null unless a request was open, which the header answers), or
- *  carried by Dispatch to the version a human's answer to a decision block writes, when that
- *  answer is the whole change since the version he approved. A carried review is `approved` in
- *  his name, its `reason` names the carry (`Carried forward from the approval of version <N>: the
- *  answer to a decision block was the whole change since it.`), and its `ask_id` is null unless
- *  a request was open at the carry, which it answers `Approve` in his name. */
+ *  carried by Dispatch to a later version. A carry follows a human's answer to a decision block,
+ *  when that answer is the whole change since the version he approved (`reason`: `Carried forward
+ *  from the approval of version <N>: the answer to a decision block was the whole change since
+ *  it.`), or a version whose text is byte for byte that of the version the document's newest
+ *  review approved and whose every decision block is as its stored row has it (nobody decided one
+ *  since), such as an accidental edit undone (`reason`: `Carried forward from the
+ *  approval of version <N>: this version's text is that version's, unchanged.`). A carried review
+ *  is `approved` in the approver's name, and its `ask_id` is null unless a request was open at the
+ *  carry, which it answers `Approve` in his name. */
 export interface ArtifactReview {
   readonly id: string;
   readonly artifact_id: string;
@@ -50,7 +54,9 @@ export interface ArtifactReview {
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
  *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
- *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */
+ *  `stale` is approved at an older version: a later version leaves the approval there unless
+ *  Dispatch carries it to that version (`ArtifactReview`); `changes_requested` carries the
+ *  reviewer's reason. */
 export const ArtifactApprovalSchema = z
   .strictObject({
     state: z.enum(["draft", "awaiting", "approved", "stale", "changes_requested"]),
@@ -185,6 +191,14 @@ export interface EditOp {
   readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
+// DocumentRead is GET and PUT /api/v1/me/documents/{id}/read: one person's last read version of a
+// document, `version` and `read_at` null when they have read none.
+export interface DocumentRead {
+  readonly artifact_id: string;
+  readonly version: number | null;
+  readonly read_at: string | null;
+}
+
 export const ArtifactCreatedEventPayloadSchema = z
   .strictObject({ artifact: ArtifactSchema, ...referenceChangesFields })
   .readonly();
@@ -270,9 +284,10 @@ export const InboundArtifactHumanEditedEventPayloadSchema = z.object({
  *  approval ask the review answered, null when given from the document header with no
  *  approval ask open at that version. A third provenance is the carry: Dispatch records an
  *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
- *  when that answer is the whole change since the version he approved; its `reason` names the
- *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
- *  carry, which it answers (see `ArtifactReview`). */
+ *  when that answer is the whole change since the version he approved, and at a version whose
+ *  text is byte for byte the approved version's with no decision block in it decided since; its
+ *  `reason` names the carry and the version it follows, and its `ask_id` is null unless a request
+ *  was open at the carry, which it answers (see `ArtifactReview`). */
 export const artifactReviewEventPayloadFields = {
   artifact_id: z.string(),
   name: z.string(),
@@ -318,3 +333,16 @@ export const BlockInvalidEventPayloadSchema = z
   .readonly();
 
 export type BlockInvalidEventPayload = z.output<typeof BlockInvalidEventPayloadSchema>;
+
+/** `decision.kept`, which a person's Keep appends on the decision's issue: the document, the
+ *  decision's heading block and the version its text stood at. It wakes nobody - a Keep records
+ *  that a person agreed, which asks its agent for nothing. */
+export const DecisionKeptEventPayloadSchema = z
+  .strictObject({
+    artifact_id: z.string(),
+    block_id: z.string(),
+    changed_version: z.number().int(),
+  })
+  .readonly();
+
+export type DecisionKeptEventPayload = z.output<typeof DecisionKeptEventPayloadSchema>;

@@ -33,6 +33,7 @@ const PAYLOAD_TYPES = [
   "ChildStatusEventPayload",
   "CommentDeliveryEventPayload",
   "CommentEventPayload",
+  "DecisionKeptEventPayload",
   "DispatchServerStartedPayload",
   "HandoffRecordedPayload",
   "IssueClaimEventPayload",
@@ -59,7 +60,7 @@ const PAYLOAD_TYPES = [
  * they are built from, down to the actor. Stated so a type written by hand beside a schema that
  * already describes it is a failure rather than a slow return to two spellings of one shape.
  */
-const DERIVED_TYPES = 78;
+const DERIVED_TYPES = 79;
 
 /** Every module of the split, as one text with its whitespace collapsed, so a declaration Biome
  *  wrapped over several lines reads as the one line it is. */

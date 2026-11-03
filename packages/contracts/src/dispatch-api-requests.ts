@@ -56,11 +56,14 @@ export interface WriteAdvice {
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
    * The approval a document write superseded: the version it stored replaced the one a person
-   * had approved, so that approval is stale until someone approves the new version. A Legion
-   * design gate is such an approval, so this write closed it. Set by a document edit and by an
-   * upload that replaced an existing document, and only on the write that superseded the
-   * approval: a write on a document nobody approved, one whose approval was already stale, and
-   * one whose version carried that approval forward (the approval carry) each omit it.
+   * had approved, so that approval is stale until someone approves the new version or a later
+   * write stores the approved version's text again exactly with no decision block in it decided
+   * since, which carries the approval to that write's version. A Legion design gate is such an
+   * approval, so this write closed it. Set by a document edit and by an upload that replaced an
+   * existing document, and only on the write that superseded the approval: a write on a document
+   * nobody approved, one whose approval was already stale, and one whose version carried that
+   * approval forward (the approval carry: an answer to a decision block, or the approved version's
+   * text stored again) each omit it.
    */
   readonly superseded_approval?: {
     /** The version a person approved, the one this write superseded. */

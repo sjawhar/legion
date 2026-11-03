@@ -272,9 +272,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 // writes it, an upload being the one such write (ReplaceText): written is that tree with the
 // rendering the write made of it, which this operation takes for the fork it leaves rather than
 // rendering the same text over again, and only where the fork reads back as that very tree,
-// block ids and marks included (writtenRendering). A write that put another tree in the fork -
-// an upload that marked its replacement with the anchors it carried over - renders the fork
-// here, as every other write does. written is nil for applyLive itself.
+// block ids and marks included (writtenRendering). A warm operation hands the room's update
+// observer the rendering it leaves with the layout of the same render (publishedRendering), so
+// such a write records its rendering's layout too (renderTreeWithLayout). A write that put
+// another tree in the fork - an upload that marked its replacement with the anchors it carried
+// over - renders the fork here, as every other write does. written is nil for applyLive itself.
 func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor model.Actor, written *renderedTree, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
@@ -294,22 +296,25 @@ func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
+	// beforeKnown says beforeMarkdown is known without rendering the fork, and knownPath is the
+	// count of the path it was had by, bumped when it is first needed.
 	var beforeMarkdown string
-	var known *atomic.Uint64
+	var beforeKnown bool
+	var knownPath *atomic.Uint64
 	if startErr == nil {
 		switch {
 		case write.forkMarkdown != nil:
-			beforeMarkdown, known = *write.forkMarkdown, &s.renderPaths.beforeFromReplica
+			beforeMarkdown, beforeKnown, knownPath = *write.forkMarkdown, true, &s.renderPaths.beforeFromReplica
 		case write.tree != nil:
-			beforeMarkdown, known = write.markdown, &s.renderPaths.beforeFromWrite
+			beforeMarkdown, beforeKnown, knownPath = write.markdown, true, &s.renderPaths.beforeFromWrite
 		}
 	}
 	write.forkMarkdown = nil
 	rendered := startErr != nil
 	start := func() error {
 		if !rendered {
-			if known != nil {
-				known.Add(1)
+			if beforeKnown {
+				knownPath.Add(1)
 			} else {
 				beforeMarkdown, startErr = documentMarkdownValid(before)
 				s.renderPaths.beforeRendered.Add(1)
@@ -344,8 +349,10 @@ func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor
 	tree, err := s.readForkTree(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
+	var layout *pmdoc.Layout
+	// Only a warm operation's layout is ever taken (publishedRendering below).
 	if err == nil {
-		markdown, offsets, err = writtenRendering(written, tree)
+		markdown, offsets, layout, err = writtenRendering(written, op.read.warm, tree)
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -392,10 +399,10 @@ func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor
 	// decode check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil
 	// What the room's update observer can take in place of rendering the room after this update
-	// (publishedRendering): this operation's rendering, when its fork was read warm.
+	// (publishedRendering): this operation's rendering and its layout, when its fork was read warm.
 	var rendering publishedRendering
 	if op.read.warm {
-		rendering = publishedRendering{forkReadMark: op.read, markdown: markdown}
+		rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: markdown, layout: layout}}
 		if contentChanged {
 			rendering.askBlocks = askBlockIDs(tree.Node())
 		}
@@ -416,17 +423,29 @@ func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor
 	return nil
 }
 
-// writtenRendering is the rendering of tree, the fork as an operation left it: the one the write
+// writtenRendering is the rendering of tree, the fork as an operation left it, with the
+// pmdoc.Layout a warm operation hands the room's update observer with it: the rendering the write
 // made of the tree it wrote (applyLiveWritten's written), where the fork reads back as that very
 // tree - its content, its structure, its block ids, its attributes and its marks
 // (pmdoc.Node.EqualWithBlockIDs) - and a render of the fork otherwise. Rendering is deterministic
-// over one tree, so the write's rendering of an equal tree is the very string and the very
-// offsets this render would make.
-func writtenRendering(written *renderedTree, tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, error) {
-	if written != nil && written.tree != nil && written.tree.EqualWithBlockIDs(tree.Node()) {
-		return written.markdown, written.offsets, nil
+// over one tree, so the write's rendering of an equal tree is the very string, the very offsets
+// and the very layout this render would make.
+//
+// Only a warm operation's rendering is ever taken from here (publishedRendering), and the replica
+// that takes it splices later updates into the layout beside its markdown (renderedReplica.keep),
+// so a warm fork takes the write's rendering only with the layout that render recorded
+// (renderTreeWithLayout) and renders the fork for one otherwise. A cold fork needs none: no
+// replica is offered its rendering.
+func writtenRendering(written *renderedTree, warm bool, tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
+	if written != nil && written.tree != nil && (written.layout != nil || !warm) &&
+		written.tree.EqualWithBlockIDs(tree.Node()) {
+		return written.markdown, written.offsets, written.layout, nil
 	}
-	return documentMarkdownValidWithOffsets(tree)
+	if warm {
+		return documentRenderingValidWithLayout(tree)
+	}
+	markdown, offsets, err := documentMarkdownValidWithOffsets(tree)
+	return markdown, offsets, nil, err
 }
 
 // applyMargin writes record as markID's margin record - a comment's or suggestion's, which a
@@ -463,10 +482,11 @@ func writtenRendering(written *renderedTree, tree pmdoc.ValidDocument) (string, 
 //   - It records beside its update the room its fork was warm-built from (liveWrite.marginRooms),
 //     so the room's update observer, which would render the publish only to find the same
 //     markdown, keeps its rendering instead when the update reaches that same room
-//     (liveWriteOrigin.marginOnly says why that is exact). For a warm fork it also records, as
-//     applyLive does, its rendering of the fork with the fork read's replica counters
-//     (publishedRendering): the rendering it records, which the margin write leaves as it was, with
-//     no ask blocks, since it changes no rendered markdown. A cold fork records neither.
+//     (liveWriteOrigin.marginOnly says why that is exact). It records no rendering of its own,
+//     where applyLive records a warm operation's (publishedRendering): the margin-only path
+//     answers before the observer would look at a rendering (renderedReplica.changedBy), and a
+//     publish that path does not answer - into a room the fork was not built from, or onto a
+//     replica that holds no rendering - the observer measures itself. A cold fork names no room.
 //
 // A marks-map Set always adds an item, so the write always changes the fork: unlike applyLive it
 // never answers websocket.ErrNoChanges. A panic in it is its error (recoverMutation), as there.
@@ -501,19 +521,14 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 		return err
 	}
 	// The room the fork was warm-built from, which the publish tags the update against
-	// (liveWriteOrigin.marginOnly), and the rendering the observer may take in its place
-	// (publishedRendering). A cold fork was built from the stored document, with no room behind
-	// it, so it names neither; write.cold says so directly rather than leaving it to coldFork to
-	// have cleared the room it read and the fork read's counters.
+	// (liveWriteOrigin.marginOnly). A cold fork was built from the stored document, with no room
+	// behind it, so it names none; write.cold says so directly rather than leaving it to coldFork
+	// to have cleared the room it read and the fork read's counters.
 	var room weak.Pointer[crdt.Doc]
-	var rendering publishedRendering
 	if !op.write.cold {
 		room = op.write.forkedFrom
-		if op.read.warm {
-			rendering = publishedRendering{forkReadMark: op.read, markdown: rendered.markdown}
-		}
 	}
-	return s.recordLiveOperation(ctx, &op, actor, rendered, false, rendering, room)
+	return s.recordLiveOperation(ctx, &op, actor, rendered, false, publishedRendering{}, room)
 }
 
 // joinedSchemaError is the error a joined operation answers for err, a failure it met after it
@@ -628,7 +643,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	// The rendering of the replacement, which this write makes to tell whether the upload changes
 	// the document and answers its caller with: the write leaves that very tree in the fork,
 	// unless it has anchors to carry over, so applyLive takes this rendering for the fork it
-	// leaves rather than rendering the same text again (writtenRendering).
+	// leaves rather than rendering the same text again (writtenRendering). It is rendered with
+	// its layout, which a warm operation hands the room's update observer with it
+	// (replicaRendering), so taking it costs the observer no render either.
 	var written renderedTree
 	err = s.applyLiveWritten(ctx, artifactID, actor, &written, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -665,10 +682,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		var offsets []pmdoc.BlockOffset
-		if canonical, offsets, err = renderTreeWithOffsets(target); err != nil {
+		var layout *pmdoc.Layout
+		if canonical, offsets, layout, err = renderTreeWithLayout(target); err != nil {
 			return err
 		}
-		written = renderedTree{tree: target, markdown: canonical, offsets: offsets}
+		written = renderedTree{tree: target, markdown: canonical, offsets: offsets, layout: layout}
 		if !repairing && currentMarkdown == canonical {
 			unchanged = true
 			return nil
@@ -2014,19 +2032,28 @@ type versionWriteResult struct {
 // renderedTree is a document tree with its canonical markdown and each identified block's byte
 // range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
 // stores the markdown and indexes its blocks and cuts its mentions' excerpts from that render
-// rather than rendering the tree again for them. An upload that changes the document still renders
-// it twice: ReplaceText renders the replacement to tell whether it changes anything, and applyLive
-// renders the fork it leaves; the blocks and excerpts are cut from applyLive's render, which
+// rather than rendering the tree again for them. An upload that changes the document renders it
+// twice: ReplaceText renders the document as it stands, to tell whether the upload changes it,
+// and renders the replacement it parsed, which it answers its caller with; applyLive takes that
+// second rendering for the tree the write left, where the fork reads back as that very tree
+// (writtenRendering), and the blocks and excerpts are cut from it, which
 // IndexDocumentReferences checks is the version's markdown.
+//
+// layout is the pmdoc.Layout of that same render, recorded only by a write that hands its
+// rendering to the operation it writes through (applyLiveWritten's written), since a warm
+// operation offers the room's update observer a rendering and its layout together
+// (replicaRendering); every other rendered tree leaves it nil.
 type renderedTree struct {
 	tree     *pmdoc.Node
 	markdown string
 	offsets  []pmdoc.BlockOffset
+	layout   *pmdoc.Layout
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
 // version writes index references and blocks, move open approval asks to the new version, carry a
-// human's approval to the version his answer to a decision block writes (carryApproval), refresh
+// human's approval to the version his answer to a decision block writes or to a version holding
+// the text he approved with its decision blocks as their rows have them (carryApproval), refresh
 // anchors, and retain their author capture until the enclosing transaction commits. A nil write
 // records no version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
@@ -2081,8 +2108,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 		collectEvent(ctx, event)
 	}
 	// A human's answer to a decision block carries his approval to the version it writes, when
-	// that answer is the whole change since the version he approved. It runs after the move, so
-	// an open request already names this version when the carry answers it in his name.
+	// that answer is the whole change since the version he approved, and a version holding the
+	// approved text again, its blocks as their rows have them, carries that approval. It runs after
+	// the move, so an open request already names this version when the carry answers it in his name.
 	carried, err := s.carryApproval(ctx, tx, artifactID, version, rendered)
 	if err != nil {
 		return versionWriteResult{}, err
