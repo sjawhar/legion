@@ -17,7 +17,7 @@ import (
 // Doc.SetIntegrateScanBudget, crdt/doc.go:179-216); an apply whose scans, the drain of the parked
 // queue it ends with included, would pass it is refused and taken back out whole, and a drain the
 // allowance cannot hold is taken back with the parked queue kept while the update stands
-// (crdt/apply_rollback.go:9-34, :274-361).
+// (crdt/apply_rollback.go:9-34, :329-407).
 // A browser's update scans at most the per-frame ceiling or what is left of the room's scan total,
 // whichever is less; the server's own remote applies scan at most the ceiling.
 
@@ -34,10 +34,11 @@ import (
 const perFrameScanCeiling = 400_000
 
 // bytesOfAScanMark is the heap a remote apply's scans hold for each distinct item they pass: the
-// mark ygo keeps for it in one map for the whole transaction (Transaction.scanMarks,
-// crdt/item.go:126-158), with the map's growth: 40 to 48 bytes measured on this pod for a frame
-// scanning 399,999 distinct items (BenchmarkAnApplyJustUnderTheScanCeiling, 2026-10-28), and the
-// ruling's 76, the most measured on the development machine, is kept as the price.
+// mark ygo keeps for it in one map for the whole transaction (Transaction.scanMarks, sjawhar/ygo
+// v1.54.1-sami.3, crdt/item.go:129-168), with the map's growth: 40 to 48 bytes measured on this
+// pod for a frame scanning 399,999 distinct items (BenchmarkAnApplyJustUnderTheScanCeiling,
+// 2026-10-28), and the ruling's 76, the most measured on the development machine, is kept as the
+// price.
 const bytesOfAScanMark = 76
 
 // usedUpScanBudget is the allowance of a browser's apply in a room whose scan total is used up -
@@ -78,7 +79,8 @@ const honestHandoffScans = 35_800
 // applyHeapBound, or the whole bound for an estimate past it, and for any other what its marks can
 // hold in what is left of unweighedApplyHeapBytes past its own share, (2 MiB - own) / 76: 27,594
 // for an update of no share, so typing never waits on the heap bound for its scans either. It is
-// at least 1, since an allowance of 0 would leave the apply unbounded (crdt/doc.go:362-370).
+// at least 1, since an allowance of 0 would leave the apply unbounded (applyScanLimit,
+// sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:367-375).
 func scanCeiling(own uint64) int {
 	if own > unweighedApplyHeapBytes {
 		return perFrameScanCeiling
@@ -102,17 +104,18 @@ func scanCeiling(own uint64) int {
 // settle), as the struct total reserves an update's addition: two browsers applying at once each
 // see the other's allowance taken out of what is left, so together they cannot pass the total by
 // more than a used-up room's allowance each. ygo asks the budget once per remote apply, under the
-// document's lock (crdt/apply_rollback.go:134-151), so the budget reads the allowance reserved for
-// the apply's origin, ygo's peer for a browser's update (provider/websocket/peer_update.go:84-94),
-// which applies one update at a time; an apply of any other origin is the server's own, and gets
-// perFrameScanCeiling whatever is left, so a server write never fails its room for the total.
+// document's lock (beginRemoteApply, crdt/apply_rollback.go:135-158), so the budget reads the
+// allowance reserved for the apply's origin, ygo's peer for a browser's update
+// (provider/websocket/peer.go:289-295), which applies one update at a time; an apply of any other
+// origin is the server's own, and gets perFrameScanCeiling whatever is left, so a server write
+// never fails its room for the total.
 //
 // What an apply that commits scanned is read in the room's OnAfterTransaction observer, which ygo
 // fires after the transaction has released the document's lock and before ApplyUpdate returns, on
-// the committing goroutine (crdt/doc.go:729-826, :705-707), from Transaction.IntegrateScanned,
-// which counts the drain's scans too, a drain taken back included (crdt/transaction.go:95-108). A
+// the committing goroutine (crdt/doc.go:741-866, :717-719), from Transaction.IntegrateScanned,
+// which counts the drain's scans too, a drain taken back included (crdt/transaction.go:130-143). A
 // refused apply commits nothing an observer sees, and reports its scans in the
-// *crdt.RefusedUpdateError it returns (crdt/update.go:47-74).
+// *crdt.RefusedUpdateError it returns (crdt/update.go:50-77).
 type roomScans struct {
 	mu sync.Mutex
 	// used is the room's scan total so far, and reserved the allowances of the browsers' applies
@@ -135,13 +138,13 @@ type scanAllowance struct {
 
 // newRoomScans is the scan total of live, a room's document, with nothing used yet, set as live's
 // scan budget and observer: from here live applies every remote update whole or not at all, and
-// refuses one carrying a subdocument or a move (crdt/doc.go:197-201), as every room the peer update
-// hook guards does. The room's load records what the stored state's re-scan came to (rescanned)
-// before ygo hands the room to any peer. What decodes a document the server already holds stays
-// unbounded: a write's fork, the fold, growth's and a cold load's copies, the measurer's copies
-// (structsAfter), validateUpdate, snapshotDocument and the room's replica integrate state no
-// browser chose, and a bounded document's apply keeps a journal to take itself back out
-// (beginRemoteApply, crdt/apply_rollback.go:129-151) where theirs need not.
+// refuses one carrying a subdocument or a move (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:201-205),
+// as every room the peer update hook guards does. The room's load records what the stored state's
+// re-scan came to (rescanned) before ygo hands the room to any peer. What decodes a document the
+// server already holds stays unbounded: a write's fork, the fold, growth's and a cold load's
+// copies, the measurer's copies (structsAfter), validateUpdate, snapshotDocument and the room's
+// replica integrate state no browser chose, and a bounded document's apply keeps a journal to take
+// itself back out (beginRemoteApply, crdt/apply_rollback.go:135-158) where theirs need not.
 func newRoomScans(live *crdt.Doc) *roomScans {
 	scans := &roomScans{}
 	live.SetIntegrateScanBudget(scans.budget)
@@ -172,8 +175,9 @@ func (r *roomScans) budget(origin any) int {
 // observed is the room's OnAfterTransaction observer: what a committed transaction's scans passed
 // is a browser's apply's, kept for its settle, or the server's, added to the total at once. The
 // format cleanup ygo commits after an apply into a text that carries formatting is a transaction
-// of its own, local and of no origin (crdt/ytext_format_cleanup.go:50-74): it reaches here as the
-// server's, scans nothing because it integrates nothing, and so leaves every figure as it was.
+// of its own, local and of no origin (sjawhar/ygo v1.54.1-sami.3,
+// crdt/ytext_format_cleanup.go:50-74, :89-96): it reaches here as the server's, scans nothing
+// because it integrates nothing, and so leaves every figure as it was.
 func (r *roomScans) observed(txn *crdt.Transaction) {
 	scanned := txn.IntegrateScanned()
 	r.mu.Lock()

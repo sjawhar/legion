@@ -234,7 +234,7 @@ const structTotalRecheck = maxUpdateItems / 64
 // their own way (refuseUndecodable, leavesPastDecodeCap) and are bounded there, not here. The one
 // place that sees each of them, whoever wrote it, is the document's update observer: ygo fires it
 // for every transaction it commits, even one that writes nothing, with the transaction's origin
-// (crdt/doc.go:606-608, :688-703), on the committing goroutine. So the total registers an
+// (crdt/doc.go:606-608, :697-715), on the committing goroutine. So the total registers an
 // observer of its own (observed), and the hook names the origin of each apply it is running while
 // it runs it (applying): ygo's peer, the origin ygo applies a browser's update with
 // (provider/websocket/peer_update.go:84-97). Several browsers' applies can run at once, each its
@@ -246,7 +246,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The hook reserves an update's addition before its apply and holds no lock across the apply:
 // ygo fires a transaction's update observers after it has released the document's lock, on the
-// committing goroutine (crdt/doc.go:795-798), so a lock held from the check through the apply
+// committing goroutine (crdt/doc.go:830-838), so a lock held from the check through the apply
 // would hold every other browser of the room while one apply sat in an observer
 // (TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth holds one there). Under a
 // short lock (admissions) the hook checks the running total, which counts every reservation in
@@ -436,10 +436,10 @@ func (t *roomTotals) observed(_ []byte, origin any) {
 // hookApplies reports whether origin is the origin of an apply the hook is running (applying): a
 // browser's update, whose structure the hook charges itself (roomCharge.grew). Every transaction
 // commits inside the apply that made it, whose update observers ygo fires before the apply returns
-// (crdt/doc.go:795-798), so the room's update observer, which drains the room's update log there,
-// finds each of the hook's updates while its apply is still running; any other origin is the
-// server's own write, whose structure that observer charges (renderedReplica.chargeAdded). Nil, a
-// total no load made, runs no apply of the hook's.
+// (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:830-838), so the room's update observer, which drains
+// the room's update log there, finds each of the hook's updates while its apply is still running;
+// any other origin is the server's own write, whose structure that observer charges
+// (renderedReplica.chargeAdded). Nil, a total no load made, runs no apply of the hook's.
 func (t *roomTotals) hookApplies(origin any) bool {
 	if t == nil {
 		return false

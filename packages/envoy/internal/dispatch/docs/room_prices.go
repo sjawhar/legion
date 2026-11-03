@@ -63,8 +63,9 @@ const bytesOfHeapAStructHeld = 170
 // of its own, 10.2 bytes, 20,410,464 for both copies of 1,000,042 rendered bytes; runs of 50,000
 // to 500,000 keystrokes 9.2 to 11.1, the most at 300,000. The decode appends each keystroke's item
 // to its client's slice of the store before the merge, and the merge keeps that slice's array
-// (crdt/store.go:56-58, crdt/transaction.go:300-321): eight bytes a keystroke and the slack append
-// grew the array by, beside the character's own byte, so the figure moves with the run's length. A
+// (StructStore.Append, crdt/store.go:64-73, and squashRuns's compaction,
+// crdt/transaction.go:377-395): eight bytes a keystroke and the slack append grew the array by,
+// beside the character's own byte, so the figure moves with the run's length. A
 // paragraph of a mebibyte typed in one transaction, which no decode merges, holds 1.0 byte a byte,
 // and so do eight paragraphs of 128 KiB. It is set past the most measured, 11.1, rounded up to the
 // next whole byte. It stays under the other two prices of the shapes they price: a mebibyte of
@@ -155,8 +156,8 @@ const bytesOfHeapAStruct = 650
 // charged at the heaviest kind's price its two splits come to 1,300 bytes a copy against the 338.8
 // the insert and its split keep together: the room budget would charge a mebibyte of prose typed
 // with 2,000 keystrokes and ten pastes of 4 KiB a structure part of 8,018,920 bytes, taking its
-// charge to 65,618,920, 1.117 times the 58,735,880 bytes of heap the cross-checked reading of
-// 2026-10-31 under sjawhar/ygo v1.54.1-sami.3 finds the room holding, where this price charges
+// charge to 65,618,920, 1.117 times the 58,740,176 bytes of heap the cross-checked reading of
+// 2026-11-03 under sjawhar/ygo v1.54.1-sami.3 finds the room holding, where this price charges
 // 4,400,920 and 1.056 times it
 // (TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor). Under sjawhar/ygo
 // v1.51.3-sami.7 the same two prices charged 1.112 and 1.051 times a reading of 55,591,872 bytes,

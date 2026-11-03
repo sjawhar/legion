@@ -58,16 +58,16 @@ import (
 // The question is asked first of the clock sum, which costs no encode, and only where that cannot
 // clear the write is the document counted (leavesPastDecodeCap gives the steps). The sum clears
 // nothing past the cap, because it counts characters and the cap counts structs: ygo's state
-// vector is each client's last item's clock plus that item's length (crdt/store.go:235-245 in
-// sjawhar/ygo v1.54.1-sami.3), a string's length is its UTF-16 length (crdt/content.go:109), and
-// one struct holds a whole run of typing. Measured on 2026-10-25, the shape room_heap_test.go
-// builds, typed over as benchmarkLiveDocument types, sums to 52,575 clocks at 51 KiB, 538,306 at
-// 524 KiB and 1,050,470 at a mebibyte, past the 1,048,576 cap, where it holds 77,600 structs
-// (BenchmarkDecodeCapConfirmation); a 256 KiB document after a mebibyte of typing and deleting
-// sums to 1,310,720, and 1.5 MiB written in 1 KiB inserts to 1,572,864; and every one of them
-// decodes. A document's clocks never fall, so refusing on the sum alone would stop the stamp, the
-// sweep and the returning answers for good on the documents people work in hardest, while
-// applyLive, which counts to confirm, went on writing to them.
+// vector is each client's last item's clock plus that item's length (StructStore.StateVector,
+// crdt/store.go:237-248 in sjawhar/ygo v1.54.1-sami.3), a string's length is its UTF-16 length
+// (crdt/content.go:109), and one struct holds a whole run of typing. Measured on 2026-10-25, the
+// shape room_heap_test.go builds, typed over as benchmarkLiveDocument types, sums to 52,575 clocks
+// at 51 KiB, 538,306 at 524 KiB and 1,050,470 at a mebibyte, past the 1,048,576 cap, where it
+// holds 77,600 structs (BenchmarkDecodeCapConfirmation); a 256 KiB document after a mebibyte of
+// typing and deleting sums to 1,310,720, and 1.5 MiB written in 1 KiB inserts to 1,572,864; and
+// every one of them decodes. A document's clocks never fall, so refusing on the sum alone would
+// stop the stamp, the sweep and the returning answers for good on the documents people work in
+// hardest, while applyLive, which counts to confirm, went on writing to them.
 // Settlement's repair was the one of the three with a plausible route to the cap - two rounds of
 // a 50,000-byte answer added 24 clocks, so tens of thousands of repair cycles on one document -
 // and the other two had narrower triggers, not cheaper ones: the stamp runs only for a duplicate
@@ -449,7 +449,7 @@ func updatesAdd(updates [][]byte) (uint64, bool) {
 
 // clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
 // since every one takes at least one clock, and says nothing past that: a struct of typed text
-// takes a clock for each character (crdt/store.go:235-245, crdt/content.go:109 in sjawhar/ygo
+// takes a clock for each character (crdt/store.go:237-248, crdt/content.go:109 in sjawhar/ygo
 // v1.54.1-sami.3).
 func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64

@@ -59,7 +59,8 @@ func TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt(t *testing.T) {
 			}
 			chainedRun(t, doc, lastCharacter(t, doc), runner, run)
 			// The row is only a guard while its document carries what makes ygo run the cleanup:
-			// the ContentFormat items a mark is stored as (crdt/item.go:340-344).
+			// the ContentFormat items a mark is stored as (sjawhar/ygo v1.54.1-sami.3,
+			// crdt/item.go:340-344).
 			formats := formatStructs(t, crdt.EncodeStateAsUpdateV1(doc, nil))
 			if formats != row.formats {
 				t.Fatalf("the %s document carries %d format structs, want %d", row.name, formats, row.formats)
@@ -237,10 +238,11 @@ func TestTheRoomScanTotalHoldsFifteenHonestLongSessions(t *testing.T) {
 // 5 KiB document typed on until its state reached the decode cap (longEditedAtCapState) is each at
 // most half of roomScanTotal, so each leaves people at least half the total to edit it with. Set
 // DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 178 s here with the store, the agent's rewrites 170 s
-// of them. Run on 2026-10-31 under sjawhar/ygo v1.54.1-sami.3: the heaviest document's
-// 5,360,879-byte state, the long-edited one's 14,427,285-byte state and the agent-rewritten
-// document's 12,598,044-byte state, 28 whole rewrites, re-scan no item at all, each far within
-// half the 1,000,000 total, 500,000. On
+// of them. Run on 2026-10-31 under sjawhar/ygo v1.54.1-sami.3 and again on 2026-11-03: the
+// heaviest document's 5,360,879-byte state, the long-edited one's 14,427,285-byte state and the
+// agent-rewritten document's state, 12,598,044 bytes then and 12,555,674 on 2026-11-03, whose
+// random client ids move its size from run to run, 28 whole rewrites, re-scan no item at all,
+// each far within half the 1,000,000 total, 500,000. On
 // 2026-10-28, under sjawhar/ygo v1.51.3-sami.7, the same three states re-scanned 49,156, 10 and
 // 475,136 items; the figure this test holds to is the half, not the reading.
 func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
@@ -285,11 +287,11 @@ func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 // 1,000,002 distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
 // stored state (decodeStoredCopy) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
 // 1.5 s more than the unscanned one, and allocates at most twice bytesOfAScanMark more for each
-// item its scans pass, which is what ygo keeps a mark for (crdt/item.go:126-158). Set
-// DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on 2026-10-30: the scanned copy
-// re-scanned 1,000,002 items in 2.217 s, allocating 456,926,192 bytes with a peak of 433,741,040
-// above the heap before it; the unscanned one, no item, 1.419 s, 382,005,224 and 353,177,568:
-// 0.798 s and 74,920,968 bytes more, 74.9 bytes a scan.
+// item its scans pass, which is what ygo keeps a mark for (sjawhar/ygo v1.54.1-sami.3,
+// crdt/item.go:129-168). Set DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on
+// 2026-10-30: the scanned copy re-scanned 1,000,002 items in 2.217 s, allocating 456,926,192 bytes
+// with a peak of 433,741,040 above the heap before it; the unscanned one, no item, 1.419 s,
+// 382,005,224 and 353,177,568: 0.798 s and 74,920,968 bytes more, 74.9 bytes a scan.
 func TestACopyOfARoomAtTheScanTotalCostsACopyOfItsStateAndAboutASecondOfScans(t *testing.T) {
 	if os.Getenv(scanMeasurement) == "" {
 		t.Skip("set " + scanMeasurement + "=1 to run the copy measurement")

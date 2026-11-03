@@ -23,12 +23,12 @@ import (
 // here.
 //
 // It is ported from two places in ygo. The header, the struct loop and the delete set follow
-// ygo's own allocation-free header scanner, pendingScanner (crdt/pending_budget.go:241-568),
+// ygo's own allocation-free header scanner, pendingScanner (crdt/pending_budget.go:556-891),
 // which walks the caller's buffer without materialising a value; each struct's fields and each
-// content reference follow decodeItem (crdt/update.go:901-1076), decodeContent (:1078-1220) and
-// decodeTypeContent (:1222-1287), which are what ygo's apply actually runs, so that the two read
+// content reference follow decodeItem (crdt/update.go:1057-1220), decodeContent (:1222-1364) and
+// decodeTypeContent (:1366-1431), which are what ygo's apply actually runs, so that the two read
 // every byte the same way. That includes ContentJSON's rule (decodeContent's wireJSON case,
-// :1087-1118): a JSON item whose first value starts with a byte from 116 to 127, which is both a
+// :1231-1262): a JSON item whose first value starts with a byte from 116 to 127, which is both a
 // JSON text of that many bytes and a lib0 Any tag, is read as JSON text for every value when
 // that succeeds and as lib0 Any for every value otherwise, so the walk ends that item where ygo
 // does and cannot drift out of step with it. An Any value is skipped as
@@ -36,14 +36,14 @@ import (
 //
 // It refuses, with an *updateRefusal wrapping one of two sentinels:
 //
-//   - errUpdateUndecodable, what ygo's V1 apply refuses (applyV1Txn, crdt/update.go:537-590): a
-//     header of more clients than half the frame's bytes or than maxUpdateItems (:559); more
+//   - errUpdateUndecodable, what ygo's V1 apply refuses (applyV1Txn, crdt/update.go:702-790): a
+//     header of more clients than half the frame's bytes or than maxUpdateItems (:740); more
 //     than maxUpdateItems structs in total, counted after each client's header as decodeAndPark
-//     (:609-617) and decodeStructsV1 (crdt/merge.go:30-46) count them, which is also what keeps
+//     (:825-834) and decodeStructsV1 (crdt/merge.go:30-46) count them, which is also what keeps
 //     that running count inside uint64: the walk stops at the first header past the cap, and a
 //     header declares at most the 2^53 a varint carries; a delete set of more than
-//     maxUpdateItems clients, or of more than maxUpdateItems ranges for one client (:1295,
-//     :1307); a varint past 53 bits or a length past the end of the frame, wherever it is; a
+//     maxUpdateItems clients, or of more than maxUpdateItems ranges for one client (:1439,
+//     :1451); a varint past 53 bits or a length past the end of the frame, wherever it is; a
 //     string, a root name or a map key that is not UTF-8; JSON that encoding/json would not
 //     unmarshal into a float64-numbered value; an Any value anycodec would not read; and a
 //     content reference ygo does not know.
@@ -65,8 +65,9 @@ import (
 //     back in a whole-state message once a rebuild has seeded it, which the hook refuses when it
 //     adds, overwrites or deletes an entry of it (weighPeerUpdate); a struct or a delete range
 //     ending past 2^53, which no JavaScript clock reaches, so that a caller adding the walk's
-//     clocks cannot wrap where ygo's decodeAndPark adds lengths unchecked
-//     (crdt/update.go:641-646); and bytes after the delete set, which no Yjs encoder writes and
+//     clocks cannot wrap - ygo refuses one too, as undecodable from any source, since every
+//     struct's and every delete range's end is taken through structEnd (crdt/update.go:1543-1548,
+//     called at :852 and :1464); and bytes after the delete set, which no Yjs encoder writes and
 //     ygo's apply ignores.
 //
 // The editor's sources were searched for what writes binary or embedded content on 2026-10-26:
@@ -105,12 +106,13 @@ import (
 // room (newDocumentCopy, whose pending queue of maxUpdateItems no update ygo decodes can
 // overflow with structs) without error, because the walk refuses every byte sequence ygo's
 // decoder refuses; so a frame of valid structs ending in one bad byte is refused before anything
-// decodes it (ApplyUpdateV1 integrates each struct as it decodes it, crdt/update.go:104-110 and
-// :620-728, and leaves those structs in a document that sets no scan bound or budget; a room's
+// decodes it (ApplyUpdateV1 integrates each struct as it decodes it, crdt/update.go:110-117 and
+// :844-937, and leaves those structs in a document that sets no scan bound or budget; a room's
 // bounded document, newRoomScans, takes them back out, but only after it has integrated them
 // all). The one exception is a delete set of more than maxUpdateItems ranges across its clients
 // that the document cannot apply yet, which ygo refuses once parking it would pass the same cap
-// (checkParkedDeletes, crdt/update.go:580-586 and :799-822): whether a range parks depends on the
+// (checkParkedDeletes, crdt/delete_set.go:250-283, called from applyV1Txn at
+// crdt/update.go:761-763 before the apply changes anything): whether a range parks depends on the
 // document it reaches, not the frame, so the walk leaves it to ygo, and from a browser the struct
 // total refuses it first, at splitsAStructCanCause structs or more for each range that would park
 // as a parked range of its own (peerWeighing.added). And every update ygo applies without error
@@ -118,9 +120,9 @@ import (
 // is never refused by it.
 //
 // A walk of the room's own state (fromRoom: crdt.EncodeStateAsUpdateV1 of the live document,
-// which carries parked structs, the skips before them and parked delete ranges, crdt/update.go:
-// 123-145) refuses only what ygo's decoder refuses: what a stored document already holds, whatever
-// wrote it, is counted rather than turned away.
+// which carries parked structs, the skips before them and parked delete ranges, withParked,
+// crdt/update.go:230-258) refuses only what ygo's decoder refuses: what a stored document already
+// holds, whatever wrote it, is counted rather than turned away.
 //
 // The visitor sees each struct and delete range as it is read, so a walk that ends in a refusal
 // has already shown it the structs before the refusal; a caller discards what it gathered from a
@@ -282,8 +284,8 @@ type updateTally struct {
 	// deleteClients is the number of clients the delete set declares.
 	deleteClients uint64
 	// deleteRanges is the number of ranges the delete set carries, as encoded: ygo sorts and merges
-	// each client's ranges when it decodes them (crdt/update.go:1324-1326), so a decoded delete set
-	// can hold fewer.
+	// each client's ranges when it decodes them (sjawhar/ygo v1.54.1-sami.3,
+	// crdt/update.go:1474-1476), so a decoded delete set can hold fewer.
 	deleteRanges uint64
 	// deletesAt is where in the update its delete set starts, for a second look at the delete set
 	// alone (walkDeleteSet).
@@ -305,7 +307,8 @@ type updateStruct struct {
 	// keyed is whether the struct names a map key (parentSub): a map entry, or an attribute of an
 	// XML element, and key is that key as encoded, length prefix included. A later entry for the
 	// same key carries an origin instead and names neither its parent nor its key (Yjs typeMapSet;
-	// ygo's YMap.Set, crdt/ymap.go:220-225; crdt/update.go:1016-1029), so it reads as unkeyed here.
+	// ygo's YMap.Set, sjawhar/ygo v1.54.1-sami.3, crdt/ymap.go:220-225; crdt/update.go:1160-1173),
+	// so it reads as unkeyed here.
 	keyed bool
 	key   []byte
 	// content is the encoded content after the struct's header, length prefix included, which is
@@ -371,7 +374,7 @@ type structID struct {
 }
 
 // structKind is a struct's kind: the wire's content reference for an item, and the GC and skip
-// structs, whose references are 0 and 10 (crdt/update.go:14-27).
+// structs, whose references are 0 and 10 (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:17-30).
 type structKind uint8
 
 const (
@@ -396,7 +399,8 @@ const (
 	// parentUnnamed is a GC run or a skip, which have no parent.
 	parentUnnamed structParent = iota
 	// parentOfNeighbour is an item with an origin or a right origin, whose parent is its
-	// neighbour's, so the wire does not name it (crdt/update.go:942-965, :1049-1070).
+	// neighbour's, so the wire does not name it (sjawhar/ygo v1.54.1-sami.3,
+	// crdt/update.go:1098-1118, :1193-1214).
 	parentOfNeighbour
 	// parentItem is an item inside a nested type, named by the ID of the item holding that type.
 	// Which root it belongs to is the parent chain's, which the walk does not resolve.
@@ -416,14 +420,15 @@ const (
 // delete range the editor writes ends beyond it.
 const maxEditorClock = 1 << 53
 
-// Item info bits (crdt/update.go:29-34).
+// Item info bits (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:32-37).
 const (
 	infoHasOrigin      byte = 0x80
 	infoHasRightOrigin byte = 0x40
 	infoHasParentSub   byte = 0x20
 )
 
-// lib0 Any bounds anycodec enforces (internal/anycodec/decoder.go:230-241).
+// lib0 Any bounds anycodec enforces (sjawhar/ygo v1.54.1-sami.3,
+// internal/anycodec/decoder.go:230-241).
 const (
 	maxAnyDepth    = 100
 	maxAnyElements = 100_000
@@ -477,7 +482,8 @@ func (w *updateWalker) notFromEditor(reason string) {
 	}
 }
 
-// walkStruct reads one struct into walked, as decodeItem reads it (crdt/update.go:901-1076).
+// walkStruct reads one struct into walked, as decodeItem reads it (sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:1057-1220).
 func (w *updateWalker) walkStruct(walked *updateStruct) {
 	info := w.byte()
 	if w.refusal != nil {
@@ -552,7 +558,7 @@ func (w *updateWalker) namedRoot(walked *updateStruct) {
 }
 
 // content reads the content of an item of kind and returns its length, as decodeContent reads it
-// (crdt/update.go:1078-1220).
+// (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:1222-1364).
 func (w *updateWalker) content(kind structKind) uint64 {
 	switch kind {
 	case structDeleted:
@@ -699,7 +705,7 @@ func (w *updateWalker) varBytes() []byte {
 }
 
 // str reads a length-prefixed UTF-8 string and returns its length in UTF-16 code units, which is
-// a Yjs string's length in clocks (crdt/content.go:26-36).
+// a Yjs string's length in clocks (sjawhar/ygo v1.54.1-sami.3, crdt/content.go:26-36).
 func (w *updateWalker) str() uint64 {
 	b := w.varBytes()
 	if w.refusal != nil {
@@ -723,8 +729,9 @@ func (w *updateWalker) str() uint64 {
 	return units
 }
 
-// skipJSONValues reads n JSON texts, as readJSONVals does (crdt/update.go:1435-1449), and reports
-// whether every one would unmarshal. It records no refusal, since the legacy rule retries.
+// skipJSONValues reads n JSON texts, as readJSONVals does (sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:1631-1645), and reports whether every one would unmarshal. It records no refusal,
+// since the legacy rule retries.
 func (w *updateWalker) skipJSONValues(n uint64) bool {
 	for range n {
 		if !w.skipJSON() {
@@ -734,8 +741,8 @@ func (w *updateWalker) skipJSONValues(n uint64) bool {
 	return true
 }
 
-// skipJSON reads one JSON text and reports whether fmtValFromJSON would take it
-// (crdt/update.go:1420-1430), recording no refusal.
+// skipJSON reads one JSON text and reports whether fmtValFromJSON would take it (sjawhar/ygo
+// v1.54.1-sami.3, crdt/update.go:1616-1626), recording no refusal.
 func (w *updateWalker) skipJSON() bool {
 	if w.refusal != nil {
 		return false
@@ -750,8 +757,9 @@ func (w *updateWalker) skipJSON() bool {
 
 // jsonUnmarshals reports whether fmtValFromJSON takes raw: "undefined", or UTF-8 that
 // encoding/json unmarshals into an interface value, whose numbers must each fit a float64. It is
-// ygo's own validatePendingJSON (crdt/pending_budget.go:537-568), which decides the legacy Any
-// fallback for an ambiguous 116-127-byte text the way the decoder does.
+// ygo's own validatePendingJSON (sjawhar/ygo v1.54.1-sami.3, crdt/pending_budget.go:932-963),
+// which decides the legacy Any fallback for an ambiguous 116-127-byte text the way the decoder
+// does.
 func jsonUnmarshals(raw []byte) bool {
 	if !utf8.Valid(raw) {
 		return false
@@ -785,12 +793,12 @@ func jsonUnmarshals(raw []byte) bool {
 	return true
 }
 
-// isAnyTag reports whether b is a lib0 Any tag (crdt/update.go:1432).
+// isAnyTag reports whether b is a lib0 Any tag (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:1628).
 func isAnyTag(b byte) bool { return b >= 116 && b <= 127 }
 
-// skipAny reads one lib0 Any value at depth as anycodec's readAny skips it
-// (internal/anycodec/decoder.go:261-393) and reports whether it reads, recording no refusal. It
-// counts the value, and what nests under it, into the struct's shape (contentShape).
+// skipAny reads one lib0 Any value at depth as anycodec's readAny skips it (sjawhar/ygo
+// v1.54.1-sami.3, internal/anycodec/decoder.go:261-393) and reports whether it reads, recording no
+// refusal. It counts the value, and what nests under it, into the struct's shape (contentShape).
 func (w *updateWalker) skipAny(depth int) bool {
 	if depth > maxAnyDepth || w.pos >= len(w.buf) {
 		return false
@@ -850,7 +858,8 @@ func (w *updateWalker) skipFixed(n int) bool {
 }
 
 // readVarUint reads a lib0 varuint at *pos, as anycodec's ReadVarUint does: one whose eighth byte
-// continues is past 53 bits and refused (internal/anycodec/decoder.go:89-107).
+// continues is past 53 bits and refused (sjawhar/ygo v1.54.1-sami.3,
+// internal/anycodec/decoder.go:89-107).
 func readVarUint(buf []byte, pos *int) (uint64, bool) {
 	var v uint64
 	for shift := uint(0); ; shift += 7 {
@@ -870,7 +879,7 @@ func readVarUint(buf []byte, pos *int) (uint64, bool) {
 }
 
 // readVarInt skips a lib0 sign-magnitude varint at *pos, as anycodec's ReadVarInt reads it
-// (internal/anycodec/decoder.go:110-136).
+// (sjawhar/ygo v1.54.1-sami.3, internal/anycodec/decoder.go:110-136).
 func readVarInt(buf []byte, pos *int) bool {
 	if *pos >= len(buf) {
 		return false
@@ -888,7 +897,8 @@ func readVarInt(buf []byte, pos *int) bool {
 }
 
 // readVarBytes reads a length-prefixed byte string at *pos, refusing a length past the end of buf
-// as anycodec's ReadVarBytes does (internal/anycodec/decoder.go:162-175).
+// as anycodec's ReadVarBytes does (sjawhar/ygo v1.54.1-sami.3,
+// internal/anycodec/decoder.go:162-175).
 func readVarBytes(buf []byte, pos *int) ([]byte, bool) {
 	n, ok := readVarUint(buf, pos)
 	if !ok || n > uint64(len(buf)-*pos) {

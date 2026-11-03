@@ -34,9 +34,9 @@ const (
 	// unless that is this number.
 	peerWriteQueueBytesForTest = 60 << 20
 	// writeQueueFrameCap mirrors ygo's default PeerWriteQueueSize, 512 frames whatever their size
-	// (defaultPeerWriteQueueSize, sjawhar/ygo provider/websocket/server.go:208-212): the only
-	// bound on a peer's queue before the budget. The single-socket drive asks for that many whole
-	// states, so what it would hold with the budget off is what the frame cap alone allows.
+	// (defaultPeerWriteQueueSize, sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:208-212):
+	// the only bound on a peer's queue before the budget. The single-socket drive asks for that many
+	// whole states, so what it would hold with the budget off is what the frame cap alone allows.
 	writeQueueFrameCap = 512
 	// floodFramesPerSocket is how many whole states each of the twenty sockets asks for: half as
 	// many again as the budget admits of the document those twenty rooms hold (runOfWords), whose
@@ -47,9 +47,10 @@ const (
 )
 
 // writeQueueCloseLine is what ygo logs for each peer its byte budget closes, with the figures
-// behind it (peer.enqueueLocked, sjawhar/ygo provider/websocket/write_budget.go:6-30). It reaches
-// the server's own log because ygo logs through slog.Default() while Server.Logger is unset
-// (provider/websocket/server.go:168-174), which cmd/dispatch sets at boot (main).
+// behind it (peer.enqueueLocked, sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/write_budget.go:6-30). It reaches the server's own log because ygo logs
+// through slog.Default() while Server.Logger is unset (provider/websocket/server.go:168-174),
+// which cmd/dispatch sets at boot (main).
 var writeQueueCloseLine = regexp.MustCompile(`msg="peer queued bytes over budget; closing peer" room=(\S+) path=("[^"]*"|\S+) queuedBytes=(\d+) budgetBytes=(\d+) frameBytes=(\d+) queueSize=(\d+)`)
 
 // writeQueueClose is one such close: the room, the enqueue path the frame was refused on, what the
@@ -148,9 +149,9 @@ func requireBudgetFigures(t *testing.T, closed writeQueueClose, what string, lar
 // silentSocket is a document socket that completes its room's handshake - it reads the room's
 // SyncStep1 and the whole state the room hands it - and then never reads again while it asks for
 // that whole state over and over. Each SyncStep1 it sends is answered with one whole-state
-// SyncStep2 (sjawhar/ygo provider/websocket/peer.go:96-108), which the server queues for a socket
-// that is not draining it: this is the shape that grew a server's heap without bound before the
-// budget, a forty-one-byte ask for three megabytes held.
+// SyncStep2 (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer.go:99-111), which the server
+// queues for a socket that is not draining it: this is the shape that grew a server's heap without
+// bound before the budget, a forty-one-byte ask for three megabytes held.
 type silentSocket struct {
 	room       string
 	connection *gws.Conn
@@ -200,8 +201,8 @@ func (s *silentSocket) askForState() []byte {
 // flood asks the room for its whole state frames times over, never reading an answer, and stops at
 // the first ask the socket cannot take, which is how the server's close reaches this side. It
 // reports how many asks were written and why the last was not. The server drops the asks it has
-// not answered when the budget closes the socket (closeConn, sjawhar/ygo
-// provider/websocket/peer.go:880-885), so the flood is never answered more times than it is closed
+// not answered when the budget closes the socket (closeConn, sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/peer.go:888-893), so the flood is never answered more times than it is closed
 // for.
 func (s *silentSocket) flood(frames int) (int, error) {
 	ask := s.askForState()
@@ -230,14 +231,14 @@ func (s *silentSocket) ended(within time.Duration) error {
 // writeQueueHeapMargin is how far above the budget and two whole-state frames the single-socket
 // drive lets the server's memory rise over what it held idle with the same room open. The budget
 // bounds the frames a socket holds queued, and the frame its writer is in the middle of is a
-// second frame beside them (creditLocked, sjawhar/ygo provider/websocket/peer.go:905-909); neither
-// bounds the garbage that making those frames leaves, and at the runtime's own collector ratio the
-// whole-state encode behind each frame is garbage until the next cycle. Measured on 2026-10-31
-// over three runs (the drive logs every figure): the server held 102,973,472 to 119,939,104 bytes
-// above idle for a socket closed holding 63,117,516, which is 34,047,646 to 51,013,278 above the
-// budget and two 3,005,633-byte frames. 64 MiB is a third as much again as the worst of the
-// three, and the same drive with the budget off held 1,228,628,256 above idle, nine times the
-// bound this margin makes.
+// second frame beside them (creditLocked, sjawhar/ygo v1.54.1-sami.3,
+// provider/websocket/write_budget.go:38-46); neither bounds the garbage that making those frames
+// leaves, and at the runtime's own collector ratio the whole-state encode behind each frame is
+// garbage until the next cycle. Measured on 2026-10-31 over three runs (the drive logs every
+// figure): the server held 102,973,472 to 119,939,104 bytes above idle for a socket closed holding
+// 63,117,516, which is 34,047,646 to 51,013,278 above the budget and two 3,005,633-byte frames.
+// 64 MiB is a third as much again as the worst of the three, and the same drive with the budget
+// off held 1,228,628,256 above idle, nine times the bound this margin makes.
 const writeQueueHeapMargin = 64 << 20
 
 // One socket that completes a mebibyte document's handshake and then asks for the room's whole
@@ -319,9 +320,10 @@ func TestASocketThatNeverReadsIsClosedWithinItsWriteQueueBudget(t *testing.T) {
 
 // runOfWords is a document of one paragraph: size bytes of plain words in a single run of text,
 // which a room loads as a handful of structs, since the decode merges a run into one item
-// (squashRuns, sjawhar/ygo crdt/transaction.go:242-397), and renders as one paragraph. Its whole
-// state is that text, so a socket asking for it is sent a mebibyte a time for a copy rather than
-// for a walk of the tens of thousands of structs a mebibyte of proseMarkdown's sections holds.
+// (squashRuns, sjawhar/ygo v1.54.1-sami.3, crdt/transaction.go:242-397), and renders as one
+// paragraph. Its whole state is that text, so a socket asking for it is sent a mebibyte a time for
+// a copy rather than for a walk of the tens of thousands of structs a mebibyte of proseMarkdown's
+// sections holds.
 func runOfWords(t *testing.T, size int) string {
 	t.Helper()
 	markdown := strings.Repeat("word ", size/5)
@@ -433,8 +435,8 @@ const throttledReadInterval = 250 * time.Millisecond
 // broadcast to every other socket of the room. The burst ends with that browser handing its whole
 // state back, as a browser reconnecting to the room does, which ygo relays to the room's other
 // sockets as the frame it arrived in (applySyncUpdate's broadcastSync, sjawhar/ygo
-// provider/websocket/peer.go:278): the heaviest frame an honest room broadcasts, and the one the
-// budget is sized to hold beside a reader's ordinary lag.
+// v1.54.1-sami.3, provider/websocket/peer.go:281): the heaviest frame an honest room broadcasts,
+// and the one the budget is sized to hold beside a reader's ordinary lag.
 const burstKeystrokes = 200
 
 // throttledReader is an honest browser whose link is slow: it reads one frame every

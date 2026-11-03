@@ -952,14 +952,14 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // items at ygo's default. An update decoded alone parks every item that leans on the document it
 // was written against, and no update carries more items than this, so no decode parks items past
 // it. The queue caps, apart, the delete ranges parked for structs the document does not hold
-// (checkParkedDeletes, crdt/update.go:580-586 and :799-822): one update can name more of them
-// than this, up to this many for each of its clients, and a decode that would park more than this
-// is refused, so a history holding more parked delete ranges than this does not load. A room's
-// struct total counts each parked range splitsAStructCanCause times within this cap
-// (countRoomStructs), so no room the peer update hook guards stores one. ygo's own check of each
-// update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at all: it is the
-// check ygo's bundled stores run, since the room has already applied the update (reearth/ygo#268,
-// in the pinned fork).
+// (checkParkedDeletes, crdt/delete_set.go:250-283, called from applyV1Txn at
+// crdt/update.go:761-763): one update can name more of them than this, up to this many for each
+// of its clients, and a decode that would park more than this is refused, so a history holding
+// more parked delete ranges than this does not load. A room's struct total counts each parked
+// range splitsAStructCanCause times within this cap (countRoomStructs), so no room the peer
+// update hook guards stores one. ygo's own check of each update the service broadcasts
+// (Server.BroadcastUpdate) takes no pending queue at all: it is the check ygo's bundled stores
+// run, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 // TestTheStoreTakesOneBrowserUpdateItsRoomTook is an update the store decodes itself under this
 // queue (appendUpdate) and a check at ygo's default would refuse;
 // TestASettlementStampsMoreBlocksThanYgosDefaultQueue is one nothing decodes alone any more - the

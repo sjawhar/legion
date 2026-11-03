@@ -178,7 +178,7 @@ func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) 
 // client ID is a random 32-bit number, so these collide with one no more often than any two
 // browsers' do, and all but about one in 30,000 of them are past the chain's, which is what makes
 // a browser's insert scan the chain rather than stop at its first item (Item.integrate, case 1,
-// crdt/item.go:155-168).
+// sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179).
 const (
 	tangledChain       = 40_000
 	tangledChainClient = 100_000
@@ -259,7 +259,8 @@ func tangleProbe(origin crdt.ID) []byte {
 }
 
 // writeOriginString writes one string item of content naming origin as its left origin and no
-// right origin, so its parent is its origin's and the wire does not name it (crdt/update.go:942-965).
+// right origin, so its parent is its origin's and the wire does not name it (sjawhar/ygo
+// v1.54.1-sami.3, crdt/update.go:1098-1118).
 func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) {
 	frame.WriteUint8(byte(structString) | infoHasOrigin)
 	frame.WriteVarUint(uint64(origin.Client))

@@ -119,7 +119,7 @@ func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
 // The room budget's sweep leaves a room an Apply is inside its callback on, and closes it once
 // that Apply has returned. ygo's Apply holds the room's in-flight count "to protect rm from a
 // concurrent eviction while in use" and its idle sweep honours that count, but its CloseRoom does
-// not (sjawhar/ygo v1.54.1-sami.3, provider/websocket/inject.go:332-335 and :492-643): a close
+// not (sjawhar/ygo v1.54.1-sami.3, provider/websocket/inject.go:332-335 and :489-640): a close
 // takes the room out of the server's map whatever is inside an Apply on it, and the apply's write
 // then lands on a room the server no longer holds, which the next read does not load. A decision
 // whose body a browser broke would then read as the body it replaced, and an ask edit of it would

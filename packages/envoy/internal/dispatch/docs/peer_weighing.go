@@ -103,8 +103,8 @@ type peerWeighing struct {
 // builds its document afresh on a new connection, a new Y.Doc with a client id of its own
 // (packages/dispatch/web/src/features/doc/connection.ts:153, :222-231), so what it writes next is
 // no retired client's. And no encoder begins a client group with anything but a struct it holds of
-// that client: ygo starts each group inside its first item (encodeV1Locked, crdt/update.go:231-271;
-// encodeStructStoreV1, crdt/merge.go:162-188, which writes a skip only between two items), and Yjs
+// that client: ygo starts each group inside its first item (encodeV1Locked, crdt/update.go:366-406;
+// encodeStructStoreV1, crdt/merge.go:155-193, which writes a skip only between two items), and Yjs
 // at the first struct of its store, which holds no skips (writeStructs, src/utils/encoding.js:57-71),
 // at the first struct of a merge, whose readers drop skips (mergeUpdatesV2, src/utils/updates.js:338,
 // writing a skip only between two structs of one client, :405-417), and never with a skip in a
@@ -291,7 +291,7 @@ func unrenderedBytes(walked updateStruct) uint64 {
 //     encoding/encoder.go:283-299; internal/anycodec/decoder.go:276-284): half as much again.
 //     ygo writes every other content as it read it, and names a struct's origins and parent as
 //     the update did, or drops an origin it holds as a GC run for a parent named in no more bytes
-//     (encodeItem, :349-361 and :392-421);
+//     (encodeItem, dropGCOrigins at crdt/update.go:429-444, and :555-580);
 //   - its place among the room's structs (placeBytes);
 //   - its deletion, by its own delete range or by whatever deletes it later - a block deleted
 //     around it, an entry written over it, a parent deleted before it arrives (deleteRangeBytes);

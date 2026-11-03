@@ -210,10 +210,10 @@ func TestTheUpdateWalkAcceptsEveryUpdateARoomTakes(t *testing.T) {
 }
 
 // A frame of valid structs ending in one bad byte is refused whole. ygo's apply refuses it too,
-// but only after it has integrated every struct before the bad byte (crdt/update.go:104-110), which
-// on a document that sets no scan bound or budget, as newDocumentCopy's does not, stay in it, and
-// which a room's bounded document takes back out only once it has integrated them all: the work
-// the hook's walk keeps off the room.
+// but only after it has integrated every struct before the bad byte (sjawhar/ygo v1.54.1-sami.3,
+// crdt/update.go:110-117), which on a document that sets no scan bound or budget, as
+// newDocumentCopy's does not, stay in it, and which a room's bounded document takes back out only
+// once it has integrated them all: the work the hook's walk keeps off the room.
 func TestTheUpdateWalkRefusesValidStructsBeforeOneBadByte(t *testing.T) {
 	update := newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done()
 	_, err := walkUpdate(update, fromPeer, nil)
@@ -386,9 +386,9 @@ func TestTheUpdateWalkHoldsYgosBoundsAtTheirEdges(t *testing.T) {
 
 // ContentJSON's two encodings are read where ygo's decoder reads them. A JSON text of 116 to 127
 // bytes starts with a byte that is also a lib0 Any tag; ygo tries JSON text for every value and
-// lib0 Any only when that fails (crdt/update.go:1087-1118), and a walk that chose otherwise would
-// end the item somewhere else and misread every struct after it. Each case is followed by a struct
-// the walk must still read as ygo does.
+// lib0 Any only when that fails (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:1231-1262), and a walk
+// that chose otherwise would end the item somewhere else and misread every struct after it. Each
+// case is followed by a struct the walk must still read as ygo does.
 func TestTheUpdateWalkReadsJSONWhereYgoDoes(t *testing.T) {
 	type jsonCase struct {
 		name    string
@@ -633,7 +633,8 @@ func ygoMadeUpdates(tb testing.TB) []madeUpdate {
 	state("a GC run through ygo", gcDoc)
 
 	// Parked structs behind a skip: a document given a transaction's update without the one before
-	// it parks it, and its state carries the skip and the parked structs (crdt/update.go:123-145).
+	// it parks it, and its state carries the skip and the parked structs (withParked, sjawhar/ygo
+	// v1.54.1-sami.3, crdt/update.go:230-258).
 	var steps [][]byte
 	writer := newDocumentCopy(crdt.WithClientID(27))
 	stopSteps := writer.OnUpdate(func(update []byte, _ any) { steps = append(steps, slices.Clone(update)) })
@@ -811,7 +812,8 @@ func gcFrame(n int) []byte {
 }
 
 // kindOfItem is the struct kind of an item ygo's decoder returned: a GC run decodes to deleted
-// content on an item already marked deleted, where deleted content is not (crdt/update.go:907-918).
+// content on an item already marked deleted, where deleted content is not (sjawhar/ygo
+// v1.54.1-sami.3, crdt/update.go:1063-1077).
 func kindOfItem(item *crdt.Item) structKind {
 	switch item.Content.(type) {
 	case *crdt.ContentDeleted:
