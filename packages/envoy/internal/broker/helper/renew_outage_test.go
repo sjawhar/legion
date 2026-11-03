@@ -24,9 +24,11 @@ import (
 // rows below. renewLoop has no clock of its own to inject — it waits on time.After and reads
 // time.Until(lease) — so the row runs the whole outage at a shortened second instead, with
 // every wait of the model shortened by the same factor (leasetime.Model.Scale). The helper's
-// floor becomes 60 ms, which is long enough that the scheduler's own lateness is nothing
-// beside the margins asserted below, and a whole row takes under a second.
-const outageUnit = 2 * time.Millisecond
+// floor becomes 300 ms and each margin asserted below 400 ms, which is far past the lateness a
+// loaded machine adds to a timer, and a whole row still takes under two seconds. It was 2 ms
+// once, and at that unit one run of this row in a hundred, taken while every other Postgres
+// suite of this module ran beside it, launched one renewal more than the model walked.
+const outageUnit = 10 * time.Millisecond
 
 // outageBroker is a broker that stops serving between gapStart and gapEnd, counted from the
 // renewal that granted the lease. A connection it refuses fails at once; one the outage
