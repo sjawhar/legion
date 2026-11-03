@@ -22,7 +22,10 @@ other change to the head voids it.
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   waits for each one's result with `wait`, since each runs as a job of its own, and records the
-  verdict from what those results say. The CI it reads is the head's own checks: no handoff is a
+  verdict from what those results say. A result that carries no report, or that names another
+  place for it, is a failed run, not a verdict: run that agent again, or read its transcript, and
+  record nothing from it until you have the findings text in front of you. Answering the rubric
+  yourself from a bare verdict is how an unreviewed head gets an approval. The CI it reads is the head's own checks: no handoff is a
   commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
   With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the
@@ -57,7 +60,8 @@ other change to the head voids it.
   run at the head holds the job, or nothing will run it (a check only a commit status reports, a
   workflow another repository defines), tell the architect and do not approve.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
-  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
+  On a docs-only PR the `Thermo` line still records the simplify pass, and its pair half reads
+  `pair: not run (docs-only)`. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
   call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
@@ -140,7 +144,11 @@ reviewing until you finish.
   head does void it, except the handoff import's removal of `.legion/` files: READY is refused
   `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the architect, who has it send
   the head back to review instead of completing, the move's reason naming the refusal's code and
-  what it found. A conflict merge pushed above the approved head with no review round after it
+  what it found. A path outside retro's own is one of five causes of `READY_UNREVIEWED_CHANGE`:
+  the others are a compare GitHub cut at its 300-file limit, a head that does not descend from the
+  approved one, a compare that gives no file list, and an approved head GitHub does not know.
+  Every one of them sends the head back to review and none is an error to retry; the complete
+  list, with each remedy, is the merger's own role prompt part. A conflict merge pushed above the approved head with no review round after it
   brings the base's paths above that head, so READY refuses it the same way; one sent back through
   `implementing` by the conflict procedure gets its confirmation before READY runs. A READY
   refusal's return reaches the reviewer as a new round, never a fingerprint confirmation. Retro

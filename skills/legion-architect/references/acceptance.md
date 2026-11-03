@@ -142,7 +142,8 @@ with the destination (`jj new legion/<KEY> <destination>`, the forward-merge pro
 `skill://legion-worker/references/conflicts-and-rewrites.md`; never a rebase, which rewrites every
 descendant of the fork point, including another tree's stacked branch), pushes it with
 `jj git push` (a genuine fast-forward and a code push like any other) and posts the
-before and after fingerprints; the tester re-runs the bare gates only; the reviewer approves the
+before and after fingerprints; the tester re-runs the bare gates only and the class search of
+every earlier round's findings at the new head; the reviewer approves the
 new head by SHA, or continues its round if it had not approved; the daemon carries the issue
 through your acceptance and retro to the merger's new READY.
 

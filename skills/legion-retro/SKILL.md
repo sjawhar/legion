@@ -23,6 +23,11 @@ which gets its own checks; a retro with no learnings pushes nothing.
   the reviewer for another review. Commits that change only `docs/solutions/` leave the approval
   standing. READY also lets through a file under `.legion/` that GitHub lists as removed: the
   commit `legion handoffs import` makes, never one of yours.
+- A path outside retro's own is one of five causes of `READY_UNREVIEWED_CHANGE`: the others are a
+  compare GitHub cut at its 300-file limit, a head that does not descend from the approved one, a
+  compare that gives no file list, and an approved head GitHub does not know. Every one of them
+  sends the head back to review and none is an error to retry; the complete list, with each
+  remedy, is the merger's own role prompt part.
 
 Work on the existing issue branch: never rebase it onto another base, never make another branch or
 bookmark, and push only fast-forward, because READY reads this branch's head and a forced push can
