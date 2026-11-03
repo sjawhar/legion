@@ -10,7 +10,8 @@ import { useSending } from "../../hooks/useSending";
 import { relativeTimeLabel } from "../refs/Timestamp";
 import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
-import { MentionComposer, reconcileMentions } from "./MentionComposer";
+import { MentionComposer } from "./MentionComposer";
+import { reconcileMentions } from "./MentionField";
 import { KEYED_SEND_LATE_TEXT } from "./send-request";
 
 /** What each attempt of a send is held to, beside the request it carries: its deadline and the
@@ -759,6 +760,135 @@ test("typing a session's folder finds it in the mention picker", async () => {
     );
   } finally {
     view.unmount();
+  }
+});
+
+// INFRA-341 (R2). The field and its picker are `MentionField`, which the ask card mounts too,
+// inside an Inbox that binds ArrowDown, ArrowUp and Enter as its own hotkeys: while the picker
+// is open those keys are the picker's, and the host never sees them.
+test("arrow keys move the picker's active option and Enter picks it", async () => {
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@" } });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const options = within(listbox).getAllByRole("option");
+    expect(options.map((option) => option.getAttribute("aria-label"))).toEqual([
+      "legion-planner",
+      "Worker",
+      "Planner",
+    ]);
+    // Nothing is active until a key moves it, so Enter picks nothing by accident.
+    expect(field.getAttribute("aria-activedescendant")).toBeNull();
+    expect(options.map((option) => option.getAttribute("aria-selected"))).toEqual([
+      "false",
+      "false",
+      "false",
+    ]);
+
+    expect(fireEvent.keyDown(field, { key: "ArrowDown" })).toBe(false);
+    expect(field.getAttribute("aria-activedescendant")).toBe(options[0]?.id ?? "");
+    expect(options.map((option) => option.getAttribute("aria-selected"))).toEqual([
+      "true",
+      "false",
+      "false",
+    ]);
+
+    expect(fireEvent.keyDown(field, { key: "Enter" })).toBe(false);
+    await waitFor(() => expect(field.value).toBe("@legion-planner"));
+    expect(screen.getByRole("list", { name: "Mention targets" }).textContent).toContain(
+      "role:legion-planner"
+    );
+    expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// INFRA-341 (R2). Both arrows wrap: up from nothing takes the last option, as down takes the
+// first, so either end of the list is one key away.
+test("the picker's arrows wrap round the list", async () => {
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@" } });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const options = within(listbox).getAllByRole("option");
+
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field.getAttribute("aria-activedescendant")).toBe(options[2]?.id ?? "");
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field.getAttribute("aria-activedescendant")).toBe(options[0]?.id ?? "");
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field.getAttribute("aria-activedescendant")).toBe(options[2]?.id ?? "");
+
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() => expect(field.value).toBe("@Planner"));
+    expect(screen.getByRole("list", { name: "Mention targets" }).textContent).toContain(
+      "session:A"
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+// INFRA-341 (R2). Escape belongs to the picker while it is open: it closes that and nothing
+// else - no Discard prompt, and no card or dialog around the field - and leaves the words.
+test("Escape closes the mention picker and leaves the typed text", async () => {
+  const { view } = renderComposer({ agents: [planner] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "hello @pla" } });
+    await screen.findByRole("listbox", { name: "Mention suggestions" });
+
+    fireEvent.keyDown(field, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
+    expect(field.value).toBe("hello @pla");
+    expect(screen.queryByText("Discard draft?")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// INFRA-341 (R2). With the picker closed every key is the page's again: Enter types its newline
+// rather than sending, and reaches the hotkeys the host binds on the window.
+test("the open picker keeps its keys from the page, and a closed one keeps none", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const seen: string[] = [];
+  const watch = (event: KeyboardEvent) => seen.push(event.key);
+  window.addEventListener("keydown", watch);
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@" } });
+    await screen.findByRole("listbox", { name: "Mention suggestions" });
+
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    // Enter with nothing picked yet is still the picker's: it leaves the list open.
+    fireEvent.change(field, { target: { value: "@p" } });
+    expect(fireEvent.keyDown(field, { key: "Enter" })).toBe(true);
+    expect(screen.getByRole("listbox", { name: "Mention suggestions" })).not.toBeNull();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(seen).toEqual([]);
+
+    fireEvent.change(field, { target: { value: "no mention here" } });
+    expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
+    // Enter is the browser's newline, not a send, and the page's hotkeys see all three keys.
+    expect(fireEvent.keyDown(field, { key: "Enter" })).toBe(true);
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(seen).toEqual(["Enter", "ArrowDown", "ArrowUp"]);
+    expect(createComment).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener("keydown", watch);
+    view.unmount();
+    createComment.mockRestore();
   }
 });
 
