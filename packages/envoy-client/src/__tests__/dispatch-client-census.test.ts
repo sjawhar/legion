@@ -47,6 +47,7 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   sessionAnswers: (client) => client.sessionAnswers("session-1"),
   listAgents: (client) => client.listAgents(),
   whoami: (client) => client.whoami(),
+  limits: (client) => client.limits(),
   createProject: (client) => client.createProject({ key: "DSP", name: "Dispatch" } as never),
   listProjects: (client) => client.listProjects(),
   listArchitectureSources: (client) => client.listArchitectureSources("DSP"),

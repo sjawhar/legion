@@ -1,4 +1,3 @@
-import { DISPATCH_BODY_MAX } from "@legion/contracts";
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery";
 import type { UserInputResult } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
@@ -103,27 +102,28 @@ export type TypedInputOutcome =
   | { readonly hostVersion: string };
 
 /**
- * What the session answers on Dispatch for a person's text, capped to a Dispatch body, or
- * undefined when there is nothing to say: a prompt, skill or command that printed nothing, and, on
- * a host without `pi.sendUserInput`, text that is not a command, which the caller sends as before.
- * What a command printed is the answer whether or not it then submitted a prompt
- * (`/force:<tool> <prompt>` prints its confirmation first). The attempt is already the session's
- * user turn, so the answer is a reply rather than an error, and the conversation shows it.
+ * What the session answers on Dispatch for a person's text, or undefined when there is nothing to
+ * say: a prompt, skill or command that printed nothing, and, on a host without `pi.sendUserInput`,
+ * text that is not a command, which the caller sends as before. What a command printed is the
+ * answer whether or not it then submitted a prompt (`/force:<tool> <prompt>` prints its
+ * confirmation first). The attempt is already the session's user turn, so the answer is a reply
+ * rather than an error, and the conversation shows it. The reply is written whole: Dispatch holds
+ * it to its own bounds and refuses a longer one, and the caller posts that refusal.
  */
 export function typedInputReply(text: string, outcome: TypedInputOutcome): string | undefined {
   const typed = /^\/\S+/.exec(text)?.[0];
   const command = typed ?? "This message";
-  let reply: string | undefined;
-  if ("error" in outcome) reply = `${command} was not run: ${outcome.error}`;
-  else if ("hostVersion" in outcome) {
-    if (typed !== undefined) {
-      reply = `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;
-    }
-  } else if (outcome.handled === "terminal-only") {
-    reply = `${command} runs only in the session's own terminal; nothing was sent.`;
-  } else if (outcome.handled === "unavailable") {
-    reply = `${command} was not run: this session's host cannot run typed input from Dispatch; nothing was sent.`;
-  } else if (outcome.output?.trim()) reply = outcome.output;
-  if (reply === undefined || reply.length <= DISPATCH_BODY_MAX) return reply;
-  return `${reply.slice(0, DISPATCH_BODY_MAX - 1)}…`;
+  if ("error" in outcome) return `${command} was not run: ${outcome.error}`;
+  if ("hostVersion" in outcome) {
+    return typed === undefined
+      ? undefined
+      : `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;
+  }
+  if (outcome.handled === "terminal-only") {
+    return `${command} runs only in the session's own terminal; nothing was sent.`;
+  }
+  if (outcome.handled === "unavailable") {
+    return `${command} was not run: this session's host cannot run typed input from Dispatch; nothing was sent.`;
+  }
+  return outcome.output?.trim() ? outcome.output : undefined;
 }

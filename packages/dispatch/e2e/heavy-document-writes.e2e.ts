@@ -6,7 +6,7 @@
 // the one server process, so a second project would time these writes against a server that
 // already holds what each shape touches, and what the row says below about the first document
 // write of its shape would be false there (sjawhar/legion#2519).
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 import { expect, test } from "@playwright/test";
 import { createIssue, createIssueArtifact, createProject } from "./api";
 import {
@@ -229,12 +229,13 @@ test("a document write of each heavy body answers in under a second, stored or r
   }
 
   for (const [index, row] of documentRows.entries()) {
-    // A document takes far more than a comment does, so each row is held to the comment cap: the
-    // browser rows of `heavy-bodies.e2e.ts` and this one then read the very same shapes.
+    // A document takes far more than a comment does, so each row is held to the bound one block
+    // of a comment is held to: the browser rows of `heavy-bodies.e2e.ts` and this one then read
+    // the very same shapes.
     expect(
       row.body.length,
-      `${row.name}: the row is longer than a comment's body cap`
-    ).toBeLessThanOrEqual(DISPATCH_BODY_MAX);
+      `${row.name}: the row is longer than a comment's block bound`
+    ).toBeLessThanOrEqual(DISPATCH_BLOCK_UNITS);
     if (row.warm === true) {
       // The first parse of this shape in a server process pays for the memory it touches, not for
       // the parsing (the table above): write it once, record that, and hold the bound against the

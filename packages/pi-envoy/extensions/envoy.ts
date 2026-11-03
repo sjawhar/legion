@@ -56,6 +56,7 @@ import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
@@ -1266,7 +1267,20 @@ export default function envoyExtension(pi: PiApi): void {
         // A `/model` or `/effort` has run by now: the viewer's header shows its result before the
         // reply that names it reaches the page.
         refreshAgentStreamSettings(sessionID);
-        if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
+        if (reply === undefined) return;
+        try {
+          await postDispatchReply(delivery, { body: reply }, replySessionID);
+        } catch (error) {
+          // Nothing cuts the reply here, so a reply Dispatch refuses - one holding a block longer
+          // than it takes - would leave the person who typed the command with no answer at all.
+          // Dispatch's own words say why, and they are short enough to post in its place.
+          if (!(error instanceof DispatchServiceError) || !error.fromDispatch) throw error;
+          await postDispatchReply(
+            delivery,
+            { body: `Your command ran, and Dispatch refused its output: ${error.message}` },
+            replySessionID
+          );
+        }
       })
       .catch((error: unknown) => {
         logger.warn("envoy: the reply to a person's typed input did not reach Dispatch", {

@@ -113,6 +113,7 @@ const validCalls = {
   dispatch_open_asks: {},
   dispatch_answers: {},
   dispatch_whoami: {},
+  dispatch_limits: {},
   dispatch_handoff_write: specFor("dispatch_handoff_write").example,
   dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
 } as const;
@@ -181,6 +182,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_open_asks",
       "dispatch_answers",
       "dispatch_whoami",
+      "dispatch_limits",
       "dispatch_handoff_write",
       "dispatch_handoff_read",
     ]);
@@ -429,6 +431,16 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_limits accepts no arguments and says the server refuses an over-long text", () => {
+    const schema = schemaFor("dispatch_limits");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ project: "CORE" }).success).toBe(false);
+    expect(specFor("dispatch_limits").description).toContain(
+      "Dispatch refuses a text over a bound and names the block or the field it passed"
+    );
   });
 
   test("dispatch_handoff_write takes one JSON object body up to the byte cap, and a phase slug", () => {

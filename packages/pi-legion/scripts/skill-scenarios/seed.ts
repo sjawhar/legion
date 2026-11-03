@@ -78,14 +78,13 @@
 //                                          artifacts.json in <run dir>)
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import {
-  type Actor,
-  type ArtifactBlock,
-  ASK_QUESTION_MAX,
-  type Ask,
-  type AskOption,
-  type Handoff,
-  type HandoffSummary,
+import type {
+  Actor,
+  ArtifactBlock,
+  Ask,
+  AskOption,
+  Handoff,
+  HandoffSummary,
 } from "@legion/contracts";
 import { z } from "zod";
 import {
@@ -194,17 +193,6 @@ function time(value: string, where: string): bigint {
  * difference is no sort key. */
 function byTime(a: bigint, b: bigint): number {
   return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/** A source question as an ask on the run's issue can hold it. The ask route refuses a question
- * over ASK_QUESTION_MAX characters (UTF-16 units, as JavaScript counts them), but an ask block in a
- * spec has no cap, so a source can hold a longer one. Such a question is cut at its last space
- * before the cap and ends with "…"; any other question is posted unchanged. */
-export function seededQuestion(question: string): string {
-  if (question.length <= ASK_QUESTION_MAX) return question;
-  const room = question.slice(0, ASK_QUESTION_MAX - 1);
-  const space = room.lastIndexOf(" ");
-  return `${space > 0 ? room.slice(0, space + 1) : room}…`;
 }
 
 /** The entries of a source's messages.md, oldest first as the file holds them. */
@@ -316,16 +304,14 @@ async function seedSpecIssue(file: string, source: string, spec?: string): Promi
     if (ask.kind !== "question" || ask.state !== "answered" || answer === null) continue;
     if (inSpec.has(ask.id)) continue;
     let opened: Ask | undefined;
-    if (seededQuestion(ask.question) !== ask.question)
-      console.log(
-        `seeded ask ${ask.id}: its ${ask.question.length}-character question is cut to Dispatch's ${ASK_QUESTION_MAX}-character cap`
-      );
+    // The question goes as the source holds it: Dispatch owns the bound on a question and
+    // refuses one past it, so nothing is cut here.
     steps.push({
       at: time(ask.created_at, asksFile),
       write: async () => {
         opened = await createAsk(
           issue.key,
-          { question: seededQuestion(ask.question), options: ask.options, multiple: ask.multiple },
+          { question: ask.question, options: ask.options, multiple: ask.multiple },
           { as: "agent", actor: SEED_ASKER }
         );
         seeded.push(opened.id);

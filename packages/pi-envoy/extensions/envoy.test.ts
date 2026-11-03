@@ -907,8 +907,13 @@ async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
   }
 }
 
+/** A server's answer, typed as Dispatch and the listener type theirs: a client reads a body as
+ *  JSON only where the answer says it is JSON (`DispatchClient`'s `#response`). */
 function response(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200 });
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status: 200,
+  });
 }
 
 /** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
@@ -18500,8 +18505,9 @@ describe("a body an event carried only in part", () => {
     });
 
     expect(reads).toEqual([`/api/v1/comments/${CUT_COMMENT}`]);
-    // Byte for byte: the body the route answered, and no note, because nothing is missing.
-    expect(card).toContain(WHOLE);
+    // Byte for byte: the body the route answered, written as the card writes a text holding
+    // blank lines (one quoted scalar), and no note, because nothing is missing.
+    expect(card).toContain(`body: ${JSON.stringify(WHOLE)}`);
     expect(card).not.toContain("first part only");
   });
 

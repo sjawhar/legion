@@ -1571,6 +1571,14 @@ export const dispatchToolSpecs = [
     strict: true,
   },
   {
+    name: "dispatch_limits",
+    example: {},
+    description:
+      "The bounds this Dispatch server holds a write to, read from the server itself: how long one block of a body may be and how many blocks a body may hold, how many options an ask may have and how long an ask's question and options are together, how long a body an event carries whole may be, and how many bytes a request, a document and a handoff body may hold. Dispatch refuses a text over a bound and names the block or the field it passed; no tool and no command cuts or refuses your text before the server reads it, so these numbers are what decides whether a write is taken.",
+    arguments: () => ({}),
+    strict: true,
+  },
+  {
     name: "dispatch_handoff_write",
     example: {
       issue: "DSP-1",

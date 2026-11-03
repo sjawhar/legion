@@ -5,9 +5,9 @@
 
 /** Room kept for a clip marker (` … [elided N bytes]`, at most 32 bytes). */
 const CLIP_MARKER_BYTES = 32;
-// A revise reason carries a rewritten ask question of up to ASK_QUESTION_MAX (2,000) UTF-16 units,
-// up to about 6,000 UTF-8 bytes, with the failure names and quoted words on top. The cap holds a
-// full-length rewrite whole: a clip falls at its end, where the options and recommendation sit.
+// A revise reason carries a rewritten ask question, with the failure names and quoted words on
+// top. A question of 2,000 three-byte characters is 6,000 UTF-8 bytes, so this cap holds such a
+// rewrite whole: a clip falls at its end, where the options and recommendation sit.
 /** How much of a reason the agent is handed, after the tag transform. */
 export const GATE_REASON_MAX_BYTES = 8 * 1024;
 

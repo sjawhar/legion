@@ -1,4 +1,4 @@
-import { ASK_QUESTION_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_EVENT_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Artifact } from "../web/src/api/types";
 
@@ -441,11 +441,19 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
   const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
-  // Nearly as long as the ask cap leaves a summary, budgeted as the server budgets it
-  // (`approvalQuestion` in `internal/dispatch/api/reviews.go`): the cap less the question at the
-  // longest version a request can reach, less the space before the summary. Cut at a word, so the
+  // Nearly as long as the ask bound leaves a summary, budgeted as the server budgets it
+  // (`approvalQuestion` in `internal/dispatch/api/reviews.go`): the bound on an ask's question
+  // and options together, less the question at the longest version a request can reach, less
+  // the two fixed options it carries, less the space before the summary. Cut at a word, so the
   // text still reads as a sentence.
-  const room = ASK_QUESTION_MAX - "Approve spec.md (version 9999999999)?".length - 1;
+  const options = [
+    "Approve",
+    "Approve this version of the document.",
+    "Request changes",
+    "Say what must change before it can be approved.",
+  ].reduce((units, text) => units + text.length, 0);
+  const room =
+    DISPATCH_EVENT_BODY_MAX - "Approve spec.md (version 9999999999)?".length - options - 1;
   const opening =
     "Retries a failed push at most three times, one minute apart, and then stops and names the push that failed. ";
   const ending = "Nothing else in the retry path changes.";

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
-import { DISPATCH_BODY_MAX, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
+import { DISPATCH_BLOCK_UNITS, IDEMPOTENCY_KEY_HEADER, PROJECT_KEY_RULE } from "@legion/contracts";
 import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory, KEYED_LAYER_MEMORY_MS } from "../dispatch-http";
@@ -22,6 +22,16 @@ let triage = false;
 let replyLength = 1;
 const LONG_THREAD = "11111111-1111-4111-8111-111111111111";
 const human = { kind: "human", id: "h" };
+
+/** How the Dispatch server refuses a one-paragraph body over the per-block bound, worded as
+ *  `itemblocks.CapExceeded` words it. The fake server below answers it, and the command prints
+ *  it as it came. */
+function blockCapRefusal(units: number): string {
+  return (
+    `body block 1 (paragraph) is ${units - DISPATCH_BLOCK_UNITS} characters over the ` +
+    `${DISPATCH_BLOCK_UNITS}-character block limit (${units}/${DISPATCH_BLOCK_UNITS})`
+  );
+}
 
 /** The Envoy listener's answer for session ses-1's subscriptions. */
 let interests: () => Response = () => Response.json({ error: "unset" }, { status: 500 });
@@ -235,6 +245,21 @@ const server = Bun.serve({
           session_writes_since_human: 0,
           your_open_asks: [],
         },
+      });
+    }
+    if (pathname === "/api/v1/issues/DSP-1/comments" && request.method === "POST") {
+      // The bodies posted here are each one paragraph, so the body's only block is the body.
+      const units = (body.body as string).length;
+      if (units > DISPATCH_BLOCK_UNITS) {
+        return Response.json(
+          { code: "CAP_EXCEEDED", error: blockCapRefusal(units) },
+          { status: 400 }
+        );
+      }
+      return Response.json({
+        id: "comment-1",
+        issue_key: "DSP-1",
+        advice: { issue_status: "in_progress", session_writes_since_human: 0, your_open_asks: [] },
       });
     }
     if (pathname === "/api/v1/issues/DSP-3" && request.method === "GET") {
@@ -646,16 +671,34 @@ describe("the dispatch CLI", () => {
     expect(requests).toEqual([]);
   });
 
-  test("--dry-run refuses a body over the cap the call would refuse", async () => {
+  // No length check stands between the body and Dispatch: the whole text is posted, and what the
+  // person reads is the server's refusal, printed as it came.
+  test("a body with a block over the server's bound is posted and refused in the server's words", async () => {
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS + 1);
+
+    const { code, stdout } = await run(
+      ["comment", "--issue", "DSP-1", "--body-file", "-"],
+      omp,
+      body
+    );
+
+    expect(code).toBe(1);
+    expect(stdout.trim()).toBe(blockCapRefusal(DISPATCH_BLOCK_UNITS + 1));
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/comments");
+    expect(posted?.body).toMatchObject({ body });
+  });
+
+  test("a dry run of the same body prints the arguments and posts nothing", async () => {
+    const body = "x".repeat(DISPATCH_BLOCK_UNITS + 1);
+
     const { code, stdout } = await run(
       ["comment", "--dry-run", "--issue", "DSP-1", "--body-file", "-"],
       omp,
-      "x".repeat(DISPATCH_BODY_MAX + 1)
+      body
     );
-    expect(code).toBe(1);
-    expect(stdout).toContain(
-      `- --body is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX})`
-    );
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ issue: "DSP-1", body });
     expect(requests).toEqual([]);
   });
 

@@ -520,7 +520,7 @@ export function carriedItem(
         ? ("message" as const)
         : undefined;
   if (resource === undefined || !isObject(event.payload)) return undefined;
-  const id = event.payload.id;
+  const id = event.payload["id"];
   if (typeof id !== "string" || id === "") return undefined;
   return { resource, id, issueKey: event.issue_key };
 }
@@ -528,7 +528,7 @@ export function carriedItem(
 /** Whether an event payload says the body on it is the item's first part only
  *  (`CarriedBodyPayload.body_truncated` in `@legion/contracts`). */
 export function bodyWasCut(payload: unknown): boolean {
-  return isObject(payload) && payload.body_truncated === true;
+  return isObject(payload) && payload["body_truncated"] === true;
 }
 
 /** The Dispatch route that answers the whole item an event names. */
@@ -595,30 +595,33 @@ export async function withWholeEventBody(
   } catch {
     return raw;
   }
-  if (!isObject(envelope) || typeof envelope.payload !== "string") return raw;
+  if (!isObject(envelope) || typeof envelope["payload"] !== "string") return raw;
   let frame: unknown;
   try {
-    frame = JSON.parse(envelope.payload);
+    frame = JSON.parse(envelope["payload"]);
   } catch {
     return raw;
   }
   if (!isObject(frame)) return raw;
   // A mention delivery frame wraps the event; every other Dispatch envelope carries it flat.
-  const event = isObject(frame.event) ? frame.event : frame;
-  if (!isObject(event.payload) || !bodyWasCut(event.payload)) return raw;
-  if (typeof event.type !== "string") return raw;
-  const issueKey = typeof event.issue_key === "string" ? event.issue_key : null;
-  const item = carriedItem({ type: event.type, issue_key: issueKey, payload: event.payload });
+  const event = isObject(frame["event"]) ? frame["event"] : frame;
+  const payload = event["payload"];
+  if (!isObject(payload) || !bodyWasCut(payload)) return raw;
+  const type = event["type"];
+  if (typeof type !== "string") return raw;
+  const key = event["issue_key"];
+  const issueKey = typeof key === "string" ? key : null;
+  const item = carriedItem({ type, issue_key: issueKey, payload });
   if (item === undefined) return raw;
   const client = dispatchClient();
   if (client === undefined) return raw;
   const body = await wholeCarriedBody(client, item, session);
   if (body === undefined) return raw;
-  const { body_truncated: _cut, ...carried } = event.payload;
+  const { body_truncated: _cut, ...carried } = payload;
   const whole = { ...event, payload: { ...carried, body } };
   return JSON.stringify({
     ...envelope,
-    payload: JSON.stringify(isObject(frame.event) ? { ...frame, event: whole } : whole),
+    payload: JSON.stringify(isObject(frame["event"]) ? { ...frame, event: whole } : whole),
   });
 }
 

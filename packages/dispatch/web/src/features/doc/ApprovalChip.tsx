@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
-import { api, type CreateArtifactReviewInput } from "../../api/client";
+import { api, type CreateArtifactReviewInput, isCapExceeded } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { Artifact, ArtifactApproval } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
@@ -113,7 +113,8 @@ function RequestChangesDialog({
   onSubmit,
   saving,
 }: {
-  error: boolean;
+  /** What the server answered the last request with, or null while none was refused. */
+  error: unknown;
   onClose: () => void;
   onSubmit: (reason: string) => void;
   saving: boolean;
@@ -159,11 +160,13 @@ function RequestChangesDialog({
               value={reason}
             />
           </label>
-          {error ? (
+          {error === null ? null : (
             <p className={`text-sm ${dangerText}`} role="alert">
-              Could not request changes. Try again.
+              {/* A reason Dispatch refused for its length says so in its own words, which name
+                  the block and the bound; any other failure is worth another try. */}
+              {isCapExceeded(error) ? error.message : "Could not request changes. Try again."}
             </p>
-          ) : null}
+          )}
           <div className="flex items-center justify-end gap-2">
             <button
               className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
@@ -299,7 +302,7 @@ export function ApprovalChip({
       ) : null}
       {requestChangesOpen ? (
         <RequestChangesDialog
-          error={review.isError}
+          error={review.isError ? review.error : null}
           onClose={() => {
             review.reset();
             setRequestChangesOpen(false);

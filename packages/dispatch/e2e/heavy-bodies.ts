@@ -4,7 +4,7 @@
 // alone would leave the other comparing a different body against the same numbers
 // (sjawhar/legion#2519). This module imports neither Playwright nor a browser module, so a spec
 // loads it for its shapes alone.
-import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
+import { DISPATCH_BLOCK_UNITS } from "@legion/contracts/dispatch-tools";
 
 /** `head` followed by `filler` repeated, cut to exactly `length` characters. */
 export function padTo(head: string, filler: string, length: number): string {
@@ -38,8 +38,8 @@ export function atBothSizes(
  *  brings under a second on the page's own thread. */
 export const plainListSizes = atBothSizes((items) => "- x\n".repeat(items), 8_000);
 export const plainList = plainListSizes.full;
-export const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BODY_MAX);
-export const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BODY_MAX);
+export const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BLOCK_UNITS);
+export const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BLOCK_UNITS);
 export const lazyQuote = `> x\n${"x\n".repeat(15_998)}`;
 export const lazyListItem = `- x\n${"x\n".repeat(15_998)}`;
 export const bracketRunSizes = atBothSizes(
@@ -53,5 +53,5 @@ export const markerChain = `${"- ".repeat(15_999)}x`;
  *  blocks), then blank lines to the cap, and the same markers padded to half of it. */
 export const nested49ThenBlankLinesSizes = atBothSizes(
   (length) => padTo(`${"- ".repeat(49)}x\n`, "\n", length),
-  DISPATCH_BODY_MAX
+  DISPATCH_BLOCK_UNITS
 );

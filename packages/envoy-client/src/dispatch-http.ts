@@ -24,6 +24,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  DispatchLimits,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,
@@ -983,6 +984,12 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `GET /api/v1/limits`: the bounds this server holds a write to, each read from the constant
+   *  that enforces it. The client keeps no copy of them: it prints what the server answers. */
+  async limits(): Promise<DispatchLimits> {
+    return this.#json("GET", ["api", "v1", "limits"]);
   }
 
   /** `POST /api/v1/projects`: create a project. A key that already exists is 409
