@@ -9,9 +9,9 @@ import "testing"
 // reader must answer what that parser answers for each; it may not answer one thing for the family.
 //
 // Every expectation is measured against that parser (packages/proof-editor's createHeadlessProof
-// with schema/blocks.json). The merged base of this pull request answers tight for the first two
+// with schema/blocks.json). Before this pull request this reader answered tight for the first two
 // and so stores the third as a document the browser draws otherwise; a reader that answers spread
-// for the first stores one the browser draws otherwise in its place (INFRA-722).
+// for the first stores one the browser draws otherwise in its place (#2507).
 func TestATabFillInsideAQuotedItemFollowsTheBrowser(t *testing.T) {
 	const callout = ":::callout{#c1 kind=\"note\" title=\"T\"}"
 	for _, test := range []struct {

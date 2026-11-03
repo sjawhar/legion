@@ -12,8 +12,7 @@ import (
 // answer one thing for every depth.
 //
 // Every expectation below is measured against that parser (packages/proof-editor's
-// createHeadlessProof with schema/blocks.json), and the merged base of this pull request answers
-// tight at all three depths - right at two quotes and wrong at one and three, which is the
+// createHeadlessProof with schema/blocks.json), and this reader answered tight at all three depths before this pull request - right at two quotes and wrong at one and three, which is the
 // divergence this change closes. A reader that answers spread at every depth closes one and three
 // and breaks two, which is what this test is here to catch.
 func TestAnUnclosedTypedBlocksTabBlankLinesFollowTheBrowserAtEveryQuoteDepth(t *testing.T) {

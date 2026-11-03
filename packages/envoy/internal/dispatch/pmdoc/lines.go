@@ -659,9 +659,6 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 	context.Set(tabFreeKey, bytes.IndexByte(source, '\t') < 0)
 	reader := &lastLineColumns{Reader: gmtext.NewReader(source)}
 	root := p.Parse(reader, parser.WithContext(context))
-	if reader.kept {
-		root.SetAttribute(lastLineKeptAttr, true)
-	}
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
@@ -684,20 +681,11 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 // (Segment.Value); a last line its containers leave nothing of stays no line to either parser.
 type lastLineColumns struct {
 	gmtext.Reader
-	// kept is whether it served such a line, which parseSource records on the document
-	// (lastLineKeptAttr).
-	kept bool
 }
-
-// lastLineKeptAttr marks a document whose last line lastLineColumns kept, which goldmark dropped:
-// blanksOutsideCode counts that line as no code block's, so it stays the blank line it reads as
-// outside the code.
-var lastLineKeptAttr = []byte("pmdoc-last-line-kept")
 
 func (r *lastLineColumns) PeekLine() ([]byte, gmtext.Segment) {
 	line, segment := r.Reader.PeekLine()
 	if line == nil && segment.Padding > 0 && segment.Start == len(r.Source()) {
-		r.kept = true
 		return segment.Value(r.Source()), segment
 	}
 	return line, segment

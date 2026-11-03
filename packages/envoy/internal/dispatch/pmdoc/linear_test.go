@@ -74,7 +74,7 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	// A block shape: a list item whose typed block holds one list item per blank line. Reading a
 	// blank line inside such a block as the item's walked the whole block once for each of them,
 	// and the list again for each node of it, which is quadratic in a block of blank lines; the
-	// reading is taken once per block now (typedKeptLines, typedBlankSpreadsItem). A write is
+	// reading is taken once over the document now (readSpreads). A write is
 	// what reads it, so this one is timed through ParseForWrite.
 	{
 		open, repeat, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  - p\n\n", "  :::\n"

@@ -78,9 +78,8 @@ func quoteListOrDefinition(block *Node) bool {
 
 // endsInClosedList reports whether block's last block is a list, directly or at the end of a quote
 // it ends in, that ends in no paragraph a line of text after it would continue (endsInParagraph).
-// In a quote, a blank line after such a list at the end of a footnote definition is the list's,
-// which the reader refuses (footnotedQuoteListSpread), and the block after it opens on the next
-// line without one.
+// In a quote, a blank line after such a list at the end of a footnote definition is the list's
+// (readSpreads), and the block after it opens on the next line without one.
 func endsInClosedList(block *Node) bool {
 	switch last := block.Children[len(block.Children)-1]; {
 	case isList(last):
@@ -210,7 +209,7 @@ func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence
 // the typed block around it: it is that block's last block, or the last block of a quote that is.
 // Nothing of the quote stands between its list and that fence, so the browser editor's parser
 // counts the blank lines before the fence as it counts them at the end of a typed block a list
-// ends (quotedListSpread, blanksEndingQuotedList).
+// ends (readSpreads, blanksEndingQuotedList).
 func (r *renderer) quoteEndsAtFence() bool {
 	child := r.scope().node
 	for index := len(r.scopes) - 2; index >= 0; index-- {
@@ -282,13 +281,19 @@ func opensAfterParagraph(block *Node) bool {
 }
 
 // opensAfterBlock reports whether child, written on the line after previous with no blank line
-// between them, opens as itself: what opensAfterParagraph says of it, except for a table, whose
-// header row interrupts a paragraph of its own container as GitHub's tables do, while after a
-// list, a quote or another container it is read as one more line of the paragraph that container
-// ends in, which the line continues at the container's own indentation.
+// between them, opens as itself: what opensAfterParagraph says of it, except for two blocks whose
+// answer the block before decides. A table's header row interrupts a paragraph of its own
+// container as GitHub's tables do, while after a list, a quote or another container it is read as
+// one more line of the paragraph that container ends in. A list opens on the line after a
+// container whatever its first item is, since only a paragraph of the same block takes that line
+// as its own text: a list that interrupts no paragraph - one starting past one, or one whose
+// first item is empty - still opens after a quote or a list, as main writes it.
 func opensAfterBlock(previous, child *Node) bool {
 	if child.Type == "table" {
 		return previous.Type == "paragraph"
+	}
+	if isList(child) && previous.Type != "paragraph" {
+		return true
 	}
 	return opensAfterParagraph(child)
 }

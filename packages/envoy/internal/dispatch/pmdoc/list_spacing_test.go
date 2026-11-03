@@ -8,10 +8,10 @@ import (
 )
 
 // A document holding a shape only the browser editor's parser and this one read alike is refused
-// where this parser cannot read its lists or blocks as that parser does, and the same text
-// without such a shape still parses, since goldmark's looseness is how Dispatch has read it. The
-// spacing it reads, in quotes and footnote definitions included, is the list-spacing-in-containers
-// and footnote-placement corpus documents', which the fixtures compare with the engine's reading.
+// where this parser cannot read its blocks as that parser does, and the same text without such a
+// shape still parses, since goldmark's looseness is how Dispatch has read it. The spacing it
+// reads, in quotes and footnote definitions included, is the list-spacing-in-containers and
+// footnote-placement corpus documents', which the fixtures compare with the engine's reading.
 func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -19,13 +19,6 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 		// set, is the same text without one.
 		refused, readable string
 	}{
-		{
-			// The typed block's rule holds with a quote inside it: the browser editor reads a blank
-			// line after the list as spacing its last item by what follows.
-			name:     "a blank line after a list in a quote in a typed block in a footnote definition",
-			refused:  "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - c\n    >\n    > p\n    :::\n",
-			readable: "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - c\n    > p\n    :::\n",
-		},
 		{
 			// Goldmark ends the quote and the items around the empty item there, and re-opens the
 			// quote for the next line, which the browser editor keeps in the inner list.
@@ -82,19 +75,6 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "> - a\n>\n>   -\n>\n>   > x\n",
 		},
 		{
-			// A quote standing between the definition and the typed block keeps the typed block's
-			// refusal: the browser editor reads the blank line as spacing the list.
-			name:    "a blank line after a list in a typed block in a quote in a footnote definition",
-			refused: "x[^n]\n\n[^n]: > :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - b\n    >\n    > a\n    > :::\n",
-		},
-		{
-			// With no shape the browser editor alone reads, goldmark's looseness spreads the item
-			// holding two blocks and leaves "b", which a blank line follows, unspread; the browser
-			// editor spreads "b" by what follows it.
-			name:    "a blank line after a list in a typed block in a footnote definition, in a document holding no browser-only shape",
-			refused: "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    - a\n\n      > q\n    - b\n\n    a\n    :::\n    tail\n",
-		},
-		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},
@@ -107,10 +87,6 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 		{
 			name:    "the same, indented by a tab after the quote's marker",
 			refused: ">\t[^n]: - a\n>\n>\t    -\n>\n>\t    - c\n",
-		},
-		{
-			name:    "a blank line at the end of a quote holding a footnote definition, after a list",
-			refused: "x[^1]\n\n> [^1]: t\n>\n>     - a\n>\n\nAfter.\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -130,7 +106,7 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 // The blank lines that end a typed block in a quoted list item are no blank lines of the item to
 // the browser editor's parser where a list the block ends with takes them - it ends that list past
 // the quotes' markers on the line after it - or where the block, closed by no fence, ends before
-// the last of them, which ends the item (typedBlankInItem). Each document below carries the
+// the last of them, which ends the item (readSpreads). Each document below carries the
 // outer item's spread that parser was measured reading for it. The corpus holds them as well, in
 // quoted-item-typed-blocks-ending-in-blank-lines and
 // quoted-item-typed-block-code-ending-in-a-blank-line, which lock the tree that parser reads;
@@ -273,25 +249,12 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 	}
 }
 
-// The corpus-errors documents whose list item the browser editor spreads otherwise than this parser
-// would store it are refused by every reader of caller markdown: the blank lines after a quoted item
-// ending in a footnote definition whose typed block holds a fence no fence closed, which that
-// parser reads as the code's; a definition inside a typed block with a list item around it,
-// whose lines and the blank lines next to it that parser counts otherwise; a blank line
-// inside a typed block a footnote definition in a list item holds, where that parser's reading of
-// the definition's own end and of the item's blank lines meet and this one decides neither; and a
-// blank line of tight quote markers whose tab opens where the item's content does, where no column
-// rule reads both it and the same line after a spaced marker as that parser reads them.
+// The corpus-errors documents whose list item the browser editor spreads otherwise than this
+// parser would store it are refused by every reader of caller markdown: a definition inside a
+// typed block with a list item around it, whose lines and the blank lines next to it that parser
+// counts otherwise.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
-		"item-definition-callout-opening-with-a-blank-line":                                       typedDefinitionBlankInItem,
-		"tight-quote-markers-with-a-tab-at-the-item-content":                                      tightMarkerTabInItem,
-		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
-		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
-		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
-		"quoted-item-definition-callout-unclosed-fence-then-blank-lines":                          quotedDefinitionFenceBlank,
-		"quoted-item-definition-callout-unclosed-fence-then-blank-lines-and-text":                 quotedDefinitionFenceBlank,
-		"quoted-item-definition-callout-unclosed-tilde-fence-holding-code-then-blank-lines":       quotedDefinitionFenceBlank,
 		"ordered-item-callout-holding-a-definition-opening-on-a-later-line":                       typedDefinitionInItem,
 		"item-callout-holding-a-definition-opening-on-a-later-line":                               typedDefinitionInItem,
 		"item-text-then-callout-holding-a-definition-opening-on-a-later-line":                     typedDefinitionInItem,

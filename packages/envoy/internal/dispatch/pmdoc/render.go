@@ -429,8 +429,8 @@ func (r *renderer) block(n *Node, prefix string) {
 			// written is a spread item this block alone fills (itemWritesOnly), where nothing else
 			// of the item carries the spread - not a tight item, not a spread one whose other
 			// blocks a blank line already stands between, and not a footnote definition the item
-			// holds, where that line is read as the definition's end and as the item's alike and
-			// refused (typedDefinitionBlankInItem).
+			// holds, where that line is read as the definition's end and as the item's alike
+			// (readSpreads).
 			r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix + fence)
 			return
 		}
@@ -449,8 +449,8 @@ func (r *renderer) block(n *Node, prefix string) {
 		// A spread item whose only written block is this one has no blank line between two of its
 		// own blocks to be spread by, so the line that spreads it stands inside the typed block,
 		// above its closing fence, where the browser editor's parser reads it as the item's
-		// (typedBlankSpreadsItem). A footnote definition the item holds reads that line as its end
-		// and as the item's alike, and is refused by name instead (typedDefinitionBlankInItem).
+		// (readSpreads). A footnote definition the item holds reads that line as its end and as the
+		// item's alike, so the writer puts none inside one.
 		if !r.inFootnote() && !holdsOnlyAnEmptyParagraph(n) && itemWritesOnly(r.itemBelowQuotes(), n) {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " "))
 		}

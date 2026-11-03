@@ -37,8 +37,8 @@ func TestAFencedBlockEndingAtTheDocumentsOwnWhitespaceLineHoldsNoneOfIt(t *testi
 
 // The blank lines a typed block's indentation takes out of the fenced code it holds are the blank
 // lines they were before the code held them, and the whitespace lines indented code holds are
-// none of the item's either (the keptLast delete in blanksOutsideCode and sourceLines.blank's skip
-// of indented code's held lines, source_lines.go). A
+// none of the item's either (sourceLines.held, which the line machine reads as a flow
+// construct's lines, prepare_list.go). A
 // blank line inside a typed block in a list item spaces the item to the browser editor's parser,
 // so a line read as blank rather than as the code's would store a list a person did not write.
 // Each document below holds its line in the code, and the item the typed block stands in is
