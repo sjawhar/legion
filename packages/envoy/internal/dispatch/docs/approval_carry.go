@@ -103,6 +103,36 @@ type approvedVersion struct {
 	cut   string
 }
 
+// errApprovalCarriedTwice is the refusal a carry returns when the transaction it runs in has
+// carried an approval for the same document already (refuseSecondCarry). One carry for one
+// document in one transaction is what the carry's two stored reads are right on: it reads the
+// document's newest review (NewestReview) and the approved version's text (restoresApprovedText)
+// from the tables, and a carry earlier in the same transaction has queued a newer review of that
+// document and a newer version of it than either read can see, so a second carry would decide on
+// a review this transaction has already moved past and record an approval in a person's name
+// from it, with nothing to show for the mistake. The ledger is built to take several versions of
+// one artifact in one transaction (Ledger.NextVersion), so nothing but this refusal holds the
+// rule.
+//
+// A route that trips it is a programming error, not a user's: no caller can provoke it, and the
+// refusal fails the write rather than reporting anything to a person. A route that must write
+// two versions of one document in one transaction has to give the carry a read of that
+// transaction's queued review (Ledger.PendingReview) and of its queued version text
+// (Ledger.QueueVersion) in place of the two stored reads before it can carry twice.
+var errApprovalCarriedTwice = errors.New("a transaction carries one document's approval at most once")
+
+// refuseSecondCarry refuses the carry when the ledger queueing tx's writes already holds a
+// pending review of artifactID (Ledger.PendingReview): writeCarriedReview alone records one
+// (recordPendingReview), so its presence means this transaction has carried an approval for this
+// document already (errApprovalCarriedTwice). A transaction no ledger queues holds no pending
+// review and passes.
+func refuseSecondCarry(ctx context.Context, tx pgx.Tx, artifactID string) error {
+	if _, carried := queueFor(ctx, tx).PendingReview(artifactID); carried {
+		return fmt.Errorf("carry the approval of document %s twice in one transaction: %w", artifactID, errApprovalCarriedTwice)
+	}
+	return nil
+}
+
 // carryApproval carries a human's approval to version, just written from rendered, when his answer
 // to a decision block is the whole change since the version he approved, or when version's text is
 // the text of the version the document's newest review approved (the rules above). It hands sink
@@ -111,12 +141,15 @@ type approvedVersion struct {
 // rendered.tree and never changes it: the tree is the live document's. Every read and both rules
 // run where it is called: the newest review (NewestReview), the ask rows (loadAskBlocks), the
 // approved version's text (restoresApprovedText) and the request (openApprovalAsk). The newest
-// review and the approved version's text are stored reads, since only a carry earlier in the same
-// transaction could queue either and no route carries an approval twice in one transaction; the
-// ask rows and the request are read as this transaction's own queued writes leave them. The
-// answer and the review are written through write, so a transaction whose writes are queued runs
-// them in its write phase, after the version they carry to.
+// review and the approved version's text are stored reads, which are right only under the rule
+// refuseSecondCarry holds, that one transaction carries one document's approval at most once;
+// the ask rows and the request are read as this transaction's own queued writes leave them. The
+// answer and the review are written through write, so a transaction whose writes are
+// queued runs them in its write phase, after the version they carry to.
 func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree, sink func(model.Event)) error {
+	if err := refuseSecondCarry(ctx, tx, artifactID); err != nil {
+		return err
+	}
 	// Every version write runs this: anything past the newest review is read only once a carry is
 	// possible at all, which needs an approval still standing. A newer request for changes than
 	// every approval leaves none: the answer carry's candidates each fail on it, and the restore
@@ -147,6 +180,9 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 // appends reach the ledger of the transaction it runs in (eventSink), which publishes them after
 // its Commit, beside the version move's own.
 func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, serverURL string) error {
+	if err := refuseSecondCarry(ctx, tx, artifactID); err != nil {
+		return err
+	}
 	newest, err := NewestReview(ctx, tx, artifactID)
 	if err != nil || newest == nil || newest.State != "approved" {
 		return err
@@ -223,7 +259,8 @@ func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, a
 	// The carry's own approval is this document's newest review from here on, and no read of the
 	// table sees it until the write phase runs, so the read of the newest review that the write
 	// advice makes later in this transaction (supersededApprovalAdvice) takes it off the ledger.
-	// The carry makes no such read itself: it runs once in a transaction.
+	// The carry makes no such read itself: it runs at most once for a document in a transaction
+	// (refuseSecondCarry).
 	recordPendingReview(ctx, tx, artifactID, model.ArtifactReview{
 		ArtifactID: artifactID,
 		Version:    number,
@@ -258,11 +295,10 @@ func (s *Service) answerCarriedReview(ctx context.Context, tx pgx.Tx, artifactID
 // restoresApprovedText reports whether markdown, the text a version of artifactID was just
 // written with, is byte for byte the text of version approved. The text compared against it is
 // the caller's own, which it holds already - the version it just wrote or queued - so only the
-// approved version is read. That version is always a stored one: only a second carry in the same
-// transaction could make it a version this transaction has merely queued, and no route writes two
-// versions in one transaction. Of a stored version only a text of the same size is read, so the
-// write of any other text reads no document; octet_length reads a stored text's size without
-// decompressing it.
+// approved version is read. That version is a stored one by construction: approved is the version
+// of a review NewestReview read from artifact_reviews. Of a stored version only a text of the
+// same size is read, so the write of any other text reads no document; octet_length reads a
+// stored text's size without decompressing it.
 func restoresApprovedText(ctx context.Context, tx pgx.Tx, artifactID string, approved int, markdown string) (bool, error) {
 	var stored string
 	err := tx.QueryRow(ctx, `
@@ -562,8 +598,7 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // (planAskPartsCounted).
 // The update, the parts, the append and the stamp are one step (write); the event carries the
 // row as the step leaves it, after the move this version write queued before it, which set the
-// request's edited_at (RewriteApprovalAsk). Where the step is queued, the ledger records the
-// request closed, so nothing later in the transaction answers it again.
+// request's edited_at (RewriteApprovalAsk).
 func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, ask *model.Ask, actor model.Actor, reason, serverURL string, sink func(model.Event)) error {
 	answeredAt, err := transactionNow(ctx, tx)
 	if err != nil {
@@ -588,7 +623,6 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ar
 	if err != nil {
 		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}
-	recordPendingApproval(ctx, tx, artifactID, pendingApproval{ask: ask, closed: true})
 	return write(ctx, tx, func(b *store.WriteBatch) error {
 		b.Queue("answer approval ask", `update asks set state = 'answered', answer = $2 where id = $1 and state = 'open'`, ask.ID, encoded).Exec(func(tag pgconn.CommandTag) error {
 			if tag.RowsAffected() != 1 {

@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -705,5 +706,48 @@ func TestAVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 	}
 	if reviews, approvals := run(t, true); reviews != 1 || approvals != 0 {
 		t.Fatalf("with the repeat: reviews = %d, artifact.approved events = %d; want alice's approval of version 1 alone and no event", reviews, approvals)
+	}
+}
+
+// A transaction carries one document's approval at most once. The carry reads the document's
+// newest review and the approved version's text from the tables, so a carry that ran earlier in
+// the same transaction - whose review and whose version are queued and in neither table yet -
+// leaves those reads stale, and a second carry would record an approval in a person's name from
+// a review the transaction has already moved past. Here the agent names a version whose text is
+// the approved text, which carries alice's approval, and names a second version of the same
+// document in the same transaction: the second one is refused (errApprovalCarriedTwice) and the
+// transaction writes nothing. SnapshotVersion would not reach the carry for the first version,
+// returning the latest version where the live text has not moved, so both versions are named.
+func TestATransactionCannotCarryOneDocumentsApprovalTwice(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "Context\n")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Second})
+	t.Cleanup(func() { _ = service.Shutdown(ctx) })
+	seedServiceText(t, service, artifactID, "Context\n")
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	// The approved version is one this service wrote, so the version named below restores its
+	// text byte for byte, which is what carries the approval (restoresApprovedText).
+	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := service.NamedVersion(ctx, artifactID, "Named before the approval", agent)
+		return err
+	})
+	approveStoredVersion(t, database, artifactID, 2, "alice")
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joinedCtx, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.NamedVersion(joinedCtx, artifactID, "Restores the approved text", agent); err != nil {
+		t.Fatalf("the version restoring the approved text: %v", err)
+	}
+	if _, carried := ledger.PendingReview(artifactID); !carried {
+		t.Fatal("the version restoring the approved text carried no approval, so the second version faces no first carry")
+	}
+	if _, err := service.NamedVersion(joinedCtx, artifactID, "A second version of the same document", agent); !errors.Is(err, errApprovalCarriedTwice) {
+		t.Fatalf("the second version of the document in the same transaction = %v, want %v", err, errApprovalCarriedTwice)
 	}
 }

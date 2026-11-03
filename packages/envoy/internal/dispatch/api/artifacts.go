@@ -619,9 +619,9 @@ func (s *server) storeArtifact(
 		// It carries the document's newest approval when its text is the approved text again and
 		// its decision blocks are as their rows have them, as every version the document service
 		// writes does (docs.carryApproval): an exact undo uploaded is the approved document. It
-		// runs where the route's other document work runs, so its reads see this transaction's
-		// own queued writes and its own writes join the queue, and its events reach the ledger
-		// beside the move's.
+		// runs where the route's other document work runs, so the open approval request and the
+		// ask rows it reads are as this transaction's own queued writes leave them, its own
+		// writes join the queue, and its events reach the ledger beside the move's.
 		if err := docs.CarryRestoredApproval(
 			documentCtx, tx, s.deps.Events, artifact.ID, version.Number, documentMarkdown, documentReadBack, s.deps.ServerURL,
 		); err != nil {

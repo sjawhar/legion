@@ -38,14 +38,10 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 }
 
 // openApprovalAsk is OpenApprovalAsk as the transaction's queued writes leave the request: the
-// request a version write of this transaction moved (MoveApprovalAsk), nil once a queued answer
-// closed it (carryApproval), else the stored one.
+// request a version write of this transaction moved (MoveApprovalAsk), else the stored one.
 func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	if ledger := queueFor(ctx, tx); ledger != nil {
 		if pending := ledger.approvals[artifactID]; pending != nil {
-			if pending.closed {
-				return nil, nil
-			}
 			return pending.ask, nil
 		}
 	}
