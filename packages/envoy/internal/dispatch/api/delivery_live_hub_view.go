@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
@@ -18,6 +19,9 @@ func parseDeliveryLiveView(view DeliveryLiveView) (deliveryLiveSpec, *LiveError)
 		return deliveryLiveSpec{}, &refusal
 	}
 	spec := deliveryLiveSpec{kind: view.Kind}
+	if view.Project != nil && view.Kind != legionBoardView {
+		return invalid("INVALID_FRAME", "only a legion view names a project")
+	}
 	switch view.Kind {
 	case deliveryLiveTimeline, deliveryLiveMeasures:
 		if view.At != nil {
@@ -69,10 +73,31 @@ func parseDeliveryLiveView(view DeliveryLiveView) (deliveryLiveSpec, *LiveError)
 		default:
 			spec.key = "pipeline|now|"
 		}
+	case legionBoardView:
+		// A legion view names the project whose board it shows and nothing else: the board has no
+		// window, and the project is the only thing GET /api/v1/legion/board reads.
+		if view.Window != nil || view.At != nil || view.Query != nil {
+			return invalid("INVALID_FRAME", "a legion view names a project, not a window, an at or a query")
+		}
+		if view.Project == nil {
+			return invalid("INVALID_FRAME", "a legion view names its project")
+		}
+		project := strings.TrimSpace(*view.Project)
+		if !projectKeyPattern.MatchString(project) {
+			return invalid("INVALID_QUERY", projectKeyProblem("project", project))
+		}
+		spec.query = url.Values{"project": {project}}
+		spec.key = legionBoardView + "|" + project + "|"
 	default:
-		return invalid("INVALID_FRAME", "view.kind must be timeline, measures or pipeline")
+		return invalid("INVALID_FRAME", "view.kind must be timeline, measures, pipeline or legion")
 	}
 	return spec, nil
+}
+
+// project is the project a legion view's board shows, carried in the spec's query as the GET
+// route reads it; every other kind names none.
+func (spec deliveryLiveSpec) project() string {
+	return spec.query.Get("project")
 }
 
 // readWindow reads a view's window into spec, as the GET routes read from and to, and answers how

@@ -70,6 +70,12 @@ func (s *server) putLegionSetting(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// An open Legion board of this project was told LEGION_NOT_CONFIGURED and otherwise waits for
+	// the sampler's next read to hear that it now has a daemon. The write announces itself on the
+	// same channel a read does, so the board appears as soon as the URL is set.
+	if err := legion.NotifyRead(r.Context(), s.deps.Store.Pool, project); err != nil {
+		slog.Warn("dispatch: announce a Legion setting write", "project", project, "error", err)
+	}
 	WriteJSON(w, http.StatusOK, settings)
 }
 
@@ -92,6 +98,9 @@ func (s *server) deleteLegionSetting(w http.ResponseWriter, r *http.Request) {
 	if !deleted {
 		writeError(w, "NOT_FOUND", http.StatusNotFound, "this project has no Legion daemon configured")
 		return
+	}
+	if err := legion.NotifyRead(r.Context(), s.deps.Store.Pool, project); err != nil {
+		slog.Warn("dispatch: announce a Legion setting removal", "project", project, "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

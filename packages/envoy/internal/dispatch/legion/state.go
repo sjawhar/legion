@@ -17,13 +17,53 @@ import (
 //     `admission.trees` will list the live roots, each issue gains a `tree` naming its root, and
 //     DaemonAPIVersion goes from 46 to 47. A reader that refused an unknown field would stop
 //     reading the day a daemon rolls onto it, so nothing here uses a strict decode.
-//   - Nothing here assumes a slot holder is a root: an issue's slot is read from that issue's own
-//     `slot`, never from `admission.active`, which is why this type names no admission at all.
+//   - Nothing here takes a slot holder for a root: an issue's slot is read from that issue's own
+//     `slot`, never from `admission.active`, and the admission block below is recorded as the
+//     daemon sent it rather than read as a list of roots.
 //   - Tree is optional and stays optional: a daemon before INFRA-980 sends none.
 
-// State is a daemon's state as Dispatch records it: its issues, and nothing else of the document.
+// State is a daemon's state as Dispatch records it: its issues, its admission block, the settings
+// it reports with where each came from, and nothing else of the document.
 type State struct {
 	Issues map[string]Issue `json:"issues"`
+	// Admission is the daemon's admission block, absent from a document that carries none: the
+	// Legion board reads the waiting line's own order from it (the spec's "Rule details": that
+	// order puts answered roots first and follows Dispatch's rank after them, so Dispatch's rank
+	// alone is not it), the blockers each held issue waits on, and the slot cap its header shows.
+	Admission *Admission `json:"admission,omitempty"`
+	// Settings is the settings the daemon reports, which hold no secret, each value kept as the
+	// bytes the daemon sent: the view shows them and Dispatch models none of them, so a key added
+	// to legion.yaml is recorded the day a daemon sends it.
+	Settings map[string]json.RawMessage `json:"settings,omitempty"`
+	// SettingSources is where each setting's value came from, by the same key: the file or the
+	// route, who changed it and when (the spec's contract 4). A daemon before that contract sends
+	// none, which is no source rather than an empty one.
+	SettingSources map[string]json.RawMessage `json:"settingSources,omitempty"`
+}
+
+// Admission is the admission block in the members Dispatch records. Every member is optional and
+// every other field of the block is ignored, so a daemon that grows one (dispatch://INFRA-980's
+// `trees`, which is read here the day a daemon sends it) is recorded, not refused.
+type Admission struct {
+	// Cap is the deployment's admission cap, the slots the header counts against.
+	Cap *int `json:"cap,omitempty"`
+	// Active is every issue holding a slot. Dispatch counts the slots in use from each issue's
+	// own `slot` instead, since INFRA-980 widens this list to children as well as roots.
+	Active []string `json:"active,omitempty"`
+	// Waiting is the waiting line in the daemon's own order, which the board's Queue column shows
+	// without re-sorting.
+	Waiting []string `json:"waiting,omitempty"`
+	// Trees is the live tree roots (dispatch://INFRA-980); no daemon released today sends it.
+	Trees []string `json:"trees,omitempty"`
+	// Blocked is each issue a blocker link holds, with the issues it waits on.
+	Blocked []BlockedIssue `json:"blocked,omitempty"`
+}
+
+// BlockedIssue is one entry of `admission.blocked`: the issue, and the issues nobody has finished
+// that hold it (record.BlockedIssue on the daemon's side).
+type BlockedIssue struct {
+	Issue     string   `json:"issue"`
+	BlockedBy []string `json:"blockedBy,omitempty"`
 }
 
 // Issue is one issue of the daemon's record, in the fields Dispatch observes.
@@ -80,10 +120,28 @@ const (
 	FieldPullRequestState          = "pull_request.state"
 	FieldPullRequestChecksVerdict  = "pull_request.checks_verdict"
 	FieldPullRequestRequiresChecks = "pull_request.requires_checks"
+	// FieldTree is the issue's tree root as the daemon named it (dispatch://INFRA-980). It is
+	// observed only for an issue carrying one: a daemon that sends none leaves the reader to the
+	// parent chain rather than to a guess.
+	FieldTree = "tree"
+	// FieldAdmission is the daemon's whole admission block, observed once per read under
+	// AdmissionKey rather than on any issue: the waiting line's order, the blockers and the cap
+	// belong to the project, not to one issue.
+	FieldAdmission = "admission"
+	// FieldSettings and FieldSettingSources are the settings the daemon reports and where each
+	// came from, observed under AdmissionKey beside the admission block: they belong to the
+	// project's daemon, not to an issue, and the settings control on the Legion view reads them.
+	FieldSettings       = "settings"
+	FieldSettingSources = "setting_sources"
 	// ClaimFieldPrefix starts the field of one role's claim state: `claim.architect`,
 	// `claim.implementer`.
 	ClaimFieldPrefix = "claim."
 )
+
+// AdmissionKey is the issue key every project-level observation is written under — the admission
+// block, the settings and their sources: the empty string, which no issue key can be
+// (legion_observations.issue_key is free text with no foreign key, so the rows cost no issue).
+const AdmissionKey = ""
 
 // Observation is one field of one issue as a read found it, the value JSON-encoded as
 // legion_observations holds it.
@@ -94,16 +152,30 @@ type Observation struct {
 }
 
 // Observations is every observed field of every issue the read carries, by issue key and then by
-// field, so two reads of one state produce one list.
+// field, so two reads of one state produce one list. The project's own three come first, under
+// AdmissionKey: the admission block, the settings the daemon reports and where each came from,
+// none of which belongs to an issue.
 //
 // Phase, status, slot, the wait and the pull request's three fields are observed on every issue,
 // `null` where the issue carries none, so a slot released or a wait answered is a change like any
 // other; a first `null` writes no row (store.go's insert). A claim is observed for each role the
-// read names — the architect and each worker — since a role the daemon does not name has not
-// changed, it is simply not this phase's.
+// read names — the architect and each worker — and a tree only for an issue the daemon named one
+// for, since a field the daemon does not name has not changed: it is simply not this daemon's.
 func (s State) Observations() []Observation {
 	keys := slices.Sorted(maps.Keys(s.Issues))
-	observations := make([]Observation, 0, len(keys)*8)
+	observations := make([]Observation, 0, len(keys)*8+3)
+	for _, project := range []struct {
+		field string
+		value any
+	}{
+		{FieldAdmission, s.Admission},
+		{FieldSettings, s.Settings},
+		{FieldSettingSources, s.SettingSources},
+	} {
+		observations = append(observations, Observation{
+			IssueKey: AdmissionKey, Field: project.field, Value: encodeValue(project.value),
+		})
+	}
 	for _, key := range keys {
 		issue := s.Issues[key]
 		add := func(field string, value any) {
@@ -111,6 +183,9 @@ func (s State) Observations() []Observation {
 		}
 		add(FieldPhase, issue.Phase)
 		add(FieldStatus, issue.Status)
+		if issue.Tree != nil {
+			add(FieldTree, optional(*issue.Tree))
+		}
 		var slot any
 		if issue.Slot != nil {
 			slot = issue.Slot.Index

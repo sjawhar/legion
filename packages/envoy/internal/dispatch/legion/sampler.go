@@ -57,13 +57,20 @@ func (s *Sampler) Pass(ctx context.Context) {
 	}
 }
 
-// read is one project's read and the two records it leaves.
+// read is one project's read, the two records it leaves, and the notification that wakes every
+// open Legion board of the project (StateChannel). The notification goes out after a failed read
+// too: the board's header carries the failure.
 func (s *Sampler) read(ctx context.Context, setting Settings) {
 	state, bytes, readErr := s.clients[setting.StateURL].State(ctx)
 	at := s.now().UTC()
 	if err := RecordRead(ctx, s.pool, setting.Project, at, bytes, readErr); err != nil {
 		slog.Warn("dispatch: record a Legion state read", "project", setting.Project, "error", err)
 	}
+	defer func() {
+		if err := NotifyRead(ctx, s.pool, setting.Project); err != nil {
+			slog.Warn("dispatch: announce a Legion state read", "project", setting.Project, "error", err)
+		}
+	}()
 	if readErr != nil {
 		slog.Warn("dispatch: read a Legion daemon's state", "project", setting.Project, "bytes", bytes, "error", readErr)
 		return

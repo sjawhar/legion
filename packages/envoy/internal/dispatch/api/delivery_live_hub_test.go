@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -447,10 +448,18 @@ func getBody(t *testing.T, handler http.Handler, target string) json.RawMessage 
 }
 
 // windowTarget is the GET route of kind for the window a body answered: a timeline or measures
-// body names its window, and a pipeline body its days, whose first day's midnight and the
-// midnight after its last are the window the route reads back.
+// body names its window, a pipeline body its days, whose first day's midnight and the midnight
+// after its last are the window the route reads back, and a legion body its project, which is the
+// whole of what its route reads.
 func windowTarget(t *testing.T, kind string, body json.RawMessage, query string) string {
 	t.Helper()
+	if kind == legionBoardView {
+		target := "/api/v1/legion/board?project=" + legionBodyProject(t, body)
+		if query != "" {
+			target += "&" + query
+		}
+		return target
+	}
 	var shape struct {
 		Window delivery.DeliveryWindowView `json:"window"`
 	}
@@ -2195,4 +2204,100 @@ func TestNotConfiguredIsAnErrorFrameThenASnapshotOnceConfigured(t *testing.T) {
 	seedHubSettings(t, rig.database)
 	snapshot := conn.snapshot(t, 5*time.Second, "p")
 	requireSameBody(t, "the first snapshot once configured", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
+}
+
+// legionView is a subscribe frame's view for the Legion board of project.
+func legionView(project string) DeliveryLiveView {
+	return DeliveryLiveView{Kind: legionBoardView, Project: &project}
+}
+
+// legionBodyProject is the project a Legion board body names, which is the whole of what its GET
+// route reads.
+func legionBodyProject(t *testing.T, body json.RawMessage) string {
+	t.Helper()
+	var shape struct {
+		Project string `json:"project"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil {
+		t.Fatalf("read the board body's project: %v", err)
+	}
+	return shape.Project
+}
+
+// TestALegionBoardsSnapshotAndDeltasLandOnItsGET: the fourth view kind holds the hub's own rule —
+// the snapshot plus every delta a page applies is the GET route's body — through a read of the
+// daemon the sampler announces (legion.StateChannel) and through a write of one of the board's
+// issues, the two things that move it.
+func TestALegionBoardsSnapshotAndDeltasLandOnItsGET(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedLegionProjects(t, rig.handler, "INFRA")
+	nameLegionDaemon(t, rig.handler, "INFRA", "http://legion-infra.internal:13370")
+	seedLegionBoard(t, rig.database, "INFRA", rig.clock.Now())
+
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("b", legionView("INFRA")))
+	snapshot := conn.snapshot(t, 5*time.Second, "b")
+	requireSameBody(t, "the board's first snapshot", snapshot.Body,
+		getBody(t, rig.handler, windowTarget(t, legionBoardView, snapshot.Body, "")))
+
+	// The sampler's next read finds the implementer's child in review, with no role in a turn.
+	held := snapshot.Body
+	now := rig.clock.Now()
+	seedLegionObservation(t, rig.database, "INFRA", "INFRA-4", legion.FieldPhase, `"reviewing"`, now)
+	seedLegionObservation(t, rig.database, "INFRA", "INFRA-4", legion.ClaimFieldPrefix+"implementer", `"idle"`, now)
+	seedLegionRead(t, rig.database, "INFRA", now, "")
+	notifyChannel(t, rig.database, legion.StateChannel, "INFRA")
+	held = requireLandsOnGET(t, rig.handler, legionBoardView, held, conn.delta(t, 5*time.Second, "b"), "")
+
+	// A title Dispatch itself rewrites moves the card it is on, through the event log.
+	patched := dispatchRequest(t, rig.handler, http.MethodPatch, "/api/v1/issues/INFRA-4",
+		map[string]any{"title": "The reviewer's child"}, "alice")
+	if patched.Code != http.StatusOK {
+		t.Fatalf("retitle the card's issue: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	held = requireLandsOnGET(t, rig.handler, legionBoardView, held, conn.delta(t, 5*time.Second, "b"), "")
+	if !strings.Contains(string(held), "The reviewer's child") {
+		t.Fatalf("the board a page holds after the deltas does not carry the new title: %s", held)
+	}
+}
+
+// TestALegionBoardOfAProjectWithNoDaemonIsRefusedOnce: a view of a project that names no daemon is
+// told LEGION_NOT_CONFIGURED once and stays open, as a delivery view with no settings is.
+func TestALegionBoardOfAProjectWithNoDaemonIsRefusedOnce(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedLegionProjects(t, rig.handler, "INFRA")
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("b", legionView("INFRA")))
+	conn.refusal(t, 5*time.Second, "b", "LEGION_NOT_CONFIGURED")
+	conn.none(t, time.Second, "the refusal of a project with no daemon")
+}
+
+// TestALegionViewNamesItsProjectAndNothingElse: the kind's shape is held where every other kind's
+// is, so a frame of another kind's shape is refused before anything is subscribed.
+func TestALegionViewNamesItsProjectAndNothingElse(t *testing.T) {
+	window := DeliveryLiveWindow{Preset: new(7)}
+	project := "INFRA"
+	for _, refused := range []struct {
+		what string
+		view DeliveryLiveView
+	}{
+		{"a legion view with no project", DeliveryLiveView{Kind: legionBoardView}},
+		{"a legion view with a window", DeliveryLiveView{Kind: legionBoardView, Project: &project, Window: &window}},
+		{"a timeline view with a project", DeliveryLiveView{Kind: deliveryLiveTimeline, Window: &window, Project: &project}},
+	} {
+		if _, refusal := parseDeliveryLiveView(refused.view); refusal == nil || refusal.Code != "INVALID_FRAME" {
+			t.Errorf("%s: refusal = %+v, want INVALID_FRAME", refused.what, refusal)
+		}
+	}
+	notAKey := "infra"
+	if _, refusal := parseDeliveryLiveView(DeliveryLiveView{Kind: legionBoardView, Project: &notAKey}); refusal == nil || refusal.Code != "INVALID_QUERY" {
+		t.Errorf("a legion view of %q: refusal = %+v, want INVALID_QUERY", notAKey, refusal)
+	}
+	spec, refusal := parseDeliveryLiveView(legionView("INFRA"))
+	if refusal != nil {
+		t.Fatalf("a legion view of INFRA: %+v", refusal)
+	}
+	if spec.project() != "INFRA" || spec.key != "legion|INFRA|" {
+		t.Fatalf("the spec = %+v, want the project it names and a key of its own", spec)
+	}
 }

@@ -17,11 +17,15 @@ import (
 // key, counts two levels deep, and the other fields whole. The events view is the event feed,
 // event by event, and the agent view one session's live conversation.
 
-// The three delivery views a page can subscribe to, by the GET route each mirrors.
+// The four delivery-hub views a page can subscribe to, by the GET route each mirrors. The first
+// three answer the Delivery and Pipeline pages' bodies for a window; the fourth is the Legion
+// board of one project (legion_board.go), which has no window: it shows what the daemon's state
+// says now.
 const (
 	deliveryLiveTimeline = "timeline"
 	deliveryLiveMeasures = "measures"
 	deliveryLivePipeline = "pipeline"
+	legionBoardView      = "legion"
 )
 
 // The two views beside the delivery views: the event feed, and one session's live conversation.
@@ -41,12 +45,14 @@ type DeliveryLiveWindow struct {
 // DeliveryLiveView is one view a page shows. A timeline or measures view names its Window and
 // Query, the query string the page would send to the GET route without from/to (search and every
 // facet); a pipeline view names its Window, or an At, which is the seven days ending on that day,
-// or neither, which is the seven days ending at the present, and no Query.
+// or neither, which is the seven days ending at the present, and no Query; a legion view names
+// its Project and nothing else, since the board has no window.
 type DeliveryLiveView struct {
-	Kind   string              `json:"kind"`
-	Window *DeliveryLiveWindow `json:"window,omitempty"`
-	Query  *string             `json:"query,omitempty"`
-	At     *string             `json:"at,omitempty"`
+	Kind    string              `json:"kind"`
+	Window  *DeliveryLiveWindow `json:"window,omitempty"`
+	Query   *string             `json:"query,omitempty"`
+	At      *string             `json:"at,omitempty"`
+	Project *string             `json:"project,omitempty"`
 }
 
 // DeliveryLiveRevs is what a page holds, as revisions (deliveryLiveRevision) in the frame's own
@@ -273,6 +279,18 @@ var deliveryLiveKinds = map[string]deliveryLiveClasses{
 			"merge_to_production": nil, "opened_to_merge": nil, "targets": nil,
 		},
 		out: []string{"computed_at", "freshness"},
+	},
+	// The Legion board is one project's small, whole picture, so every field of it but its
+	// computed_at is sent whole: its ten columns are a fixed order rather than a list a page
+	// merges by id (the page's applyDelta sorts each list it knows, which a column order would
+	// have to be taught), and the header, the settings the daemon reports and where each came
+	// from each move as a block.
+	legionBoardView: {
+		body: reflect.TypeFor[legionBoardResponse](),
+		whole: map[string][]string{
+			"project": nil, "header": nil, "columns": nil, "settings": nil, "setting_sources": nil,
+		},
+		out: []string{"computed_at"},
 	},
 }
 

@@ -29,6 +29,22 @@ const settingsColumns = `project, state_url, created_by, updated_at`
 // the operator relay has nowhere to send a change.
 var ErrNoSettings = errors.New("this project has no Legion daemon configured")
 
+// StateChannel is the Postgres notification channel one read of a daemon's state announces itself
+// on, with the project as its payload, in the shape of delivery.SettingsChannel: nothing commits
+// to announce a remote daemon's state, so the sampler's own write is what an open Legion board
+// hears (api/delivery_live_hub.go). A read announces itself whether or not it changed an
+// observation, since the board's header carries the read itself — when it was made, and why it
+// failed.
+const StateChannel = "dispatch_legion_state"
+
+// NotifyRead announces a read of project's daemon on StateChannel.
+func NotifyRead(ctx context.Context, pool *store.Pool, project string) error {
+	if _, err := pool.Exec(ctx, `select pg_notify($1, $2)`, StateChannel, project); err != nil {
+		return fmt.Errorf("announce the Legion state read of %s: %w", project, err)
+	}
+	return nil
+}
+
 // scanSettings decodes one settingsColumns row.
 func scanSettings(row pgx.Row) (Settings, error) {
 	var settings Settings

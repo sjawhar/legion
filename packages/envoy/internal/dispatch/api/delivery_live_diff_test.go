@@ -50,7 +50,8 @@ func liveJSONFields(t reflect.Type) []liveJSONField {
 }
 
 func TestEveryResponseFieldHasOneClass(t *testing.T) {
-	for _, kind := range []string{deliveryLiveTimeline, deliveryLiveMeasures, deliveryLivePipeline} {
+	// Every kind the hub serves, so a kind added to deliveryLiveKinds is held to this at once.
+	for _, kind := range slices.Sorted(maps.Keys(deliveryLiveKinds)) {
 		classes, ok := deliveryLiveKinds[kind]
 		if !ok {
 			t.Fatalf("%s: no classes", kind)

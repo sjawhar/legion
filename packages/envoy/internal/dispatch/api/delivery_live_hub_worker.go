@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
 // work recomputes the dirty views and the expired ones, one at a time, and keeps the freshness
@@ -164,12 +165,17 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	switch {
 	case h.views[spec.key] != view:
 		// Every sub left while it read.
-	case errors.Is(err, delivery.ErrNoSettings):
+	case errors.Is(err, delivery.ErrNoSettings), errors.Is(err, legion.ErrNoSettings):
+		code, message := "DELIVERY_NOT_CONFIGURED",
+			"delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery"
+		if errors.Is(err, legion.ErrNoSettings) {
+			code, message = "LEGION_NOT_CONFIGURED",
+				"this project has no Legion daemon; set one through PUT /api/v1/settings/legion/{project}"
+		}
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
 			if !sub.told {
-				sub.conn.Send(liveRefusal(sub.id, "DELIVERY_NOT_CONFIGURED",
-					"delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery"))
+				sub.conn.Send(liveRefusal(sub.id, code, message))
 				sub.told = true
 				sent++
 			}
@@ -199,6 +205,11 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		view.from, view.at, view.expiry = read.from, read.at, read.expiry
 		view.issues, view.ancestors, view.sessions = read.issues, read.ancestors, read.sessions
 		sent = h.sendLocked(view)
+		if spec.kind == legionBoardView {
+			// The board reads no delivery settings, so it judges no freshness: the verdict stays
+			// the one the delivery views' own reads set.
+			break
+		}
 		if !h.known {
 			// The first verdict is set silently, from the first settings read.
 			h.fresh = deliveryFreshnessHeard{
@@ -243,12 +254,24 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec, epoch int6
 			return read, err
 		}
 	}
-	if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
-		return read, err
-	}
 	now := h.clock.Now()
 	var body any
-	if spec.kind == deliveryLivePipeline {
+	switch spec.kind {
+	case legionBoardView:
+		// The Legion board reads no delivery settings: its own are the project's Legion setting,
+		// and a deployment that configured one and not the other still shows the board.
+		board, boardErr := h.server.readLegionBoard(ctx, spec.project())
+		if boardErr != nil {
+			return read, boardErr
+		}
+		// Every issue the board names, so an event about one marks the view (dirtyIssueLocked);
+		// the board shows no session, so it names none.
+		read.issues = board.issueKeys()
+		body = legionBoardCompute(board, now)
+	case deliveryLivePipeline:
+		if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
+			return read, err
+		}
 		window := spec.pipelineWindowAt(now)
 		read.at = window.end
 		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, window); err != nil {
@@ -261,7 +284,10 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec, epoch int6
 		read.from = window.start()
 		read.prs, read.runs = len(read.pipe.leadTimes.prs), len(read.pipe.checks.Runs)+len(read.pipe.deploys.Runs)
 		read.unfetchable = read.pipe.leadTimes.unfetchable
-	} else {
+	default:
+		if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
+			return read, err
+		}
 		from, to := spec.from, spec.to
 		if spec.preset > 0 {
 			from, to = now.Add(-spec.days()), now

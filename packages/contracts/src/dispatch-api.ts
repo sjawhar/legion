@@ -4104,6 +4104,101 @@ export interface DeliveryPipelineResponse {
   readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
+/** One column of the Legion board (`GET /api/v1/legion/board`), by its id: the daemon's waiting
+ *  line and the issues a blocker link holds, the roots holding a slot whose phase is still
+ *  `admitted`, the six phases a role works, `merging` (`retro`, `merging` and `awaiting_merge`),
+ *  `awaiting_person` and `held`. Every answer carries all ten, in this order. */
+export type LegionBoardColumnID =
+  | "queue"
+  | "design"
+  | "planning"
+  | "implementing"
+  | "testing"
+  | "reviewing"
+  | "accepting"
+  | "merging"
+  | "awaiting_person"
+  | "held";
+
+/** What a root in `awaiting_person` waits on from a person, as the daemon recorded it: the kind of
+ *  wait (`ask`, `gate`, or whatever a later daemon names), when it began, and when a person
+ *  answered it — an answered root waits for a slot at the front of the queue, not for a person. */
+export interface LegionBoardWait {
+  readonly kind: string;
+  readonly since: string | null;
+  readonly answered_at: string | null;
+}
+
+/** One issue on the Legion board. `key`, `title` and `priority` are Dispatch's own, joined on the
+ *  daemon's key; `phase`, `phase_since` (when the issue entered the phase, which is the time in
+ *  the phase the card shows), `slot`, `roles` (the roles whose claim is `working`, sorted),
+ *  `checks_verdict` and `waiting_on` are the newest observations the sampler recorded.
+ *  `blocked_by` names the issues a blocker link holds it on, `tree` its tree root, and `children`
+ *  the issues of its tree that have not started, which are on no card of their own. */
+export interface LegionBoardCard {
+  readonly key: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly phase: string;
+  readonly phase_since: string | null;
+  readonly slot: number | null;
+  readonly roles: readonly string[];
+  readonly checks_verdict: string | null;
+  readonly blocked_by: readonly string[];
+  readonly waiting_on: LegionBoardWait | null;
+  readonly tree: string;
+  readonly children: number;
+}
+
+/** One column of the board: its id, the label the view shows, and its cards in the order the view
+ *  draws them. The queue's order is the daemon's own waiting line, which the view does not
+ *  re-sort. */
+export interface LegionBoardColumn {
+  readonly id: LegionBoardColumnID;
+  readonly label: string;
+  readonly cards: readonly LegionBoardCard[];
+}
+
+/** The board's header: the slots in use against the cap, the queue's length, and the last read of
+ *  the daemon. `slot_cap` is null until a read recorded the daemon's admission block; `read_at` is
+ *  null for a project whose daemon has never answered, which shows the board with empty columns
+ *  and the failure in its header. */
+export interface LegionBoardHeader {
+  readonly slots_in_use: number;
+  readonly slot_cap: number | null;
+  readonly queue_length: number;
+  readonly read_at: string | null;
+  readonly read_ok: boolean;
+  readonly read_error: string | null;
+}
+
+/** Where one of the daemon's settings got its value: its `legion.yaml` file or the settings route,
+ *  who made the change — null for a change the file carried, which nobody signed — and when. The
+ *  key it is held under is the setting's dotted `legion.yaml` path. */
+export interface LegionSettingSource {
+  readonly source: "file" | "route";
+  readonly by: string | null;
+  readonly at: string;
+}
+
+/** `GET /api/v1/legion/board`: the Legion view on the project Issues page, computed from what the
+ *  sampler recorded of the project's daemon, never from a call to the daemon. A project that names
+ *  no daemon is `404 LEGION_NOT_CONFIGURED`, which is what shows no view. `settings` is the
+ *  settings the daemon reports, which hold no secret, by their dotted `legion.yaml` paths, and
+ *  `setting_sources` where each got its value; both are `{}` until a read records them, so a
+ *  project whose daemon has never answered still renders. The Go mirror is `legionBoardResponse`
+ *  in packages/envoy/internal/dispatch/api/legion_board.go. */
+export interface LegionBoardResponse {
+  readonly project: string;
+  readonly header: LegionBoardHeader;
+  /** Always all ten columns, in the order the view draws them; a delta sends them whole, never
+   *  item by item, since their order is fixed and a board is small. */
+  readonly columns: readonly LegionBoardColumn[];
+  readonly settings: Readonly<Record<string, unknown>>;
+  readonly setting_sources: Readonly<Record<string, LegionSettingSource>>;
+  readonly computed_at: string;
+}
+
 /** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
 export type DeliveryLiveWindow =
   | { readonly preset: 7 | 14 | 28 | 84 }
@@ -4114,11 +4209,14 @@ export type DeliveryLiveWindow =
  *  pipeline view names a window, or an `at`, which is the seven days ending on that day, or
  *  neither, which is the seven days ending at the present; naming both is refused, as the GET
  *  route refuses `at` beside `from`/`to`, and it names no query, since the Pipeline page follows
- *  none of the timeline's facets. */
+ *  none of the timeline's facets. A legion view names the project whose board it shows and
+ *  nothing else: the board has no window, and `project` is all `GET /api/v1/legion/board` reads.
+ *  Its snapshot and deltas carry a `LegionBoardResponse`. */
 export type DeliveryLiveView =
   | { readonly kind: "timeline"; readonly window: DeliveryLiveWindow; readonly query: string }
   | { readonly kind: "measures"; readonly window: DeliveryLiveWindow; readonly query: string }
-  | { readonly kind: "pipeline"; readonly window?: DeliveryLiveWindow; readonly at?: string };
+  | { readonly kind: "pipeline"; readonly window?: DeliveryLiveWindow; readonly at?: string }
+  | { readonly kind: "legion"; readonly project: string };
 
 /** The timeline's lists sent item by item, by id. */
 export type DeliveryLiveList = "prs" | "runs" | "session_groups";
@@ -4218,10 +4316,13 @@ export interface LiveUnsubscribe {
 }
 export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
+/** The body a delivery-hub snapshot or delta carries, by the view's kind: the matching GET
+ *  route's body, byte for byte. */
 export type DeliveryLiveBody =
   | DeliveryTimelineResponse
   | DeliveryMeasuresResponse
-  | DeliveryPipelineResponse;
+  | DeliveryPipelineResponse
+  | LegionBoardResponse;
 
 export interface DeliveryLiveSnapshot {
   readonly type: "snapshot";

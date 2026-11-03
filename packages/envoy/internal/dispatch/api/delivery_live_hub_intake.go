@@ -412,11 +412,15 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	}
 }
 
+// dirtyIssueLocked marks every view one issue's write can move: the views whose population, or
+// whose ancestors, name it, and — for a P0 write — the two views that show the unowned P0 list.
+// A Legion board names its own issues and shows no P0 list, so only the first rule reaches it.
 func (h *deliveryHub) dirtyIssueLocked(key string, p0 bool, now time.Time) {
 	for _, view := range h.views {
 		_, named := view.issues[key]
 		_, ancestor := view.ancestors[key]
-		if named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline) {
+		showsP0 := view.spec.kind == deliveryLiveTimeline || view.spec.kind == deliveryLiveMeasures
+		if named || ancestor || (p0 && showsP0) {
 			h.markDirtyLocked(view, now, deliveryCauseChange)
 		}
 		if view.heard != nil {
@@ -450,6 +454,11 @@ func (h *deliveryHub) markDirtyLocked(view *deliveryView, now time.Time, cause s
 // is taken as touching timeline and measures views. Pipeline lead times read only merged pull
 // requests (ListPullRequestsInWindow), so an unmerged pull request cannot move a Pipeline view.
 func (view *deliveryView) touchedBy(change delivery.Change, now time.Time) bool {
+	if view.spec.kind == legionBoardView {
+		// The board reads no delivery row at all: what moves it is a read of the daemon
+		// (legion.StateChannel) or a write of one of its issues (dirtyIssueLocked).
+		return false
+	}
 	var times []time.Time
 	for _, t := range []*time.Time{change.TOld, change.TNew} {
 		if t != nil {
