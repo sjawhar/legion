@@ -647,7 +647,7 @@ export interface Pi {
   /** The host's message into the session; a host without it gets a UI notice instead. */
   sendMessage?(
     message: { customType: string; content: string; display: boolean },
-    options: { deliverAs: "aside"; triggerTurn: boolean }
+    options: { deliverAs: "aside" | "followUp"; triggerTurn: boolean }
   ): void;
 }
 export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
@@ -670,6 +670,8 @@ export type ToolResultResult = { content: ResultBlock[] } | undefined;
 export type GateCtx = {
   agent: { kind: string };
   hasUI: boolean;
+  /** Whether the host runs no turn now; a host without it is read as busy. */
+  isIdle?(): boolean;
   ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
   getSystemPrompt(): string[];
   models: { resolve(spec: string): GateModel | undefined };
@@ -2406,7 +2408,8 @@ function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
  * The gate of a session where AskGate did not load: a host module that did not import, an
  * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
  * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each literal
- * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`) is refused in
+ * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`), and each
+ * message to other agents it would review (`agentMessage`, `reviewsMessage`), is refused in
  * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker
  * and records no mode, so every other gated write of a process that acts as the session, a
  * subagent's included, meets the CLI's marker check: refused where the session chose block
@@ -2419,7 +2422,7 @@ export function loadFailureGate(
   pi: Pick<Pi, "appendEntry">
 ): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
   const message = messageOf(error);
-  const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+  const reason = `AskGate did not send this call: it reviews each Dispatch write, and each message to other agents that reaches every agent or calls something a rule, before it goes out, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
   const envMode = parseMode(deps.env.OMP_ASKGATE);
   return (event, ctx) => {
     if (ctx.agent.kind !== "main") return undefined;
@@ -2429,6 +2432,11 @@ export function loadFailureGate(
       if (write !== undefined) found = { tool: write.tool, path: write.label };
     } else if (scopedDevice(event.toolName, event.input))
       found = { tool: event.toolName, path: `xd://${event.toolName}` };
+    else {
+      const sent = agentMessage(event.toolName, event.input);
+      if (sent !== undefined && reviewsMessage(sent))
+        found = { tool: event.toolName, path: event.toolName };
+    }
     if (found === undefined) return undefined;
     try {
       pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
@@ -2771,10 +2779,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /**
      * Tells the session, once per cause until the session changes, that a write of it went out
      * with no review: the call's own result says so too, but an agent reads a result for what the
-     * call did, and a person watching the session reads no result at all. The notice is a displayed
-     * message the host folds into the session at its next step, with no turn of its own
-     * (`sendMessage`, an aside), or a UI notice on a host without it, and one line in the host's
-     * plain log (`runtimeLogger`), which a headless session's reader has. Best effort: a notice
+     * call did, and a person watching the session reads no result at all. Called only for a write
+     * that runs. The notice is a displayed message that starts no turn (`sendMessage`), or a UI
+     * notice on a host without it, and one line in the host's plain log (`runtimeLogger`), which a
+     * headless session's reader has. While a run goes on it is an aside, which the host folds in at
+     * the run's next step; on an idle host (a background eval cell's call that ends after its run)
+     * it is a follow-up, which the host appends with no turn, since an idle host starts a turn for
+     * an aside whatever `triggerTurn` says. Limit: a run that settles between the read of
+     * `isIdle` and the host's delivery of the aside can start a turn for it. Best effort: a notice
      * that fails changes no decision.
      */
     const tellSession = (ctx: GateCtx, outcome: GateEntry["outcome"]) => {
@@ -2790,7 +2802,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (pi.sendMessage !== undefined)
           pi.sendMessage(
             { customType: ASKGATE_NOTICE_TYPE, content: notice, display: true },
-            { deliverAs: "aside", triggerTurn: false }
+            { deliverAs: ctx.isIdle?.() === true ? "followUp" : "aside", triggerTurn: false }
           );
         else if (ctx.hasUI) ctx.ui.notify(notice, "warning");
       } catch {
@@ -2798,14 +2810,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
     };
 
-    /** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
-    const settle = (effect: Decision["effect"], ctx: GateCtx) => {
+    /**
+     * A call without a verdict counts toward the halt; a verdict resets the count; anything else
+     * leaves it. The halt is told to the session with the first write it lets out unreviewed,
+     * never by the call that reached it, which a refusal may still hold back.
+     */
+    const settle = (effect: Decision["effect"]) => {
       if (effect === "verdict") failures = 0;
       if (effect !== "failure") return;
       failures++;
       if (failures < GATE_HALT_AFTER_FAILURES || halted) return;
       halted = true;
-      tellSession(ctx, "halted");
     };
 
     /**
@@ -2954,9 +2969,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
      * The models one review walks, every one on the provider the session's own model is on, so the
      * transcript goes to no provider it is not already on: the gate role's model and the models of
      * its retry.fallbackChains chain that are on that provider, in chain order, then the session's
-     * own model as the last of them. A role on another provider (a session that fell back from a
-     * gateway to the direct login, or one that runs on another vendor's model) is reviewed by the
-     * first model of its chain on the session's provider, and by the session's own model when the
+     * own model when the chain does not already hold it, as the last fallback. A role on another
+     * provider (a session that fell back from a gateway to the direct login, or one that runs on
+     * another vendor's model) is reviewed by the first model of its chain on the session's
+     * provider, and by the session's own model when the
      * chain has none there. A session with no model of its own has no provider to keep the
      * transcript on, and walks the role's whole chain.
      */
@@ -3850,9 +3866,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
       try {
-        settle(decision.effect, ctx);
+        settle(decision.effect);
       } catch {
-        // The halt notice is best effort.
+        // The halt count is best effort.
       }
       let rulesNotice: string | undefined;
       try {
@@ -3906,7 +3922,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       // A review, or a pass the gate took over the dry run's arguments (a rebuttal, a breaker
       // trip), binds those arguments and the files' digests; a call no verdict stands behind (a
-      // halt and another provider among them) is argv-only. The mint reads the command the
+      // halt among them) is argv-only. The mint reads the command the
       // handler finally returns, the override comment put back, whose argv is what bash hands the
       // CLI. A call this entry already refused mints nothing: no command of it runs.
       let minted: ToolCallResult;

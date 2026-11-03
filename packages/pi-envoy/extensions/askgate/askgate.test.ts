@@ -184,6 +184,8 @@ interface BindOptions {
   now?: () => number;
   /** Whether the host has `pi.sendMessage`, which the session notice prefers to a UI notice; false unless a test says otherwise. */
   sendMessage?: boolean;
+  /** What the host's `isIdle` answers; a host without it unless a test says otherwise. */
+  idle?: boolean;
 }
 
 /** One session binding of the gate, driven through a fake `pi` and `ctx`. */
@@ -357,6 +359,7 @@ function bind(opts: BindOptions = {}): BoundGate {
       getEntries: () => (typeof sessionEntries === "function" ? sessionEntries() : sessionEntries),
     },
     cwd: opts.cwd ?? "/work",
+    ...(opts.idle === undefined ? {} : { isIdle: () => opts.idle === true }),
   };
   const handler = handlers.get("tool_call");
   /** Every call id this binding was handed, ended after the test (`callEnders`). */
@@ -1222,7 +1225,8 @@ describe("fail-open", () => {
         expect(result?.reason).toContain("askgate.enabled");
       }
       expect(g.calls).toHaveLength(3);
-      expect(g.notices).toHaveLength(1);
+      // Every call was refused, so no write went out unreviewed and the session is told nothing.
+      expect(g.notices).toEqual([]);
     }
   });
   test("F9: a write the model allowed still posts when its record fails, since it was reviewed", async () => {
@@ -1312,16 +1316,17 @@ describe("a write that passes unreviewed is recorded and said", () => {
     const g = bind({
       hasUI: false,
       sendMessage: true,
+      idle: false,
       env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
       complete: (req) => (answers.shift() ?? untilAborted)(req),
     });
-    for (const id of ["a", "b", "c"]) {
+    for (const id of ["a", "b", "c", "d"]) {
       const result = await g.device(id, "dispatch_comment", COMMENT);
       expect(result?.additionalContext).toContain("The call ran unreviewed.");
     }
-    expect(g.entries.map((e) => e.outcome)).toEqual(["timeout", "timeout", "error"]);
-    // Three causes, so three messages: the second timeout says so on its own result alone, and
-    // the third failure in a row halts the gate, which is its own cause.
+    expect(g.entries.map((e) => e.outcome)).toEqual(["timeout", "timeout", "error", "halted"]);
+    // Three causes: the second timeout says so on its own result alone, and the halt the third
+    // failure reached is told with the first write it lets out.
     expect(g.sent.map((s) => s.options)).toEqual(
       Array(3).fill({ deliverAs: "aside", triggerTurn: false })
     );
@@ -1329,13 +1334,33 @@ describe("a write that passes unreviewed is recorded and said", () => {
       Array(3).fill([ASKGATE_NOTICE_TYPE, true])
     );
     expect(g.sent[0].message.content).toContain("the review did not answer within its deadline");
-    expect(g.sent[1].message.content).toContain("AskGate is paused for this session");
-    expect(g.sent[2].message.content).toContain("the review failed");
+    expect(g.sent[1].message.content).toContain("the review failed");
+    expect(g.sent[2].message.content).toContain("AskGate is paused for this session");
     expect(g.runtimeWarnings).toEqual(g.sent.map((s) => s.message.content));
     expect(g.notices).toEqual([]);
   });
+  test("on an idle host the notice is a follow-up, which starts no turn where an aside would", async () => {
+    const g = bind({
+      sendMessage: true,
+      idle: true,
+      complete: async () => ({ text: "", error: "500" }),
+    });
+    await g.device("a", "dispatch_comment", COMMENT);
+    expect(g.sent.map((s) => s.options)).toEqual([{ deliverAs: "followUp", triggerTurn: false }]);
+  });
+  test("a halt reached by a refused call is told only with the first write it lets out", async () => {
+    const g = bind({
+      sendMessage: true,
+      recordThrows: true,
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
+      complete: untilAborted,
+    });
+    for (const id of ["a", "b", "c"])
+      expect((await g.device(id, "dispatch_comment", COMMENT))?.block).toBe(true);
+    expect(g.sent).toEqual([]);
+  });
   test("a session switch tells the cause again; a reviewed, refused or rebutted write tells nothing", async () => {
-    const answers = [untilAborted, async () => ({ text: REVISE })];
+    const answers = [untilAborted, async () => ({ text: REVISE }), async () => ({ text: ALLOW })];
     const g = bind({
       sendMessage: true,
       env: { OMP_ASKGATE_TIMEOUT_MS: "20", OMP_ASKGATE: "block" },
@@ -1343,6 +1368,7 @@ describe("a write that passes unreviewed is recorded and said", () => {
     });
     await g.device("a", "dispatch_comment", COMMENT);
     expect((await g.device("b", "dispatch_comment", COMMENT))?.block).toBe(true);
+    expect(await g.device("ok", "dispatch_comment", COMMENT)).toBeUndefined();
     await g.write(
       "r",
       "xd://dispatch_comment",
@@ -5227,6 +5253,31 @@ describe("messages to other agents", () => {
     const third = await g.write("c", "agent://all", RULE_BROADCAST);
     expect(third?.block).toBeUndefined();
     expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict", "breaker"]);
+  });
+  test("a gate that did not load refuses each message it would review, and lets the others out", () => {
+    const entries: Array<Record<string, unknown>> = [];
+    const refuse = core.loadFailureGate(
+      new Error("OMP_ASKGATE_TIMEOUT_MS must be a positive integer"),
+      { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+      { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
+    );
+    const ctx = { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never;
+    const call = (toolName: string, input: Record<string, unknown>) =>
+      refuse({ toolName, toolCallId: toolName, input }, ctx);
+    expect(call("write", { path: "agent://all", content: PLAIN_BROADCAST })?.block).toBe(true);
+    expect(call("envoy_send", { session_id: "s", message: "New rule: no deploys." })?.block).toBe(
+      true
+    );
+    expect(
+      call("envoy_publish", { topic: "notifications.team.leads", message: PLAIN_BROADCAST })?.block
+    ).toBe(true);
+    expect(call("write", { path: "agent://Peer", content: PLAIN_DIRECT })).toBeUndefined();
+    expect(call("write", { path: "/tmp/notes.md", content: RULE_BROADCAST })).toBeUndefined();
+    expect(entries.map((e) => [e.tool, e.outcome])).toEqual([
+      ["write", "load-failed"],
+      ["envoy_send", "load-failed"],
+      ["envoy_publish", "load-failed"],
+    ]);
   });
   test("a subagent's message is not reviewed", async () => {
     const g = bind({ kind: "sub" });

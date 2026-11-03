@@ -345,8 +345,9 @@ with the arguments `to` and `message`. Any other message goes out with no entry.
 the message in `block` mode; in `warn` mode the message goes out with the reason. To send a refused
 message anyway, make its first line `advisor-rebuttal: <one line>`: the gate records the line and
 removes it before the message goes out, also from an `xd://envoy_send` or `xd://envoy_publish`
-device's `message`. Two refusals of one message on one recipient send the third unreviewed, as
-for a Dispatch write.
+device's `message`. Two refusals on one recipient with one tool send the third message there
+unreviewed, whatever its text, as two refusals on one Dispatch target do for a write that opens no
+ask. A gate that did not load refuses each message it would review.
 
 The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
 contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
@@ -611,17 +612,20 @@ role is not set, they ask the `default` role. When neither role resolves, the ga
 write in both modes and names the two roles. The review runs on the provider the session's own
 model is on, so the transcript goes to no provider it is not already on: the role's model when it
 is on that provider, then the models of the role's `retry.fallbackChains` chain on that provider,
-then the session's own model. A model that answers with an error passes the request to the next
-one. So a session that fell back from a gateway to the direct login is reviewed by the role's model
+then the session's own model as the last fallback when the chain does not already name it. A model
+that answers with an error passes the request to the next one. So a session that fell back from a
+gateway to the direct login is reviewed by the role's model
 on the direct login when the chain names it, and a session on another vendor's model is reviewed
 by its own model. An earlier release did not review such a session at all (outcome `skipped`).
 
 **When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
 entry with its outcome, and hands the agent a note that says the write went out unreviewed and
-why. The note reaches a headless session too. The session is also told once per cause, until it
-changes, apart from the call's result: a displayed message the host folds into the session at its
-next step without starting a turn (a UI notice on a host without one), and one line in the host's
-plain log:
+why. The note reaches a headless session too. For `timeout`, `error`, `no-verdict` and `halted`,
+the session is also told once per cause, until it changes, apart from the call's result: a
+displayed message that starts no turn, an aside while a run goes on and a follow-up on an idle
+host (a UI notice on a host without either), and one line in the host's plain log. A run that
+settles between AskGate's read of the host's state and the host's delivery of the aside can start
+a turn for it:
 
 | Outcome | What happened |
 | --- | --- |

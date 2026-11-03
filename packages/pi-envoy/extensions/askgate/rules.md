@@ -343,10 +343,10 @@ We invented these examples. Each one shows a shape that passes.
   recommendation: passes.
 - "Design gate for LEGION-N… Change: the import page takes files of any
   size… Recommendation: Approve." A configured gate: passes.
-- "Every test site shares one disk, and the disk is almost full… The
-  fastest way to make room is to delete the oldest site… Recommendation:
-  delete it only if you confirm nobody still uses it." Deleting a shared
-  resource that others may still use: passes.
+- "Every test site shares one disk, and `df -h /srv/sites` shows it 96%
+  full… The fastest way to make room is to delete the oldest site…
+  Recommendation: delete it only if you confirm nobody still uses it."
+  Deleting a shared resource that others may still use: passes.
 - "Who fixes the slow search page?… the timings are in
   dispatch://ACME-5/message/<id>… dispatch://ACME-5/ask/<id> put the search
   service outside my area." An ownership boundary they set, with a link and
@@ -355,9 +355,9 @@ We invented these examples. Each one shows a shape that passes.
   (Recommended) / B: folders / C…" A design decision about their own tool,
   with a recommendation: passes.
 - "D-2 - date format. All four libraries we looked at (date-fns, Luxon,
-  Temporal and the standard library) print dates as year-month-day…
-  Recommendation: A." An architecture choice the agent could have made,
-  argued and recommended: passes.
+  Temporal and the standard library) print dates as year-month-day in their
+  own docs, linked below… Recommendation: A." An architecture choice the
+  agent could have made, argued and recommended: passes.
 - "What do we build next, the export or the search filters? The evidence
   and an order are in dispatch://ACME-12/artifact/…" with a RECOMMENDED
   option. What to build next, with a link for the evidence: passes.
