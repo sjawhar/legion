@@ -63,11 +63,11 @@ A test changes no server setting (`fsync`, `full_page_writes`, `max_wal_size`): 
 
 ## A test that reads `GET /api/v1/references?since=` reads again
 
-A since read answers only the edges at or below the event log's safe horizon
-(`packages/envoy/internal/dispatch/api/references.go:132-139`, and `sinceHorizon` at `:154-172`),
-and waits at most `referencesSinceWait`, one second (`references.go:61-66`), for a horizon above
-the events committed before the read. Past that wait it answers at the horizon it has and leaves
-the rest to a later read: the route defers, it never loses an edge. The horizon is instance-wide,
+A since read answers only the edges at or below the event log's safe horizon (`getReferences` and
+`sinceHorizon` in `packages/envoy/internal/dispatch/api/references.go`), and waits at most
+`referencesSinceWait`, one second, for a horizon above the events committed before the read. Past
+that wait it answers at the horizon it has and leaves the rest to a later read: the route defers,
+it never loses an edge. The horizon is instance-wide,
 so any transaction holding a transaction id on the Postgres instance holds it back, and in
 `packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
 `create database … template … strategy file_copy` and `storetest`'s

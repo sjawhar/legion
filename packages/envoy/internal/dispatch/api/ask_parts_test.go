@@ -650,10 +650,8 @@ func TestAPinnedAskPartShowsTheRevisionItNames(t *testing.T) {
 
 // The answer's part rows are stamped with the ask.answered event that carried them (refs.Stamp),
 // so a ?since= read of the ask lists the edges the answer wrote, each stamped with that event,
-// and no older one; an unstamped row is invisible to every such read. One read does not settle
-// it: a since read caps at the event log's safe horizon, which a transaction open anywhere on
-// the Postgres instance holds back, so the read before the answer is taken through
-// awaitSinceRead, and only a read that answered within referencesSinceWait is final.
+// and no older one; an unstamped row is invisible to every such read. awaitSinceRead settles
+// which answer of the read after the answer is final.
 func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -663,6 +661,8 @@ func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
 	ask := createPartAsk(t, handler, source.Key, "Does dispatch://"+target.Key+" ship first?",
 		map[string]string{"label": "Monday"})
 	askRef := "dispatch://" + source.Key + "/ask/" + ask.ID
+	// The log's head is a safe since here, unlike for a live poller: the answer draws its event id
+	// after this read, so that id stands above every id the read could see.
 	beforeTheAnswer := eventHead(t, database)
 	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Monday, once dispatch://"+target.Key+" lands.")
 	theAnswer := answeredEventID(t, database, source.Key)

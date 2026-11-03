@@ -700,10 +700,11 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 // created_at), a message's created_at. An item a write site indexed since it was listed is no
 // longer owed and is left alone; one deleted since took its state row with it (on delete
 // cascade), so nothing is owed. It runs from the block-index reconciliation
-// (docs/block_index.go:216) and indexes through IndexItemIfOwed, which indexes nothing unless the
-// item's index is owed, so every mention it records is of text an earlier write already appended
-// an event for: a row that takes no source_seq here, and so is listed by no ?since= read, carries
-// no fact a poller was not shown when that write stamped the item's own refs.
+// (docs.(*Service).ReconcileBlockIndex) and indexes through IndexItemIfOwed, which indexes nothing
+// unless the item's index is owed, so every mention it records is of text an earlier write
+// already appended an event for. A block mention takes the source_seq of the item's own refs row
+// for its target at the item's first indexing (indexItemBlocks) and none otherwise, and no
+// ?since= read lists a row with none until a later write of the item stamps it (Stamp).
 func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) (bool, error) {
 	tables, err := item.Kind.tables()
 	if err != nil {

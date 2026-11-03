@@ -2315,7 +2315,8 @@ Each item below names a path with its method and identity, then its purpose.
   `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
   A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
   when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
-  A caller with no cursor starts from `since=0`, which lists every mention committed before the read, and after that reads again from the highest `source_seq` an answer showed it.
+  A caller with no cursor starts from `since=0`, which lists every mention committed before the read that carries a `source_seq`, and after that reads again from the highest `source_seq` an answer showed it.
+  A mention written with no event (a rebuild, a backfill, an older build) carries no `source_seq` until a later write of its source stamps it with that write's event, and until then only a read without `since` lists it.
   A signed-in page may start from `GET /auth/whoami`'s `event_head` instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from `0`.
   Never take a `since` from `max(events.id)` read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later.
   An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.
