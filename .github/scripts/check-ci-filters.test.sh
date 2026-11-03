@@ -353,7 +353,7 @@ check "names the job and what its last step must be" \
 
 echo "case: a job named for a required check"
 root=$(fixture ci-ok-job)
-replace "$root/.github/workflows/ci.yaml" "  image:" $'  image:\n    name: ci-ok'
+replace "$root/.github/workflows/ci.yaml" $'\n  image:\n' $'\n  image:\n    name: ci-ok\n'
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and the check" \
