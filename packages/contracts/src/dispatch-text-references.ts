@@ -1,30 +1,87 @@
+/** The questions the `#id` rows below belong to, each block id to its ask's reference. */
+const QUESTIONS = {
+  q2: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+  q3: "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+  "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718":
+    "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666",
+};
+
+const ASK = "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b";
+const COMMENT = "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c";
+const MESSAGE = "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d";
+const BLOCK = "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e";
+
+/** The ask, comment, message and document block the prefix rows below shorten. */
+const ITEMS = {
+  "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": ASK,
+  "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": COMMENT,
+  "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": MESSAGE,
+  "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": BLOCK,
+};
+
 /**
- * Markdown bodies with the `dispatch://` references each one cites, in order of first appearance,
- * as read against the server origin `https://dispatch.test`, or the row's `origin` where it names
- * one. Two readers are tested against it - the dashboard's `composerReferences` (its composer's
- * reference pills and its unfurl cards; the rendered-text linkifier shares its scanner) and the Go
- * reader `text.Extract`, which writes the reference graph, through its JSON copy in
- * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what it
- * names can change on one side only. A reference ends at whitespace (Unicode space separators
- * included, a vertical tab and U+FEFF not), an angle or square bracket, a quote, a backtick or a
- * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
- * parenthesis after it are dropped. External URLs cite nothing, and neither does a reference
- * whose target id, as the server stores the edge to it, is past MAX_REFERENCE_TARGET_BYTES. A
- * block reference is its document's, ask's, comment's or issue message's reference, `#b-` and the
- * block id as `encodeBlockId` writes it (readers take any percent-encoding; an id past
- * MAX_BLOCK_ID_BYTES names nothing), optionally pinned to version N of the document, or to
- * revision N of the comment or of the ask's parts, by a trailing `@v<N>` (a message never
- * changes, so a pinned message block names nothing); each `refs` entry for one is written that
- * canonical way.
+ * Markdown bodies with the references each one cites, in order of first appearance, as read
+ * against the server origin `https://dispatch.test`, or the row's `origin` where it names one.
+ * Four readers are tested against it - the dashboard's `composerReferences` (its composer's
+ * reference pills, which read `dispatch://` references and dashboard addresses alone), the
+ * dashboard's reader and resolver for text (what its rendered markdown, its unfurl cards and its
+ * document editors share), those renderers (what they link), and the Go reader `text.Mentions`,
+ * which writes the reference graph, through its JSON copy in
+ * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what
+ * it names can change on one side only.
+ *
+ * A reference ends at whitespace (Unicode space separators included, a vertical tab and U+FEFF
+ * not), an angle or square bracket, a quote, a backtick or a pipe; the sentence punctuation,
+ * emphasis and strikethrough delimiters and unbalanced closing parenthesis after it are dropped.
+ * External URLs cite nothing, and neither does a reference whose target id, as the server stores
+ * the edge to it, is past MAX_REFERENCE_TARGET_BYTES. A block reference is its document's, ask's,
+ * comment's or issue message's reference, `#b-` and the block id as `encodeBlockId` writes it
+ * (readers take any percent-encoding; an id past MAX_BLOCK_ID_BYTES names nothing), optionally
+ * pinned to version N of the document, or to revision N of the comment or of the ask's parts, by
+ * a trailing `@v<N>` (a message never changes, so a pinned message block names nothing); each
+ * `refs` entry for one is written that canonical way.
+ *
+ * A text also cites what it writes bare: an issue key (`CORE-12`) that names an existing issue,
+ * as `dispatch://CORE-12`, and `#` with the id of a question block of the text's document, as
+ * that question's ask. Either stands alone: after the start of the text, whitespace (or a
+ * numeric reference to whitespace, such as the `&#32;` stored markdown writes a space at a
+ * mark's edge as), or one of ( [ " ' * _ > ` ~ |. A key ends at the end of the text or at a
+ * character that is not a letter, a digit, `-`, `/`, `#` or `@`, and the sentence punctuation
+ * and delimiters `.` `,` `:` `;` `_` `*` `~` end it only when no letter or digit follows them. A
+ * `#id` is `#` and the longest run of `[A-Za-z0-9_-]`, or that run without its trailing `_` and
+ * `-` where no question holds the whole run; the `{#id …}` an `:::ask` declares its question
+ * with is no candidate.
+ *
+ * The id a reference names may be a prefix of the id it means: a hex digit and seven or more of
+ * `[0-9a-f-]` after it, read without case. Where one id of `items` starts with it, the reference
+ * is that item's, written with the whole id; where two ids do, or where the text holds a `-` the
+ * id does not, it is stored as written, as a reference to a missing target is. A `#id` run of
+ * eight or more such characters that no question declares is read the same way, against the
+ * question block ids.
+ *
+ * The server reads a key, a `#id` and a prefix inside a code span, a code block and a link's
+ * destination, as it reads a `dispatch://` reference in code today; a renderer links none of
+ * them there.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
   origin?: string;
+  /** The issue keys that name an existing issue; a row without it has none. */
+  issues?: readonly string[];
+  /** The question block ids of the text's document, each to its ask's reference. */
+  questions?: Readonly<Record<string, string>>;
+  /** The ask, comment, message and document block ids that exist, each to its reference. */
+  items?: Readonly<Record<string, string>>;
+  /** What the server indexes. */
   refs: readonly string[];
+  /** What a renderer links, which is none inside code or a link; omitted, it is `refs`. */
+  links?: readonly string[];
+  /** Only a reader of the bare key, `#id` and prefix grammar writes this row's `refs`. */
+  grammar?: true;
 }[] = [
   { body: "Tied to dispatch://CORE-1 here.", refs: ["dispatch://CORE-1"] },
   { body: "Tied to **dispatch://CORE-1** here.", refs: ["dispatch://CORE-1"] },
-  { body: "Tied to `dispatch://CORE-1` here.", refs: ["dispatch://CORE-1"] },
+  { body: "Tied to `dispatch://CORE-1` here.", refs: ["dispatch://CORE-1"], links: [] },
   {
     body: "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
     refs: [
@@ -36,6 +93,7 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "`dispatch://CORE-5`/`dispatch://CORE-6`",
     refs: ["dispatch://CORE-5", "dispatch://CORE-6"],
+    links: [],
   },
   // How a document stores the autolink `<dispatch://CORE-7/spec>`.
   {
@@ -81,6 +139,7 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
     refs: ["dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"],
+    links: [],
   },
   // A query is read as the browser reads it, pairs parted at `&` alone, so an id holding a `;`
   // keeps it (and is written escaped), a version holding one is no version, and an `ask` holding
@@ -389,5 +448,619 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
     refs: ["dispatch://CORE-1/artifact/notes-md@v2"],
+  },
+  // A bare key that names an existing issue cites it, at each boundary it may stand after: the
+  // start of the text, a space, and the marks a mention may open against.
+  { body: "CORE-1 is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], grammar: true },
+  {
+    body: "Blocked on CORE-1 today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked (CORE-1) today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked [CORE-1] today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: 'Blocked on "CORE-1" today.',
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on 'CORE-1' today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on **CORE-1** today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on _CORE-1_ today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  { body: ">CORE-1 is blocked.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], grammar: true },
+  {
+    body: "Blocked on ~~CORE-1~~ today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "|issue|state|\n|---|---|\n|CORE-1|open|",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  // Stored markdown writes the whitespace at a mark's edge as its numeric reference, decimal or
+  // hex.
+  {
+    body: "Blocked on&#32;CORE-1 today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on&#x20;CORE-1 today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on&#9;CORE-1 today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  {
+    body: "Blocked on&#10;CORE-1 today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  // A key of two to ten characters, and two keys in one text.
+  { body: "See XCORE-1 here.", issues: ["XCORE-1"], refs: ["dispatch://XCORE-1"], grammar: true },
+  {
+    body: "Both CORE-1 and ACME-12 are blocked.",
+    issues: ["CORE-1", "ACME-12"],
+    refs: ["dispatch://CORE-1", "dispatch://ACME-12"],
+    grammar: true,
+  },
+  // What may trail a key: an apostrophe, and the sentence punctuation no letter or digit follows.
+  {
+    body: "CORE-1's spec is done.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  { body: "Done in CORE-1.", issues: ["CORE-1"], refs: ["dispatch://CORE-1"], grammar: true },
+  {
+    body: "Blocked on CORE-1, then shipped.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    grammar: true,
+  },
+  // A link's destination: the server reads the key there, and no renderer links it, the text
+  // around it being a link already.
+  {
+    body: "See [the blocker](CORE-1).",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  // A key that stands after another character, that runs on, or that names no issue, cites
+  // nothing.
+  { body: "See legion/CORE-1 here.", issues: ["CORE-1"], refs: [] },
+  {
+    body: "See owner/repo#1 here.",
+    questions: { "1": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  { body: "See xCORE-1 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See core-1 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1abc here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1-2 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1/spec here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1.5 here.", issues: ["CORE-1"], refs: [] },
+  { body: "See CORE-1_x here.", issues: ["CORE-1"], refs: [] },
+  {
+    body: "See CORE-1#q1 here.",
+    issues: ["CORE-1"],
+    questions: { q1: "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333" },
+    refs: [],
+  },
+  { body: "Blocked on CORE-404.", issues: ["CORE-1"], refs: [] },
+  { body: "Blocked on CORE-1, which no issue holds.", refs: [] },
+  // `#` and the id of a question block of the text's document cite that question's ask.
+  { body: "See #q2 for the rollout.", questions: QUESTIONS, refs: [QUESTIONS.q2], grammar: true },
+  { body: "As agreed, _see #q2_.", questions: QUESTIONS, refs: [QUESTIONS.q2], grammar: true },
+  { body: "Answered in #q2.", questions: QUESTIONS, refs: [QUESTIONS.q2], grammar: true },
+  {
+    body: "See [the question](#q2).",
+    questions: QUESTIONS,
+    refs: [QUESTIONS.q2],
+    links: [],
+    grammar: true,
+  },
+  // An escaped `#` is no candidate, and neither is the numeric reference that writes one.
+  { body: "See \\#q2 and #q3 here.", questions: QUESTIONS, refs: [QUESTIONS.q3], grammar: true },
+  { body: "See &#35;q2 here.", questions: QUESTIONS, refs: [] },
+  // A question whose id no one wrote by hand is shortened as an item's id is.
+  {
+    body: "See #7b2c9d04 for the rollout.",
+    questions: QUESTIONS,
+    refs: ["dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"],
+    grammar: true,
+  },
+  { body: "See #deadbeef here.", questions: QUESTIONS, refs: [] },
+  // An id no question holds, a `#` that stands after another character, and the declaration of a
+  // question block itself cite nothing.
+  { body: "See #nope here.", questions: QUESTIONS, refs: [] },
+  { body: ":::ask{#q2}\nWhich region first?\n:::", questions: QUESTIONS, refs: [] },
+  // A key or a `#id` inside an address is part of that address.
+  {
+    body: "See https://example.com/search?q=(CORE-1) and https://example.com/docs(#q2).",
+    issues: ["CORE-1"],
+    questions: QUESTIONS,
+    refs: [],
+  },
+  // The id a reference names may be a prefix of the id of an ask, a comment, a message or a
+  // document block: eight or more hex characters and hyphens, read without case, that the whole
+  // id starts with. The reference is then stored with the whole id.
+  { body: "See dispatch://CORE-1/ask/2a7f1c90 here.", items: ITEMS, refs: [ASK], grammar: true },
+  {
+    body: "See dispatch://CORE-1/ask/2a7f1c90-1f4e here.",
+    items: ITEMS,
+    refs: [ASK],
+    grammar: true,
+  },
+  { body: "See dispatch://CORE-1/ask/2A7F1C90 here.", items: ITEMS, refs: [ASK], grammar: true },
+  {
+    body: "See dispatch://CORE-1/comment/3b8e2d01 here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/comment/3b8e2d01-2a5f here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/comment/3B8E2D01 here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/message/4c9f3e12 here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/message/4c9f3e12-3b60 here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/message/4C9F3E12 here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5da04f23 here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5da04f23-4c71 here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    grammar: true,
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5DA04F23 here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    grammar: true,
+  },
+  // A text that holds a hyphen the id does not, and one of seven characters, which is no prefix:
+  // each is stored as written, as a reference to a missing target is.
+  {
+    body: "See dispatch://CORE-1/ask/2a7f1c-90 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/ask/2a7f1c-90"],
+  },
+  {
+    body: "See dispatch://CORE-1/ask/2a7f1c9 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/ask/2a7f1c9"],
+  },
+  {
+    body: "See dispatch://CORE-1/comment/3b8e2d-01 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/comment/3b8e2d-01"],
+  },
+  {
+    body: "See dispatch://CORE-1/comment/3b8e2d0 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/comment/3b8e2d0"],
+  },
+  {
+    body: "See dispatch://CORE-1/message/4c9f3e-12 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/message/4c9f3e-12"],
+  },
+  {
+    body: "See dispatch://CORE-1/message/4c9f3e1 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/message/4c9f3e1"],
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5da04f-23 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/spec#b-5da04f-23"],
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5da04f2 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/spec#b-5da04f2"],
+  },
+  // A prefix two ids share, and one no id starts with: stored as written too.
+  {
+    body: "See dispatch://CORE-1/ask/7e1a9b04 here.",
+    items: {
+      "7e1a9b04-1111-4a11-8a11-111111111111":
+        "dispatch://CORE-1/ask/7e1a9b04-1111-4a11-8a11-111111111111",
+      "7e1a9b04-2222-4a22-8a22-222222222222":
+        "dispatch://CORE-1/ask/7e1a9b04-2222-4a22-8a22-222222222222",
+    },
+    refs: ["dispatch://CORE-1/ask/7e1a9b04"],
+  },
+  {
+    body: "See dispatch://CORE-1/ask/2a7f1c91 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/ask/2a7f1c91"],
+  },
+  {
+    body: "See dispatch://CORE-1/comment/8f2b0c15 here.",
+    items: {
+      "8f2b0c15-1111-4b11-8b11-111111111111":
+        "dispatch://CORE-1/comment/8f2b0c15-1111-4b11-8b11-111111111111",
+      "8f2b0c15-2222-4b22-8b22-222222222222":
+        "dispatch://CORE-1/comment/8f2b0c15-2222-4b22-8b22-222222222222",
+    },
+    refs: ["dispatch://CORE-1/comment/8f2b0c15"],
+  },
+  {
+    body: "See dispatch://CORE-1/comment/3b8e2d02 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/comment/3b8e2d02"],
+  },
+  {
+    body: "See dispatch://CORE-1/message/9a3c1d26 here.",
+    items: {
+      "9a3c1d26-1111-4c11-8c11-111111111111":
+        "dispatch://CORE-1/message/9a3c1d26-1111-4c11-8c11-111111111111",
+      "9a3c1d26-2222-4c22-8c22-222222222222":
+        "dispatch://CORE-1/message/9a3c1d26-2222-4c22-8c22-222222222222",
+    },
+    refs: ["dispatch://CORE-1/message/9a3c1d26"],
+  },
+  {
+    body: "See dispatch://CORE-1/message/4c9f3e13 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/message/4c9f3e13"],
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-0b4d2e37 here.",
+    items: {
+      "0b4d2e37-1111-4d11-8d11-111111111111":
+        "dispatch://CORE-1/spec#b-0b4d2e37-1111-4d11-8d11-111111111111",
+      "0b4d2e37-2222-4d22-8d22-222222222222":
+        "dispatch://CORE-1/spec#b-0b4d2e37-2222-4d22-8d22-222222222222",
+    },
+    refs: ["dispatch://CORE-1/spec#b-0b4d2e37"],
+  },
+  {
+    body: "See dispatch://CORE-1/spec#b-5da04f24 here.",
+    items: ITEMS,
+    refs: ["dispatch://CORE-1/spec#b-5da04f24"],
+  },
+  // Every form the server reads bare, again in code: it indexes each one there, as it indexes a
+  // `dispatch://` reference in code, and no renderer links inside a code span or a code block.
+  {
+    body: "`CORE-1` is blocked.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked `(CORE-1)` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked `[CORE-1]` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: 'Blocked on `"CORE-1"` today.',
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `'CORE-1'` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `**CORE-1**` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `_CORE-1_` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "`>CORE-1` is blocked.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `~~CORE-1~~` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Cells are written `|CORE-1|open|`.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `&#32;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `&#x20;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `&#9;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `&#10;CORE-1` today.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `XCORE-1` here.",
+    issues: ["XCORE-1"],
+    refs: ["dispatch://XCORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Both `CORE-1` and `ACME-12` are blocked.",
+    issues: ["CORE-1", "ACME-12"],
+    refs: ["dispatch://CORE-1", "dispatch://ACME-12"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "`CORE-1's` spec is done.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Done in `CORE-1.`",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Blocked on `CORE-1,` then shipped.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `[the blocker](CORE-1)`.",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "```\nCORE-1 is blocked.\n```",
+    issues: ["CORE-1"],
+    refs: ["dispatch://CORE-1"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `#q2` for the rollout.",
+    questions: QUESTIONS,
+    refs: [QUESTIONS.q2],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "As agreed, `_see #q2_`.",
+    questions: QUESTIONS,
+    refs: [QUESTIONS.q2],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "Answered in `#q2.`",
+    questions: QUESTIONS,
+    refs: [QUESTIONS.q2],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `[the question](#q2)`.",
+    questions: QUESTIONS,
+    refs: [QUESTIONS.q2],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `#7b2c9d04` for the rollout.",
+    questions: QUESTIONS,
+    refs: ["dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/ask/2a7f1c90` here.",
+    items: ITEMS,
+    refs: [ASK],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/ask/2a7f1c90-1f4e` here.",
+    items: ITEMS,
+    refs: [ASK],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/ask/2A7F1C90` here.",
+    items: ITEMS,
+    refs: [ASK],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/comment/3b8e2d01` here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/comment/3b8e2d01-2a5f` here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/comment/3B8E2D01` here.",
+    items: ITEMS,
+    refs: [COMMENT],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/message/4c9f3e12` here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/message/4c9f3e12-3b60` here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/message/4C9F3E12` here.",
+    items: ITEMS,
+    refs: [MESSAGE],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/spec#b-5da04f23` here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/spec#b-5da04f23-4c71` here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    links: [],
+    grammar: true,
+  },
+  {
+    body: "See `dispatch://CORE-1/spec#b-5DA04F23` here.",
+    items: ITEMS,
+    refs: [BLOCK],
+    links: [],
+    grammar: true,
   },
 ];

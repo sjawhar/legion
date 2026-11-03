@@ -15,7 +15,8 @@
     "body": "Tied to `dispatch://CORE-1` here.",
     "refs": [
       "dispatch://CORE-1"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
@@ -30,7 +31,8 @@
     "refs": [
       "dispatch://CORE-5",
       "dispatch://CORE-6"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "See [dispatch://CORE-7/spec](dispatch://CORE-7/spec).",
@@ -106,7 +108,8 @@
     "body": "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
     "refs": [
       "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"
-    ]
+    ],
+    "links": []
   },
   {
     "body": "Pairs part at & alone: https://dispatch.test/issues/CORE-1/spec?comment=c1;c2, https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2;3 and https://dispatch.test/issues/CORE-2/spec?ask=a1;x&comment=c1.",
@@ -482,5 +485,1240 @@
     "refs": [
       "dispatch://CORE-1/artifact/notes-md@v2"
     ]
+  },
+  {
+    "body": "CORE-1 is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked (CORE-1) today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked [CORE-1] today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on \"CORE-1\" today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on 'CORE-1' today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on **CORE-1** today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on _CORE-1_ today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": ">CORE-1 is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on ~~CORE-1~~ today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "|issue|state|\n|---|---|\n|CORE-1|open|",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on&#32;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on&#x20;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on&#9;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on&#10;CORE-1 today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See XCORE-1 here.",
+    "issues": [
+      "XCORE-1"
+    ],
+    "refs": [
+      "dispatch://XCORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Both CORE-1 and ACME-12 are blocked.",
+    "issues": [
+      "CORE-1",
+      "ACME-12"
+    ],
+    "refs": [
+      "dispatch://CORE-1",
+      "dispatch://ACME-12"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "CORE-1's spec is done.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Done in CORE-1.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on CORE-1, then shipped.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See [the blocker](CORE-1).",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See legion/CORE-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See owner/repo#1 here.",
+    "questions": {
+      "1": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "See xCORE-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See core-1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1abc here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1-2 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1/spec here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1.5 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1_x here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "See CORE-1#q1 here.",
+    "issues": [
+      "CORE-1"
+    ],
+    "questions": {
+      "q1": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    },
+    "refs": []
+  },
+  {
+    "body": "Blocked on CORE-404.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": []
+  },
+  {
+    "body": "Blocked on CORE-1, which no issue holds.",
+    "refs": []
+  },
+  {
+    "body": "See #q2 for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "As agreed, _see #q2_.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "Answered in #q2.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See [the question](#q2).",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See \\#q2 and #q3 here.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See &#35;q2 here.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": []
+  },
+  {
+    "body": "See #7b2c9d04 for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See #deadbeef here.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": []
+  },
+  {
+    "body": "See #nope here.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": []
+  },
+  {
+    "body": ":::ask{#q2}\nWhich region first?\n:::",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": []
+  },
+  {
+    "body": "See https://example.com/search?q=(CORE-1) and https://example.com/docs(#q2).",
+    "issues": [
+      "CORE-1"
+    ],
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": []
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2a7f1c90 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2a7f1c90-1f4e here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2A7F1C90 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3b8e2d01 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3b8e2d01-2a5f here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3B8E2D01 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4c9f3e12 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4c9f3e12-3b60 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4C9F3E12 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5da04f23 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5da04f23-4c71 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5DA04F23 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "grammar": true
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2a7f1c-90 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c-90"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2a7f1c9 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c9"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3b8e2d-01 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d-01"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3b8e2d0 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d0"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4c9f3e-12 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e-12"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4c9f3e1 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e1"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5da04f-23 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f-23"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5da04f2 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f2"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/7e1a9b04 here.",
+    "items": {
+      "7e1a9b04-1111-4a11-8a11-111111111111": "dispatch://CORE-1/ask/7e1a9b04-1111-4a11-8a11-111111111111",
+      "7e1a9b04-2222-4a22-8a22-222222222222": "dispatch://CORE-1/ask/7e1a9b04-2222-4a22-8a22-222222222222"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/7e1a9b04"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/ask/2a7f1c91 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c91"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/8f2b0c15 here.",
+    "items": {
+      "8f2b0c15-1111-4b11-8b11-111111111111": "dispatch://CORE-1/comment/8f2b0c15-1111-4b11-8b11-111111111111",
+      "8f2b0c15-2222-4b22-8b22-222222222222": "dispatch://CORE-1/comment/8f2b0c15-2222-4b22-8b22-222222222222"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/8f2b0c15"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/comment/3b8e2d02 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d02"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/message/9a3c1d26 here.",
+    "items": {
+      "9a3c1d26-1111-4c11-8c11-111111111111": "dispatch://CORE-1/message/9a3c1d26-1111-4c11-8c11-111111111111",
+      "9a3c1d26-2222-4c22-8c22-222222222222": "dispatch://CORE-1/message/9a3c1d26-2222-4c22-8c22-222222222222"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/9a3c1d26"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/message/4c9f3e13 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e13"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-0b4d2e37 here.",
+    "items": {
+      "0b4d2e37-1111-4d11-8d11-111111111111": "dispatch://CORE-1/spec#b-0b4d2e37-1111-4d11-8d11-111111111111",
+      "0b4d2e37-2222-4d22-8d22-222222222222": "dispatch://CORE-1/spec#b-0b4d2e37-2222-4d22-8d22-222222222222"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-0b4d2e37"
+    ]
+  },
+  {
+    "body": "See dispatch://CORE-1/spec#b-5da04f24 here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f24"
+    ]
+  },
+  {
+    "body": "`CORE-1` is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked `(CORE-1)` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked `[CORE-1]` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `\"CORE-1\"` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `'CORE-1'` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `**CORE-1**` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `_CORE-1_` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "`>CORE-1` is blocked.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `~~CORE-1~~` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Cells are written `|CORE-1|open|`.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `&#32;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `&#x20;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `&#9;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `&#10;CORE-1` today.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `XCORE-1` here.",
+    "issues": [
+      "XCORE-1"
+    ],
+    "refs": [
+      "dispatch://XCORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Both `CORE-1` and `ACME-12` are blocked.",
+    "issues": [
+      "CORE-1",
+      "ACME-12"
+    ],
+    "refs": [
+      "dispatch://CORE-1",
+      "dispatch://ACME-12"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "`CORE-1's` spec is done.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Done in `CORE-1.`",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Blocked on `CORE-1,` then shipped.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `[the blocker](CORE-1)`.",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "```\nCORE-1 is blocked.\n```",
+    "issues": [
+      "CORE-1"
+    ],
+    "refs": [
+      "dispatch://CORE-1"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `#q2` for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "As agreed, `_see #q2_`.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "Answered in `#q2.`",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `[the question](#q2)`.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `#7b2c9d04` for the rollout.",
+    "questions": {
+      "q2": "dispatch://CORE-1/ask/33333333-3333-4333-8333-333333333333",
+      "q3": "dispatch://CORE-1/ask/55555555-5555-4555-8555-555555555555",
+      "7b2c9d04-5e6f-4a71-8b92-c3d4e5f60718": "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/ask/2a7f1c90` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/ask/2a7f1c90-1f4e` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/ask/2A7F1C90` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/comment/3b8e2d01` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/comment/3b8e2d01-2a5f` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/comment/3B8E2D01` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/message/4c9f3e12` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/message/4c9f3e12-3b60` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/message/4C9F3E12` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/spec#b-5da04f23` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/spec#b-5da04f23-4c71` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "links": [],
+    "grammar": true
+  },
+  {
+    "body": "See `dispatch://CORE-1/spec#b-5DA04F23` here.",
+    "items": {
+      "2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b": "dispatch://CORE-1/ask/2a7f1c90-1f4e-4a2b-9c3d-5e6f70819a2b",
+      "3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c": "dispatch://CORE-1/comment/3b8e2d01-2a5f-4b3c-8d4e-6f70819a2b3c",
+      "4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d": "dispatch://CORE-1/message/4c9f3e12-3b60-4c4d-9e5f-70819a2b3c4d",
+      "5da04f23-4c71-4d5e-8f60-819a2b3c4d5e": "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    },
+    "refs": [
+      "dispatch://CORE-1/spec#b-5da04f23-4c71-4d5e-8f60-819a2b3c4d5e"
+    ],
+    "links": [],
+    "grammar": true
   }
 ]

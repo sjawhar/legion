@@ -108,9 +108,10 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 		t.Fatalf("read table: %v", err)
 	}
 	var rows []struct {
-		Body   string   `json:"body"`
-		Origin string   `json:"origin"`
-		Refs   []string `json:"refs"`
+		Body    string   `json:"body"`
+		Origin  string   `json:"origin"`
+		Refs    []string `json:"refs"`
+		Grammar bool     `json:"grammar"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -120,6 +121,10 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 	}
 
 	for _, row := range rows {
+		if row.Grammar {
+			// Only text.Mentions, which reads a bare key, a `#id` and an id prefix, cites these.
+			continue
+		}
 		t.Run(row.Body, func(t *testing.T) {
 			server := row.Origin
 			if server == "" {
