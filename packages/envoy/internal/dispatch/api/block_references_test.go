@@ -203,6 +203,7 @@ func latestVersion(t *testing.T, database *store.Store, artifactID string) model
 // inside a block as an edge out of the innermost block holding it, dated by the version that wrote
 // it and the event that recorded that version.
 func TestAVersionIndexesItsBlocksAndTheMentionsInThem(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -277,6 +278,7 @@ func TestAVersionIndexesItsBlocksAndTheMentionsInThem(t *testing.T) {
 // another paragraph moves only that one. Deleting the callout records both texts as gone, and
 // restoring the callout's id records it anew.
 func TestABlocksChangedVersionMovesOnlyWithItsText(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	callout := func(body string) string { return ":::callout{#ship_it kind=\"note\" title=\"\"}\n" + body + "\n:::" }
@@ -338,6 +340,7 @@ func TestABlocksChangedVersionMovesOnlyWithItsText(t *testing.T) {
 // throughout: each such version's event names it, and the count reads one per citing block plus
 // the target's own spec, attached_to it: 2, 3, 2.
 func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -375,6 +378,7 @@ func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
 // leaves its document owed: issue creation, the edit route, the upload route (a new document and
 // a replacement) and an accepted suggestion.
 func TestEveryVersionWriteLeavesItsDocumentIndexed(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	requireWritten := func(path, artifactID, text string) {
@@ -455,6 +459,7 @@ func requireReferenceNotFound(t *testing.T, handler http.Handler, query url.Valu
 // comment's block holding the link (R7). The document's blocks are part_of it, an edge its read
 // lists only when asked for.
 func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -515,6 +520,7 @@ func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
 // A2: deleting a block takes it out of the graph, so its reference answers 404 naming it; a
 // version that holds its id again brings back every link written to it.
 func TestReferencesToADeletedBlockAnswer404AndReturnWithTheBlock(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -533,6 +539,7 @@ func TestReferencesToADeletedBlockAnswer404AndReturnWithTheBlock(t *testing.T) {
 
 // R7: a document's own links are listed once each, from the block holding it.
 func TestReferencesFromADocumentNameTheBlockHoldingEachLink(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -552,6 +559,7 @@ func TestReferencesFromADocumentNameTheBlockHoldingEachLink(t *testing.T) {
 // R7: a mention a document's block holds is listed from that block, with the block's text as its
 // excerpt: the excerpt the document's own row showed before.
 func TestAMentionABlockHoldsIsListedFromTheBlock(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -571,6 +579,7 @@ func TestAMentionABlockHoldsIsListedFromTheBlock(t *testing.T) {
 // A node one document cites from two blocks is cited twice: its count and its list each hold
 // both blocks' mentions, beside the target's own spec, attached_to it.
 func TestBacklinkCountsCountEachCitingBlock(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	target := createReferenceAPIIssue(t, handler, "CORE")
@@ -594,6 +603,7 @@ func TestBacklinkCountsCountEachCitingBlock(t *testing.T) {
 // block of the spec, and a comment that cites the block and the spec, each reference the spec
 // once; the citing document's outgoing link is the block, carrying the spec as its document.
 func TestArtifactReferencesKeepADocumentThatCitesOnlyABlock(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -617,6 +627,7 @@ func TestArtifactReferencesKeepADocumentThatCitesOnlyABlock(t *testing.T) {
 
 // R6, A10: every block GET …/blocks lists is a node part_of its document, and no other is.
 func TestEveryBlockIsPartOfItsDocument(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createSpecIssue(t, handler, "CORE", "# Plan\n\n"+shipIt("Ship it.")+"\n\n- First item\n- Second item\n\nClosing paragraph.\n")
@@ -641,6 +652,7 @@ func TestEveryBlockIsPartOfItsDocument(t *testing.T) {
 // R7, contract item 2: list items and table cells are not nodes, so a link in a list item starts
 // at the item's paragraph and one in a table cell starts at the table.
 func TestALinkInAListItemStartsAtTheItemsParagraph(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -673,6 +685,7 @@ func TestALinkInAListItemStartsAtTheItemsParagraph(t *testing.T) {
 // and outgoing list, the citing issue's closure and the block links between the two documents;
 // restoring the block with its id brings every one back.
 func TestADeletedBlockLeavesEveryListAndReturnsWithItsID(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -761,6 +774,7 @@ func pinnedParagraph(middle string) string {
 // changed since; the unpinned reference shows the whole current text. An edge's end at the block
 // carries only the excerpt.
 func TestAPinnedReferenceShowsItsVersionsText(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	original, changed := pinnedParagraph("ORIGINALMIDDLETEXT20"), pinnedParagraph("REPLACEDMIDDLETEXT20")
@@ -802,6 +816,7 @@ func TestAPinnedReferenceShowsItsVersionsText(t *testing.T) {
 // "Changed" compares the current text with the pinned version's, not the history between: a text
 // that changed and went back reads unchanged.
 func TestAPinnedReferenceWhoseTextReturnedIsUnchanged(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n\nP says one thing.\n")
@@ -826,6 +841,7 @@ func TestAPinnedReferenceWhoseTextReturnedIsUnchanged(t *testing.T) {
 // deleted block; the unpinned reference answers 404. Restored with its id, the block reads as its
 // text compares again.
 func TestAPinnedReferenceToADeletedBlockSaysItWasRemoved(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -869,6 +885,7 @@ func TestAPinnedReferenceToADeletedBlockSaysItWasRemoved(t *testing.T) {
 // A pin the index cannot read answers 404 saying why: a version the document lacks, a version an
 // older build wrote and no block-aware build indexed, and a version that did not hold the block.
 func TestAPinnedReferenceAnswers404ForAVersionItCannotRead(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n")
@@ -896,6 +913,7 @@ func TestAPinnedReferenceAnswers404ForAVersionItCannotRead(t *testing.T) {
 // stores, or past what fits in 64 bits but still a well-formed `@v<N>` - names a version the
 // document lacks: 404 saying so, as for any other missing version, never a server error.
 func TestAPinPastEveryVersionNumberAnswers404(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")
@@ -913,6 +931,7 @@ func TestAPinPastEveryVersionNumberAnswers404(t *testing.T) {
 // One byte more names no indexed target in text, but a route reads the block it names whatever
 // its length: the document holds no block `xy`, so that is 404 NOT_FOUND.
 func TestABlockReferenceAtTheTargetBoundIsWrittenAndRead(t *testing.T) {
+	t.Parallel()
 	_, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cites a block at the target bound", "Context paragraph.\n")
 	// The slug of `<hex>.md` is `<hex>-md`, so the target id `<key>/<hex>-md#x` is the bound.

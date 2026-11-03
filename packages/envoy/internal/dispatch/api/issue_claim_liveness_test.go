@@ -21,6 +21,7 @@ import (
 // record instead, so a holder the list has dropped keeps its issue - judged by the list, this
 // takeover was granted, and two sessions then worked the same issue.
 func TestClaimRefusesAHolderTheLiveListDroppedButTheStoreStillHolds(t *testing.T) {
+	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/registry/session-one":
@@ -72,6 +73,7 @@ func TestClaimRefusesAHolderTheLiveListDroppedButTheStoreStillHolds(t *testing.T
 // session is working, so the claim is refused as unavailable. "Unknown, therefore free" would
 // hand a working session's issue to another on a transport error, which no later read undoes.
 func TestClaimRefusesWhenTheHoldersSessionReadDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	var refusing atomic.Bool
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1/registry/") {

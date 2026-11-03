@@ -8,6 +8,7 @@ import (
 )
 
 func TestArtifactBlocksReferenceCanonicalMarkdownByteRanges(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{

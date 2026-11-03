@@ -183,6 +183,7 @@ func deliveryReceiptsOf(t *testing.T, database *store.Store, receiptType, field,
 // of its own, which still fits every try a case's take-over takes: a receipt timeout's 300 ms try
 // and its retry, and the starting gate's two retries 250 ms and 750 ms after the first try.
 func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
+	t.Parallel()
 	listener := startTakeOverListener(t)
 	handler, database, _ := newTestServer(t, testServerOptions{
 		envoyURL: listener.server.URL, envoyTimeout: 300 * time.Millisecond, takeoverWindow: 3 * time.Second,
@@ -279,6 +280,7 @@ func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
 // With no listener configured there is no take-over to wait out: the send settles failed at once,
 // well inside the production window the server runs.
 func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{takeoverWindow: listenerTakeoverWindow})
 	started := time.Now()
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages",
@@ -301,9 +303,11 @@ func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
 // reaches its session once, under attempt 1, with one receipt. The listener refuses until two
 // tries have found the attempt held and a sweep pass has run, so the fourth try - 1.75 s of
 // backoff after the first - is the one it answers, and the claim is read at four points across
-// three renewals. The server's window is 3 s: it still admits that fourth try with over a second
-// to spare, and the production twelve would only lengthen a failure.
+// three renewals. The server's window is thirty seconds, a give-up bound rather than a
+// measurement: what ends the wait here is the listener answering the fourth try, and a window
+// tight around that try is a window a loaded machine runs out before the try arrives.
 func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, table, column, receipt, path string
 		body                               map[string]any
@@ -325,7 +329,7 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			listener := startTakeOverListener(t)
 			handler, database, deps := newTestServer(t, testServerOptions{
-				envoyURL: listener.server.URL, takeoverWindow: 3 * time.Second,
+				envoyURL: listener.server.URL, takeoverWindow: 30 * time.Second,
 			})
 			path := tc.path
 			if path == "" {

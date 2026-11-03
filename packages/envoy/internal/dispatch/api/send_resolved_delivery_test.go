@@ -15,6 +15,7 @@ import (
 // and offers it no same-mode Retry. That holds only while every failure sendResolvedDelivery reports
 // comes with no envelope id: one beside a failure would read as the session's own error answer.
 func TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure(t *testing.T) {
+	t.Parallel()
 	session := "s1"
 	live := ResolvedMention{Target: "session:s1", Delivery: "steer", SessionID: &session}
 	for _, tc := range []struct {

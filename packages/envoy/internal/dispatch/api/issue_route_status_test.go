@@ -159,6 +159,7 @@ func requireReach(t *testing.T, handler http.Handler, key, status, holder string
 }
 
 func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-other", "reviewer")
 	handler, _ := routeStatusServer(t, roster)
@@ -175,6 +176,7 @@ func TestRoleRouteReadsNoHolderUntilASessionClaimsTheRole(t *testing.T) {
 }
 
 func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-worker")
 	handler, _ := routeStatusServer(t, roster)
@@ -187,6 +189,7 @@ func TestSessionRouteReadsLiveOnlyWhileTheSessionIsListed(t *testing.T) {
 }
 
 func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -198,12 +201,14 @@ func TestRouteStatusIsUnknownWhenTheListenerDoesNotAnswer(t *testing.T) {
 }
 
 func TestRouteStatusIsUnknownWithoutAConfiguredListener(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	key := routedIssueKey(t, handler, "role:sre")
 	requireReach(t, handler, key, "unknown", "")
 }
 
 func TestUnroutedIssueHasNoRouteStatusAndCostsNoListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	handler, _ := routeStatusServer(t, roster)
 	key := routedIssueKey(t, handler, "")
@@ -232,6 +237,7 @@ func seedRoutedIssues(t *testing.T, handler http.Handler, database *store.Store,
 }
 
 func TestIssueListResolvesEveryRouteWithOneListenerCall(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, database := routeStatusServer(t, roster)
@@ -268,6 +274,7 @@ func TestIssueListResolvesEveryRouteWithOneListenerCall(t *testing.T) {
 }
 
 func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _ := routeStatusServer(t, roster)
@@ -332,6 +339,7 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 // - points an operator at the listener). A read that only shows a route still serves the issue,
 // with its route unknown.
 func TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, database := routeStatusServer(t, roster)
@@ -375,6 +383,7 @@ func secondRouteStatusServer(t *testing.T, served *server) (http.Handler, *serve
 // on the second because the second asked the listener a moment later, and the second makes no
 // call of its own. Both TTLs are a minute, so a slow machine's reads stay inside them.
 func TestTwoServersJudgeARouteAgainstTheOneStoredListenerAnswer(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.set("ses-sre", "sre")
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -402,6 +411,7 @@ func TestTwoServersJudgeARouteAgainstTheOneStoredListenerAnswer(t *testing.T) {
 // unknown too, without a call of its own, even though the listener answers again by then. The
 // silence is a minute, so a slow machine's reads stay inside it.
 func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
+	t.Parallel()
 	roster := &fakeRoster{}
 	roster.down.Store(true)
 	handler, _, served := cachedRouteStatusServer(t, roster)
@@ -432,6 +442,7 @@ func TestAListenerFailureOneServerMetReadsUnknownOnTheOther(t *testing.T) {
 // stored, and the reads waiting on it are served that newer answer. The listener holds its first
 // call and answers it with nobody; every later call lists ses-sre holding sre.
 func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	gate := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

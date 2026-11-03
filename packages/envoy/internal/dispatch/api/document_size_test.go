@@ -81,6 +81,7 @@ func requireSize(t *testing.T, read string, version model.Version, want int) {
 // history: the document service saw no render, and a load failure armed before the reads is still
 // waiting for the first read that loads the document.
 func TestArtifactListsGiveANearCapDocumentsStoredSizeWithoutRenderingIt(t *testing.T) {
+	t.Parallel()
 	var broken *invalidLoadOnceStore
 	watch := &renderWatch{}
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -188,6 +189,7 @@ func TestArtifactListsGiveANearCapDocumentsStoredSizeWithoutRenderingIt(t *testi
 // version and its artifact.version event, and the cited document's versions on an issue's
 // reference closure and on a document's outgoing references.
 func TestEveryVersionAWriteOrAReferenceReadAnswersCarriesItsStoredSize(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const cited = "Spec.\n"
 	target := createInteractionIssue(t, handler, "TEST", "Transport decision", cited)

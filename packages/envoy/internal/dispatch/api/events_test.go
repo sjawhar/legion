@@ -15,6 +15,7 @@ import (
 )
 
 func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Raw event payload", "A spec")
 	fixtures := []struct {
@@ -66,6 +67,8 @@ func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
 }
 
 func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	handler, database := rig.handler, rig.database
 	issue := createInteractionIssue(t, handler, "TEST", "Event response bytes", "A spec")
@@ -252,6 +255,7 @@ func createTitledChild(t *testing.T, handler http.Handler, title, parent string)
 // with the issue's ancestors, parent first. A status move names everyone with a Replies row on the
 // issue's threads, and nobody else; a retitle names the issues whose panels show the title.
 func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	root := createInteractionIssue(t, handler, "TEST", "Root of the tree", "A spec")
 	child := createTitledChild(t, handler, "Middle of the tree", root.Key)
@@ -328,6 +332,7 @@ func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 // names every blocker its write added or removed, and no other: a create every blocker it holds, a
 // PATCH the ones that came or went. A retitle that also moves blockers names each once.
 func TestIssueEventsNameTheBlockersTheyMove(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	create := func(title string, blockedBy []string) model.Issue {
 		t.Helper()
@@ -391,6 +396,7 @@ func TestIssueEventsNameTheBlockersTheyMove(t *testing.T) {
 // user_state.updated says which of pinned, last_read_seq and dismissed the write moved, so a tab
 // refreshes its pinned list for a pin and not for a read mark. It carries no issue key.
 func TestUserStateEventSaysWhichFieldsMoved(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Pinned", "A spec")
 	type stateEvent struct {
@@ -421,6 +427,8 @@ func TestUserStateEventSaysWhichFieldsMoved(t *testing.T) {
 // gives an answer, so a client can read the list's length. A live frame is read through the same
 // attachAskEventFields (TestLiveAskEventFrameCarriesTheReadTimeFields).
 func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	handler, database := rig.handler, rig.database
 	issue := createInteractionIssue(t, handler, "TEST", "Null selected events", "A spec")

@@ -22,6 +22,7 @@ import (
 // deeper, settlement writes no version and both reads answer 409 DOC_SCHEMA naming the repair: the
 // stored tree is outside the schema, and a replacement from markdown repairs it.
 func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name     string
 		depth    int

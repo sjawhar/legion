@@ -35,6 +35,8 @@ func requireEdgeSources(t *testing.T, stage string, edges []model.GraphEdge, wan
 // claim's block to the requirement, listed and queried by that name, and is the only link the
 // pointer makes: neither the claim nor its document lists a mentions edge beside it.
 func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
+	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
+	// which every test in this process parses against.
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
@@ -83,6 +85,8 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 // it: the claim's serves and answers edges from the claim, and the mention from the claim's
 // paragraph. Dropping the prose keeps the pointer's edge as it was first written.
 func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
+	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
+	// which every test in this process parses against.
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
 		"serves":  {Kind: "block[]", Targets: []string{"requirement"}},
 		"answers": {Kind: "block[]"},
@@ -134,6 +138,8 @@ func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 // citation whatever the target's type (D7). A target retyped back, or deleted and restored, is
 // listed again.
 func TestABlockPointerIsListedOnlyWhileItsTargetHasAnAllowedType(t *testing.T) {
+	// No t.Parallel: pmdoctest.UseBlockSchema swaps pmdoc's package-level block schema,
+	// which every test in this process parses against.
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)

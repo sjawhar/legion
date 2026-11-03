@@ -97,7 +97,7 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 		}
 	})
 	if err != nil {
-		endAgentAfterFailure(ctx, stream, sub, "subscribe to the session's frames", err)
+		s.endAgentAfterFailure(ctx, stream, sub, "subscribe to the session's frames", err)
 		return
 	}
 	var stopRelayOnce sync.Once
@@ -107,7 +107,7 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 	// before the first turn, not after it.
 	if err := source.Watch(sessionID); err != nil {
 		stopRelay()
-		endAgentAfterFailure(ctx, stream, sub, "tell the session a viewer is attached", err)
+		s.endAgentAfterFailure(ctx, stream, sub, "tell the session a viewer is attached", err)
 		return
 	}
 
@@ -171,7 +171,7 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 		case <-rearm.C:
 			if err := source.Watch(sessionID); err != nil {
 				stopRelay()
-				endAgentAfterFailure(ctx, stream, sub, "re-arm the session", err)
+				s.endAgentAfterFailure(ctx, stream, sub, "re-arm the session", err)
 				return
 			}
 			if responding {
@@ -204,16 +204,17 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 }
 
 // endAgentAfterFailure ends a view whose relay call failed with an ended frame (dropped), so its
-// page subscribes again rather than watching a session that never hears of it. It waits
-// agentStreamRetry first: a page answers an ended frame by subscribing again at once, and a relay
-// that keeps failing would otherwise have the page and the subscription take turns as fast as the
-// failure comes back. A view whose own context ended (stopped, or its socket closed) sends nothing.
-func endAgentAfterFailure(ctx context.Context, stream liveStreamer, sub, what string, err error) {
+// page subscribes again rather than watching a session that never hears of it. It waits the
+// server's agentStreamRetryWait first (agentStreamRetry, which a test shortens): a page answers
+// an ended frame by subscribing again at once, and a relay that keeps failing would otherwise
+// have the page and the subscription take turns as fast as the failure comes back. A view whose
+// own context ended (stopped, or its socket closed) sends nothing.
+func (s *server) endAgentAfterFailure(ctx context.Context, stream liveStreamer, sub, what string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
 	slog.Warn("dispatch: an agent view could not "+what+"; it ends, and its page subscribes again", "error", err)
-	if !waitFor(ctx, agentStreamRetry) {
+	if !waitFor(ctx, s.agentStreamRetryWait) {
 		return
 	}
 	_ = stream.SendWait(ctx, liveEnded(sub, liveEndedDropped))

@@ -13,6 +13,7 @@ import (
 // refused by name before anything is written, so a creation over the cap creates nothing, and a
 // retitle over it leaves the title it had.
 func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CAP", "name": "Cap"}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())

@@ -12,6 +12,7 @@ import (
 // it closes the database pool, so a wait that skipped them would close the pool under a worker
 // still writing.
 func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
+	t.Parallel()
 	served := register(http.NewServeMux(), t.Context(), Deps{})
 	started, release := make(chan struct{}), make(chan struct{})
 	served.detached.goDetached(func() {
@@ -42,6 +43,7 @@ func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
 // until the socket ends: production shutdown waits for it before it closes the database pool,
 // which a subscription still reading would otherwise lose under it.
 func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, asUser("alice"))
 	rig.sockets(t, 1)
@@ -67,6 +69,7 @@ func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
 // The background wait holds for the event stream relay, which an events subscription starts and
 // which runs on the server's lifetime after its last subscriber leaves, until that lifetime ends.
 func TestTheBackgroundWaitHoldsForTheEventStreamRelay(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, withBearer("agent-token"))
 	subscribeEvents(t, client, "events", nil)
@@ -78,6 +81,7 @@ func TestTheBackgroundWaitHoldsForTheEventStreamRelay(t *testing.T) {
 // The background wait holds for the delivery hub, which a delivery view starts and which runs on
 // the server's lifetime after its last view closes, until that lifetime ends.
 func TestTheBackgroundWaitHoldsForTheDeliveryHub(t *testing.T) {
+	t.Parallel()
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	seedHubSettings(t, rig.database)
 	client := rig.dial(t, asUser("alice"))
@@ -116,6 +120,7 @@ func requireBackgroundWaitHoldsUntilTheLifetimeEnds(t *testing.T, rig *liveSocke
 // the test that built it, and the background wait would never return once a subscription had
 // started the relay.
 func TestRegisterRefusesANilLifetime(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		refusal, ok := recover().(string)
 		if !ok || !strings.Contains(refusal, "the lifetime parameter is required") {

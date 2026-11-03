@@ -45,6 +45,7 @@ func wantNull(t *testing.T, what string, got *model.ProgressCount) {
 // and null for a spec with no task list; a spec with no task item at all counts the same as one
 // never counted.
 func TestIssueProgressCountsSeededSpecTasks(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	withTasks := createInteractionIssue(t, handler, "TEST", "With tasks",
 		"Plan\n\n- [x] one\n- [ ] two\n  - [x] nested\n- plain item\n")
@@ -62,6 +63,7 @@ func TestIssueProgressCountsSeededSpecTasks(t *testing.T) {
 // box instead of writing `[x]` as text, and the settlement that versions the edit recounts the
 // issue; a `[x] ` written over a plain list item or a paragraph stays literal text.
 func TestIssueProgressFollowsReplaceThatTicksAnItem(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ticking", "- [ ] write it\n- [ ] test it\n\nA paragraph.\n\n- plain\n")
 	wantCount(t, "tasks before", progressOf(t, handler, issue.Key).Tasks, 0, 2)
@@ -116,6 +118,7 @@ func TestIssueProgressFollowsReplaceThatTicksAnItem(t *testing.T) {
 
 // An upload that replaces the spec recounts the issue in the upload's own transaction.
 func TestIssueProgressFollowsSpecUpload(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Uploaded", "- [ ] one\n")
 	wantCount(t, "tasks before", progressOf(t, handler, issue.Key).Tasks, 0, 1)
@@ -140,6 +143,7 @@ func TestIssueProgressFollowsSpecUpload(t *testing.T) {
 // and follows a child's status at once; a grandchild counts toward its parent alone. The list,
 // the page and the pinned list carry the same object.
 func TestIssueProgressCountsDirectChildren(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	root := createInteractionIssue(t, handler, "TEST", "Root", "- [ ] root task\n")
 	createChild := func(title, parent string) string {
@@ -209,6 +213,7 @@ func TestIssueProgressCountsDirectChildren(t *testing.T) {
 // wrote no count (the task a deploy replaces); it leaves current rows alone and finds nothing on
 // a second pass.
 func TestIssueProgressReconciliationCountsDriftedIssues(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	counted := createInteractionIssue(t, handler, "TEST", "Counted", "- [x] a\n- [ ] b\n")
 	uncounted := createInteractionIssue(t, handler, "SECOND", "Uncounted", "- [x] c\n- [x] d\n- [ ] e\n")
@@ -260,6 +265,7 @@ func TestIssueProgressReconciliationCountsDriftedIssues(t *testing.T) {
 // A pass drains a backlog wider than one batch: the first start after the deploy finds every
 // issue uncounted, and more than taskProgressBatch of them must not wait five minutes per fifty.
 func TestIssueProgressReconciliationDrainsMoreThanOneBatch(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	ctx := context.Background()
 	// 60 issues with a one-item task list; a batch is 50, so one pass needs two batches. Created

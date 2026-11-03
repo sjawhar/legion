@@ -191,6 +191,7 @@ const transportAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhi
 // A block ask keeps its text in two places: the ask row and the `:::ask` block. An edit writes
 // both, so the next settlement agrees with the row and leaves it alone (LEGION-265).
 func TestEditedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask edit", "decision", transportAsk, "Which transport?")
 
@@ -245,6 +246,7 @@ func TestEditedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
 // Acceptance 8: the ask's wording is part of the document, so an edit versions it once, crediting
 // the session that edited - never the room's last actor.
 func TestEditedBlockAskWritesOneVersionCreditingTheEditor(t *testing.T) {
+	t.Parallel()
 	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
 	issue, askID := seedBlockAsk(t, handler, "Block ask version", "decision", transportAsk, "Which transport?")
 	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
@@ -290,6 +292,7 @@ func TestEditedBlockAskWritesOneVersionCreditingTheEditor(t *testing.T) {
 // order: the refreshed anchor, then the question it moved under. Both reach the stream from one
 // commit, and nothing may publish before it.
 func TestAnEditedBlockAskPublishesItsDocumentEventsBeforeItsOwn(t *testing.T) {
+	t.Parallel()
 	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -348,6 +351,7 @@ func TestAnEditedBlockAskPublishesItsDocumentEventsBeforeItsOwn(t *testing.T) {
 // Acceptance 7, refused half: an option label carrying ": " cannot round-trip through the
 // block's `Label: Description` line, so the edit is refused whole - no row, block or version.
 func TestEditBlockAskRefusesAnOptionLabelTheBlockCannotCarry(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask refusal", "decision", transportAsk, "Which transport?")
 	beforeVersions := len(documentVersions(t, handler, issue.PrimaryArtifactID))
@@ -384,6 +388,7 @@ func TestEditBlockAskRefusesAnOptionLabelTheBlockCannotCarry(t *testing.T) {
 // change the document's canonical markdown, minting a version on the next anchor or edit and
 // staling the approval of a spec whose words nobody touched.
 func TestAnchoringInASpecWhoseTextARendererMightRewriteWritesNoVersion(t *testing.T) {
+	t.Parallel()
 	handler, database := blockAskHandler(t)
 	const spec = "Intro.\n\nThe path is C:\\\n\nSee [Issue [#42]](https://x.test) for details.\n\n" +
 		"See [`pmdoc.Parse` [source]](https://x.test) for details.\n\n" +
@@ -438,6 +443,7 @@ func storeLatestVersionMarkdown(t *testing.T, database *store.Store, artifactID,
 // the canonical markdown unparseable. The renderer escapes a directive opener now, so the block
 // carries the line and the document still reads back.
 func TestEditBlockAskCarriesAQuestionWithADirectiveLine(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask directive", "decision", transportAsk, "Which transport?")
 
@@ -466,6 +472,7 @@ func TestEditBlockAskCarriesAQuestionWithADirectiveLine(t *testing.T) {
 // marker - a setext underline, a tilde fence, an HTML block opener, a table delimiter row - so
 // the block refused it. The renderer escapes each now and the route carries the question written.
 func TestEditBlockAskCarriesAQuestionWhoseLineLooksLikeABlock(t *testing.T) {
+	t.Parallel()
 	for _, question := range []string{
 		"Which transport?\n==",
 		"Which transport?\n--",
@@ -504,6 +511,7 @@ func TestEditBlockAskCarriesAQuestionWhoseLineLooksLikeABlock(t *testing.T) {
 // the block parses it back - a description-less option renders as a bare label, a single newline
 // survives as a line break, and surrounding whitespace is trimmed rather than refused.
 func TestEditBlockAskAcceptsWhatTheBlockCanCarry(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask normalisation", "decision", transportAsk, "Which transport?")
 
@@ -543,6 +551,7 @@ func TestEditBlockAskAcceptsWhatTheBlockCanCarry(t *testing.T) {
 // Acceptance 5: a retract by a session is a decision, not a settlement artefact, so no later
 // settlement reopens it.
 func TestRetractedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask retract", "decision", transportAsk, "Which transport?")
 
@@ -572,6 +581,7 @@ func TestRetractedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
 // The legacy marker for a settlement-written retraction is its reason, so a caller may not write
 // one that reads like it and be restored the next time the document settles.
 func TestResolveBlockAskRefusesTheSettlementReason(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	_, askID := seedBlockAsk(t, handler, "Block ask spoof", "decision", transportAsk, "Which transport?")
 
@@ -592,6 +602,7 @@ func TestResolveBlockAskRefusesTheSettlementReason(t *testing.T) {
 // Acceptance 5, second half: when the block leaves the document, settlement retracts its ask in
 // its own name, and undoing the deletion brings the ask back.
 func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask deletion", "decision", transportAsk, "Which transport?")
 
@@ -636,6 +647,7 @@ func TestBlockRemovedFromTheDocumentRetractsAsTheSystemActorAndUndoRestores(t *t
 // Acceptance 6: the revision a human reads is the revision they answer, whatever the document
 // does in between.
 func TestAnsweringAfterAnEditAndSettlementSucceeds(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask answer", "decision", transportAsk, "Which transport?")
 
@@ -659,6 +671,7 @@ func TestAnsweringAfterAnEditAndSettlementSucceeds(t *testing.T) {
 // Acceptance 3: the document is still the way a human or `dispatch doc-edit` rewords a block ask,
 // and the row follows it, credited to that editor.
 func TestDocumentEditOfAnAskBlockStillUpdatesTheRow(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask document edit", "decision", transportAsk, "Which transport?")
 
@@ -699,6 +712,7 @@ func TestDocumentEditOfAnAskBlockStillUpdatesTheRow(t *testing.T) {
 // round. They are ordered by the owner row both hold first; if that ever stops being true this
 // deadlocks rather than fails, so it runs under its own deadline.
 func TestConcurrentBlockAskEditsAndSettlementsDoNotDeadlock(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask concurrency", "decision", transportAsk, "Which transport?")
 
@@ -754,6 +768,7 @@ func TestConcurrentBlockAskEditsAndSettlementsDoNotDeadlock(t *testing.T) {
 // characters, and the links among them, exactly where they were - rebuilding the body from the
 // row would flatten them (LEGION-265 review, PROBE B).
 func TestUrgencyOnlyEditLeavesTheQuestionsFormattingAlone(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
 		"- REST: Matches the platform\n:::\n"
@@ -783,6 +798,7 @@ func TestUrgencyOnlyEditLeavesTheQuestionsFormattingAlone(t *testing.T) {
 // The inner paragraph a human's comment is anchored to keeps its block id through an edit that
 // does not rewrite it, so the anchor stays attached (LEGION-265 review, PROBE D).
 func TestUrgencyOnlyEditLeavesAnAnchoredCommentAttached(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask anchor", "decision", transportAsk, "Which transport?")
 
@@ -822,6 +838,7 @@ func TestUrgencyOnlyEditLeavesAnAnchoredCommentAttached(t *testing.T) {
 // ErrNoChanges. That is the ask the caller asked for, not a server fault (LEGION-265 review,
 // PROBE A2).
 func TestRepeatingABlockAskEditSucceeds(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	_, askID := seedBlockAsk(t, handler, "Block ask repeat", "decision", transportAsk, "Which transport?")
 
@@ -841,6 +858,7 @@ func TestRepeatingABlockAskEditSucceeds(t *testing.T) {
 // A rewritten body is the children the markdown pipeline produces, so the bullet list carries the
 // list attributes every other document write gives it rather than a hand-built node's defaults.
 func TestBlockAskOptionsEditWritesAParsedList(t *testing.T) {
+	t.Parallel()
 	handler, database := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask list attrs", "decision", transportAsk, "Which transport?")
 	seeded := askBlockListAttrs(t, database, issue.PrimaryArtifactID)
@@ -904,6 +922,7 @@ func askBlockListAttrs(t *testing.T, database *store.Store, artifactID string) s
 // rewritten: rebuilding nodes that already say the same thing would mint fresh inner block ids
 // and orphan the anchors inside them for no change at all (LEGION-265 review round 3, P3-1).
 func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
 		"- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n"
@@ -964,6 +983,7 @@ func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
 // write and marks it `invalid` at the next settlement. Neither happens: the settlement after the
 // edit rewrites nothing and the ask keeps the options the edit sent.
 func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	const nestedAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n\n" +
 		"- REST: Matches the platform\n" +
@@ -1020,6 +1040,7 @@ func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
 // keeps them whichever fields the request named: a repair that sends the options beside the
 // question sends that joined reading, the only options such a block accepts.
 func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{

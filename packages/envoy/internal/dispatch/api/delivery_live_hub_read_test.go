@@ -93,6 +93,11 @@ func (r *hubRig) recomputesSince(mark int) int {
 // mark is for something committed before the reads that follow, so the one recompute's delta holds
 // both merges and no second recompute follows.
 func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	holds := []struct {
 		name  string
 		match func(deliveryHubNote) bool
@@ -130,7 +135,7 @@ func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 				t.Fatalf("the recompute's delta upserts %v, want both merges", got)
 			}
 			requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
-			rig.waitNoRecompute(t, 2*viewQuiet)
+			rig.waitNoRecompute(t, 2*rig.hub.quiet)
 			holdsSecond := func(note deliveryHubNote) bool {
 				return note.what == "recompute position" && note.through >= second
 			}
@@ -148,6 +153,11 @@ func TestAMarkMadeBeforeAReadTakesItsPositionIsThatReadsToAnswer(t *testing.T) {
 // merges a pull request there, past the read's position: the read never saw it, so the view is
 // marked again and a second recompute sends it.
 func TestAChangeAfterAReadsPositionRecomputesTheViewAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
@@ -191,6 +201,11 @@ func TestAChangeAfterAReadsPositionRecomputesTheViewAgain(t *testing.T) {
 // nothing; the reset's own mark, which the read cannot take over since its position may name the
 // old log, recomputes the view again and sends the merge.
 func TestAChangeLogResetDuringAReadKeepsTheViewDirty(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
@@ -239,6 +254,11 @@ func TestAChangeLogResetDuringAReadKeepsTheViewDirty(t *testing.T) {
 // names it under its old title, so the recompute marks the view again and the next one sends the
 // new title.
 func TestAnIssueTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)
@@ -276,6 +296,11 @@ func TestAnIssueTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testi
 // the read is held. The read shows the session by its id, so the recompute marks the view again
 // and the next one sends the title.
 func TestASessionTitleChangeDuringTheReadThatFirstNamesItRecomputesAgain(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	var pause *notePause
 	rig := newHubRig(t, func(hub *deliveryHub) { pause = pauseNotes(hub) })
 	seedHubSettings(t, rig.database)

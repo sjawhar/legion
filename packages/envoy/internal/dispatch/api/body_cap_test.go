@@ -15,6 +15,7 @@ import (
 // truncates - and one unit over it is refused 400 CAP_EXCEEDED naming the count, by the same
 // wording on every route (INFRA-45).
 func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "CAP", "Body cap", "before")

@@ -136,6 +136,7 @@ func nulListener(t *testing.T) *httptest.Server {
 // member name, a multipart upload's every field and its markdown file, and every path and query
 // parameter, so each row below is a route and one of its text fields.
 func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
+	t.Parallel()
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
 	f := newNulFixture(t, handler)
 	awaitBackgroundWrites(t, served)
@@ -239,6 +240,7 @@ func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
 // A path or query parameter reaches a query as a read's text too, where PostgreSQL refuses a NUL as
 // it refuses one written, so a read refuses it the same way.
 func TestAReadRefusesANulInItsParameters(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "NUL reads", "before\n")
 	for _, row := range []struct {
@@ -265,6 +267,7 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 // type. Each failed with a 500 or, for the markdown file, panicked the document writer and dropped
 // the connection. A markdown file stores no part header, so its Content-Type is not checked.
 func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
+	t.Parallel()
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Not UTF-8", "before\n")
 	awaitBackgroundWrites(t, served)
@@ -298,6 +301,7 @@ func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
 // whose own name spells one (RFC 2231's name* form, x%00y) is named with the six characters
 // \u0000, as a JSON member name or a query parameter name holding one is.
 func TestARefusalSendsBackNoNul(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Field name NUL", "before\n")
 	var body bytes.Buffer
@@ -335,6 +339,7 @@ func TestARefusalSendsBackNoNul(t *testing.T) {
 // against its own PostgreSQL, and Dispatch is the only caller of those routes: a code holding a NUL
 // is refused here and never relayed.
 func TestTheCredentialRelayRefusesANulBeforeTheBroker(t *testing.T) {
+	t.Parallel()
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 	for _, target := range []string{
@@ -361,6 +366,7 @@ func TestTheCredentialRelayRefusesANulBeforeTheBroker(t *testing.T) {
 // is, the character fails settlement every time it runs, and every edit or named version of the
 // document with it.
 func TestABrowsersNulLeavesTheDocumentVersionable(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		spec string
@@ -450,6 +456,7 @@ func TestABrowsersNulLeavesTheDocumentVersionable(t *testing.T) {
 // store. Settlement mints such an id again as it mints a missing one, so the document settles: the
 // ask is indexed under the new id and the version holds no NUL.
 func TestABlockIDHoldingANulIsMintedAgain(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		spec string
@@ -502,6 +509,7 @@ func TestABlockIDHoldingANulIsMintedAgain(t *testing.T) {
 // such an id again would leave the answered row behind and index the block as a fresh open ask, the
 // question the human already answered back in their inbox.
 func TestABlockIDTheEditorKeepsFromAPasteSurvivesSettlement(t *testing.T) {
+	t.Parallel()
 	for _, id := range []string{"q:1", "décision"} {
 		t.Run(id, func(t *testing.T) {
 			documentService, handler, database := browserDocumentService(t)
@@ -565,6 +573,7 @@ func describeAsks(asks []model.Ask) string {
 // a comment or an ask anchored inside that block is pinned to no block, as one spanning top-level
 // blocks is, rather than storing an id its row cannot hold.
 func TestAnAnchorInABlockWhoseLiveIDHoldsANulIsUnpinned(t *testing.T) {
+	t.Parallel()
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unsettled NUL id", "before\n")
 	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
@@ -600,6 +609,7 @@ func TestAnAnchorInABlockWhoseLiveIDHoldsANulIsUnpinned(t *testing.T) {
 // serves it as U+FFFD, as it serves the character in text, and a named version is stored with it
 // so. A typed block writes its id bare, `#` and the id, beside the attributes it writes quoted.
 func TestABlockIDHoldingANulIsServedAndVersionedAsAReplacementCharacter(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		spec  string
@@ -643,6 +653,7 @@ func TestABlockIDHoldingANulIsServedAndVersionedAsAReplacementCharacter(t *testi
 // replace's target, and a `# Title` quote and a `heading:` anchor find their heading. Text holding
 // the U+0000 itself is refused at the input layer.
 func TestAQuoteMatchesABrowsersNulAsEveryReadServesIt(t *testing.T) {
+	t.Parallel()
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Quote over a NUL", "# Plan\n\nbefore\n")
 	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)

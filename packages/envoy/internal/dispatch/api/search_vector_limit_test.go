@@ -18,6 +18,7 @@ import (
 // document's own bounds. Settlement's own version write is the docs package's
 // TestSettlementVersionsADocumentPastTheSearchVectorLimit.
 func TestADocumentPastTheSearchVectorLimitVersionsAndIsFound(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	markdown := searchtest.DistinctWords(100_000, "\n\n")
@@ -67,6 +68,7 @@ func TestADocumentPastTheSearchVectorLimitVersionsAndIsFound(t *testing.T) {
 // TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening writes such a title straight
 // into issues, where the trigger still indexes its opening.
 func TestAnIssueTitlePastTheSearchVectorLimitIsRefused(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "WORDS", "name": "Words"}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())

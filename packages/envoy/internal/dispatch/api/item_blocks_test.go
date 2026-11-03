@@ -136,6 +136,7 @@ func carriedBlocks(pairs ...any) []map[string]any {
 // unchanged ones keeps its id at a new revision, a deleted one is removed, and the same text
 // written back takes the id back.
 func TestACommentsEditKeepsItsBlockIDs(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Comment blocks", "before")
 	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "First.\n\nSecond.\n\nThird."}, "alice")
@@ -180,6 +181,7 @@ func TestACommentsEditKeepsItsBlockIDs(t *testing.T) {
 // reconciliation (refs.ReindexOwedItem): nothing recorded when those blocks were made, so each
 // has no making time, while a block a later edit adds is made at that edit.
 func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Older comment", "before")
 	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Old one.\n\nOld two."}, "alice")
@@ -221,6 +223,7 @@ func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 // alone would lose it. A carried list made against a revision that is no longer the comment's is
 // ignored, and the ids follow the text.
 func TestTheEditorsCarriedIDsSurviveMoveRewordAndSplit(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carried ids", "before")
 	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta.\n\nGamma."}, "alice")
@@ -262,6 +265,7 @@ func TestTheEditorsCarriedIDsSurviveMoveRewordAndSplit(t *testing.T) {
 // splits at blank lines into blocks of type text; adding block HTML elsewhere in a comment keeps
 // an unchanged paragraph's id and changed revision.
 func TestABodyWithBlockHTMLReadsBackByteForByte(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Block HTML", "before")
 	body := "Intro paragraph.\r\n\r\n<div align=\"center\">\n  raw <b>html</b>\n</div>\n\n\tClosing."
@@ -291,6 +295,7 @@ func TestABodyWithBlockHTMLReadsBackByteForByte(t *testing.T) {
 // Each wrong field of a carried list is refused with 400 INVALID_COMMENT naming it, and the
 // comment is left as it was.
 func TestBadCarriedIDsAreRefused(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Bad carried ids", "before")
 	body := "Alpha.\n\nBeta."
@@ -420,6 +425,7 @@ func itemBlockRefs(t *testing.T, database *store.Store, kind, itemID string) []s
 // reply to it, and a session's delivery callback reply to a comment. (Each copy of a broadcast is
 // covered in TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest.)
 func TestEveryMessageWriteIndexesItsBlocks(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Message blocks", "before")
@@ -497,6 +503,7 @@ func TestEveryMessageWriteIndexesItsBlocks(t *testing.T) {
 // and referenced_by_count counts each citing paragraph. A link that moves between two blocks of a
 // comment is a change the edit's event names, though the comment still cites the target.
 func TestAMentionStartsAtItsBlock(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Mentions in blocks", "before")
 	target := createInteractionIssue(t, handler, "ACME", "Cited issue", "before")
@@ -577,6 +584,7 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 // link moved from one block to another. An edit that moves a link past the head names that target
 // alone, and one that moves only the head names every cited target though no block row moved.
 func TestACommentEditNamesItsMovedHeadAndItsMovedLinks(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Edits that move links", "before")
 	headTarget := createInteractionIssue(t, handler, "ACME", "Cited in the head", "before")
@@ -639,6 +647,7 @@ func TestACommentEditNamesItsMovedHeadAndItsMovedLinks(t *testing.T) {
 // does not hold answers 404, and a message block pinned to a revision is no reference. A reply
 // that names a block of the item read is listed once, under that block, and belongs to it.
 func TestABlockOfACommentIsAddressable(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Comment block references", "before")
 	x := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta."}, "alice")
@@ -742,6 +751,7 @@ func TestABlockOfACommentIsAddressable(t *testing.T) {
 // removed (after an edit deletes it, with the revision that removed it). The unpinned link reads
 // the current text, or 404 once the block is gone; a pin past the comment's revision answers 404.
 func TestAPinnedCommentBlockReadsItsRevision(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Pinned comment blocks", "before")
 	x := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta."}, "alice")
@@ -827,6 +837,7 @@ func describeRevision(revision *int) string {
 // message is read under GET /api/v1/messages/{id}'s rule: a session reads a direct message's
 // blocks only in a conversation it is in, and they have no reference.
 func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
+	t.Parallel()
 	handler, database, direct, reply, _ := directConversationFrom(t, "alice")
 	issue := createInteractionIssue(t, handler, "TEST", "Blocks routes", "before")
 	read := func(step, path string, human bool) (model.ItemBlocks, string) {
@@ -990,6 +1001,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 // or the message's, which GET /api/v1/messages/{id}/blocks reads only to a session in the
 // conversation.
 func TestADirectMessagesBlockHasNoAddress(t *testing.T) {
+	t.Parallel()
 	handler, _, direct, _, _ := directConversationFrom(t, "alice")
 	for _, key := range []string{"TEST-1", "NONE-9"} {
 		reference := "dispatch://" + key + "/message/" + direct.ID + "#b-b1"

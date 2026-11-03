@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,29 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// apiTestParallelism is how many of this package's parallel tests run at once when the command
+// line names no -parallel of its own. go test's default is GOMAXPROCS, four on CI's runner,
+// which leaves most of both machines idle here: a CPU profile of a run of these tests spent
+// 2.2 % of its wall time on this process's CPU and the rest waiting on Postgres round trips, so
+// four at a time is four waits at a time.
+//
+// What bounds the number is the database's connections rather than the runner's cores. CI's
+// Postgres service takes PostgreSQL's default max_connections of 100, less the three it reserves,
+// and a test holds a handful of the sixteen its store's pool allows (storetest's testPoolSize),
+// beside the harness's admin pool and its reset workers. Sixteen reached that limit - a test
+// opening a database of its own was refused "sorry, too many clients already" - and twelve did
+// not.
+//
+// A -parallel on the command line still wins: go test parses its flags inside M.Run, which
+// storetest.Main calls after this.
+const apiTestParallelism = 12
+
+func TestMain(m *testing.M) {
+	if err := flag.Set("test.parallel", strconv.Itoa(apiTestParallelism)); err != nil {
+		panic("set this package's default -parallel: " + err.Error())
+	}
+	os.Exit(storetest.Main(m))
+}
 
 // sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
 func sharedAgentTokens(t testing.TB, setting string) *auth.SharedAgentTokens {
@@ -89,6 +113,13 @@ type testServerOptions struct {
 	// agentWatchInterval replaces how often an agent view re-arms its session (ten seconds), so a
 	// test of the re-arm need not wait one out.
 	agentWatchInterval time.Duration
+	// agentStreamRetry replaces how long an agent view whose relay call failed waits before it
+	// ends as dropped (agentStreamRetry, one second); zero keeps it.
+	agentStreamRetry time.Duration
+	// legionStatusSQL replaces the statement the legion-label walk runs (server.legionStatusSQL);
+	// empty runs the production statement. Only the claim tests of a failing and of a hanging
+	// walk set it.
+	legionStatusSQL string
 	// embedder wires meaning search (LEGION-549); nil (every test but the meaning search tests'
 	// own) is the deployment with no embedder configured, where search answers keyword-only.
 	embedder embed.Embedder
@@ -103,6 +134,11 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// callerRecheck replaces how often a socket resolves its caller again (Deps.CallerRecheck);
+	// zero leaves it at the heartbeat, as every deployment has it. A test whose subject is that
+	// re-resolution sets a short one and a long heartbeat, so it waits on resolutions rather
+	// than on heartbeats and its page never has to answer a ping to keep its socket.
+	callerRecheck time.Duration
 	// takeoverWindow replaces the listener take-over window (Deps.ListenerTakeoverWindow); zero is
 	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
 	// for the production twelve seconds.
@@ -151,6 +187,24 @@ func seedPeople(t testing.TB, database *store.Store, emails ...string) {
 		}
 	}
 }
+
+// dropWhenDone runs each statement when t ends, before the harness takes the database back.
+// storetest.Open hands a test a database off a free list and puts it back once a reset has
+// emptied its tables; that reset restores rows, and the fingerprint that decides whether a
+// database may go back at all reads the tables and columns of schema public, so a function or a
+// trigger a test left behind rides into the next test that opens that database and fails it.
+// Every test here that creates one drops it through this.
+func dropWhenDone(t *testing.T, database *store.Store, statements ...string) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, statement := range statements {
+			if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+				t.Errorf("undo what this test added to its database (%s): %v", statement, err)
+			}
+		}
+	})
+}
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{})
@@ -230,6 +284,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		GitHubAPIBase:          options.githubAPIBase,
 		TestHooksEnabled:       options.testHooks,
 		StreamHeartbeat:        options.streamHeartbeat,
+		CallerRecheck:          options.callerRecheck,
 		EnvoyURL:               options.envoyURL,
 		EnvoyTimeout:           options.envoyTimeout,
 		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),
@@ -251,6 +306,10 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if options.agentWatchInterval != 0 {
 		served.agentWatchInterval = options.agentWatchInterval
 	}
+	if options.agentStreamRetry != 0 {
+		served.agentStreamRetryWait = options.agentStreamRetry
+	}
+	served.legionStatusSQL = options.legionStatusSQL
 	// waitBackground, as production's shutdown calls it: every keyed handler and every delivery a
 	// handler detached from its request, then the sockets, the hub, the relay and the test hooks'
 	// listener. A broadcast's deliveries and a keyed handler outlive the client that started them,
@@ -312,11 +371,18 @@ func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessi
 	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))
 }
 
-// waitForDatabaseLocks waits up to 2 s for want backends to queue behind a lock that holder's
-// transaction owns (storetest.WaitForLockWaiters), and fails the test when they never do.
+// concurrentWait is how long a test waits for work another goroutine must finish before it can
+// go on: a request queued behind a held lock, a backend joining that queue. It is a give-up
+// bound and not a measurement - every caller waits on the event itself and this only decides
+// when a test that will never finish says so - so it is generous rather than tight, since these
+// tests now run beside fifteen others and two seconds was a passing test's failure.
+const concurrentWait = 30 * time.Second
+
+// waitForDatabaseLocks waits for want backends to queue behind a lock that holder's transaction
+// owns (storetest.WaitForLockWaiters), and fails the test when they never do.
 func waitForDatabaseLocks(t *testing.T, holder pgx.Tx, want int) {
 	t.Helper()
-	if queued := storetest.WaitForLockWaiters(t, holder, want, 2*time.Second); queued < want {
+	if queued := storetest.WaitForLockWaiters(t, holder, want, concurrentWait); queued < want {
 		t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock, saw %d", want, queued)
 	}
 }
@@ -326,7 +392,7 @@ func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *h
 	select {
 	case response := <-responses:
 		return response
-	case <-time.After(2 * time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("concurrent request did not complete")
 		return nil
 	}
@@ -514,6 +580,7 @@ func assertCapExceeded(t *testing.T, request string, response *httptest.Response
 }
 
 func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -557,6 +624,7 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 }
 
 func TestCreateIssueWithMissingOrBlankSpecGetsAnEmptyPrimaryDocument(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -604,6 +672,7 @@ func TestCreateIssueWithMissingOrBlankSpecGetsAnEmptyPrimaryDocument(t *testing.
 }
 
 func TestCreateIssueRejectsSpecOutsideProofSchema(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -619,6 +688,7 @@ func TestCreateIssueRejectsSpecOutsideProofSchema(t *testing.T) {
 	}
 }
 func TestDocumentTextReportsUnavailableService(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
@@ -684,6 +754,7 @@ func (failingLoadStore) LoadDocument(context.Context, string) (docs.LoadedDocume
 }
 
 func TestDocumentEditRejectsInvalidOperationField(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -709,6 +780,7 @@ func TestDocumentEditRejectsInvalidOperationField(t *testing.T) {
 }
 
 func TestEventNotifyRules(t *testing.T) {
+	t.Parallel()
 	broker := events.NewBroker()
 	user := model.Actor{Kind: "user", ID: "alice"}
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
@@ -747,6 +819,7 @@ func TestEventNotifyRules(t *testing.T) {
 }
 
 func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -791,6 +864,7 @@ func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
 }
 
 func TestExternalIssueReferenceResolvesBothGitHubURLShapes(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -858,6 +932,7 @@ func TestExternalIssueReferenceResolvesBothGitHubURLShapes(t *testing.T) {
 }
 
 func TestExternalIssueCreationReusesPullRequestLink(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -903,6 +978,7 @@ func TestExternalIssueCreationReusesPullRequestLink(t *testing.T) {
 }
 
 func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 		"external": "unmapped/repository#1",
@@ -915,6 +991,7 @@ func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
 }
 
 func TestExternalIssueUsesDefaultProjectForUnmappedRepository(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithDefaultProject(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "DEFAULT", "name": "Default project",
@@ -946,6 +1023,7 @@ func TestExternalIssueUsesDefaultProjectForUnmappedRepository(t *testing.T) {
 }
 
 func TestExternalIssueExplicitMappingTakesPrecedenceOverDefaultProject(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithDefaultProject(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -981,6 +1059,7 @@ func TestExternalIssueExplicitMappingTakesPrecedenceOverDefaultProject(t *testin
 }
 
 func TestArtifactVersions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1061,6 +1140,7 @@ func agentRequest(t *testing.T, handler http.Handler, method, target string, bod
 }
 
 func TestIssueRouteVersionEventsAndChildStatus(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1157,6 +1237,7 @@ func TestIssueRouteVersionEventsAndChildStatus(t *testing.T) {
 }
 
 func TestListIssueEventsSupportsNewestCursorAndIDLookup(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1262,6 +1343,7 @@ func TestListIssueEventsSupportsNewestCursorAndIDLookup(t *testing.T) {
 }
 
 func TestActorAuthenticationRules(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	unauthenticated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1290,6 +1372,7 @@ func TestActorAuthenticationRules(t *testing.T) {
 }
 
 func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1327,23 +1410,27 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 		t.Fatalf("create comment: status=%d body=%s", comment.Code, comment.Body.String())
 	}
 
-	for _, target := range []string{
-		"/api/v1/projects",
-		"/api/v1/issues",
-		"/api/v1/issues/resolve?ref=" + issue.Key,
-		"/api/v1/issues/" + issue.Key,
-		"/api/v1/issues/" + issue.Key + "/events",
-		"/api/v1/issues/" + issue.Key + "/artifacts",
-		"/api/v1/asks/" + ask.ID,
-		"/api/v1/issues/" + issue.Key + "/comments",
-		"/api/v1/artifacts/" + issue.PrimaryArtifactID,
-		"/api/v1/artifacts/" + issue.PrimaryArtifactID + "/text",
-		"/api/v1/artifacts/" + issue.PrimaryArtifactID + "/versions/1",
+	// Each case is named for the route it reads rather than for the target it reads it at,
+	// because an artifact id and an ask id are minted by the run and a subtest named after one
+	// is a different test in every run, which no before-and-after comparison of two runs can
+	// pair up.
+	for _, route := range []struct{ name, target string }{
+		{name: "the projects", target: "/api/v1/projects"},
+		{name: "the issues", target: "/api/v1/issues"},
+		{name: "an issue resolved by reference", target: "/api/v1/issues/resolve?ref=" + issue.Key},
+		{name: "an issue", target: "/api/v1/issues/" + issue.Key},
+		{name: "an issue's events", target: "/api/v1/issues/" + issue.Key + "/events"},
+		{name: "an issue's artifacts", target: "/api/v1/issues/" + issue.Key + "/artifacts"},
+		{name: "an ask", target: "/api/v1/asks/" + ask.ID},
+		{name: "an issue's comments", target: "/api/v1/issues/" + issue.Key + "/comments"},
+		{name: "an artifact", target: "/api/v1/artifacts/" + issue.PrimaryArtifactID},
+		{name: "an artifact's text", target: "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/text"},
+		{name: "an artifact version", target: "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/versions/1"},
 	} {
-		t.Run(target, func(t *testing.T) {
-			response := agentRequest(t, handler, http.MethodGet, target, nil, "agent-token")
+		t.Run(route.name, func(t *testing.T) {
+			response := agentRequest(t, handler, http.MethodGet, route.target, nil, "agent-token")
 			if response.Code != http.StatusOK {
-				t.Fatalf("bearer read: status=%d body=%s", response.Code, response.Body.String())
+				t.Fatalf("bearer read of %s: status=%d body=%s", route.target, response.Code, response.Body.String())
 			}
 		})
 	}
@@ -1359,6 +1446,7 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 }
 
 func TestPerUserIssueStateIsIsolated(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1395,6 +1483,7 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 }
 
 func TestUserIssueStateSequenceRejectsStaleWrites(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1444,6 +1533,7 @@ func TestUserIssueStateSequenceRejectsStaleWrites(t *testing.T) {
 }
 
 func TestMessageMutationAppendsAndPublishesEvent(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1472,6 +1562,7 @@ func TestMessageMutationAppendsAndPublishesEvent(t *testing.T) {
 }
 
 func TestResolveIssueRejectsMalformedNativeKey(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/resolve?ref=TEST-not-a-number", nil, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ISSUE_REF"`) {
@@ -1480,6 +1571,7 @@ func TestResolveIssueRejectsMalformedNativeKey(t *testing.T) {
 }
 
 func TestArtifactUploadRecognizesParameterizedMarkdown(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1512,6 +1604,7 @@ func TestArtifactUploadRecognizesParameterizedMarkdown(t *testing.T) {
 }
 
 func TestArtifactSlugsIncludeExtensions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1555,6 +1648,7 @@ func TestArtifactSlugsIncludeExtensions(t *testing.T) {
 }
 
 func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1612,6 +1706,10 @@ func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
 }
 
 func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	// The seeded specs' settlement would lock the child row this test holds; keep it
 	// out of the lock queue so only the two status patches are counted as waiters.
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
@@ -1698,6 +1796,10 @@ func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
 }
 
 func TestConcurrentPartialUserStateUpdatesPreserveFields(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1759,6 +1861,7 @@ func TestConcurrentPartialUserStateUpdatesPreserveFields(t *testing.T) {
 }
 
 func TestIssueExternalLinksRequireAbsoluteHTTPURLs(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1791,6 +1894,7 @@ func TestIssueExternalLinksRequireAbsoluteHTTPURLs(t *testing.T) {
 }
 
 func TestDocumentUploadIndexesDispatchReferences(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1830,6 +1934,7 @@ func TestDocumentUploadIndexesDispatchReferences(t *testing.T) {
 }
 
 func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1917,6 +2022,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 }
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
+	t.Parallel()
 	handler, sessions, cookie, request := newCookieServer(t)
 	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
@@ -1956,6 +2062,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 // same room admits the cookie. A bearer once named its own session in a header the socket read,
 // which made it a second, weaker door into Dispatch.
 func TestTheDocumentSocketTakesACookieAndNotTheSharedAgentToken(t *testing.T) {
+	t.Parallel()
 	handler, _, cookie, request := newCookieServer(t)
 	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
@@ -2002,6 +2109,7 @@ func TestTheDocumentSocketTakesACookieAndNotTheSharedAgentToken(t *testing.T) {
 }
 
 func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Named uploads", "before")
 	for _, test := range []struct {
@@ -2031,6 +2139,7 @@ func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
 }
 
 func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/quiesce", nil, "alice")
 	if response.Code != http.StatusNotFound {
@@ -2039,6 +2148,7 @@ func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
 }
 
 func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	body := `{"key":"TEST","name":"Test project"}`
 
@@ -2062,6 +2172,7 @@ func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
 }
 
 func TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(strings.Repeat(" ", 8<<20)))
 	request.Header.Set("Content-Type", "application/json")

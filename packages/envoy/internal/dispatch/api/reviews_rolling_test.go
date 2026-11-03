@@ -76,6 +76,7 @@ func reviewEventSeq(t *testing.T, database *store.Store, reviewID string) int64 
 // The trigger reads an issue document's events on its issue and a project document's on the
 // document itself, so both owners are covered.
 func TestAReviewThePreviousReleaseWritesDuringARolloutReadsAsTheNewest(t *testing.T) {
+	t.Parallel()
 	for _, owner := range []string{"issue document", "project document"} {
 		for _, order := range []struct {
 			name          string
@@ -158,6 +159,7 @@ func TestAReviewThePreviousReleaseWritesDuringARolloutReadsAsTheNewest(t *testin
 // after it, each get their own event's sequence, and a review whose transaction appended no event
 // stays without one whatever other transactions append.
 func TestTheReviewSequenceTriggerTouchesOnlyItsOwnTransactionsReview(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Concurrent reviews", "A spec")
 	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
@@ -220,6 +222,7 @@ func TestTheReviewSequenceTriggerTouchesOnlyItsOwnTransactionsReview(t *testing.
 // migration 0120, which no trigger sequenced). Matched by time alone, the review would take that
 // older event, the oldest one no review holds; it takes its own.
 func TestTheReviewSequenceTriggerTakesNoEventOfATransactionStartedAtTheSameMoment(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Same moment", "A spec")
 	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
@@ -264,6 +267,7 @@ func TestTheReviewSequenceTriggerTakesNoEventOfATransactionStartedAtTheSameMomen
 // state in one transaction, the first written in a released savepoint, with a rolled-back
 // savepoint's event between them, each take the event appended for it.
 func TestTheReviewSequenceTriggerReadsItsTransactionsSavepoints(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Savepoints", "A spec")
 	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))

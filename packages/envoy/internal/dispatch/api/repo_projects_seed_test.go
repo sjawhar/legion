@@ -70,6 +70,7 @@ func requireEventsMatchTable(t *testing.T, database *store.Store, projects ...st
 // has a mapping, in its seeded project or another, is left alone with no event; and a later move
 // tells the seeded project the mapping left.
 func TestSeedRepoProjectsAnnouncesWhatItAddsAndNothingElse(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createProjects(t, handler, "CORE", "OTHER")
 	ctx := context.Background()
@@ -108,6 +109,10 @@ func TestSeedRepoProjectsAnnouncesWhatItAddsAndNothingElse(t *testing.T) {
 // PUT, then finds the mapping the PUT made and leaves it. It never adds the mapping to a project
 // the PUT then moves it out of, so no project holds it without its events saying so.
 func TestSeedRepoProjectsRacingAPutOfTheSameRepositoryWaitsForIt(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	handler, database := newTestHandlerWithStore(t)
 	createProjects(t, handler, "CORE", "OTHER")
 	ctx := context.Background()
@@ -156,6 +161,7 @@ func TestSeedRepoProjectsRacingAPutOfTheSameRepositoryWaitsForIt(t *testing.T) {
 }
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	for _, project := range []string{"APP", "CORE"} {
@@ -199,6 +205,7 @@ func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T)
 }
 
 func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	err := SeedRepoProjects(context.Background(), database, events.NewBroker(), "missing/repo=MISSING")
 	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo": project MISSING does not exist`) {

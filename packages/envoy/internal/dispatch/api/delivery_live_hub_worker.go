@@ -60,7 +60,7 @@ func (h *deliveryHub) runDue() bool {
 	var dueAt time.Time
 	var cause string
 	for _, view := range h.views {
-		at, why, ok := view.dueAt()
+		at, why, ok := view.dueAt(h.quiet, h.maxWait)
 		if ok && !at.After(now) && (due == nil || at.Before(dueAt)) {
 			due, dueAt, cause = view, at, why
 		}
@@ -77,16 +77,17 @@ func (h *deliveryHub) runDue() bool {
 	return true
 }
 
-// dueAt is when the view is next due, and why: a dirty view viewQuiet after its last mark or
-// viewMaxWait after its first, whichever is sooner (at once for a subscribe's), not before a
-// failed read's retry; a clean one with an answer at its expiry.
-func (view *deliveryView) dueAt() (time.Time, string, bool) {
+// dueAt is when the view is next due, and why: a dirty view quiet after its last mark or maxWait
+// after its first, whichever is sooner (at once for a subscribe's), not before a failed read's
+// retry; a clean one with an answer at its expiry. quiet and maxWait are the hub's, viewQuiet and
+// viewMaxWait in production.
+func (view *deliveryView) dueAt(quiet, maxWait time.Duration) (time.Time, string, bool) {
 	if view.computing {
 		return time.Time{}, "", false
 	}
 	if view.dirty {
-		at := view.lastDirty.Add(viewQuiet)
-		if latest := view.firstDirty.Add(viewMaxWait); latest.Before(at) {
+		at := view.lastDirty.Add(quiet)
+		if latest := view.firstDirty.Add(maxWait); latest.Before(at) {
 			at = latest
 		}
 		if view.immediate {
@@ -113,7 +114,7 @@ func (h *deliveryHub) nextWakeLocked(now time.Time) (time.Time, bool) {
 		}
 	}
 	for _, view := range h.views {
-		if at, _, ok := view.dueAt(); ok {
+		if at, _, ok := view.dueAt(h.quiet, h.maxWait); ok {
 			consider(at)
 		}
 	}
@@ -184,7 +185,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		if !view.dirty {
 			view.dirty, view.firstDirty, view.cause = true, now, cause
 		}
-		view.lastDirty, view.notBefore = now, now.Add(deliveryLiveRetry)
+		view.lastDirty, view.notBefore = now, now.Add(h.retry)
 	default:
 		if h.epoch != epoch {
 			// The change log was reset while it read, so its position names nothing in the new one.

@@ -141,6 +141,7 @@ func requireCarriedApproval(t *testing.T, ask carriedAsk, review model.ArtifactR
 // A request on a document a human approved at an earlier version names that approval: the version
 // he approved, when, and that it was him.
 func TestARequestOnAnApprovedDocumentCarriesTheApproval(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve me again", "A spec")
 	review := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -160,6 +161,7 @@ func TestARequestOnAnApprovedDocumentCarriesTheApproval(t *testing.T) {
 // A first request, on a document nobody has approved, carries no approved key: not a null value,
 // no key at all.
 func TestAFirstRequestCarriesNoEarlierApproval(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve me", "A spec")
 	requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{"actor": sessionActor()})
@@ -182,6 +184,7 @@ func TestAFirstRequestCarriesNoEarlierApproval(t *testing.T) {
 // Two humans approved at different versions: the request names the newest approval, whoever gave
 // it, and a later request for changes, which approves nothing, does not displace it.
 func TestARequestCarriesTheNewestApprovalWhoeverGaveIt(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved twice", "A spec")
 	alices := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -207,6 +210,7 @@ func TestARequestCarriesTheNewestApprovalWhoeverGaveIt(t *testing.T) {
 // A version that moves the open request rewords it to the new version and re-encodes its whole
 // approval, so the earlier approval it carries survives the move unchanged.
 func TestAVersionMoveKeepsTheCarriedApproval(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Moving carried approval", "A spec")
 	review := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -396,6 +400,7 @@ func decodePayload[T any](t *testing.T, event carryEvent) T {
 // his approval: one approved review in his name at that version, with the carry's reason and no
 // ask, appended before the version's own event, and no approval request opened for it.
 func TestAnAnswerThatIsTheWholeChangeSinceHisApprovalCarriesIt(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carry the approval",
 		"# Plan\n\nThe service ships behind a flag.\n\n> Rollback is a flag flip.\n\n- Announce the dates.\n- Pick the regions.\n")
@@ -450,6 +455,7 @@ func TestAnAnswerThatIsTheWholeChangeSinceHisApprovalCarriesIt(t *testing.T) {
 // human's answer still waiting for its settlement lands in that version too. The edit is inside a
 // second, still-open block's body, which the comparison leaves out: the version carries.
 func TestAnAnswerCarriesWhenAnAgentEditInsideAnotherBlockLandsInItsVersion(t *testing.T) {
+	t.Parallel()
 	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Answer beside an edit", "Context\n")
 	insertDecisionMarkdown(t, handler, issue.PrimaryArtifactID, waveAsk+"\n"+regionAsk, 2)
@@ -487,6 +493,7 @@ func versionMarkdown(t *testing.T, handler http.Handler, artifactID string, numb
 // carried. Settlement then writes the decided wording back, and that version - the one he approved
 // plus his answer to the second block - carries.
 func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Reword under the answer", "Context\n\n"+regionAsk)
 	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -527,6 +534,7 @@ func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
 // approved plus his answer to the second block - carries; for `invalid`, which no rendering writes,
 // settlement's repair changes no markdown and versions nothing, so the approval stays stale.
 func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		attribute string
 		forged    any
@@ -644,6 +652,7 @@ func settledWithoutVersion(t *testing.T, database *store.Store, documents *docs.
 // The human changes his answer. The block's answered_at moves, so the block is newly answered
 // again, and the version he approved is now the carried one: the change carries again.
 func TestAChangedAnswerByTheSameHumanCarriesAgain(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Change the answer", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -667,6 +676,7 @@ func TestAChangedAnswerByTheSameHumanCarriesAgain(t *testing.T) {
 // Stale: the agent changed a paragraph outside the blocks before the answer, so the answer is not
 // the whole change since the approval.
 func TestAParagraphEditBeforeTheAnswerDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Paragraph changed", "The service ships behind a flag.\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -680,6 +690,7 @@ func TestAParagraphEditBeforeTheAnswerDoesNotCarry(t *testing.T) {
 
 // Stale: only another human approved the document; the answerer has no approval to carry.
 func TestAnAnswerOnADocumentOnlyAnotherHumanApprovedDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved by another", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "bob", "approved", "")
@@ -693,6 +704,7 @@ func TestAnAnswerOnADocumentOnlyAnotherHumanApprovedDoesNotCarry(t *testing.T) {
 // Changes requested: the answerer's latest review of the document asks for changes, so his
 // earlier approval is not his standing word on it.
 func TestAnAnswerByAHumanWhoseLatestReviewRequestsChangesDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answerer requested changes", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -707,6 +719,7 @@ func TestAnAnswerByAHumanWhoseLatestReviewRequestsChangesDoesNotCarry(t *testing
 // Changes requested: a second human asked for changes after the answerer's approval, so carrying
 // it would approve over a standing request for changes.
 func TestAnAnswerAfterAnotherHumanRequestedChangesDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Another requested changes", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -721,6 +734,7 @@ func TestAnAnswerAfterAnotherHumanRequestedChangesDoesNotCarry(t *testing.T) {
 // Stale: a second block added since his approval is still open, so the version holds a question
 // he has not decided.
 func TestAnAnswerBesideASecondBlockLeftOpenDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Second block open", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -735,6 +749,7 @@ func TestAnAnswerBesideASecondBlockLeftOpenDoesNotCarry(t *testing.T) {
 // Stale: a second block added since his approval was resolved rather than answered by him, so
 // the version holds a decision that is not his.
 func TestAnAnswerBesideASecondBlockResolvedDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Second block resolved", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -757,6 +772,7 @@ func TestAnAnswerBesideASecondBlockResolvedDoesNotCarry(t *testing.T) {
 // text is the same either way, so the comparison alone would carry; the blocks of the approved
 // version must all still stand.
 func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved block removed", "Context\n\n"+regionAsk)
 	indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -785,6 +801,7 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 // answer carry carries nothing; but its text is then the approved version's again, and that
 // carries the approval (approval_restore_test.go).
 func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -834,6 +851,7 @@ func TestADeletedAndRestoredAnsweredBlockIsApprovedOnceItsTextIsTheApprovedText(
 // since it put the block there: a changed block's answer must be newer than the approval it would
 // carry. Neither the insert's version, showing the block open, nor settlement's carries.
 func TestARestoredBlockAnsweredBeforeTheApprovalCarriesNothing(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Restored block answered before the approval", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -880,6 +898,7 @@ func TestARestoredBlockAnsweredBeforeTheApprovalCarriesNothing(t *testing.T) {
 // The cut text is the same and every added block is his, so only the comparison of each block
 // with the approved version's state keeps the carry from approving the other answer unread.
 func TestAnAnswerBesideABlockAnotherHumanAnsweredSinceHisApprovalDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Other answer since approval", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -899,6 +918,7 @@ func TestAnAnswerBesideABlockAnotherHumanAnsweredSinceHisApprovalDoesNotCarry(t 
 // Carry: a block the approved version held open, answered by the approver himself with nothing
 // else changed, is his answer to a block of the version he approved.
 func TestHisAnswerToABlockTheApprovedVersionHeldOpenCarries(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved block answered", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -912,6 +932,7 @@ func TestHisAnswerToABlockTheApprovedVersionHeldOpenCarries(t *testing.T) {
 // Carry: a block another human answered before his approval, untouched since, is content he
 // approved; his answer to a block added since is still the whole change.
 func TestAnotherHumansAnswerHeApprovedStaysOutOfTheCarrysTest(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Other answer before approval", "Context\n\n"+regionAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
@@ -930,6 +951,7 @@ func TestAnotherHumansAnswerHeApprovedStaysOutOfTheCarrysTest(t *testing.T) {
 // Stale: two humans answered two blocks in one version, so the version is not one person's
 // answer and carries nobody's approval.
 func TestTwoHumansAnswersInOneVersionDoNotCarry(t *testing.T) {
+	t.Parallel()
 	handler, _, documents := settlingCarryDocuments(t, time.Second)
 	issue := createInteractionIssue(t, handler, "TEST", "Two answerers", "Context\n\n"+waveAsk+"\n"+regionAsk)
 	asks := settledDecisionBlocks(t, handler, documents, issue.Key, issue.PrimaryArtifactID,
@@ -950,6 +972,7 @@ func TestTwoHumansAnswersInOneVersionDoNotCarry(t *testing.T) {
 // approved both documents; his answer carries his approval of the spec, whose block he answered,
 // and not of the copy, whose block is nobody's decision there.
 func TestACopiedBlockAnsweredThroughItsSourceCarriesOnTheSourceOnly(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Copied block", "Context\n\n"+waveAsk)
 	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"wave": "How many regions take the first wave?"})
@@ -982,6 +1005,7 @@ func TestACopiedBlockAnsweredThroughItsSourceCarriesOnTheSourceOnly(t *testing.T
 // answers. The copy is answered in his name and is no row of the spec's, so the spec carries
 // nothing: a block no row of this document backs is a decision the carry cannot read.
 func TestACopiedBlockPlantedSinceHisApprovalDoesNotCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Planted copy", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -1019,6 +1043,7 @@ func TestACopiedBlockPlantedSinceHisApprovalDoesNotCarry(t *testing.T) {
 // the carry then answers it Approve in the human's name with the carry's reason, so the review
 // names it and nothing reopens or rewords it afterwards.
 func TestAnOpenApprovalRequestIsAnsweredByTheCarry(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Request open at the carry", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -1070,6 +1095,7 @@ func TestAnOpenApprovalRequestIsAnsweredByTheCarry(t *testing.T) {
 // before the answer's is the insert's, holding the block open, and the approved version holds no
 // block at all. The answer carries.
 func TestADocumentApprovedAtVersionOneCarriesOnItsFirstBlocksAnswer(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approved at version one", "Context\n")
 	review := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")

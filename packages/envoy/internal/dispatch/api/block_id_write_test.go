@@ -23,6 +23,7 @@ import (
 // block's id - an insert, an accepted suggestion, an uploaded version - is refused naming the id,
 // and nothing changes.
 func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
+	t.Parallel()
 	const callout = ":::callout{#decision}\nA note.\n:::\n"
 	insert := func(markdown string) func(*testing.T, http.Handler, string, string) *httptest.ResponseRecorder {
 		return func(t *testing.T, handler http.Handler, _, artifactID string) *httptest.ResponseRecorder {
@@ -106,6 +107,7 @@ func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
 // its block and the question it was answered on, which settlement writes back into the block,
 // whether the suggestion quotes the ask's whole text or a span across it.
 func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
+	t.Parallel()
 	const freeText = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"
 	const reworded = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport, first?\n:::\n"
 	for _, test := range []struct{ name, quote string }{
@@ -158,6 +160,7 @@ func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 // one the caller wrote, so the accept is taken. Each half keeps the space the split left at its
 // edge, written as a reference so it reads back.
 func TestABlockReplacementInsideAParagraphIsTaken(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, replaceWith, want string }{
 		{name: "two paragraphs", replaceWith: "one\n\ntwo\n", want: "Alpha&#32;\n\none\n\ntwo\n\n&#32;gamma.\n"},
 		{name: "a callout", replaceWith: ":::callout{kind=\"note\"}\nA note.\n:::\n",
@@ -191,6 +194,7 @@ func TestABlockReplacementInsideAParagraphIsTaken(t *testing.T) {
 // A spec seeded at issue creation that names one block id twice is refused the same way: the
 // repair would hand the id to the first block and index the second as another ask.
 func TestASeededSpecRepeatingABlockIDIsRefused(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	if created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "TEST project",
@@ -212,6 +216,7 @@ func TestASeededSpecRepeatingABlockIDIsRefused(t *testing.T) {
 // answer 201 and store what pmdoc.Parse renders, whether its typed blocks name no id (minted ids
 // masked) or distinct ids of their own.
 func TestAWriteNamingEachBlockIDOnceIsStoredAsBefore(t *testing.T) {
+	t.Parallel()
 	minted := regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	for _, test := range []struct{ name, markdown string }{
 		{name: "no explicit ids", markdown: "# Plan\n\nSome text.\n\n:::callout{kind=\"note\"}\nA note.\n:::\n\n" +

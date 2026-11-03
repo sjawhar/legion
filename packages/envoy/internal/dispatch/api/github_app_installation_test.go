@@ -35,6 +35,7 @@ func appInstallationServer(t *testing.T, github http.HandlerFunc) http.Handler {
 // An agent asks whether Dispatch's App is installed on a repository: GitHub's installation is
 // true, whatever permissions it grants, and GitHub's 404 is false.
 func TestAgentReadsWhetherTheAppInstallationExists(t *testing.T) {
+	t.Parallel()
 	handler := appInstallationServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widgets/installation":
@@ -60,6 +61,7 @@ func TestAgentReadsWhetherTheAppInstallationExists(t *testing.T) {
 
 // Dispatch with no App key cannot ask GitHub, which is no answer about the repository.
 func TestAppInstallationWithoutAnAppKeyAnswers503(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{})
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/github/app-installation/acme/widgets", nil, "agent-token")
 	body := decodeBody[map[string]string](t, response)
@@ -70,6 +72,7 @@ func TestAppInstallationWithoutAnAppKeyAnswers503(t *testing.T) {
 
 // GitHub failing the lookup is no answer either: 502 naming the repository and GitHub's error.
 func TestAppInstallationGitHubFailureAnswers502(t *testing.T) {
+	t.Parallel()
 	handler := appInstallationServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"message":"Server Error"}`)

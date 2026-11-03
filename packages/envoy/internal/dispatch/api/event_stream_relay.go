@@ -124,7 +124,9 @@ type eventStreamRelay struct {
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
 	// coalesce is the window a notification waits before its read; zero is eventRelayCoalesce.
-	coalesce time.Duration
+	// retry is how long a failed read waits before the next; zero is eventRelayRetry. A test
+	// that drives a failing read sets its own rather than waiting out the production second.
+	coalesce, retry time.Duration
 	// beforeAdvance, when a test sets it before the relay starts, runs after each page is
 	// published and before the cursor moves over it, with mu held: the one moment a subscriber
 	// must not be let in (publish). Nil outside tests.
@@ -281,6 +283,12 @@ func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error)
 	newest, gaps, err := eventLogGapsAbove(ctx, pool, floor)
 	if err != nil {
 		return 0, time.Time{}, err
+	}
+	// A test of the first start commits an event after this read and before the wait below ends,
+	// which is the one window its subject lives in; the hook is how it knows the read is done,
+	// rather than resting on a sleep (live_events_horizon_test.go). Nil outside tests.
+	if s.relayStartRead != nil {
+		s.relayStartRead()
 	}
 	if _, err := s.horizon().Await(ctx); err != nil {
 		return 0, time.Time{}, err
@@ -515,7 +523,7 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 		gaps.stop()
 		safe, gap, ok := r.read(ctx, checkReset)
 		for !ok {
-			if !waitFor(ctx, eventRelayRetry) {
+			if !waitFor(ctx, r.failedReadWait()) {
 				return
 			}
 			safe, gap, ok = r.read(ctx, checkReset)
@@ -638,6 +646,13 @@ func (r *eventStreamRelay) resetCursor(ctx context.Context) (reset bool, safe in
 	if !eventLogWasReset(cursor, at, maxID, cursorAt) {
 		return false, 0, nil
 	}
+	// A test of a subscription made while the relay still stands on the replaced log waits here,
+	// rather than on a span of time: past this point the reseed holds, waiting for every write
+	// open at the reset, and the cursor is still the old log's (relayStartRead is the same seam
+	// for the first start). Nil outside tests.
+	if r.server.relayFoundReset != nil {
+		r.server.relayFoundReset()
+	}
 	safe, to, toAt, err := r.server.reseedEventCursor(ctx)
 	if err != nil {
 		return false, 0, err
@@ -663,6 +678,15 @@ func (r *eventStreamRelay) window() time.Duration {
 		return eventRelayCoalesce
 	}
 	return r.coalesce
+}
+
+// failedReadWait is how long the relay waits before reading again after a read failed: retry, or
+// eventRelayRetry when no test set one.
+func (r *eventStreamRelay) failedReadWait() time.Duration {
+	if r.retry == 0 {
+		return eventRelayRetry
+	}
+	return r.retry
 }
 
 // waitFor waits for d, or until ctx ends; false means ctx ended.

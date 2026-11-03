@@ -47,6 +47,7 @@ func answerAskForChange(t *testing.T, handler http.Handler, askID, login, select
 }
 
 func TestAnswerAskChangesTheCurrentAnswerAndRecordsHistory(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Change an answer", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)
@@ -97,6 +98,7 @@ func TestAnswerAskChangesTheCurrentAnswerAndRecordsHistory(t *testing.T) {
 }
 
 func TestAnswerAskChangeUsesTheCurrentAnswerAsCompareAndSet(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Compare answer", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)
@@ -129,6 +131,7 @@ func TestAnswerAskChangeUsesTheCurrentAnswerAsCompareAndSet(t *testing.T) {
 }
 
 func TestAnswerAskChangeRefusesClosedAndApprovalAsks(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answer change refusals", "A spec")
 	open := createChangeableAsk(t, handler, issue.Key)
@@ -169,6 +172,7 @@ func TestAnswerAskChangeRefusesClosedAndApprovalAsks(t *testing.T) {
 }
 
 func TestAnswerAskHistoryIgnoresARestorationAndKeepsTheLaterChange(t *testing.T) {
+	t.Parallel()
 	handler, database := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Restored history", "decision", transportAsk, "Which transport?")
 	before := readBlockAsk(t, handler, askID)
@@ -227,6 +231,7 @@ func TestAnswerAskHistoryIgnoresARestorationAndKeepsTheLaterChange(t *testing.T)
 }
 
 func TestAnswerAskChangeStillRequiresTheReviewedQuestionRevision(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Question revision", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)

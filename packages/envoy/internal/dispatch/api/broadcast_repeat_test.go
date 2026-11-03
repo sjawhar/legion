@@ -40,6 +40,7 @@ func broadcastCount(t *testing.T, handler http.Handler) int {
 // with the first answer's exclusions, so every recipient is handed the message once rather than
 // twice.
 func TestBroadcastRepeatWithItsKeyAnswersTheOriginalAndDeliversOnce(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	send := func() *httptest.ResponseRecorder {
@@ -93,6 +94,7 @@ func TestBroadcastRepeatWithItsKeyAnswersTheOriginalAndDeliversOnce(t *testing.T
 // A retry of a send that landed is answered from the database before the registry is read, so
 // it is answered even while the listener is down, rather than refused as unreachable.
 func TestBroadcastRepeatIsAnsweredWhileTheListenerIsDown(t *testing.T) {
+	t.Parallel()
 	var down atomic.Bool
 	listener, _ := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, _ *http.Request) bool {
 		if down.Load() {
@@ -135,6 +137,7 @@ func TestBroadcastRepeatIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 // retry is told it is in flight and writes nothing; once the first has answered, a retry is its
 // answer. One broadcast is written and each recipient is handed one frame.
 func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
+	t.Parallel()
 	reading, release := make(chan struct{}), make(chan struct{})
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	var reads atomic.Int32
@@ -196,6 +199,10 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 // send does (sendHeldMessageOn). It hands no recipient a second frame: not the one already
 // delivered, and not the one a live sender is delivering right now.
 func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	const body = "Status before the deploy?"
 	requested := []string{"planner", "tester", "reviewer", "archivist"}
 	listener, sends := newBroadcastListener(t, broadcastSessionsJSON(t, requested))

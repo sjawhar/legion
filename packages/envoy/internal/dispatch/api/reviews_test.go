@@ -75,6 +75,7 @@ func askEventCounts(t *testing.T, handler http.Handler, issueKey, askID string) 
 }
 
 func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -204,6 +205,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 // a repeat with a different summary is refused and changes nothing, so the card the human is
 // reading keeps its question and revision and an answer started from it is saved.
 func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -310,6 +312,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 // longest summary the route accepts keeps the question within the ask cap however many digits the
 // version gains, and that budget is the tightest that does.
 func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"spec.md", "a", strings.Repeat("n", 100)} {
 		for _, requested := range []int{1, 9, 12345} {
 			limit := 0
@@ -339,6 +342,7 @@ func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
 // The longest summary the route accepts at version 1 still fits the ask cap once a version move
 // rebuilds the question at version 10, whose number is one character longer.
 func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -395,6 +399,7 @@ func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T)
 }
 
 func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -425,6 +430,7 @@ func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	}
 }
 func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Needs work", "A spec")
 	requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{"actor": sessionActor()})
@@ -468,6 +474,7 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 // now carry the approval to it instead, a version and an artifact.approved event nothing explains,
 // so settlement mints none and the approval stays at the version the human approved.
 func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)
 	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice")
@@ -492,6 +499,7 @@ func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 // reason at one version writes two reviews the read tells apart by their sequences. A review
 // recorded before Dispatch kept the sequence reads with its `at` and no `seq`.
 func TestTheApprovalReadNamesTheLatestReviewsEventSequence(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Review twice", "A spec")
 	type sequencedRead struct {
@@ -557,6 +565,7 @@ func TestTheApprovalReadNamesTheLatestReviewsEventSequence(t *testing.T) {
 // reader of the approval — the Legion daemon's design gate above all — decides from the newest
 // review.
 func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Review order", "A spec")
 	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))

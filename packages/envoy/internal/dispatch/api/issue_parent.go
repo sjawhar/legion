@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,6 +64,7 @@ const legionLabel = "legion"
 // runs - but a write's advice does (computeWriteAdvice, write_advice.go), and there it means the
 // issue is treated as one Legion does not run: the "still in triage" line prints. A chain that
 // deep needs a reparent that refuseParentTooDeep would have refused.
+// It is a var only because parentDepthCapSQL is one; no test assigns it.
 var legionManagedStatusSQL = `
 	with recursive chain as (
 		select i.parent_key, i.labels, 0 as depth
@@ -76,15 +78,16 @@ var legionManagedStatusSQL = `
 		select 1 from chain c, unnest(c.labels) as label where lower(label) = '` + legionLabel + `'
 	)`
 
-// legionManagedStatus runs legionManagedStatusSQL inside the caller's transaction. That keeps the
-// issue's own row as the caller locked it, and nothing more: an ancestor's labels, and a reparent
+// legionManagedStatus runs legionManagedStatusSQL, or the statement the server's test seam
+// names (server.legionStatusSQL), inside the caller's transaction. That keeps the issue's own
+// row as the caller locked it, and nothing more: an ancestor's labels, and a reparent
 // above the issue, are read as they stand and are not held still by any lock the caller takes. The
 // answer is advisory in both callers, so a chain that moves under the walk costs a sentence of
 // guidance and never a write. Both claim routes (issue_claim.go) and a session's write advice
 // (write_advice.go) read it.
-func legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
+func (s *server) legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
 	var managed bool
-	if err := tx.QueryRow(ctx, legionManagedStatusSQL, key).Scan(&managed); err != nil {
+	if err := tx.QueryRow(ctx, cmp.Or(s.legionStatusSQL, legionManagedStatusSQL), key).Scan(&managed); err != nil {
 		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
 	}
 	return managed, nil

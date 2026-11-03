@@ -18,6 +18,7 @@ type routeIndex struct {
 }
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	Register(mux, t.Context(), Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 
@@ -61,6 +62,7 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 // WriteRouteIndex is what `envoy-dispatch routes` prints and the docs site's API reference is
 // generated from: every row of the table, as GET /api/v1 serves it, and no test hook.
 func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	if err := WriteRouteIndex(&output); err != nil {
 		t.Fatal(err)
@@ -105,6 +107,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
+	t.Parallel()
 	const registeredRoutes = 154
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
@@ -197,6 +200,7 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 // and an anonymous request, so GET /api/v1 cannot describe a route the server refuses (or
 // admits) differently.
 func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithStore(t)
 	probe := func(route apiRoute, credential string) *httptest.ResponseRecorder {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

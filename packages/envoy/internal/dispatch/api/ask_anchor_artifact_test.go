@@ -18,6 +18,7 @@ import (
 // asks_anchor_artifact (0032) never cast, which is how an earlier release could leave such a
 // value stored.
 func TestAskRoutesAnswerOverAnAnchorArtifactIDThatNamesNoDocument(t *testing.T) {
+	t.Parallel()
 	for _, stored := range []struct{ name, rawJSON, served string }{
 		{name: "not a uuid", rawJSON: `"not-a-uuid"`, served: "not-a-uuid"},
 		{name: "a json number", rawJSON: `5`},
@@ -85,6 +86,7 @@ func askHits(response model.SearchResponse) map[string]model.SearchResult {
 // store.CastableUUID's one definition. The search answers over that row shape, links the
 // canonically anchored hit to its anchor's document and the other to its ask block's document.
 func TestSearchKeywordAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Anchored ask search", "The quick brown fox jumps over the lazy dog")
 	blockDocument, blockSlug := secondDocument(t, handler, issue.Key)
@@ -109,6 +111,7 @@ func TestSearchKeywordAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 // embeddings bring back rather than the ones a term matched: the query below shares no word with
 // either ask and reaches both only through the fake embedder.
 func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		"Keep the quadrant appendix? Yes, keep it.": angledVector(0.9, 2),
 		"Keep the quadrant diagram? Yes, keep it.":  angledVector(0.8, 3),
@@ -145,6 +148,7 @@ func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 // that casts to no uuid names no document, so loadAskNodes falls through to the ask's block
 // document for the node's parent, which is the document the search hit's href already names.
 func TestRefsAndSearchPutAnAskWhoseAnchorDoesNotCastOnItsBlockDocument(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Anchored ask graph", "The quick brown fox jumps over the lazy dog")
 	blockDocument, blockSlug := secondDocument(t, handler, issue.Key)

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 )
 
 func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
+	t.Parallel()
 	t.Run("different sessions", func(t *testing.T) {
 		const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
 			`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`
@@ -87,6 +87,7 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 }
 
 func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing.T) {
+	t.Parallel()
 	sent := []map[string]any{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +165,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 }
 
 func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPending(t *testing.T) {
+	t.Parallel()
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -239,6 +241,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 // the answered row owes belongs to the sender the claim names: the one whose claim lapsed pays
 // nothing, or the attempt carries two receipts saying the same thing.
 func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
+	t.Parallel()
 	var handler http.Handler
 	answerTheSend := false
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
@@ -357,6 +360,7 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 // attempt the comment's creation opened; an attempt row that named nobody would refuse its own
 // recipient's reply, and the attempt would carry no receipt at all.
 func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T) {
+	t.Parallel()
 	var handler http.Handler
 	answerTheSend := false
 	replies := []int{}
@@ -436,11 +440,12 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 // A client that gives up no longer strands the attempt - a request's own send outlives its
 // connection - so the row a dead sender leaves is written here directly.
 func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T) {
-	var listenerState struct {
-		sync.Mutex
-		sends int
-	}
+	t.Parallel()
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
+	// The listener answers every send at once. It used to stall the second one for a second and a
+	// half, so that a retry's client gave up while its send was in flight; the stranded row is
+	// written below directly now, and this test sends only the comment's first frame, so nothing
+	// reached that stall but the clock.
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
@@ -448,14 +453,6 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
-			listenerState.Lock()
-			listenerState.sends++
-			stall := listenerState.sends == 2
-			listenerState.Unlock()
-			if stall {
-				// The retry's client gives up while its send is still in flight.
-				time.Sleep(1500 * time.Millisecond)
-			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)

@@ -24,6 +24,7 @@ const agentSession = "01a1058e-f14f-7684-87eb-3dc885955551"
 // issue or project, is addressed under the session, served by slug with the bytes' long-lived
 // cache header, and cited from a message as any artifact is.
 func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	image := pngBytes(strings.Repeat("pixels", 1024))
 	base := "/api/v1/agents/" + agentSession + "/artifacts"
@@ -96,6 +97,7 @@ func TestAnAgentsConversationOwnsTheFilesUploadedToIt(t *testing.T) {
 // can produce is one the reference grammar reads back as that artifact, whatever the name's script:
 // otherwise the picture is stored and its line names nothing.
 func TestEveryArtifactSlugReadsBackAsItsArtifact(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{
 		"shot.png",
 		"café.png",
@@ -121,6 +123,7 @@ func TestEveryArtifactSlugReadsBackAsItsArtifact(t *testing.T) {
 // Each conversation owns what was sent in it: the same file name sent to two agents is two
 // artifacts, each at version 1, and neither conversation's slug or bytes are the other's.
 func TestEachAgentsConversationKeepsItsFilesApartFromAnothers(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	const other = "01a1058e-f14f-7684-87eb-3dc885955552"
 	upload := func(session, name string, content []byte) uploaded {
@@ -152,6 +155,7 @@ func TestEachAgentsConversationKeepsItsFilesApartFromAnothers(t *testing.T) {
 // named image.png - become that artifact's versions one after another, none refused, though the
 // conversation has no row to lock as an issue does.
 func TestConcurrentUploadsOfOneNameToAnAgentsConversationBecomeItsVersions(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	const uploads = 6
 	start := make(chan struct{})
@@ -189,6 +193,7 @@ func TestConcurrentUploadsOfOneNameToAnAgentsConversationBecomeItsVersions(t *te
 // statement's first runs get and as the generic plan Postgres may cache for it afterwards, which
 // knows no session id and must still prove the index's `session_id is not null` from the query.
 func TestAnAgentsArtifactLookupsReadTheSessionIndex(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	if response := multipartRequest(t, handler, "/api/v1/agents/"+agentSession+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", pngBytes("pixels"), "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
@@ -266,6 +271,7 @@ func planReadsIndex(t *testing.T, planJSON json.RawMessage, index string) bool {
 // anything is written, as is a session id no reference could carry. Its artifacts take no
 // comment or ask, which only an issue's or a project's documents hold.
 func TestAnAgentsConversationRefusesADocumentAndAnInvalidSessionID(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	base := "/api/v1/agents/" + agentSession + "/artifacts"
 	before := databaseFingerprint(t, database)
@@ -315,6 +321,7 @@ func TestAnAgentsConversationRefusesADocumentAndAnInvalidSessionID(t *testing.T)
 // person's cookie proves no session and keeps uploading into the conversation it names, which
 // is how a person puts a file in front of an agent.
 func TestAnUploadIsHeldToTheSessionTheCredentialProved(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-uploading-into-a-conversation"

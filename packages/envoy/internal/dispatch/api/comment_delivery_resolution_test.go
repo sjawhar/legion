@@ -63,6 +63,7 @@ func roleMentionListener(t *testing.T, registry *roleMentionRegistry) *httptest.
 }
 
 func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
+	t.Parallel()
 	registry := &roleMentionRegistry{holder: "s1", s1Live: true}
 	listener := roleMentionListener(t, registry)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
@@ -134,6 +135,7 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 // reply for the life of the comment, not merely until the next retry: a retry only resumes a
 // still-"pending" attempt, and this one settles "failed" right here.
 func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheReply(t *testing.T) {
+	t.Parallel()
 	registryUnavailable := false
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -219,6 +221,7 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 // names and who is still allowed to answer it, and the role's new holder was never sent this
 // attempt at all.
 func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHolder(t *testing.T) {
+	t.Parallel()
 	registry := &roleMentionRegistry{holder: "s1", s1Live: true}
 	listener := roleMentionListener(t, registry)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
@@ -291,6 +294,7 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 }
 
 func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
+	t.Parallel()
 	sentModes := []string{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +371,7 @@ func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 // a stale "sent" recorded from a capability check that ran before the session's registration
 // changed. This is the observable contract createCommentDelivery must honor for every retry.
 func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
+	t.Parallel()
 	capabilities := []string{"steer"}
 	sessionReads := 0
 	sends := 0
@@ -425,6 +430,7 @@ func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *test
 // even when nothing else races it, so the initial path must recheck exactly like a retry does,
 // not trust a decision that predates the commit it was made inside of.
 func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
+	t.Parallel()
 	capabilities := []string{"steer"}
 	sessionReads := 0
 	sends := 0
@@ -468,6 +474,7 @@ func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *t
 }
 
 func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
+	t.Parallel()
 	roleAvailable := false
 	roleLookups := 0
 	sends := 0
@@ -529,6 +536,7 @@ func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 // the text the dashboard prints, so wording an unanswered read that way would un-name a
 // recipient that never went anywhere and tell a person to stop waiting on it.
 func TestMentionDuringAnUnanswerableRegistryReadIsNotRecordedAsNoLiveSession(t *testing.T) {
+	t.Parallel()
 	const busSilent = "envoy: the message bus did not answer: no responders available for request"
 	sends := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

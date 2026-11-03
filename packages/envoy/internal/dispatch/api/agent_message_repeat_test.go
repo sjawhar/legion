@@ -122,6 +122,7 @@ func keysOf(l *broadcastListener) []string {
 // INFRA-258. A single-session send without an Idempotency-Key is sent, as any write without one
 // is: it is only not replayed.
 func TestASingleSessionSendWithoutAKeyIsSent(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
@@ -138,6 +139,7 @@ func TestASingleSessionSendWithoutAKeyIsSent(t *testing.T) {
 // A repeat of one send - a double press, a retry after a 5xx or a timeout - is answered the
 // message the first request made, with its deliveries, and the session is handed it once.
 func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	send := func() *httptest.ResponseRecorder {
@@ -180,6 +182,7 @@ func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
 // signal therefore finishes inside the drain: its attempt settles sent, and the page's retry under
 // its key is answered with that message and hands the session nothing more.
 func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
+	t.Parallel()
 	held := make(chan struct{})
 	release := make(chan struct{})
 	cut := make(chan struct{})
@@ -266,6 +269,10 @@ func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
 // them has arrived there: one makes the message and every other is told the first is in flight or,
 // once it has answered, given its answer. The session is handed the message once.
 func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	ctx := context.Background()
@@ -334,6 +341,7 @@ func TestConcurrentSendsUnderOneKeyMakeOneMessage(t *testing.T) {
 // while the listener still holds the frame. The delivery runs on past the request, the key keeps
 // its answer, and the page's retry under the key is answered the message, sending nothing again.
 func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
+	t.Parallel()
 	sending := make(chan struct{})
 	release := make(chan struct{})
 	var held atomic.Bool
@@ -402,6 +410,10 @@ func TestAClientAbortMidSendStillDeliversOnce(t *testing.T) {
 // message's own mode, rather than making the message again, and a later repeat finds it on its way
 // and sends nothing more.
 func TestARetryOfAMessageCommittedWithoutAnAnswerDeliversIt(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	id := commitKeyedMessage(t, database, "undelivered", "Still there?", "aside", 0, nil)
@@ -449,6 +461,10 @@ func TestARetryOfAMessageCommittedWithoutAnAnswerDeliversIt(t *testing.T) {
 // number, and so its own delivery key, as a same-mode retry from the agent card does - an attempt
 // stranded before anything was resolved included, which takes the message's session.
 func TestARetryOfAStrandedSendResumesItsAttempt(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	created := http.StatusCreated
 	for name, pinned := range map[string]string{
 		"an attempt naming its session":        "s1",
@@ -498,6 +514,10 @@ func TestARetryOfAStrandedSendResumesItsAttempt(t *testing.T) {
 // delivery never started is started even then, and the listener's outage is recorded on its
 // attempt, never answered as a server error the page would retry.
 func TestARetryIsAnsweredWhileTheListenerIsDown(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	var down atomic.Bool
 	var asked atomic.Int32
 	listener, sends := newBroadcastListener(t, agentSessions, func(w http.ResponseWriter, _ *http.Request) bool {
@@ -546,6 +566,10 @@ func TestARetryIsAnsweredWhileTheListenerIsDown(t *testing.T) {
 // A send whose key a repeat took over while it was slow commits nothing: its message and its
 // recovery point roll back together, and the repeat that holds the key makes the send instead.
 func TestASendThatLostItsKeyCommitsNothing(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	listener, sends := newBroadcastListener(t, agentSessions)
 	_, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	holdRequestKey(t, database, heldKey{
@@ -583,6 +607,10 @@ func TestASendThatLostItsKeyCommitsNothing(t *testing.T) {
 // recovery point kept, so the next attempt is answered from the message at once, not refused as in
 // flight and never made twice. A request that committed nothing has its key deleted instead.
 func TestAFailureAfterTheSendCommittedIsAnsweredFromItsMessage(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	id := commitKeyedMessage(t, database, "failed-after-commit", "Status?", "btw", 0, nil)

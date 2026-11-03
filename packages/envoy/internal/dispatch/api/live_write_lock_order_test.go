@@ -24,6 +24,7 @@ import (
 // row by then) or queued behind a lock. A write that waits for the in-memory writer slot while
 // holding a lock the slot's holder needs is a cycle Postgres cannot see, so both would hang.
 func TestProjectDocumentUploadAndAConcurrentWriteBothFinish(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		write func(f *uploadRaceFixture, ctx context.Context, token string) *httptest.ResponseRecorder

@@ -20,6 +20,7 @@ import (
 )
 
 func TestMatchingTopics(t *testing.T) {
+	t.Parallel()
 	base := "notifications.dispatch.issue.T-1"
 	cases := []struct {
 		name   string
@@ -213,6 +214,7 @@ func createTestIssue(t *testing.T, handler http.Handler, project, title string) 
 }
 
 func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{
@@ -249,6 +251,7 @@ func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
 // the listener sends none. A live subscriber keeps its session's own last_seen. The list is read
 // straight from the listener, so this asks the handler body with no database behind it.
 func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
+	t.Parallel()
 	const topic = "notifications.dispatch.issue.TEST-1.>"
 	envoyURL, listener := newFakeListener(t, map[string][]string{
 		"live":       {topic},
@@ -285,6 +288,7 @@ func TestSubscribersShowADeadSessionsLastHeartbeat(t *testing.T) {
 }
 
 func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, nil, nil)
@@ -301,6 +305,7 @@ func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
 }
 
 func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, handler, "TEST", "Issue")
@@ -312,6 +317,7 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 }
 
 func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -336,6 +342,7 @@ func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
 }
 
 func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	if response := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -360,6 +367,7 @@ func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -405,6 +413,7 @@ func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t
 }
 
 func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key1 := createTestIssue(t, bootstrap, "TEST", "Issue one")
@@ -446,6 +455,7 @@ func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testin
 }
 
 func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempotently(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -481,6 +491,7 @@ func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempote
 }
 
 func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -525,6 +536,7 @@ func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -540,6 +552,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -553,6 +566,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T)
 }
 
 func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -570,6 +584,7 @@ func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
 }
 
 func TestUnsubscribeArtifactSessionRejectsIssueLinkedArtifacts(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")

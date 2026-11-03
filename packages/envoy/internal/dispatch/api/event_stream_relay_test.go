@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,8 +25,9 @@ import (
 // secondProcessHandler mounts a second API stack on the database the first one is on, as the
 // second envoy-dispatch task of a deployment is: its own pool (storetest.SecondProcess), its own
 // broker, its own document service and its own event stream relay. The two share Postgres and
-// nothing else, which is the whole point -- an in-process fan-out cannot cross between them.
-func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
+// nothing else, which is the whole point -- an in-process fan-out cannot cross between them. It
+// answers the server it mounted as well, whose relay a test waits on.
+func secondProcessHandler(t *testing.T, database *store.Store) (http.Handler, *server) {
 	t.Helper()
 	second := storetest.SecondProcess(t, database)
 	broker := events.NewBroker()
@@ -47,8 +49,9 @@ func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		t.Fatalf("new API dependencies for the second process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps).Wait)
-	return mux
+	served := register(mux, t.Context(), deps)
+	t.Cleanup(served.waitBackground)
+	return mux, served
 }
 
 // TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed is what the live feed is for with two
@@ -57,9 +60,15 @@ func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
 // itself -- B's relay hears the commit on `listen dispatch_events` (migration 0107) and reads it
 // back out of the log. The broker fan-out the feed used to read would have ended at A.
 func TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
-	second := httptest.NewServer(secondProcessHandler(t, database))
+	secondHandler, _ := secondProcessHandler(t, database)
+	second := httptest.NewServer(secondHandler)
 	t.Cleanup(second.Close)
 	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
 	subscribeEvents(t, client, "events", nil)
@@ -84,10 +93,16 @@ func TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed(t *testing.T) {
 // processes are apart, so the subscription on B is sent nothing past a while A is open, and a and
 // then b once A commits.
 func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
-	second := httptest.NewServer(secondProcessHandler(t, database))
+	secondHandler, _ := secondProcessHandler(t, database)
+	second := httptest.NewServer(secondHandler)
 	t.Cleanup(second.Close)
 	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
 	subscribeEvents(t, client, "events", nil)
@@ -105,6 +120,11 @@ func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder(t *te
 // cursor the relay has published through rather than from the log's head -- a cursor reset there
 // would silently swallow exactly the events the window dropped from every open page's feed.
 func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	// An issue with no spec, whose document settles nothing, so nothing commits but the test's own.
 	issue := createPlainIssue(t, rig.handler, "TEST")
@@ -168,6 +188,11 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 // which ends every open events subscription with an ended frame (behind), so the page subscribes
 // again; and it serves the events committed after the reset to the subscriptions made after it.
 func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	rig.served.eventRelay.coalesce = time.Millisecond
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
@@ -232,16 +257,28 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 // subscription made meanwhile finds the relay still on the old cursor, so it hands over only once
 // the relay has reset, and is sent a, which committed after it subscribed, below that new cursor.
 func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
-	second := httptest.NewServer(secondProcessHandler(t, database))
+	secondHandler, secondServed := secondProcessHandler(t, database)
+	second := httptest.NewServer(secondHandler)
 	t.Cleanup(second.Close)
 	dial := func() *socketClient {
 		t.Helper()
 		return openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
 	}
 
+	// B's relay says when it has found the log replaced: past that point its reseed waits for
+	// every write open at the reset, and its cursor is still the old log's, which is the one
+	// moment the subscription below has to be made in.
+	foundReset := make(chan struct{})
+	var resetOnce sync.Once
+	secondServed.relayFoundReset = func() { resetOnce.Do(func() { close(foundReset) }) }
 	// B's relay publishes through the old log's head, so its cursor and horizon stand there.
 	across := dial()
 	subscribeEvents(t, across, "events", nil)
@@ -256,13 +293,17 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	if high >= head {
 		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", high, head)
 	}
-	// Time for B's relay to hear the refill's commit and find the reset.
-	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-foundReset:
+	case <-time.After(eventFeedWait):
+		t.Fatalf("B's relay did not find the replaced log within %s", eventFeedWait)
+	}
 	// This subscription hands over only once the relay's reset, which waits for a, has run, so it
-	// subscribes first and a commits once it has had time to reach the relay.
+	// subscribes first, and a commits once the relay holds it.
 	waiting := dial()
 	sendEventsSubscribe(t, waiting, "events", nil)
-	time.Sleep(300 * time.Millisecond)
+	pollUntil(t, eventFeedWait, "the waiting subscription reaches B's relay",
+		func() bool { return secondServed.eventRelay.stream.SubscriberCount() >= 2 })
 	commitLow()
 	renameIssue(t, first, issue.Key, "Renamed after the reset")
 
@@ -313,6 +354,11 @@ func mustEventFrameID(t *testing.T, frame LiveEventFrame) int64 {
 // it resumes the same bytes; a hand-rolled live read would hand a page an ask without them, and
 // only a resubscribe would repair it.
 func TestLiveAskEventFrameCarriesTheReadTimeFields(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Ask fields", "A spec")
 	since := eventHead(t, rig.database)

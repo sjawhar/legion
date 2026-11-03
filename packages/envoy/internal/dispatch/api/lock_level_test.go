@@ -72,6 +72,7 @@ var (
 // strings.Repeat("issues", 0) prints `... for update issues`: the tell is a word the statement
 // did not spell, an owner table outside its `from` or a lock clause the query never assembles.
 func TestNoForUpdateOnOwnerTables(t *testing.T) {
+	t.Parallel()
 	sources := moduleSources(t, "../../..")
 	constants, err := stringConstants(sources)
 	if err != nil {

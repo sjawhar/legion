@@ -82,6 +82,7 @@ func searchResponse(t *testing.T, handler http.Handler, query string) model.Sear
 }
 
 func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	corpus := seedSearchCorpus(t, handler)
 
@@ -125,6 +126,7 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 }
 
 func TestSearchLinksAnchoredIssueItemsToTheirDocument(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation instruments", "# Instruments\n\nThe astrolabe measures altitude.\n")
 
@@ -199,6 +201,7 @@ func TestSearchLinksAnchoredIssueItemsToTheirDocument(t *testing.T) {
 }
 
 func TestSearchDocumentSnippetWindowsAroundADeepMatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", strings.Repeat("Filler ", 2_000)+"The astrolabe measures altitude.")
 
@@ -212,6 +215,7 @@ func TestSearchDocumentSnippetWindowsAroundADeepMatch(t *testing.T) {
 }
 
 func TestSearchReadsOnlyTheLatestDocumentVersion(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Instruments", "The astrolabe measures altitude.\n")
 
@@ -251,6 +255,7 @@ func TestSearchReadsOnlyTheLatestDocumentVersion(t *testing.T) {
 }
 
 func TestSearchRanksTitleHitsAboveBodyHits(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	first := createInteractionIssue(t, handler, "SRCH", "Astrolabe", "Nothing here.")
 	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
@@ -283,6 +288,7 @@ func createSearchIssue(t *testing.T, handler http.Handler, project, title, spec 
 // fusion, so a term every kind holds lists one row of each kind before a second of any, and rows
 // that score alike are ordered issue, document, ask, comment, message.
 func TestSearchFusesKindsRoundRobin(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const spec = "The astrolabe measures altitude.\n"
 	keys := []string{
@@ -319,6 +325,7 @@ func TestSearchFusesKindsRoundRobin(t *testing.T) {
 // An issue's key searched alone lists that issue first, though ts_rank_cd scores the key no
 // higher than the title of an issue created after it that cites it.
 func TestSearchListsAnIssueFirstForItsOwnKey(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	cited := createInteractionIssue(t, handler, "SRCH", "Navigation instruments", "")
 	citing := createSearchIssue(t, handler, "SRCH", cited.Key+" follow-up", "")
@@ -340,6 +347,7 @@ func TestSearchListsAnIssueFirstForItsOwnKey(t *testing.T) {
 // reachable the rows the pages can return. Consecutive offsets walk those rows in one order, and
 // an offset past them answers no rows with the same counts.
 func TestSearchPagesTheFusedOrderAndCountsEveryMatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", "")
 	for i := range contracts.SearchKindDepth + 1 {
@@ -391,6 +399,7 @@ func TestSearchPagesTheFusedOrderAndCountsEveryMatch(t *testing.T) {
 }
 
 func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	first := createInteractionIssue(t, handler, "SRCH", "Astrolabe", "An astrolabe measures altitude.")
 	second := createInteractionIssue(t, handler, "OTHER", "Astrolabe", "An astrolabe measures altitude.")
@@ -420,6 +429,7 @@ func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
 }
 
 func TestSearchFindsStandaloneProjectDocumentsAndTheirDiscussions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, project := range []map[string]string{
 		{"key": "CORE", "name": "Core"},
@@ -502,6 +512,7 @@ func TestSearchFindsStandaloneProjectDocumentsAndTheirDiscussions(t *testing.T) 
 // result.issue.{key,status,title}. The server keeps emitting that object beside owner until no
 // installed client predates the change; a project-document hit never had one and must not gain one.
 func TestSearchIssueOwnedHitsCarryTheLegacyIssueField(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	corpus := seedSearchCorpus(t, handler)
 	document := createProjectDocument(t, handler, "SRCH", "Standalone chart", "# Chart\nThe astrolabe on its own page.\n")
@@ -560,6 +571,7 @@ func TestSearchIssueOwnedHitsCarryTheLegacyIssueField(t *testing.T) {
 }
 
 func TestSearchOnlyReturnsServerInsertedMarks(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", "No search term here.")
 	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]string{
@@ -584,6 +596,7 @@ func TestSearchOnlyReturnsServerInsertedMarks(t *testing.T) {
 }
 
 func TestMarkSnippetEscapesMarkupBeforeInjectingSearchMarks(t *testing.T) {
+	t.Parallel()
 	snippet := markSnippet("<script>alert(1)</script> " + markStart + "astrolabe" + markEnd + " <mark>x</mark>")
 	if !strings.Contains(snippet, "&lt;script&gt;") || !strings.Contains(snippet, "&lt;mark&gt;x&lt;/mark&gt;") {
 		t.Fatalf("snippet %q did not escape user markup", snippet)
@@ -594,6 +607,7 @@ func TestMarkSnippetEscapesMarkupBeforeInjectingSearchMarks(t *testing.T) {
 }
 
 func TestSearchReturnsEmptyResultsForStopWordOnlyQueries(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	for _, query := range []string{"down", "up", "is", "the"} {
@@ -610,6 +624,7 @@ func TestSearchReturnsEmptyResultsForStopWordOnlyQueries(t *testing.T) {
 // rule GET /api/v1/issues already applies (shared via parseQueryInt in server.go): a caller that
 // sent two values almost certainly meant one of them, and guessing which is worse than saying so.
 func TestSearchRejectsInvalidQueries(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	cases := map[string]string{
 		"q=a":                           "INVALID_QUERY",
@@ -642,6 +657,7 @@ func TestSearchRejectsInvalidQueries(t *testing.T) {
 // the server holds the same line in the same unit, so a query the command accepts is never refused
 // here, and a longer one from any other client is refused by name.
 func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	search := func(q string) *httptest.ResponseRecorder {
 		return searchRequest(t, handler, url.Values{"q": {q}}.Encode())
@@ -663,6 +679,7 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 // refused by name instead of answering an empty result; an empty project still searches every
 // project, and a key is read after trimming, as q is.
 func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	seedSearchCorpus(t, handler)
 	search := func(project string) *httptest.ResponseRecorder {
@@ -691,6 +708,7 @@ func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
 }
 
 func TestSearchAuthentication(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	unauthenticated := dispatchRequest(t, handler, http.MethodGet, "/api/v1/search?q=astrolabe", nil, "")
@@ -713,6 +731,7 @@ func TestSearchAuthentication(t *testing.T) {
 }
 
 func TestFirstTermSkipsOperators(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"astrolabe":         "astrolabe",
 		"-daemon astrolabe": "astrolabe",

@@ -14,6 +14,7 @@ import (
 )
 
 func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.T) {
+	t.Parallel()
 	var database *store.Store
 	pendingDuringSend := "not observed"
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
@@ -91,6 +92,7 @@ func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.
 }
 
 func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	roleHolder := "s1"
 	roleLookups := 0
@@ -212,6 +214,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 // takes an attempt of its own; once it is plainly abandoned a retry resumes the original
 // attempt, under its original number, so the listener deduplicates a send that did land.
 func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testing.T) {
+	t.Parallel()
 	keys := []string{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +309,7 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 // never sent: once its claim lapses the next retry must resolve it and send it, under its own
 // number and idempotency key, not report it undeliverable without ever calling the listener.
 func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
+	t.Parallel()
 	keys := []string{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

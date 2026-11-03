@@ -16,6 +16,7 @@ import (
 // that outside it. This test holds the anchored path at the cap: the comment is accepted, and the
 // margin record read back carries the body whole (INFRA-45).
 func TestAnchoredCommentAtTheBodyCapReachesTheMarginWhole(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored body cap", "The quick brown fox")
 	atCap := strings.Repeat("a", contracts.DispatchBodyMax)

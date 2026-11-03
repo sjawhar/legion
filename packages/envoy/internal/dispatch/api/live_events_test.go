@@ -177,6 +177,11 @@ func createPlainIssue(t *testing.T, handler http.Handler, project string) string
 }
 
 func TestTheEventFeedReplaysThenStreamsACommittedEvent(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createPlainIssue(t, rig.handler, "TEST")
 
@@ -208,6 +213,11 @@ func TestTheEventFeedReplaysThenStreamsACommittedEvent(t *testing.T) {
 
 // A person's socket and a bearer's are both served the feed.
 func TestTheEventFeedServesAPersonAndABearer(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	person := rig.dial(t, asUser("alice"))
@@ -227,6 +237,11 @@ func TestTheEventFeedServesAPersonAndABearer(t *testing.T) {
 // subscription with no resume (nothing replayed) and a since above the head (an id of a log since
 // replaced) say it is not.
 func TestTheEventFeedSaysWhenItsReplayCoversTheGap(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	createInteractionIssue(t, rig.handler, "TEST", "Replayed", "A spec")
 	head := eventHead(t, rig.database)
@@ -251,6 +266,11 @@ func TestTheEventFeedSaysWhenItsReplayCoversTheGap(t *testing.T) {
 }
 
 func TestTheEventFeedPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createPlainIssue(t, rig.handler, "TEST")
 	seedEvents(t, rig.database, issue, 1005, 0)
@@ -286,6 +306,11 @@ func TestTheEventFeedPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T)
 // catch-up and the live feed hand over at the relay's published cursor, which is read only up to
 // the horizon (events.Horizon), and that stays below a while A is open.
 func TestTheEventFeedResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, rig.handler, "OTHER", "Other issue", "A spec")
@@ -321,6 +346,11 @@ func TestTheEventFeedResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 // relay publishes into a subscription only ids above published, in strictly increasing order: no
 // event above since can arrive later below it.
 func TestTheEventFeedDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	// Long enough that the second subscription below opens between a commit and the read that
 	// commit's notification wakes, so the relay really is behind that subscription's since.
@@ -351,6 +381,11 @@ func TestTheEventFeedDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 // ended the subscription instead, sending the page to subscribe again, would leave a gap between
 // the last page and the new subscription for that commit to fall into.
 func TestTheEventFeedCappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	since := eventHead(t, rig.database)
@@ -383,6 +418,11 @@ func TestTheEventFeedCappedCatchupDeliversACommitDuringPagingExactlyOnce(t *test
 // this subscription: invisible to the catch-up (id <= since) and to a relay subscription made only
 // afterwards.
 func TestTheEventFeedColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	backlog := eventHead(t, rig.database)
@@ -406,6 +446,11 @@ func TestTheEventFeedColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.
 // holding no cursor adopts it and resumes from it without a gap, since every event above it is the
 // subscription's to send. The commit right after it reaches the subscription.
 func TestAColdSubscriptionStartsAtTheRelaysPublishedCursor(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	// An issue with no spec, whose document settles nothing, so nothing commits but the test's own
 	// writes and the relay's cursor stands where the subscription was handed it.
@@ -434,6 +479,11 @@ func TestAColdSubscriptionStartsAtTheRelaysPublishedCursor(t *testing.T) {
 // since, which would drop every event of the log as it now stands; and it is served what commits
 // next.
 func TestASinceAboveTheHeadStartsAtTheRelaysPublishedCursor(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createPlainIssue(t, rig.handler, "TEST")
 	client := rig.dial(t, withBearer("agent-token"))
@@ -462,6 +512,11 @@ func TestASinceAboveTheHeadStartsAtTheRelaysPublishedCursor(t *testing.T) {
 // clamped to the head it resolved; an unclamped since drops it, and the only frame this page then
 // ever sees is a heartbeat.
 func TestTheEventFeedResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	renameIssue(t, rig.handler, issue.Key, "Renamed before the reset")
@@ -540,6 +595,11 @@ func (stream *gatedStream) next(t *testing.T, what string) any {
 // had buffered for it before it dropped it. So the end can come at any id, and what the page needs
 // is that every id it applied came in order and that its resubscribe is served the rest.
 func TestARelayDropEndsTheSubscriptionAsBehind(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	issue := createPlainIssue(t, handler, "TEST")
 	ctx, err := store.ForConcurrentRead(store.WithTransactionTracking(t.Context()))
@@ -622,7 +682,16 @@ func TestARelayDropEndsTheSubscriptionAsBehind(t *testing.T) {
 // retry first, so a read that keeps failing is asked again at that pace rather than as fast as the
 // page can resubscribe.
 func TestAnEventsSubscriptionWhoseReadFailsEndsAsBehind(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	// The retry is the subject, so the test sets one short enough to wait out and long enough
+	// to tell a subscription that waited it from one that ended at once.
+	const retry = 100 * time.Millisecond
+	served.eventRelay.retry = retry
 	database.Pool.Close()
 	ctx, err := store.ForConcurrentRead(store.WithTransactionTracking(t.Context()))
 	if err != nil {
@@ -637,8 +706,8 @@ func TestAnEventsSubscriptionWhoseReadFailsEndsAsBehind(t *testing.T) {
 	if !ok || ended.Sub != "feed" || ended.Reason != "behind" {
 		t.Fatalf("the first frame of a subscription whose read failed = %+v, want its end, behind", ended)
 	}
-	if waited := time.Since(began); waited < eventRelayRetry {
-		t.Fatalf("the subscription ended %s after it started, before the relay's retry (%s)", waited, eventRelayRetry)
+	if waited := time.Since(began); waited < retry {
+		t.Fatalf("the subscription ended %s after it started, before the relay's retry (%s)", waited, retry)
 	}
 }
 
@@ -649,6 +718,11 @@ func TestAnEventsSubscriptionWhoseReadFailsEndsAsBehind(t *testing.T) {
 // frame, which is after it subscribed to the relay and read the head and before its catch-up, so
 // the commit lands exactly in that window.
 func TestAnEventCommittedDuringTheCatchUpIsSentOnce(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	issue := createPlainIssue(t, handler, "TEST")
 	ctx, err := store.ForConcurrentRead(store.WithTransactionTracking(t.Context()))
@@ -692,6 +766,11 @@ func TestAnEventCommittedDuringTheCatchUpIsSentOnce(t *testing.T) {
 // An unsubscribe or a replacement stops the subscription while its socket stays open: its
 // goroutine returns and leaves the relay, and nothing more of it reaches the page.
 func TestAStoppedEventsSubscriptionLeavesTheRelayWhileItsSocketStaysOpen(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	relay := rig.served.eventRelay
@@ -713,6 +792,11 @@ func TestAStoppedEventsSubscriptionLeavesTheRelayWhileItsSocketStaysOpen(t *test
 // An events view names its kind and nothing else, and its resume a decimal event id; anything else
 // is refused and starts nothing.
 func TestAnEventsViewNamesOnlyItsKindAndItsSinceIsAnEventID(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	client := rig.dial(t, asUser("alice"))
 	preset, query, at, session := 7, "repo=acme/widgets", "2026-10-14T09:00:00Z", "6f1c5b1e-8a3c-4b7e-9a51-0d2f3c4b5a69"
@@ -747,6 +831,11 @@ func TestAnEventsViewNamesOnlyItsKindAndItsSinceIsAnEventID(t *testing.T) {
 // thousands of events: the page reopens its socket and resubscribes from the last id it applied, and
 // is sent what committed since.
 func TestTheDisconnectHookSendsTheEventFeedThroughItsResume(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{testHooks: true}, nil)
 	issue := createPlainIssue(t, rig.handler, "TEST")
 
@@ -786,6 +875,11 @@ func TestTheDisconnectHookSendsTheEventFeedThroughItsResume(t *testing.T) {
 // GET /api/v1/events and its test hook are gone, test hooks or not: the event feed is the live
 // socket's.
 func TestTheEventsRouteIsGone(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	rig := newLiveSocketRig(t, testServerOptions{testHooks: true}, nil)
 	for _, request := range []struct{ method, target string }{
 		{http.MethodGet, "/api/v1/events"},
@@ -819,6 +913,11 @@ func liveFixtureEvent() model.Event {
 // bytes; and fixtures/live/event.json, which the contracts' and the dashboard's tests read, is that
 // frame.
 func TestAnEventFrameCarriesTheEventsOwnBytes(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
+	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
+	// lock on purpose out of the parallel set left five of these timing out on events_start;
+	// the whole family is out of it (dispatch://INFRA-1075).
 	event := liveFixtureEvent()
 	encoded, err := json.Marshal(event)
 	if err != nil {

@@ -148,6 +148,7 @@ func createAnchoredComment(t *testing.T, handler http.Handler, issueKey, artifac
 // tree after its review began would have them. A text embed holding a string is text, so a
 // document holding one reads.
 func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
+	t.Parallel()
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
 			handler, database, deps := newTestServer(t, testServerOptions{})
@@ -227,6 +228,7 @@ func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 // holds for every stored tree outsideSchemaCorruptions lists, one whose text holds an embed among
 // them, which the upload replaces whole rather than diffing against.
 func TestOutsideSchemaArtifactIsRepairableThroughUpload(t *testing.T) {
+	t.Parallel()
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
 			handler, database, deps := newTestServer(t, testServerOptions{})

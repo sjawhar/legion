@@ -12,6 +12,7 @@ import (
 // resolves to none. Both rows here carry block_artifact_id too, the shape asks_anchor_artifact
 // (0032) never cast, which is how an earlier release could leave such a spelling stored.
 func TestAskReadersResolveAnUpperCaseOrBracedAnchorToItsDocument(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchor spellings", "The quick brown fox jumps over the lazy dog")
 	blockDocument, _ := secondDocument(t, handler, issue.Key)

@@ -17,6 +17,7 @@ import (
 )
 
 func TestQuoteAnchorWritesServerMark(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -55,6 +56,7 @@ func TestQuoteAnchorWritesServerMark(t *testing.T) {
 }
 
 func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -116,6 +118,7 @@ func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs
 }
 
 func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -143,6 +146,7 @@ func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {
 }
 
 func TestQuoteAnchorCommentSpansParagraphs(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -163,6 +167,7 @@ func TestQuoteAnchorCommentSpansParagraphs(t *testing.T) {
 }
 
 func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -238,6 +243,7 @@ func writeBrowserDocument(t *testing.T, documentService *docs.Service, artifactI
 // suggestion, as main did; and a reject is never refused for an ask, since it gives back the
 // document the insert started from, even when the insert was an ask's whole question.
 func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, seed, browser, quote, replaceWith, action, want string
 		browserInsert                                         bool
@@ -291,6 +297,7 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 // that climbed out of the callout and replaced it with the blocks would read back as written in
 // both parsers, so nothing downstream could notice the callout was gone.
 func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ name, replaceWith, body string }{
 		{name: "a rule", replaceWith: "***\n", body: "---\n"},
 		{name: "a list", replaceWith: "- a\n", body: "- a\n"},
@@ -336,6 +343,7 @@ func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 // writes the question it was answered on back into the block. A fit that climbed out of the ask
 // would split it, leaving the options under a minted id as a new open ask "?" beside it.
 func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Two paragraphs in a question", "decision", transportAsk, "Which transport?")
 	read := readBlockAsk(t, handler, askID)
@@ -379,6 +387,7 @@ func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 // callout keeps its id; the inner callout of two, rewritten under its own id, is replaced where it
 // sits, inside the outer one, with any other block of the replacement beside it there.
 func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
+	t.Parallel()
 	minted := regexp.MustCompile(`#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	for _, test := range []struct{ name, spec, quote, replaceWith, want string }{
 		{name: "a callout under no id", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\nA note.\n:::\n",
@@ -437,6 +446,7 @@ func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 // answered ask rewritten this way keeps its row, its answer and the question it was answered on,
 // which settlement writes back into its block.
 func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.T) {
+	t.Parallel()
 	const (
 		ask     = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n"
 		callout = ":::callout{#c1 kind=\"note\" title=\"\"}\nWhich one?\n:::\n"
@@ -559,6 +569,7 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 //     empty (the engine drops it, which for an ask retracts it); the splice's schema error is a
 //     refusal, never a 500.
 func TestSuggestionAcceptRefusals(t *testing.T) {
+	t.Parallel()
 	codeQuestion := "Which?\n\n```\ncode\n```\n"
 	for _, test := range []struct {
 		name, spec, browser, quote, replaceWith, code, reason string
@@ -667,6 +678,7 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 }
 
 func TestMarkAnchorMissingAfterWaitIs409(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -692,6 +704,7 @@ func TestMarkAnchorMissingAfterWaitIs409(t *testing.T) {
 }
 
 func TestAnchorInputRequiresQuoteXorMarkID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		anchor map[string]any
@@ -718,6 +731,7 @@ func TestAnchorInputRequiresQuoteXorMarkID(t *testing.T) {
 }
 
 func TestAnchorQuoteNotFoundIs404(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Missing quote", "The quick brown fox")
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -733,6 +747,7 @@ func TestAnchorQuoteNotFoundIs404(t *testing.T) {
 // allowed, is the caller's markdown to fix: 400 INVALID_MARKDOWN naming the ask and its quote, not
 // a 500 that blames the server, and the document keeps its text.
 func TestAnUploadMovingAnOpenAsksQuoteIntoACodeBlockIs400(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask into code", "Intro.\n\nrun the tests\n")
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -764,6 +779,7 @@ func TestAnUploadMovingAnOpenAsksQuoteIntoACodeBlockIs400(t *testing.T) {
 }
 
 func TestReplyMayNotCarryAnAnchor(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored reply", "The quick brown fox")
 	root := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": "root"}, "alice")

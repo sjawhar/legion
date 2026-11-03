@@ -16,6 +16,7 @@ import (
 // sessions and people, comments on them, and runs the real outbox over each comment's event to read
 // which sessions' own topics it reached.
 func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
+	t.Parallel()
 	writer := map[string]any{"kind": "session", "id": "session-writer"}
 	editor := map[string]any{"kind": "session", "id": "session-editor"}
 	reviewer := map[string]any{"kind": "session", "id": "session-reviewer"}

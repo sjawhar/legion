@@ -20,6 +20,7 @@ type anchoredRecord struct {
 }
 
 func TestQuoteAnchorsRecordBlockAndBlocksCountReferences(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Block anchor", "Introduction.\n\nTarget passage.\n")
 
@@ -52,6 +53,7 @@ func TestQuoteAnchorsRecordBlockAndBlocksCountReferences(t *testing.T) {
 }
 
 func TestQuoteAnchorAcrossTopLevelBlocksKeepsBlockIDNull(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cross-block anchor", "One.\n\nTwo.\n")
 

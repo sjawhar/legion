@@ -162,6 +162,7 @@ func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, 
 }
 
 func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Options", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -186,6 +187,7 @@ func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {
 }
 
 func TestAnchoredAskAnswerAndInbox(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored ask", "The quick brown fox")
 	input := map[string]any{
@@ -260,6 +262,7 @@ func TestAnchoredAskAnswerAndInbox(t *testing.T) {
 }
 
 func TestListIssueAsksFiltersByState(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask states", "The quick brown fox")
 	otherIssue := createInteractionIssue(t, handler, "OTHER", "Unrelated issue", "A spec")
@@ -359,6 +362,10 @@ func TestListIssueAsksFiltersByState(t *testing.T) {
 }
 
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	// The seeded spec's settlement would lock the issue row this test holds; keep it
 	// out of the lock queue so the counted waiter is the answer handler.
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
@@ -402,6 +409,7 @@ func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 }
 
 func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Closed ask", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -429,6 +437,7 @@ func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
 }
 
 func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ambiguous ask", "the quick the fox")
 
@@ -460,6 +469,7 @@ func TestAskAnchorAmbiguityAndOccurrence(t *testing.T) {
 }
 
 func TestInteractionCapsAndAnswerValidation(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Caps", "A spec")
 	// A whole-cap question is accepted, since a question names its concrete case; one past it is
@@ -549,6 +559,7 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 }
 
 func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Free text answers", "A spec")
 
@@ -619,6 +630,7 @@ func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {
 }
 
 func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -664,6 +676,7 @@ func TestAnchorsCaptureAnUnnamedVersionWhenLiveTextChanged(t *testing.T) {
 }
 
 func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Document edits", "same same")
 	ambiguous := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -685,6 +698,7 @@ func TestDocumentEditMapsMissingAndAmbiguousTargets(t *testing.T) {
 }
 
 func TestDocumentEditExtendsTableAfterCellAnchor(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table document edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -711,6 +725,7 @@ func TestDocumentEditExtendsTableAfterCellAnchor(t *testing.T) {
 }
 
 func TestDocumentEditInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table paragraph insertion", "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
 	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -737,6 +752,7 @@ func TestDocumentEditInsertsParagraphAfterTableContainingCellAnchor(t *testing.T
 }
 
 func TestDocumentEditRejectsTableRowWiderThanContainingTable(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table width", "| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -752,6 +768,7 @@ func TestDocumentEditRejectsTableRowWiderThanContainingTable(t *testing.T) {
 }
 
 func TestDocumentEditRejectsTargetSpanningTextblocks(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Target spans textblocks", "one\n\ntwo\n")
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -767,6 +784,7 @@ func TestDocumentEditRejectsTargetSpanningTextblocks(t *testing.T) {
 }
 
 func TestDocumentEditWithoutSummaryWritesUnnamedVersionAndEvent(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unnamed document edit", "before")
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -798,6 +816,7 @@ func TestDocumentEditWithoutSummaryWritesUnnamedVersionAndEvent(t *testing.T) {
 }
 
 func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Clean document", "The quick brown fox")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -822,6 +841,7 @@ func TestAnchorsKeepCleanDocumentAtExistingVersion(t *testing.T) {
 	}
 }
 func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -912,6 +932,7 @@ func TestCommentsSuggestionsAndArtifactFilter(t *testing.T) {
 }
 
 func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -965,6 +986,7 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 }
 
 func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -1093,6 +1115,7 @@ func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T
 // abort the whole document mutation with a load error when that row's anchor needs refreshing.
 // Both paths share attachOpenedEventIDs's fallback (events.OpenedEventIDs).
 func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")
 
@@ -1158,6 +1181,7 @@ func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T
 }
 
 func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -1197,6 +1221,7 @@ func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 // is the one way to close it; the resolve branch must tolerate the missing mark the way
 // accept and reject already do.
 func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -1241,6 +1266,7 @@ func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
 
 // A resolved orphaned suggestion reopens like any resolved thread; the missing mark is not fatal.
 func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -1301,6 +1327,7 @@ func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID strin
 }
 
 func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -1340,6 +1367,7 @@ func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
 // An upload's version takes its author sequence at the upload write's room read, so a browser edit
 // made after that read stays pending until a later version holds and credits it (LEGION-503).
 func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.T) {
+	t.Parallel()
 	documentService, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Upload timing", "First.\n\nSecond.\n")
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -1384,6 +1412,7 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 // later version credits an edit the upload was written over, whether its replacement dropped that
 // edit or kept it. An upload that changes nothing clears nothing (LEGION-503).
 func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
+	t.Parallel()
 	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for _, test := range []struct {
@@ -1451,6 +1480,7 @@ func TestAnUploadClearsPendingCreditOnlyWhenItChangesTheDocument(t *testing.T) {
 // uploader's browser edits it is written over, so the next version, a session's named edit,
 // credits that session alone (LEGION-503).
 func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
+	t.Parallel()
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Uploaded author", "before")
 	path := "/api/v1/issues/" + issue.Key + "/artifacts"
@@ -1497,6 +1527,7 @@ func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
 }
 
 func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	var gate *firstReplaceGate
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -1560,6 +1591,10 @@ func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 }
 
 func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -1608,6 +1643,7 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 }
 
 func TestInboxOrdersOpenAsksAcrossIssues(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	first := createInteractionIssue(t, handler, "TEST", "First", "first")
 	firstAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{"question": "First question", "actor": sessionActor()})
@@ -1648,6 +1684,7 @@ func TestInboxOrdersOpenAsksAcrossIssues(t *testing.T) {
 }
 
 func TestReferencesAndSessionMessageNotify(t *testing.T) {
+	t.Parallel()
 	handler, database := newInteractionHandler(t, nil)
 	issue := createInteractionIssue(t, handler, "TEST", "References", "The quick brown fox")
 	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{"question": "Ask target dispatch://" + issue.Key + "/spec", "actor": sessionActor()})
@@ -1706,6 +1743,7 @@ func TestReferencesAndSessionMessageNotify(t *testing.T) {
 }
 
 func TestCommentReplyMustBelongToItsIssue(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	first := createInteractionIssue(t, handler, "TEST", "First", "first")
 	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/comments", map[string]any{"body": "First", "actor": sessionActor()})
@@ -1723,6 +1761,7 @@ func TestCommentReplyMustBelongToItsIssue(t *testing.T) {
 }
 
 func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask thread", "before")
 	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -1813,6 +1852,7 @@ func TestAskThreadRepliesStoredAndReturnedInOrder(t *testing.T) {
 }
 
 func TestAskReplyMustBelongToItsIssue(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	first := createInteractionIssue(t, handler, "TEST", "First", "first")
 	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+first.Key+"/asks", map[string]any{
@@ -1844,6 +1884,7 @@ func TestAskReplyMustBelongToItsIssue(t *testing.T) {
 }
 
 func TestAskReplyOnClosedIssueIsRefused(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Closing soon", "before")
 	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -1865,6 +1906,7 @@ func TestAskReplyOnClosedIssueIsRefused(t *testing.T) {
 }
 
 func TestDoneIssueRejectsEveryMutation(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Done issue", "before")
 	ask := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -1991,6 +2033,7 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 }
 
 func TestEditArtifactCreatesNamedVersion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Edit version", "before")
 	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -2033,6 +2076,7 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 }
 
 func TestEmptyArtifactEditDoesNotScheduleSettlement(t *testing.T) {
+	t.Parallel()
 	var tracked *scheduleTrackingDocs
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		service := docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -2054,6 +2098,7 @@ func TestEmptyArtifactEditDoesNotScheduleSettlement(t *testing.T) {
 }
 
 func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unversioned edit", "before")
 	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -2075,6 +2120,7 @@ func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 // A batch that changes nothing mints nothing and says so, with or without a summary: a `summary`
 // that reached NamedVersion unconditionally would version a byte-identical document.
 func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name    string
 		request map[string]any
@@ -2118,6 +2164,7 @@ func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
 }
 
 func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Text version", "before")
 	readVersion := func() *int {
@@ -2147,6 +2194,7 @@ func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
 // The route renders INVALID_OP and TARGET_AMBIGUOUS from the typed error, not the wrapped chain,
 // so a refusal inside a multi-operation batch has to reach the response still naming its operation.
 func TestDocumentEditRefusalsReachTheResponseNamingTheirOperation(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Refusal shapes", "Body.\n\n- Retracted\n\nShared line.\n\nShared line.\n")
 	for _, test := range []struct {
@@ -2214,6 +2262,7 @@ func TestDocumentEditRefusalsReachTheResponseNamingTheirOperation(t *testing.T) 
 }
 
 func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")
 	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
@@ -2228,6 +2277,7 @@ func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
 }
 
 func TestNamedArtifactVersionEventCarriesUnifiedDiff(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Version diff", "before")
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -2269,6 +2319,7 @@ func TestNamedArtifactVersionEventCarriesUnifiedDiff(t *testing.T) {
 }
 
 func TestSuggestionAllowsEmptyBodyWithoutRelaxingCommentValidation(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Empty suggestion", "before")
 	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -2291,6 +2342,7 @@ func TestSuggestionAllowsEmptyBodyWithoutRelaxingCommentValidation(t *testing.T)
 }
 
 func TestGetCommentReturnsReplyChain(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Comment thread", "before")
 	createComment := func(body string, replyTo *string) model.Comment {
@@ -2355,6 +2407,7 @@ func TestGetCommentReturnsReplyChain(t *testing.T) {
 }
 
 func TestGetCommentReturnsNotFound(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/00000000-0000-0000-0000-000000000000", nil, "alice")
 	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"NOT_FOUND"`) {
@@ -2419,6 +2472,7 @@ func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID 
 }
 
 func TestResolveAskRemovesItFromInboxAndKeepsTheThread(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Retracted decision", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -2469,6 +2523,7 @@ func TestResolveAskRemovesItFromInboxAndKeepsTheThread(t *testing.T) {
 }
 
 func TestResolveAskRejectsAnsweredAsksAndAnswerRejectsResolvedAsks(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Closed decisions", "A spec")
 	answered := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -2517,6 +2572,7 @@ func TestResolveAskRejectsAnsweredAsksAndAnswerRejectsResolvedAsks(t *testing.T)
 }
 
 func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/00000000-0000-0000-0000-000000000000/resolve", map[string]any{
 		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
@@ -2562,6 +2618,7 @@ func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
 }
 
 func TestInboxGroupsAsksWaitingOnTheirAskerAfterThoseNeedingAHuman(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Inbox turns", "spec")
 	open := func(question string) string {

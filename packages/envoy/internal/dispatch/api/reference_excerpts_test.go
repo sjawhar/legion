@@ -97,6 +97,7 @@ func documentMention(t *testing.T, handler http.Handler, reference, artifactID, 
 // The references route answers a document's mention with the excerpt stored when the mention was
 // indexed, so it reads no document to cut one.
 func TestReferencesServeTheStoredExcerptWithoutReadingTheDocument(t *testing.T) {
+	t.Parallel()
 	handler, _, service, counted := referenceExcerptHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -123,6 +124,7 @@ func TestReferencesServeTheStoredExcerptWithoutReadingTheDocument(t *testing.T) 
 // document: a heading, a list item and a paragraph, from a spec seeded at issue creation and
 // again from the version an edit writes.
 func TestAnIndexedExcerptIsTheBlockTheRouteServedForEachBlockKind(t *testing.T) {
+	t.Parallel()
 	handler, _, service, counted := referenceExcerptHandler(t)
 	for _, project := range []string{"CORE", "OPS", "ACME", "LEGION"} {
 		createReferenceAPIProject(t, handler, project)
@@ -174,6 +176,7 @@ func TestAnIndexedExcerptIsTheBlockTheRouteServedForEachBlockKind(t *testing.T) 
 // rendered document gives it; once stored, a tick finds nothing to do. The document's blocks are
 // left unindexed, as the block index has not reached it, so the document's own mention is listed.
 func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T) {
+	t.Parallel()
 	handler, database, service, _ := referenceExcerptHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -208,6 +211,7 @@ func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T)
 // the edited document's block. That older binary indexes no blocks either, so the document's own
 // mention is listed.
 func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing.T) {
+	t.Parallel()
 	handler, database, service, _ := referenceExcerptHandler(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")

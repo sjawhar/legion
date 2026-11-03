@@ -61,6 +61,7 @@ func replyTo(t *testing.T, handler http.Handler, rootID, body string) *httptest.
 // into the same conversation, threaded under its first reply, instead of being refused. A retry
 // of either reply with the same text still posts nothing.
 func TestSessionFollowUpToADirectMessageThreadsUnderItsFirstReply(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, sent := directConversation(t)
 	sendsAfterRoot := len(*sent)
 
@@ -116,6 +117,7 @@ type replyResponse struct {
 // so a frame handed to the session twice cannot post a second answer. Whenever the route posts
 // nothing and hands back a message the conversation already holds, it says so.
 func TestAnsweredDeliveryPostsAFollowUpOnlyWhenAskedAndSaysWhenItPostedNothing(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, _ := directConversation(t)
 	unflagged := func(body string) *httptest.ResponseRecorder {
 		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
@@ -157,6 +159,7 @@ func TestAnsweredDeliveryPostsAFollowUpOnlyWhenAskedAndSaysWhenItPostedNothing(t
 // follow_up is true, false or absent. Anything else is refused rather than read as a retry, so a
 // caller's typo is not answered as "already answered" with nothing posted.
 func TestReplyFollowUpIsTrueFalseOrAbsent(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, _ := directConversation(t)
 	first := decodeBody[replyResponse](t, reply("On it."))
 	answer := func(query string) *httptest.ResponseRecorder {
@@ -179,6 +182,7 @@ func TestReplyFollowUpIsTrueFalseOrAbsent(t *testing.T) {
 // any message id in it, the same way a human reads it on the Agents page: the root and every
 // reply, oldest first.
 func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, _ := directConversation(t)
 	first := decodeBody[model.Message](t, reply("On it."))
 	followUp := postAgentMessage(t, handler, "s1", map[string]any{
@@ -225,6 +229,7 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 // `actor`, so this guards against accidents rather than authorizing. An issue thread follows the
 // issue's rule, the same as GET /issues/{key}/messages/{id}.
 func TestBearerReadsADirectConversationOnlyAsItsSessionAndAnIssueThreadAsTheIssueAllows(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, _ := directConversation(t)
 	first := decodeBody[model.Message](t, reply("On it."))
 
@@ -281,6 +286,7 @@ func unreadReplies(t *testing.T, handler http.Handler, login, sessionID string) 
 // clear the conversation: the count is theirs alone, their own messages never count, marking a
 // conversation read never moves backwards, and a Clear keeps the read mark beside it.
 func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T) {
+	t.Parallel()
 	handler, _, reply, _ := directConversation(t)
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
 		t.Fatalf("before any reply: %#v, want nothing unread", got)
@@ -359,6 +365,7 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 // one casing clears them under another. The Clear is keyed the other way and is
 // TestClearIsKeyedOnTheRawActorID's.
 func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T) {
+	t.Parallel()
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
 	for _, login := range []string{"Alice", "alice", "ALICE"} {
@@ -385,6 +392,7 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 // the rows older images wrote under a login's display casing), so a viewer's Clear is one row
 // whatever casing reaches the header.
 func TestClearIsKeyedOnTheCanonicalPerson(t *testing.T) {
+	t.Parallel()
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
 	if got := unreadReplies(t, handler, "Alice", "s1"); got.UnreadReplies != 1 {
@@ -406,6 +414,7 @@ func TestClearIsKeyedOnTheCanonicalPerson(t *testing.T) {
 
 // A session id no route can name is refused as input, never answered 500 after the write.
 func TestAgentStateRefusesASessionIDNoRouteNames(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, field := range []string{"read_through", "cleared_before"} {
 		put := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/odd.session/state", map[string]any{
@@ -421,6 +430,7 @@ func TestAgentStateRefusesASessionIDNoRouteNames(t *testing.T) {
 // still accepts it, but stores it as no later than the server's now, so a reply that arrives in
 // that gap still counts as unread instead of being hidden by a mark the viewer never read past.
 func TestAFastBrowserClockNeitherHidesNorUncountsTheNextReply(t *testing.T) {
+	t.Parallel()
 	for _, field := range []string{"read_through", "cleared_before"} {
 		t.Run(field, func(t *testing.T) {
 			handler, _, reply, _ := directConversation(t)
@@ -440,6 +450,7 @@ func TestAFastBrowserClockNeitherHidesNorUncountsTheNextReply(t *testing.T) {
 // A read mark or Clear is announced on the live event feed with the login it belongs to, so the
 // viewer's other open tabs and devices refresh their badge instead of waiting for a focus.
 func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
 		"read_through": time.Now().UTC().Format(time.RFC3339Nano),
@@ -462,6 +473,7 @@ func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
 // that conversation ahead of a newer one nobody has answered, so the one that last moved is the
 // one the Agents page opens on and is never the one left outside the list's window.
 func TestAgentConversationsListByLatestActivity(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	assertRootCarriesDelivery(t, database, root.ID, "s1")
 	later := postAgentMessage(t, handler, "s1", map[string]any{
@@ -537,6 +549,7 @@ func windowHolds(t *testing.T, handler http.Handler, rootID string) (bool, int) 
 // conversation list is a window: a reply the count counts has to be in the list, or opening the
 // view marks it read through a watermark that only moves forward and nothing ever shows it.
 func TestUnreadReplyOutsideTheActivityWindowIsStillListed(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	answer := decodeBody[model.Message](t, reply("Here is the answer you needed."))
 	backdate(t, database, root.ID, 24*time.Hour)
@@ -556,6 +569,7 @@ func TestUnreadReplyOutsideTheActivityWindowIsStillListed(t *testing.T) {
 // The count covers direct messages alone, while the window covers every conversation targeted at
 // the session, so ordinary issue traffic is enough to push a direct conversation out of it.
 func TestIssueTrafficDoesNotPushAnUnreadDirectReplyOutOfTheWindow(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	answer := decodeBody[model.Message](t, reply("No - it rolled back, here is why."))
 	backdate(t, database, root.ID, 24*time.Hour)
@@ -606,6 +620,7 @@ func seedConversations(t *testing.T, database *store.Store, count int, issueKey 
 // unread conversations come back beside the 50 that moved last, and one read mark over the window
 // clears the badge with every reply already shown.
 func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *testing.T) {
+	t.Parallel()
 	handler, database, _, _, _ := directConversationFrom(t, "alice")
 	seedConversations(t, database, 60, nil, "alice", "unread")
 	issue := createInteractionIssue(t, handler, "WINDOW", "Issue traffic", "seed")
@@ -657,6 +672,7 @@ func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *test
 // mixed-case on purpose: with a login whose raw and canonical forms are the same, a call site
 // passing the raw one would pass this test while the window read zero roots.
 func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
+	t.Parallel()
 	const login = "Alice"
 	if login == model.CanonicalLogin(login) {
 		t.Fatalf("the fixture login %q is already canonical, or this test stops testing the canonicalization it is named for", login)
@@ -752,6 +768,7 @@ func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID st
 // would make it "the 50 most recently created" and drop this conversation, which is the same
 // defect the unread union fixes, for a conversation the viewer has already read.
 func TestAnOldConversationAnsweredNowIsInsideTheWindow(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	seedConversations(t, database, 50, nil, "bob", "quiet")
 	if _, err := database.Pool.Exec(context.Background(), `
@@ -787,6 +804,7 @@ func TestAnOldConversationAnsweredNowIsInsideTheWindow(t *testing.T) {
 // chain, is what brings an old question back to the top. Ranking roots on their own created_at,
 // or on their direct replies alone, would bury it under a newer question nobody has touched.
 func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	assertRootCarriesDelivery(t, database, root.ID, "s1")
 	first := decodeBody[model.Message](t, reply("On it."))
@@ -825,6 +843,7 @@ func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
 // direct message this viewer sent that session. The count and the window agree on that, as they
 // do on everything else.
 func TestADeliveredOnlyConversationIsListedAndCountsNothingUnread(t *testing.T) {
+	t.Parallel()
 	const login = "Alice"
 	handler, database, _, _, _ := directConversationFrom(t, login)
 	var rootID string
@@ -901,6 +920,7 @@ func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sess
 // TestARootInBothCandidateBranchesIsListedOnce does, so a change to that helper fails both at
 // once, which is the point of sharing it.
 func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testing.T) {
+	t.Parallel()
 	handler, _, readRoot, replyToRead, _ := directConversationFrom(t, "alice")
 	readReply := decodeBody[model.Message](t, replyToRead("Answered, and read."))
 
@@ -988,6 +1008,7 @@ func windowEntry(t *testing.T, handler http.Handler, login, sessionID, rootID st
 // has gained a reply since is, counting that reply alone. Its pair above is the one that
 // separates a per-root flag from a session-level one; this holds the count's side of the rule.
 func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
+	t.Parallel()
 	handler, _, root, reply, _ := directConversationFrom(t, "alice")
 	first := decodeBody[model.Message](t, reply("The reply the viewer has read."))
 	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
@@ -1039,6 +1060,7 @@ func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
 // the window's flags alike. The login is mixed-case so a write and a read keyed on two spellings
 // of it would show up as a mark that marks nothing.
 func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
+	t.Parallel()
 	handler, _, older, reply, _ := directConversationFrom(t, "Alice")
 	olderAnswer := decodeBody[model.Message](t, reply("The older answer, never shown."))
 	shownRoot := decodeBody[model.Message](t, postAgentMessage(t, handler, "s1", map[string]any{
@@ -1091,6 +1113,7 @@ func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
 // read_replies names the session's own messages; anything else is refused before a row is
 // written, so every row the table holds names a message the path's session wrote.
 func TestRepliesReadByIDRefuseAnythingButTheSessionsOwnMessages(t *testing.T) {
+	t.Parallel()
 	handler, root, reply, _ := directConversation(t)
 	answer := decodeBody[model.Message](t, reply("On it."))
 	for _, refusal := range []struct {
@@ -1122,6 +1145,7 @@ func TestRepliesReadByIDRefuseAnythingButTheSessionsOwnMessages(t *testing.T) {
 // the one Postgres takes, so a form Postgres refuses (urn:uuid:) never reaches it and is not a 500
 // where the route documents 400 INVALID_STATE for what it refuses.
 func TestRepliesReadByIDTakeEveryFormOfAnIDThatParses(t *testing.T) {
+	t.Parallel()
 	for _, form := range []struct {
 		name  string
 		write func(id string) string
@@ -1150,6 +1174,7 @@ func TestRepliesReadByIDTakeEveryFormOfAnIDThatParses(t *testing.T) {
 // A broadcast page sends its replies again on each visit while the session has an unread reply
 // elsewhere. A read that adds a reply still announces itself.
 func TestRepliesReadByIDAgainRecordNoEvent(t *testing.T) {
+	t.Parallel()
 	handler, database, _, reply, _ := directConversationFrom(t, "alice")
 	answer := decodeBody[model.Message](t, reply("On it."))
 	announced := func() int {
@@ -1239,6 +1264,7 @@ func seedDirectAnswer(t *testing.T, database *store.Store, login, sessionID stri
 // though their replies are older than the mark. The login is mixed-case so a delete keyed on
 // another spelling would leave rows.
 func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
+	t.Parallel()
 	handler, database, _, reply, _ := directConversationFrom(t, "Alice")
 	otherSession := seedDirectAnswer(t, database, "alice", "s2")
 	putAgentState(t, handler, "Alice", "s2", map[string]any{"read_replies": []string{otherSession}})
@@ -1286,6 +1312,7 @@ func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
 // back for the mark to delete again, and no event goes out. A broadcast page revisited while the
 // session has an unread reply elsewhere sends such replies again.
 func TestRepliesReadByIDThatAReadMarkPassedRecordNothing(t *testing.T) {
+	t.Parallel()
 	handler, database, _, reply, _ := directConversationFrom(t, "alice")
 	answer := decodeBody[model.Message](t, reply("On it."))
 	announced := func() int {
@@ -1322,6 +1349,7 @@ func TestRepliesReadByIDThatAReadMarkPassedRecordNothing(t *testing.T) {
 // of them (40P01) and the route answers that valid write 500. Every round reads a fresh batch,
 // since only rows not yet written take the locks two inserters contend for.
 func TestOverlappingRepliesReadByIDInOppositeOrdersBothLand(t *testing.T) {
+	t.Parallel()
 	handler, database, root, _, _ := directConversationFrom(t, "alice")
 	const rounds, size = 20, 40
 	var failures []string
@@ -1372,6 +1400,7 @@ func TestOverlappingRepliesReadByIDInOppositeOrdersBothLand(t *testing.T) {
 // targeted at the session that also carries a delivery to it - must come back once. `union all`
 // would list it twice.
 func TestARootInBothCandidateBranchesIsListedOnce(t *testing.T) {
+	t.Parallel()
 	handler, database, root, _, _ := directConversationFrom(t, "alice")
 
 	// The fixture's root is targeted at s1; make sure it is also one a delivery to s1 names, so

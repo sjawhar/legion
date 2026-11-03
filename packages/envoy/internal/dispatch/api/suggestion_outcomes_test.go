@@ -143,9 +143,10 @@ func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
 // An event the suggestion's actor writes on the suggested issue wakes the idle sweep through its
 // notification on a real pglisten.Hub, and the suggestion is marked acted_on within seconds.
 func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	sweep := startIdleSweep(t, "OWAKE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion row
 
 	postOutcomeMessage(t, sweep.handler, sweep.target, "alice", "Adding the new detail here instead.")
 	waitUntil(t, 5*time.Second, "the suggestion to be marked acted_on", func() bool {
@@ -164,7 +165,6 @@ func TestWritesMomentsApartAreJudgedTogetherAsActedOn(t *testing.T) {
 	const settle = 1500 * time.Millisecond
 	sweep := startIdleSweep(t, "OTOGETHER", settle)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 
 	postOutcomeMessage(t, sweep.handler, sweep.source, "alice", "Looking into this here first.")
 	time.Sleep(300 * time.Millisecond)
@@ -203,7 +203,6 @@ func TestAYoungSuggestionIsNotJudgedByAnOlderEventOfItsIssues(t *testing.T) {
 	time.Sleep(settle / 2)
 	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
 	recorded := time.Now()
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 	postOutcomeMessage(t, handler, source, "alice", "Looking into this here first.")
 
 	// bob's message is settle old now; the suggestion is not.
@@ -253,7 +252,8 @@ func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) 
 		t.Fatalf("open the suggestion's transaction: %v", err)
 	}
 	defer func() { _ = recording.Rollback(context.Background()) }()
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion's created_at
+	// No wait: this transaction's now() is its start, before the event's own transaction, which
+	// is what makes the suggestion's created_at the older of the two.
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
 
 	if err := sweepSuggestionOutcomes(t, srv); err != nil {
@@ -285,6 +285,7 @@ func TestASuggestionCommittedAfterALaterStartedEventIsStillJudged(t *testing.T) 
 // the suggestion is on the third page of two events each, and one page alone reports itself full
 // and leaves the suggestion pending.
 func TestASweepReadsEveryPageOfABacklog(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	srv := directServer(deps)
@@ -296,7 +297,6 @@ func TestASweepReadsEveryPageOfABacklog(t *testing.T) {
 	if err := sweepSuggestionOutcomes(t, srv); err != nil {
 		t.Fatalf("first sweep: %v", err)
 	}
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 	for range 4 {
 		postOutcomeMessage(t, handler, noise, "bob", "Unrelated progress.")
 	}
@@ -402,7 +402,6 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 		t.Fatalf("%d of the old suggestions are pending after the first sweep; want %d", stillPending, want)
 	}
 	seedWriteSuggestion(t, srv, "issue", source, "", "alice", "issue", target, target)
-	time.Sleep(10 * time.Millisecond) // the event must postdate the suggestion row
 	postOutcomeMessage(t, handler, target, "alice", "Adding the new detail here instead.")
 	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+activeDocument.ID+"/comments", map[string]any{
 		"body": "Progress on the active notes.",
@@ -414,9 +413,15 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 		t.Fatalf("vacuum write_suggestions: %v", err)
 	}
 
-	// Read outside the page's transaction: an observation of the horizon waits on every
-	// transaction id open on the instance, this test's own included (events.Horizon.Await).
-	safe := safeHorizon(t, srv)
+	// The page is bounded by this database's own event head, not by the safe horizon. Both are
+	// an id every event at or below which is final, and here every event is this test's and
+	// committed; but the horizon is proven from pg_snapshot_xmin, the oldest transaction id
+	// running anywhere on the instance (internal/dispatch/events, horizon.go), so a transaction
+	// another test or the harness's reset workers held open while one of the two measurements
+	// ran left that half a shorter range of the log to read, and the two then disagreed about
+	// how many rows of events a page reads - two rows apart in CI run 41762847452. The head is
+	// the same bound for both halves whatever else is running.
+	safe := eventHead(t, database)
 	counter := &storetest.StatementCounter{}
 	counted := storetest.Traced(t, database.Pool, counter, map[string]string{"enable_seqscan": "off"})
 	tx, err := counted.Begin(ctx)
@@ -466,6 +471,8 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 // thousand rows, resolved), and reads no table sequentially. The pass of the previous release read
 // every pending row on every pass.
 func TestOldPendingSuggestionsOnOtherIssuesCostAPassNothing(t *testing.T) {
+	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
+	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
 	without := measureTouchedPass(t, "OCOST", false)
 	with := measureTouchedPass(t, "OCOST", true)
 	t.Logf("none pending: %+v; 1,000 pending: %+v", without, with)
@@ -535,14 +542,15 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `delete from write_suggestions where source_issue_key = $1`, source); err != nil {
 		t.Fatalf("clear the suggestions filing recorded: %v", err)
 	}
+	// created_at ten milliseconds back, as seedWriteSuggestion writes it: the events below must
+	// postdate this row, and the stamp is that gap.
 	if _, err := database.Pool.Exec(ctx, `
 		insert into write_suggestions
-			(source_kind, source_issue_key, actor_kind, actor_id, role, rank, suggested_kind, suggested_id, suggested_issue_key)
-		values ('issue', $1, 'session', 'seed', 'related', 0, 'issue', $2, $2)
+			(source_kind, source_issue_key, actor_kind, actor_id, role, rank, suggested_kind, suggested_id, suggested_issue_key, created_at)
+		values ('issue', $1, 'session', 'seed', 'related', 0, 'issue', $2, $2, now() - interval '10 milliseconds')
 	`, source, target); err != nil {
 		t.Fatalf("record the suggestion: %v", err)
 	}
-	time.Sleep(10 * time.Millisecond) // the events must postdate the suggestion row
 
 	schedule := suggestionSchedule{minGap: time.Second, page: suggestionOutcomePage}
 	low, _, commitLow := appendOutOfOrder(t, database, deps.Events, target, other)

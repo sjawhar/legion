@@ -59,6 +59,7 @@ func versionRow(t *testing.T, database *store.Store, artifactID string, number i
 }
 
 func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
+	t.Parallel()
 	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
@@ -112,6 +113,7 @@ func TestUploadsGoToTheFileStoreAndAreServedFromIt(t *testing.T) {
 // without asking again, privately since the route is authenticated; a document version is the
 // document's JSON read and says nothing of the kind.
 func TestAFileVersionIsCachedForeverAndADocumentVersionIsNot(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	issue := fileIssue(t, handler)
 	if upload := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "shot.png"}, "shot.png", "image/png", []byte("png bytes"), "alice"); upload.Code != http.StatusCreated {
@@ -132,6 +134,7 @@ func TestAFileVersionIsCachedForeverAndADocumentVersionIsNot(t *testing.T) {
 }
 
 func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {
+	t.Parallel()
 	memory := filestest.NewMemory()
 	memory.SetFailure(errors.New("bucket unreachable"))
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
@@ -154,6 +157,7 @@ func TestAnUploadTheStoreRefusesLeavesNoVersionBehind(t *testing.T) {
 }
 
 func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
+	t.Parallel()
 	// An upload made before the store existed keeps its bytes in the row; the store configured
 	// later holds nothing for it, and the route serves the row.
 	handler, database, _ := newTestServer(t, testServerOptions{})
@@ -187,6 +191,7 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 }
 
 func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
+	t.Parallel()
 	memory := filestest.NewMemory()
 	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
 	issue := fileIssue(t, handler)
@@ -255,6 +260,7 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 // of the issue (a comment, an ask, a status change) would queue behind a store write nothing
 // bounds.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
+	t.Parallel()
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(held.release) }) }
@@ -331,6 +337,7 @@ func (s tampered) Get(ctx context.Context, sha string) (*files.Object, error) {
 // response is cut short of its Content-Length, which a client reports. Over a real connection,
 // since the cut is the connection's.
 func TestATamperedObjectIsNotDeliveredWhole(t *testing.T) {
+	t.Parallel()
 	original := bytes.Repeat([]byte("o"), 300_000)
 	replaced := append(bytes.Repeat([]byte("o"), 299_999), 'x')
 	store := tampered{Store: filestest.NewMemory(), sha: files.SHA256(original), bytes: replaced}

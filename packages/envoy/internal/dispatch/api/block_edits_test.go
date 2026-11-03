@@ -19,6 +19,7 @@ import (
 // The ids GET /blocks lists address delete and move; the edits land through the same
 // error mapping every other operation uses.
 func TestDocumentEditsAddressBlocksByID(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const ask = ":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport?\n:::\n"
 	issue := createInteractionIssue(t, handler, "TEST", "Block edits", "# Title\n\n"+ask+"\nContext ends with no drift.\n\n1. only\n")
@@ -74,6 +75,7 @@ func TestDocumentEditsAddressBlocksByID(t *testing.T) {
 // already holds a block the parser refuses, as a delete can leave one, still takes replaces
 // elsewhere and inside that block.
 func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unreadable block", "Intro.\n\nfoo <div>x</div> bar\n\nOther text.\n")
 	edit := func(op map[string]any) *httptest.ResponseRecorder {
@@ -97,6 +99,7 @@ func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
 // A replace that leaves its block unreadable is refused with advice for its cause: HTML that
 // opens a block keeps to a line. The refusal names no Go type.
 func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TA", "block HTML", "Intro.\n\nBody.\n")
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -120,6 +123,7 @@ func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T)
 // them so - by deleting or emptying what stood between them, inserting a list beside one, or
 // accepting a list beside one - is stored as the two lists it made, not one.
 func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for index, test := range []struct {
 		name, spec, want string
@@ -195,6 +199,7 @@ func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
 // parser reads it, and so does a list item whose first block is an emptied paragraph. An ask's
 // only option emptied is refused, since an option needs a label.
 func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for index, test := range []struct{ name, spec string }{
 		{"a list item", "- Body.\n- two\n"},
@@ -242,6 +247,7 @@ func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
 // first paragraph beside another block is refused, since the browser editor reads no form of that
 // item as a task: the marker's line would carry the next block as the task's text.
 func TestDocumentEditsEmptyingAListItemsFirstParagraphKeepsTheItem(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for index, test := range []struct{ name, spec, with, want string }{
 		{"a rule after it", "- Body.\n\n  ***\n- two\n", "", "- ***\n- two\n"},
@@ -286,6 +292,7 @@ func TestDocumentEditsEmptyingAListItemsFirstParagraphKeepsTheItem(t *testing.T)
 // engine (pmdoc.TestTypedFencesReadTheSameInTheEngineAndHere holds the engine's reading of each
 // shape).
 func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -386,6 +393,7 @@ func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 // stored markdown is the accepted document's, so two paragraphs in a tight list item leave the
 // item spread, and a block over an item's text leaves no empty paragraph before its nested list.
 func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -586,6 +594,7 @@ func checkAccept(t *testing.T, handler http.Handler, documentService *docs.Servi
 // a paragraph ending in a hard break that reads back with a literal backslash. Text elsewhere, or
 // beside it in the same block, is stored, and a second task item emptied is still refused.
 func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -662,6 +671,7 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 // back holding, in a list item written as its fence pair alone, and is refused for an ask, whose
 // question paragraph+ bullet_list? cannot be empty.
 func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -723,6 +733,7 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 // puts where the typed block stood are stored beside it, an empty callout in a list item as its
 // fence pair alone.
 func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -752,6 +763,7 @@ func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.
 func TestDocumentEditsReplaceInACodeBlockWritesWithAsSent(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -802,6 +814,7 @@ func TestDocumentEditsReplaceInACodeBlockWritesWithAsSent(t *testing.T) {
 // A table is one addressable block. Deleting its header promotes the first body
 // row so the table keeps its identity and remains valid Markdown.
 func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table row edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
 	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
@@ -842,6 +855,7 @@ func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
 }
 
 func TestDocumentEditsRejectInvalidTableIndicesWithoutChangingDocument(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const markdown = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	issue := createInteractionIssue(t, handler, "TEST", "Table index edit", markdown)
@@ -900,6 +914,7 @@ func TestDocumentEditsRejectInvalidTableIndicesWithoutChangingDocument(t *testin
 }
 
 func TestDocumentEditsDeleteTableColumnInPlace(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table column edit", "| Key | Value | Notes |\n| --- | --- | --- |\n| A10 | old | first |\n| A11 | new | second |\n")
 	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
@@ -940,6 +955,7 @@ func TestDocumentEditsDeleteTableColumnInPlace(t *testing.T) {
 }
 
 func TestDocumentEditsCanonicalizeRaggedTableBeforeColumnDeletion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ragged table column edit", "| One | Two | Three |\n| --- | --- | --- |\n| first | second | third |\n| only |\n")
 	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
@@ -970,6 +986,7 @@ func TestDocumentEditsCanonicalizeRaggedTableBeforeColumnDeletion(t *testing.T) 
 }
 
 func TestDocumentEditsRejectDeletionOfLastTableRowOrColumn(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		op    string
@@ -1016,6 +1033,7 @@ func TestDocumentEditsRejectDeletionOfLastTableRowOrColumn(t *testing.T) {
 }
 
 func TestDocumentEditsExplainCascadedBlockInAtomicBatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const markdown = "- Parent\n  - Child\n"
 	issue := createInteractionIssue(t, handler, "TEST", "Cascaded block edit", markdown)
@@ -1059,6 +1077,7 @@ func TestDocumentEditsExplainCascadedBlockInAtomicBatch(t *testing.T) {
 }
 
 func TestDocumentEditsProtectLiveCellAnchorsAndListThemOnTheirTable(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const markdown = "| Key | Status | Keep |\n| --- | --- | --- |\n| A10 | blocked | first |\n| A11 | later | second |\n"
 	issue := createInteractionIssue(t, handler, "TEST", "Table anchors", markdown)
@@ -1159,6 +1178,7 @@ func TestDocumentEditsProtectLiveCellAnchorsAndListThemOnTheirTable(t *testing.T
 }
 
 func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	const markdown = "| Key |\n| --- |\n| A10 |\n"
 	issue := createInteractionIssue(t, handler, "TEST", "Cascaded table edit", markdown)
@@ -1195,6 +1215,7 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 }
 
 func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
+	t.Parallel()
 	const maximumAllocation = 128 << 20
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
@@ -1231,6 +1252,7 @@ func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 // own: a row deletion beside an insert whose table adds 4,160 cells, under the limit, is stored,
 // and the refusal of a larger one names the table the request wrote and the cells it adds.
 func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Conditional table padding", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
 	var tableID string
@@ -1260,6 +1282,7 @@ func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
 // of a one-cell header over 500 columns and 500 one-cell rows, 7,513 bytes adding 249,999 cells, is
 // refused before those cells are built, and the document is left as it was.
 func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
+	t.Parallel()
 	const maximumAllocation = 64 << 20
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Narrow header padding", "Before.\n")

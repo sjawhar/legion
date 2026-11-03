@@ -43,6 +43,7 @@ func editAdviceDocument(t *testing.T, handler http.Handler, artifactID, markdown
 // what closes a Legion design gate. The edit after it says nothing: that approval was already
 // stale, and the second edit closed nothing.
 func TestDocumentEditAdviceNamesTheApprovalItSuperseded(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "GATE")
 	spec := "# Transport\n\nThe design, as approved.\n"
@@ -69,6 +70,7 @@ func TestDocumentEditAdviceNamesTheApprovalItSuperseded(t *testing.T) {
 // newest review requested changes, each raise nothing. A changes request had already closed the
 // gate, and its reviewer said why.
 func TestDocumentEditAdviceSupersedesNoApprovalWhenThereIsNone(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "NOGATE")
 	spec := "# Draft\n\nNobody has approved this.\n"
@@ -91,6 +93,7 @@ func TestDocumentEditAdviceSupersedesNoApprovalWhenThereIsNone(t *testing.T) {
 // An upload that replaces an approved document supersedes its approval exactly as an edit does:
 // this route always writes a version, so a replacement of an approved spec closes its gate too.
 func TestDocumentUploadAdviceNamesTheApprovalItSuperseded(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "UPGATE")
 	spec := "# Transport\n\nThe design, as approved.\n"
@@ -115,6 +118,7 @@ func TestDocumentUploadAdviceNamesTheApprovalItSuperseded(t *testing.T) {
 // artifact.approved event reopens the gate. The rows are a real document's and a real person's
 // approval; the version argument stands for the version each write stored.
 func TestNewestReviewAsApprovalReportsOnlyTheVersionItSuperseded(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createAdviceProject(t, handler, "RULE")
 	spec := "# Rule\n\nApproved once.\n"
@@ -149,6 +153,7 @@ func TestNewestReviewAsApprovalReportsOnlyTheVersionItSuperseded(t *testing.T) {
 // approval of the version it stored commits after it with an earlier created_at - and reading by
 // created_at there reports a gate the write did not close.
 func TestNewestReviewAsApprovalReadsTheOrderTheReviewsCommittedIn(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createAdviceProject(t, handler, "ORDER")
 	spec := "# Order\n\nApproved once.\n"
@@ -184,6 +189,7 @@ func newestApprovalOf(t *testing.T, database *store.Store, artifactID string, ve
 // A project document's edit carries no issue state, so its whole advice is the document report:
 // the approval it superseded rides it there too, beside the block count.
 func TestProjectDocumentEditAdviceCarriesTheApprovalItSuperseded(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "PROJGATE")
 	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/PROJGATE/artifacts", map[string]string{

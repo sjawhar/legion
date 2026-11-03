@@ -88,6 +88,7 @@ func documentMutationCounts(t *testing.T, database *store.Store, artifactID stri
 }
 
 func TestDocumentEditPreconditionRejectsStaleDocumentWithoutMutation(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Document precondition", "before")
 
@@ -132,6 +133,7 @@ func TestDocumentEditPreconditionRejectsStaleDocumentWithoutMutation(t *testing.
 	}
 }
 func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Empty precondition", "before")
 	stale := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
@@ -205,6 +207,7 @@ func guardedDocumentEdit(t *testing.T, handler http.Handler, artifactID, find, w
 // own transaction wrote, which is the next edit's precondition, so no edit re-reads the document
 // to learn a token the edit before it just minted.
 func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Chained document edits", "before")
 
@@ -239,6 +242,7 @@ func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
 }
 
 func TestDocumentEditWithoutPreconditionRemainsUnconditional(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unconditional document edit", "before")
 
@@ -259,6 +263,7 @@ func TestDocumentEditWithoutPreconditionRemainsUnconditional(t *testing.T) {
 }
 
 func TestDocumentEditBlockPreconditionsAllowIndependentEdits(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Independent blocks", "alpha\n\nbeta")
 	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
@@ -297,6 +302,7 @@ func TestDocumentEditBlockPreconditionsAllowIndependentEdits(t *testing.T) {
 }
 
 func TestDocumentEditBlockPreconditionMustCoverEveryTouchedBlock(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Covered blocks", "guard\n\ntarget old")
 	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
@@ -323,6 +329,7 @@ func TestDocumentEditBlockPreconditionMustCoverEveryTouchedBlock(t *testing.T) {
 }
 
 func TestDocumentEditContainerDeleteUsesItsOwnBlockToken(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Container token", "- Parent\n  - Child")
 	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
@@ -340,6 +347,7 @@ func TestDocumentEditContainerDeleteUsesItsOwnBlockToken(t *testing.T) {
 }
 
 func TestDocumentPreconditionRejectsAnchorAddedAfterRead(t *testing.T) {
+	t.Parallel()
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchor freshness", "The quick brown fox")
 	stale := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
@@ -375,6 +383,10 @@ func TestDocumentPreconditionRejectsAnchorAddedAfterRead(t *testing.T) {
 }
 
 func TestDocumentEditPreconditionRejectsWriterAfterDurableAppendRace(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	service, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Precondition race", "before")
 	stale := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)

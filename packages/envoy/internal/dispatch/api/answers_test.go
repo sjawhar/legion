@@ -69,6 +69,7 @@ func getMyAnswers(t *testing.T, handler http.Handler, login, query string) myAns
 }
 
 func TestListMyAnswersReturnsOwnAnswersAndRepliesNewestFirst(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	firstIssue := createInteractionIssue(t, handler, "TEST", "First answer", "A spec")
 	secondIssue := createAnswerListIssue(t, handler, "Second answer")
@@ -140,6 +141,7 @@ func TestListMyAnswersReturnsOwnAnswersAndRepliesNewestFirst(t *testing.T) {
 }
 
 func TestListMyAnswersIncludesDocumentAnswers(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key":  "TEST",
@@ -171,6 +173,7 @@ func TestListMyAnswersIncludesDocumentAnswers(t *testing.T) {
 }
 
 func TestListMyAnswersCollapsesRestoredAnswerEvents(t *testing.T) {
+	t.Parallel()
 	handler, database := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Restored answer", "decision", transportAsk, "Which transport?")
 	before := readBlockAsk(t, handler, askID)
@@ -232,6 +235,7 @@ func TestListMyAnswersCollapsesRestoredAnswerEvents(t *testing.T) {
 }
 
 func TestListMyAnswersMarksAChangedAnswerAsNoLongerCurrent(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Changed answer page", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)

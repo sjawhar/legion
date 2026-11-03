@@ -16,6 +16,7 @@ import (
 // control: the same walk over a fixture holding an unclassed mutating row, and over one classed
 // as a project's write whose address names no object, fails on each.
 func TestEveryMutatingRouteIsClassed(t *testing.T) {
+	t.Parallel()
 	served := &server{deps: Deps{TestHooksEnabled: true}}
 	routes := served.routes()
 	if undecidable := served.undecidableWrites(routes); len(undecidable) > 0 {
@@ -245,6 +246,7 @@ func hyphenatedEveryFour(id string) string {
 // token's own project is answered by the handler. Each id-addressed kind runs under both
 // spellings of its uuid, since the check and the handler have to read a path the same way.
 func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-scoped-to-one-project"
@@ -300,6 +302,7 @@ func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
 // It still does for a caller that names no project, which is every credential but a
 // project-scoped broker token, and the second half holds that.
 func TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-addressing-nothing"
@@ -359,6 +362,7 @@ func TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken(t *testing
 // guess. The same write by a person and by a personal token, neither of which names a project,
 // is untouched.
 func TestADeploymentWriteIsRefusedToAProjectScopedToken(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-may-not-create-a-project"
@@ -388,6 +392,7 @@ func TestADeploymentWriteIsRefusedToAProjectScopedToken(t *testing.T) {
 // exists today. A person and a personal token write both projects, and the deployment-wide
 // create too.
 func TestCredentialsThatNameNoProjectAreUnaffected(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	own := seedProject(t, rig, brokerTestProject, "Broker")
 	other := seedProject(t, rig, "OTH", "Other")
@@ -432,6 +437,7 @@ func TestCredentialsThatNameNoProjectAreUnaffected(t *testing.T) {
 // address does not name. Its handler makes the same check, with the same refusal, before the
 // create does any work.
 func TestAProjectScopedTokenCreatesIssuesOnlyInItsOwnProject(t *testing.T) {
+	t.Parallel()
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-creating-issues"

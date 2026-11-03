@@ -12,6 +12,7 @@ import (
 // only the caller's unread rows through the partial index user_threads_unread, never a scan of
 // user_threads, which holds a row for every thread anyone ever wrote in.
 func TestMyRepliesQueriesReadTheUnreadIndex(t *testing.T) {
+	t.Parallel()
 	_, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)

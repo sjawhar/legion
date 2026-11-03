@@ -10,6 +10,7 @@ import (
 )
 
 func TestBlockSchemaRouteServesEmbeddedSchema(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	Register(mux, t.Context(), Deps{})
 

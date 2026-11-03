@@ -31,6 +31,7 @@ type agentTokenRow struct {
 }
 
 func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -179,6 +180,7 @@ func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
 // The mint is still made once: a repeat under the key, its answer lost or not, is 409
 // KEY_COMMITTED - the token was made and is not shown again - and no second token is minted.
 func TestAKeyedTokenMintKeepsNoPlaintextAndMintsOnce(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	mint := func() *httptest.ResponseRecorder {
 		t.Helper()

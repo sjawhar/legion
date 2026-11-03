@@ -111,7 +111,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		relayed, unsubscribe, published, publishedAt, err = s.eventRelay.subscribe(ctx)
 		if err != nil {
 			unsubscribe = nil
-			endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
+			s.endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
 			return
 		}
 		// The log's newest id, and the row at the relay's cursor, as they stand now, after the
@@ -119,7 +119,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		// carries another created_at, is a relay whose reset check has not yet run
 		// (eventLogWasReset, the relay's own test).
 		if head, cursorAt, err = eventCursorCheck(ctx, s.deps.Store.Pool, published); err != nil {
-			endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
+			s.endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
 			return
 		}
 		if !eventLogWasReset(published, publishedAt, head, cursorAt) {
@@ -127,7 +127,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		}
 		if since == nil && replacedFrom < 0 {
 			if replacedFrom, err = s.eventLogUnbrokenThrough(ctx); err != nil {
-				endEventsAfterFailure(ctx, stream, sub, "read the event log's unbroken ids", err)
+				s.endEventsAfterFailure(ctx, stream, sub, "read the event log's unbroken ids", err)
 				return
 			}
 		}
@@ -159,7 +159,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 	send := func(event model.Event) bool {
 		frame, err := liveEventFrame(sub, event)
 		if err != nil {
-			endEventsAfterFailure(ctx, stream, sub, "encode an event", err)
+			s.endEventsAfterFailure(ctx, stream, sub, "encode an event", err)
 			return false
 		}
 		return stream.SendWait(ctx, frame) == nil
@@ -173,7 +173,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 	for cursor := from; cursor < published; {
 		page, err := s.readEventsAfterID(ctx, cursor, published)
 		if err != nil {
-			endEventsAfterFailure(ctx, stream, sub, "read the event log", err)
+			s.endEventsAfterFailure(ctx, stream, sub, "read the event log", err)
 			return
 		}
 		for _, event := range page {
@@ -232,12 +232,12 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 // every end does while the head cannot be read, the page answers after its own doubling backoff. A
 // subscription whose own context ended (stopped, or its socket closed) sends nothing: that is why
 // its read failed.
-func endEventsAfterFailure(ctx context.Context, stream liveStreamer, sub, what string, err error) {
+func (s *server) endEventsAfterFailure(ctx context.Context, stream liveStreamer, sub, what string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
 	slog.Warn("dispatch: an events subscription could not "+what+"; it ends, and its page subscribes again", "error", err)
-	if !waitFor(ctx, eventRelayRetry) {
+	if !waitFor(ctx, s.eventRelay.failedReadWait()) {
 		return
 	}
 	_ = stream.SendWait(ctx, liveEnded(sub, liveEndedBehind))

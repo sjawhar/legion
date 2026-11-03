@@ -48,6 +48,7 @@ func projectEvents(t *testing.T, database *store.Store, project, eventType strin
 // default demotes the first in the same transaction, and both rows' events say so. A mapping moved
 // to another project emits settings.repo_project.updated on the old project and the new one.
 func TestRepoProjectDefaultMovesAndEventsReachBothProjects(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	for _, project := range []map[string]string{{"key": "CORE", "name": "Core"}, {"key": "OTHER", "name": "Other"}} {
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", project, "alice"); response.Code != http.StatusCreated {
@@ -99,6 +100,7 @@ func TestRepoProjectDefaultMovesAndEventsReachBothProjects(t *testing.T) {
 
 // A mapping an issue names is in use: its delete and its move are refused with 409 naming the count.
 func TestRepoProjectInUseIsNeitherDeletedNorMoved(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	for _, project := range []map[string]string{{"key": "CORE", "name": "Core"}, {"key": "OTHER", "name": "Other"}} {
 		dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", project, "alice")
@@ -128,6 +130,7 @@ func TestRepoProjectInUseIsNeitherDeletedNorMoved(t *testing.T) {
 }
 
 func TestRepoProjectSettingsUpsertListAndDelete(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -171,6 +174,7 @@ func TestRepoProjectSettingsUpsertListAndDelete(t *testing.T) {
 }
 
 func TestAgentListsRepoProjectSettings(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -193,6 +197,7 @@ func TestAgentListsRepoProjectSettings(t *testing.T) {
 }
 
 func TestAgentPutsRepoProjectSettingsWithItsActor(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -219,6 +224,7 @@ func TestAgentPutsRepoProjectSettingsWithItsActor(t *testing.T) {
 }
 
 func TestAgentDeletesRepoProjectSettingsWithItsActor(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -253,6 +259,7 @@ func TestAgentDeletesRepoProjectSettingsWithItsActor(t *testing.T) {
 }
 
 func TestRepoProjectMappingCanonicalizesRepositoryVariants(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithDefaultProject(t)
 	for _, project := range []map[string]string{
 		{"key": "CORE", "name": "Core"},
@@ -287,6 +294,7 @@ func TestRepoProjectMappingCanonicalizesRepositoryVariants(t *testing.T) {
 }
 
 func TestExternalIssueUsesPersistedRepoProject(t *testing.T) {
+	t.Parallel()
 	handler, _ := newTestHandlerWithDefaultProject(t)
 	for _, project := range []map[string]string{
 		{"key": "CORE", "name": "Core"},

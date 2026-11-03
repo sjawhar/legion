@@ -139,6 +139,7 @@ func sessionCloser(name, id string) closer {
 }
 
 func TestClosingAnIssueWithdrawsItsOpenAsksAndReopeningRestoresThem(t *testing.T) {
+	t.Parallel()
 	for _, closer := range closers {
 		t.Run(closer.name, func(t *testing.T) {
 			f := newCloseAsksFixture(t)
@@ -279,6 +280,7 @@ func (failingSettlement) SettleIssueDocuments(context.Context, string) error {
 // to withdraw, but the close still leaves it reading resolved, and the reopen's settlement opens
 // it as its author's ask.
 func TestClosingAnIssueWithdrawsADecisionBlockNotYetSettled(t *testing.T) {
+	t.Parallel()
 	for _, settlementFails := range []bool{false, true} {
 		name := "settled by the close"
 		if settlementFails {
@@ -359,6 +361,7 @@ const pastedCloseDecision = ":::ask{#close-decision urgency=\"med\" multiple=\"f
 // sweep still leaves it reading resolved beside that block, and the reopen's settlement stamps it
 // and opens it as a new ask, beside the restored one.
 func TestClosingAnIssueWithdrawsADecisionBlockPastedUnderARepeatedID(t *testing.T) {
+	t.Parallel()
 	for _, settlementFails := range []bool{false, true} {
 		name := "settled by the close"
 		if settlementFails {
@@ -509,6 +512,7 @@ func otherProcessHandler(t *testing.T, database *store.Store) http.Handler {
 // once and given up on, the block would only be marked resolved by the close's sweep, with no ask
 // and no record of who closed it.
 func TestClosingAnIssueWithdrawsADecisionBlockWhoseRoomAnotherProcessLeftBehind(t *testing.T) {
+	t.Parallel()
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService := docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
@@ -575,6 +579,7 @@ func (d *peerInsertDocs) WriteIssueAskStates(ctx context.Context, issueKey strin
 // before it committed leaves the block in the room, where no settlement will index it while the
 // issue is closed; the close's sweep, once the rooms are closed, leaves it reading resolved.
 func TestABrowsersDecisionBlockWrittenDuringTheCloseReadsResolved(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	wrapper := &peerInsertDocs{}
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -606,6 +611,7 @@ func TestABrowsersDecisionBlockWrittenDuringTheCloseReadsResolved(t *testing.T) 
 
 // Every close withdraws the asks open at that close, and every reopen restores them, once each.
 func TestEachCloseAndReopenWithdrawsAndRestoresOnce(t *testing.T) {
+	t.Parallel()
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		service := docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
 		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })

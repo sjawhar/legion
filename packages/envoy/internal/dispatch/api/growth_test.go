@@ -28,6 +28,7 @@ import (
 // it, and the second, no bigger, passes the bound only with the first. Each insert costs time in the
 // size of the whole document, and making the earlier ones one at a time took most of a minute.
 func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	t.Parallel()
 	tableSpec := "| a | b |\n| - | - |\n| A10 | b |\n"
 	// before is the spec "Before.\n" followed by inserts copies of chunk, each its own block as an
 	// insert after the end writes it.
@@ -94,6 +95,7 @@ func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T
 // count, beside 16,384 headings, which weigh the 65,536 elements one document may hold, is a spec
 // the server takes.
 func TestASpecOfFrontMatterAndTheMostHeadingsIsTaken(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Front matter", "---\ntitle: a spec\n---\n\n"+strings.Repeat("# a\n", 16_384))
 	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasPrefix(text, "---\ntitle: a spec\n---\n") || strings.Count(text, "# a\n") != 16_384 {
@@ -107,6 +109,7 @@ func TestASpecOfFrontMatterAndTheMostHeadingsIsTaken(t *testing.T) {
 // with 413 CAP_EXCEEDED naming the cap and creates nothing, where the same headings two bytes
 // shorter, whose rendering fits, are stored.
 func TestANewDocumentWhoseRenderingPassesTheCapIsRefused(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	headings := func(width int) []byte {
@@ -133,6 +136,7 @@ func TestANewDocumentWhoseRenderingPassesTheCapIsRefused(t *testing.T) {
 // document may hold, an accept that would make it heavier is refused with 413 CAP_EXCEEDED, saying
 // to shorten the change, and the document keeps its text.
 func TestAnAcceptCannotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	// 16,384 headings of four elements each: the 65,536 one document may hold.
 	issue := createInteractionIssue(t, handler, "TEST", "Accepted growth", strings.Repeat("# a\n", 16_383)+"# target\n")
@@ -162,6 +166,7 @@ func TestAnAcceptCannotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
 // would pass the bound is refused with 413 CAP_EXCEEDED, saying what to do; the ask keeps its text
 // and stays open, and the document still reads.
 func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	t.Parallel()
 	prose := strings.Repeat("word ", 180_000)
 	handler, _ := blockAskHandler(t)
 	const asks = 3
@@ -209,6 +214,7 @@ func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 // before its edit was weighed, 400 KB of it was taken, and one of 330,000 lines did not finish its
 // edit in twenty minutes. An ordinary long description is taken.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask text", openAsksSpec(1))
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-0", "Question 0?")
@@ -249,6 +255,7 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 // one upload may hold: one choice of a 1,000,000-character option took a 1 MB document to 8 MB,
 // and an answer of 900 KB to a document with no room for it was refused and recorded nowhere.
 func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *testing.T) {
+	t.Parallel()
 	t.Run("words", func(t *testing.T) {
 		prose := strings.Repeat("word ", 180_000)
 		handler, _ := blockAskHandler(t)
@@ -361,6 +368,7 @@ func literalRequest(t *testing.T, handler http.Handler, method, target string, b
 // bound, thirty-two suggestions of 900 KB were taken and one cold websocket load of their document
 // took 296 MiB.
 func TestSuggestionsCannotGrowADocumentsMarginPastWhatItMayHold(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	var words strings.Builder
 	for index := range 100 {
@@ -447,6 +455,7 @@ func refusedTooLarge(t *testing.T, response *httptest.ResponseRecorder) bool {
 // left a 225 KB document, and twenty-four answers of 900 KB, each weighed against a document their
 // deleted blocks had left small, came back in one 1,852-byte edit as a 21.6 MB document.
 func TestSettlementCannotGrowADocumentPastWhatOneUploadMayHoldByRestoringAnswers(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	prose := strings.Repeat("word ", 180_000)
 	block := func(index int) string {
@@ -525,6 +534,7 @@ func TestSettlementCannotGrowADocumentPastWhatOneUploadMayHoldByRestoringAnswers
 // and the second's answer comes back once the document has room for it. Withheld together, neither
 // came back until both fit.
 func TestSettlementGivesBackEachReturnedAnswerTheDocumentHasRoomFor(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	prose := strings.Repeat("words ", 50_000)
 	answerText := strings.Repeat("word ", 80_000)
@@ -576,6 +586,7 @@ func TestSettlementGivesBackEachReturnedAnswerTheDocumentHasRoomFor(t *testing.T
 // of live document. The marks on a document's text carry at most 1 MiB, so the anchor that would
 // pass it is refused with 413 CAP_EXCEEDED saying so, and the document still reads.
 func TestAnchorMarksCannotGrowALiveDocumentPastWhatItsMarksMayCarry(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	words := make([]string, 30)
 	for index := range words {

@@ -129,6 +129,7 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 // deterministic cosine match, since keyword search (websearch_to_tsquery) cannot match a query
 // term absent from the corpus at all.
 func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
+	t.Parallel()
 	const title, spec = "Celestial navigation device maintenance", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		issueEmbeddingText(title, spec): angledVector(0.9, 2),
@@ -162,6 +163,7 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 // does: the query shares no word with the ask, whose embedded text (question, a space, the
 // answer's text) cosine-matches it.
 func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		"Which lubricant for the bearings? Clock oil, sparingly.": angledVector(0.9, 2),
 		"wibbleflorp": queryVector(),
@@ -259,6 +261,7 @@ func TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled(t *testing.T) {
 // same thing as a relevant result. Below searchMeaningFloor the content never reaches legs at
 // all; at or above it, it does.
 func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
+	t.Parallel()
 	const belowFloor = 0.1 // < searchMeaningFloor (0.25)
 	const atFloor = 0.25
 	const weakTitle, lineTitle, spec = "Unrelated quarterly budget notes", "Right at the line", "Body text."
@@ -291,6 +294,7 @@ func TestSearchMeaningFloorExcludesWeakMatches(t *testing.T) {
 // related-item check tries the embedder too, so only calls made after it answered are the
 // search's.
 func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{err: errors.New("bedrock: simulated outage")}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "DEGR", "Astrolabe calibration guide", "Keyword body text.")
@@ -317,6 +321,7 @@ func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 // when the default Bedrock client's AWS config load fails (cmd/dispatch's newEmbedder), and
 // search still answers, keyword-only, saying so.
 func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "NOEM", "Astrolabe calibration guide", "Keyword body text.")
 
@@ -335,6 +340,7 @@ func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 // embedder and all. The issue create's related-item check embeds its own text, so only calls
 // made after it answered are the search's.
 func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{}
 	handler, _, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	createInteractionIssue(t, handler, "SKIP", "Astrolabe calibration guide", "Keyword body text.")
@@ -366,6 +372,7 @@ func TestSearchSkipsTheEmbedderForAStopWordOnlyQuery(t *testing.T) {
 // scoring one 1/(60+2) term - under half as much. Fusion summing, not taking the better list's
 // score alone, is what makes that gap as large as it is.
 func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.T) {
+	t.Parallel()
 	const bothTitle, bothSpec = "Harbor lantern inspection report", "Body text one."
 	const meaningOnlyTitle, meaningOnlySpec = "Unrelated maintenance budget request", "Body text two."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
@@ -415,6 +422,7 @@ func TestSearchFusesAnItemFoundByBothListsAboveOneFoundOnlyByMeaning(t *testing.
 // meaning hit, while the right-identity issue does. Recording the same vector under the query
 // embedder's identity then ranks it first, so its absence was the identity alone.
 func TestSearchNeverRanksAVectorOfAnotherIdentity(t *testing.T) {
+	t.Parallel()
 	const rightTitle, foreignTitle, spec = "Celestial navigation device maintenance", "Sextant mirror alignment checklist", "Routine upkeep notes."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		issueEmbeddingText(rightTitle, spec):   angledVector(0.5, 2),
@@ -477,6 +485,7 @@ func maxBody(word string) string {
 // the body cap and the embedder's input bound (embed's maxInputChars) agree, so no tail of a
 // body the server accepted goes unsearched.
 func TestTheLongestCommentAndMessageReachTheEmbedderWhole(t *testing.T) {
+	t.Parallel()
 	embedder := &recordingEmbedder{fakeEmbedder: &fakeEmbedder{}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "LONG", "Longest bodies", "Body text.")
@@ -518,6 +527,7 @@ func TestTheLongestCommentAndMessageReachTheEmbedderWhole(t *testing.T) {
 // Once the endpoint answers 200 and the queue runs again, the comment is embedded under the
 // Azure identity, the coverage report says so, and search ranks it by meaning, not degraded.
 func TestSearchAndWritesRideOutAnAzureOutage(t *testing.T) {
+	t.Parallel()
 	const commentBody = "Recalibrate the theodolite before the survey."
 	var healthy atomic.Bool
 	azure := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

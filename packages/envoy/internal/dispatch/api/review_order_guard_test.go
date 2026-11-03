@@ -41,6 +41,7 @@ var (
 // SQL files the scan does not read, and test sources, which hold the previous release's
 // statements on purpose.
 func TestEveryReviewReadOrdersByReviewOrder(t *testing.T) {
+	t.Parallel()
 	sources := moduleSources(t, "../../..")
 	constants, err := stringConstants(sources)
 	if err != nil {
@@ -77,6 +78,7 @@ func TestEveryReviewReadOrdersByReviewOrder(t *testing.T) {
 // string lines spliced with the ReviewOrder constant - and refuses the order migration 0120
 // replaced, whether the clause sits in the same literal as the table or in another.
 func TestTheReviewOrderGuardReadsBothOrders(t *testing.T) {
+	t.Parallel()
 	right := "select id from artifact_reviews where artifact_id = $1 order by " +
 		"event_seq desc nulls last, created_at desc, artifact_reviews.id desc limit 1"
 	wrong := "select id from artifact_reviews where artifact_id = $1 order by created_at desc, id desc limit 1"

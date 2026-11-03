@@ -112,6 +112,7 @@ func sendFrame(t *testing.T, send map[string]any) (string, *model.ReplyBlock) {
 // block with no comment are refused; a comment an older build wrote is indexed first; an edit
 // that removes the block leaves the reply reading it removed, with its last text.
 func TestAReplyNamesTheBlockItAnswers(t *testing.T) {
+	t.Parallel()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)
@@ -291,6 +292,7 @@ func TestAReplyNamesTheBlockItAnswers(t *testing.T) {
 // delivery; a follow-up names no block; and a message whose stored body differs from the one its
 // blocks were indexed from is indexed first.
 func TestAMessageReplyNamesTheBlockItAnswers(t *testing.T) {
+	t.Parallel()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)
@@ -442,6 +444,7 @@ func TestAMessageReplyNamesTheBlockItAnswers(t *testing.T) {
 // reconciliation indexes it: under the comment it answers and under the ask, on the comment read,
 // the ask read and ?to=, each naming no block.
 func TestRepliesWrittenBeforeThisChangeStillShow(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Older replies", "before")
 	x := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta."}, "alice")

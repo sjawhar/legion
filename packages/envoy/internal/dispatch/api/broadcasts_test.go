@@ -119,6 +119,7 @@ const broadcastSessions = `[
 // targeted message and a delivery attempt of its own, and a selection that mixes capabilities
 // excludes the sessions that cannot take the mode rather than switching them to another one.
 func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
@@ -225,6 +226,7 @@ func equalStrings(got, want []string) bool {
 // wire: a numbered list that reads as one line on the dashboard is the dashboard's rendering,
 // never a body the server collapsed, and every recipient was sent the list.
 func TestBroadcastBodyReachesStorageAndTheWireUnchanged(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -259,6 +261,7 @@ func TestBroadcastBodyReachesStorageAndTheWireUnchanged(t *testing.T) {
 // Each recipient answers its own delivery, and the broadcast view is where every answer is
 // read back together.
 func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -327,6 +330,7 @@ func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T
 // it from one recipient's copy of a broadcast: the thread read a session confirms a delivery
 // with, the Agents page's conversation list, and each reply in a thread.
 func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -391,6 +395,7 @@ func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
 // Nothing is written when no selected session can take the mode: the sender is told why
 // rather than left with an empty broadcast to explain.
 func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -417,6 +422,7 @@ func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T
 // by id instead, so a selection the list has dropped entirely still reaches every session the
 // store holds a record for, with nothing excluded.
 func TestBroadcastReachesSessionsTheLiveListNoLongerHolds(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, r *http.Request) bool {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/sessions" {
 			return false
@@ -454,6 +460,7 @@ func TestBroadcastReachesSessionsTheLiveListNoLongerHolds(t *testing.T) {
 // failure would be unreachable under that key for good - and the key itself must stay free, so
 // the sender's retry is a fresh send rather than a replay of a broadcast that never happened.
 func TestBroadcastWhoseSessionReadDoesNotAnswerWritesNothingAndLeavesItsKeyFree(t *testing.T) {
+	t.Parallel()
 	var refusing atomic.Bool
 	refusing.Store(true)
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, r *http.Request) bool {
@@ -516,6 +523,7 @@ func TestBroadcastWhoseSessionReadDoesNotAnswerWritesNothingAndLeavesItsKeyFree(
 // original send. So a send whose budget ends first is refused, nothing is written, and the key
 // is still free for the same send once the budget allows it.
 func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesItsKeyFree(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	// A nanosecond has ended by the time the resolution first looks at its budget, so it
@@ -567,6 +575,7 @@ func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesI
 // Broadcasting is human-only, like the one-session route it is built from, and so is reading
 // one back.
 func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -599,6 +608,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 }
 
 func TestBroadcastRejectsMalformedInput(t *testing.T) {
+	t.Parallel()
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
@@ -689,6 +699,7 @@ func awaitBroadcastDeliveries(t *testing.T, handler http.Handler, id string) bro
 // load balancer's idle timeout - strand one attempt pending and leave every later recipient with
 // no attempt at all, with nothing to recover them.
 func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	var listenerState struct {
 		sync.Mutex
@@ -765,6 +776,7 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 // no longer its to send; a worker that opened an attempt of its own would send a SECOND frame to
 // the same session.
 func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	// The worker announces itself when it parks, so the takeover below happens while it is
 	// held rather than at a moment this test guessed.
@@ -869,6 +881,7 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 // TestBroadcastRecipientsReadBackInRequestOrder catches a change that falls back to the random
 // message UUID when every recipient message has the transaction's same created_at timestamp.
 func TestBroadcastRecipientsReadBackInRequestOrder(t *testing.T) {
+	t.Parallel()
 	requested := []string{"zeta", "alpha", "mid", "bravo", "echo", "delta", "hotel", "gamma"}
 	for _, scenario := range []struct {
 		name     string
@@ -954,6 +967,10 @@ func installReverseBroadcastMessageIDDefault(t *testing.T, database *store.Store
 	if err != nil {
 		t.Fatalf("install reverse broadcast message id default: %v", err)
 	}
+	dropWhenDone(t, database,
+		`alter table messages alter column id set default gen_random_uuid()`,
+		`drop function broadcast_test_message_id()`,
+		`drop sequence broadcast_test_message_ids`)
 }
 
 func broadcastRecipientSessionIDs(response broadcastResponse) []string {
@@ -968,6 +985,7 @@ func broadcastRecipientSessionIDs(response broadcastResponse) []string {
 // The migrated schema must accept it and readers must retain the only fallback order those rows
 // have: their timestamp and UUID.
 func TestBroadcastReadsLegacyUnpositionedRecipientsByCreatedAtAndID(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	author := []byte(`{"kind":"user","id":"alice"}`)

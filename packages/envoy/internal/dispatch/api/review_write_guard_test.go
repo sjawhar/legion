@@ -41,6 +41,7 @@ var (
 // previous release's insert, a row recorded before the column -- so test sources are outside it,
 // as are the migrations, which are SQL files the scan does not read.
 func TestOnlyWriteReviewWritesReviews(t *testing.T) {
+	t.Parallel()
 	sources := moduleSources(t, "../../..")
 	constants, err := stringConstants(sources)
 	if err != nil {
@@ -117,6 +118,7 @@ func reviewTableIdentifiers(file *ast.File, positions *token.FileSet) []int {
 // The patterns read the table under every name a statement can give it, and refuse no other
 // table whose name starts the same way.
 func TestTheReviewWriterPatternsReadEveryNameOfTheTable(t *testing.T) {
+	t.Parallel()
 	for _, statement := range []string{
 		`insert into artifact_reviews (id) values ($1)`,
 		`INSERT INTO public.artifact_reviews (id) values ($1)`,
@@ -146,6 +148,7 @@ func TestTheReviewWriterPatternsReadEveryNameOfTheTable(t *testing.T) {
 // A pgx.Identifier literal naming artifact_reviews, which a CopyFrom writes rows into, is found by
 // its line, and one naming another table is not.
 func TestTheReviewWriterScanFindsAnIdentifierNamingTheTable(t *testing.T) {
+	t.Parallel()
 	positions := token.NewFileSet()
 	file, err := parser.ParseFile(positions, "copy.go", `package x
 

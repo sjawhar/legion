@@ -30,6 +30,7 @@ import (
 // count, 4 on CI's runner).
 
 func TestEditArtifactRollbackNeverReachesTheRoom(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	f.connectPlainSocket(t)
 	responses := f.startFailingEdit(t)
@@ -63,6 +64,7 @@ func TestEditArtifactRollbackNeverReachesTheRoom(t *testing.T) {
 }
 
 func TestBrowserTypingDuringAHeldEditKeepsOnlyItsOwnText(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	peer := f.connectPeer(t)
 	responses := f.startFailingEdit(t)
@@ -85,6 +87,7 @@ func TestBrowserTypingDuringAHeldEditKeepsOnlyItsOwnText(t *testing.T) {
 }
 
 func TestBrowserTypingNextToAHeldEditKeepsItsText(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	peer := f.connectPeer(t)
 	responses := f.startFailingEdit(t)
@@ -102,6 +105,7 @@ func TestBrowserTypingNextToAHeldEditKeepsItsText(t *testing.T) {
 }
 
 func TestReconnectingBrowserCannotBringBackAHeldEdit(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	peer := f.connectPeer(t)
 	responses := f.startFailingEdit(t)
@@ -121,6 +125,7 @@ func TestReconnectingBrowserCannotBringBackAHeldEdit(t *testing.T) {
 }
 
 func TestCommentQueuedBehindAHeldEditAnchorsOnlyCommittedText(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, time.Hour)
 	f.connectPlainSocket(t)
 	responses := f.startFailingEdit(t)
@@ -144,6 +149,7 @@ func TestCommentQueuedBehindAHeldEditAnchorsOnlyCommittedText(t *testing.T) {
 }
 
 func TestSuggestionAcceptRollbackNeverReachesTheRoom(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	f.connectPlainSocket(t)
 	earlierResponse := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/issues/"+f.issue.Key+"/comments", map[string]any{
@@ -195,6 +201,7 @@ func TestSuggestionAcceptRollbackNeverReachesTheRoom(t *testing.T) {
 }
 
 func TestCommentProjectionFailureNeverReachesTheRoom(t *testing.T) {
+	t.Parallel()
 	for _, action := range []string{"reply", "resolve"} {
 		t.Run(action, func(t *testing.T) {
 			f := newHeldWriteFixture(t, time.Hour, func(failure *postApplyFailureDocs) {
@@ -239,6 +246,7 @@ func TestCommentProjectionFailureNeverReachesTheRoom(t *testing.T) {
 }
 
 func TestDocumentUploadRollbackNeverReachesTheRoom(t *testing.T) {
+	t.Parallel()
 	f := newHeldWriteFixture(t, time.Hour)
 	f.connectPlainSocket(t)
 	closeTestGate(f.failure.releaseBeforeApply)
@@ -736,7 +744,7 @@ func waitForBeforeApply(t *testing.T, docs *postApplyFailureDocs) {
 	t.Helper()
 	select {
 	case <-docs.beforeApply:
-	case <-time.After(time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("document mutation did not reach pre-apply gate")
 	}
 }
@@ -745,7 +753,7 @@ func waitForPostApply(t *testing.T, docs *postApplyFailureDocs) {
 	t.Helper()
 	select {
 	case <-docs.applied:
-	case <-time.After(time.Second):
+	case <-time.After(concurrentWait):
 		t.Fatal("document mutation did not complete")
 	}
 }

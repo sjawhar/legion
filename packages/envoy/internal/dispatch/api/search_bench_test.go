@@ -20,6 +20,7 @@ import (
 // this test from a base checkout and this one against the same copy, alternately, and gates on
 // the two. It is deliberately env-gated so CI never runs it.
 func TestSearchLatencyOnCorpus(t *testing.T) {
+	t.Parallel()
 	databaseURL := os.Getenv("DISPATCH_BENCH_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("DISPATCH_BENCH_DATABASE_URL must point at a restored corpus copy")

@@ -10,6 +10,7 @@ import (
 )
 
 func TestCreateAskRejectsRemovedActionKind(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Removed action kind", "A spec")
 
@@ -26,6 +27,7 @@ func TestCreateAskRejectsRemovedActionKind(t *testing.T) {
 // A to-do handed to a human is an ordinary question whose asker chose Done / Can't; no option
 // label carries a server rule of its own.
 func TestDoneCantQuestionAnswersLikeAnyQuestion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Human to-do", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -66,6 +68,7 @@ func TestDoneCantQuestionAnswersLikeAnyQuestion(t *testing.T) {
 }
 
 func TestSingleSelectAnswerKeepsOptionalText(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Annotated answer", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -92,6 +95,7 @@ func TestSingleSelectAnswerKeepsOptionalText(t *testing.T) {
 }
 
 func TestCreateAskRejectsApprovalKind(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Server-created approval", "A spec")
 
@@ -144,6 +148,7 @@ func listIssueAskRows(t *testing.T, handler http.Handler, issueKey, query string
 // each row is still the ask it was before, and each thread - its answers among them - is the
 // one the single-ask read hands back.
 func TestIssueAskListCarriesLastReplyAndThreadOnRequest(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Issue ask rows", "A spec")
 
@@ -264,6 +269,7 @@ func TestIssueAskListCarriesLastReplyAndThreadOnRequest(t *testing.T) {
 }
 
 func TestIssueAskListWithoutAsksIsAnEmptyArray(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "No asks", "A spec")
 

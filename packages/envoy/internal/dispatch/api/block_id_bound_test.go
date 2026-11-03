@@ -62,6 +62,7 @@ func requireStoredWithoutLongIDNode(t *testing.T, handler http.Handler, database
 // the document stores the id, the block carrying it is no graph node, and its other blocks are.
 // An id at the bound is written, and its block is a node the graph reads.
 func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
+	t.Parallel()
 	long := randomBlockID(t, 3200)
 	for _, test := range []struct {
 		name  string
@@ -134,6 +135,7 @@ func TestAWriteNamingABlockIDPastTheBoundIsWritten(t *testing.T) {
 // `no block … in <document>`, as for any block the index does not hold, never a refusal of the
 // reference for its length.
 func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) {
+	t.Parallel()
 	documentService, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Held long block id", "Context paragraph.\n")
 	long := randomBlockID(t, 3200)
@@ -182,6 +184,7 @@ func TestADocumentHoldingABlockIDPastTheBoundTakesUnrelatedWrites(t *testing.T) 
 // as main's does: it stores its version, the document holds the id, the block carrying it is no
 // graph node, and its other blocks are.
 func TestARebuildFromMarkdownHoldingABlockIDPastTheBoundIsWritten(t *testing.T) {
+	t.Parallel()
 	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -218,6 +221,8 @@ func TestARebuildFromMarkdownHoldingABlockIDPastTheBoundIsWritten(t *testing.T) 
 // and the others are, and no write fails, with a 500 or on an index key past its limit
 // (SQLSTATE 54000).
 func TestASuggestionWritingABlockIDPastTheBoundIsAccepted(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	logs := &storetest.LockedLog{}
 	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	_, handler, database := browserDocumentService(t)
@@ -246,6 +251,7 @@ func TestASuggestionWritingABlockIDPastTheBoundIsAccepted(t *testing.T) {
 // A comment citing a block by an id past the bound is posted: the citation names no block, so it
 // writes no edge whose key the index could not hold.
 func TestACommentCitingABlockIDPastTheBoundPosts(t *testing.T) {
+	t.Parallel()
 	_, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cited long block id", "Context paragraph.\n")
 	cited := "dispatch://" + issue.Key + "/spec#b-" + randomBlockID(t, 3200)
@@ -274,6 +280,7 @@ func TestACommentCitingABlockIDPastTheBoundPosts(t *testing.T) {
 // such a key leaves no room in document_blocks' node_id key even for a minted 36-byte paragraph
 // id; the block index must not turn that into a refusal of the document's writes.
 func TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten(t *testing.T) {
+	t.Parallel()
 	_, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Long document name", "Context paragraph.\n")
 	name := randomBlockID(t, 2680) + ".md"
@@ -308,6 +315,7 @@ func TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten(t *test
 // id is `<ref_key>#<block id>`, which the refs and block_refs keys cannot hold at this length, so
 // the block index must not turn the citation into a refusal of the write.
 func TestTextCitingABlockOfALongNamedDocumentIsStillWritten(t *testing.T) {
+	t.Parallel()
 	_, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cites a long-named document", "Context paragraph.\n")
 	name := randomBlockID(t, 2680) + ".md"
@@ -339,6 +347,7 @@ func TestTextCitingABlockOfALongNamedDocumentIsStillWritten(t *testing.T) {
 // cannot hold it - is posted: the citation names nothing, so it writes no edge, and the comment's
 // other, ordinary reference is recorded as ever.
 func TestACommentCitingATargetPastTheBoundPosts(t *testing.T) {
+	t.Parallel()
 	_, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cites long targets", "Context paragraph.\n")
 	for _, test := range []struct{ name, cited string }{
@@ -373,6 +382,7 @@ func TestACommentCitingATargetPastTheBoundPosts(t *testing.T) {
 // edge to its issue, its block is read by its block reference, and block-links reads it either
 // side. A comment no one wrote, its id past the bound, is 404 NOT_FOUND as any missing node is.
 func TestALongNamedDocumentIsReadByItsOwnReference(t *testing.T) {
+	t.Parallel()
 	_, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Reads long targets", "Context paragraph.\n")
 	// The slug of `<hex>.md` is `<hex>-md`, so the reference key `<key>/<hex>-md` is 2600 bytes.
@@ -439,6 +449,8 @@ func TestALongNamedDocumentIsReadByItsOwnReference(t *testing.T) {
 // anchor is, each anchored to that block, and the document's blocks count both against it. No
 // write fails on an index key past its limit (SQLSTATE 54000).
 func TestAnAnchorInsideABlockWhoseIDIsPastTheBoundIsWritten(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	logs := &storetest.LockedLog{}
 	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	documentService, handler, _ := browserDocumentService(t)

@@ -67,6 +67,7 @@ func requireCoverageIdentity(t *testing.T, report model.SearchCoverage, identity
 // With no embeddings row at all (a corpus loaded with its triggers off), nothing is current and
 // every item lacks a vector, aged from when it was written.
 func TestSearchCoverageCountsItemsWithNoRowAsLacking(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	seedSearchCorpus(t, handler)
@@ -94,6 +95,7 @@ func TestSearchCoverageCountsItemsWithNoRowAsLacking(t *testing.T) {
 // lacking age. A dead row is then counted failed, not lacking; a row embedded at an older text, or
 // by another identity, is lacking.
 func TestSearchCoverageCountsCurrentFailedAndLackingRows(t *testing.T) {
+	t.Parallel()
 	embedder := &fakeEmbedder{}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	corpus := seedSearchCorpus(t, handler)
@@ -141,6 +143,7 @@ func TestSearchCoverageCountsCurrentFailedAndLackingRows(t *testing.T) {
 // With no embedder configured the report names no identity, place or model, and nothing is
 // current: the rows the write triggers queued are never embedded.
 func TestSearchCoverageWithNoEmbedderNamesNoIdentity(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	seedSearchCorpus(t, handler)
 
@@ -158,6 +161,7 @@ func TestSearchCoverageWithNoEmbedderNamesNoIdentity(t *testing.T) {
 // The coverage report admits whoever search admits: an agent's bearer token and a browser
 // session cookie, and refuses a request with no credential exactly as GET /api/v1/search does.
 func TestSearchCoverageAuthentication(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 
 	if agent := agentRequest(t, handler, http.MethodGet, "/api/v1/search/coverage", nil, "agent-token"); agent.Code != http.StatusOK {

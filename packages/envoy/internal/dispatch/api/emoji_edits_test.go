@@ -47,6 +47,7 @@ const emojiTable = "| session | id | title |\n| --- | --- | --- |\n" +
 // Rows deleted and rows inserted in one batch are written over each other in place, cell by cell,
 // so a cell that held one title now holds another.
 func TestDocumentEditsKeepEmojiWhenRowsAreReplacedInPlace(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Emoji table rows", emojiTable)
 
@@ -74,6 +75,7 @@ func TestDocumentEditsKeepEmojiWhenRowsAreReplacedInPlace(t *testing.T) {
 // first body row and adding one after the last moves every other row up a place, so each of their
 // titles is diffed against the title of the row above it (📊 against 🚰, 🚰 against 🔍, and on).
 func TestDocumentEditsKeepEmojiInRowsNoOperationNames(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Emoji shifted rows", emojiTable)
 
@@ -97,6 +99,7 @@ func TestDocumentEditsKeepEmojiInRowsNoOperationNames(t *testing.T) {
 // One emoji replaced by another that shares its high surrogate (the prefix of the two texts ends
 // inside the pair) or its low surrogate (the suffix starts inside it), with text around both.
 func TestDocumentEditsKeepEmojiWhenOneReplacesAnotherSharingASurrogate(t *testing.T) {
+	t.Parallel()
 	for name, test := range map[string]struct{ was, now string }{
 		"shared high surrogate": {was: "\U0001F4CA", now: "\U0001F4CB"},
 		"shared low surrogate":  {was: "\U0001F60A", now: "\U0001FA0A"},

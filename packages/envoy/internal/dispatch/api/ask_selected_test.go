@@ -86,6 +86,7 @@ func requireAskReadsEmptySelected(t *testing.T, handler http.Handler, issueKey, 
 }
 
 func TestAskAnswerWithoutSelectedReadsAsEmptyList(t *testing.T) {
+	t.Parallel()
 	t.Run("answered with text only", func(t *testing.T) {
 		handler := newTestHandler(t)
 		issue := createInteractionIssue(t, handler, "TEST", "Text-only answer", "A spec")

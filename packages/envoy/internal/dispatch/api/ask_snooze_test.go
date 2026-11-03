@@ -46,6 +46,7 @@ func createSnoozeAsk(t *testing.T, handler http.Handler, target, question string
 // other login, and is undone by the un-snooze. A document ask snoozes exactly like an issue
 // ask - the whole reason the snooze is keyed on the ask rather than on its issue.
 func TestAskSnoozeSurfacesOnTheSnoozersInboxOnly(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -130,6 +131,7 @@ func TestAskSnoozeSurfacesOnTheSnoozersInboxOnly(t *testing.T) {
 // so one person reaching the API under two spellings holds one snooze, not two, and un-snoozes
 // under either.
 func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Casing", "spec")
 	askID := createSnoozeAsk(t, handler, "/api/v1/issues/"+issue.Key+"/asks", "Which approach?")
@@ -167,6 +169,7 @@ func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 // anyone else - not even another person holding a snooze on the same row. A write that moves
 // nothing announces nothing.
 func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -245,6 +248,7 @@ func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
 // the human, and the row must still carry its unchanged snooze so the Inbox keeps it folded
 // away. Only the moment passing or an explicit un-snooze brings it back.
 func TestAgentReplyLeavesASnoozeIntact(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Snoozed", "spec")
 	askID := createSnoozeAsk(t, handler, "/api/v1/issues/"+issue.Key+"/asks", "Which approach?")
@@ -292,6 +296,7 @@ func TestAgentReplyLeavesASnoozeIntact(t *testing.T) {
 // Nothing sweeps user_ask_snooze, so a snooze whose moment has passed must read back as the
 // ordinary row it is: still listed, carrying the moment the reader compares against now.
 func TestInboxSurfacesASnoozeWhoseMomentHasPassed(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -325,6 +330,7 @@ func TestInboxSurfacesASnoozeWhoseMomentHasPassed(t *testing.T) {
 }
 
 func TestAskSnoozeRefusesBadInputAndNonHumans(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",

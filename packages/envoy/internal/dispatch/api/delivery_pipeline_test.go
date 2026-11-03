@@ -138,6 +138,7 @@ func pipelineSettings() delivery.DeliverySettings {
 // TestDeliveryPipelineProductionCardMergesJobNames proves one production card follows both names
 // across a deploy-job rename.
 func TestDeliveryPipelineProductionCardMergesJobNames(t *testing.T) {
+	t.Parallel()
 	const oldName, newName = "widgets-release / widgets-release", "release / release"
 	settings := pipelineSettings()
 	settings.ProductionJobNames = []string{oldName, newName}
@@ -163,6 +164,7 @@ func TestDeliveryPipelineProductionCardMergesJobNames(t *testing.T) {
 // TestDeliveryPipelineCardKeysSurviveReorderedCards proves each response field reads its card's
 // key, not the order cards were assembled in.
 func TestDeliveryPipelineCardKeysSurviveReorderedCards(t *testing.T) {
+	t.Parallel()
 	started := pipelineFixtureTime(32, 8, 0)
 	cards := []measures.DeployJobCard{
 		{CardID: pipelineStagingApplyCard, Production: delivery.Production{JobNames: []string{"staging-release / apply"}}},
@@ -211,6 +213,7 @@ func getDeliveryPipeline(t *testing.T, handler http.Handler, query string) (map[
 }
 
 func TestGetDeliveryPipelineWithoutSettingsIs404(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/pipeline", nil, "alice")
 	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"DELIVERY_NOT_CONFIGURED"`) {
@@ -219,6 +222,7 @@ func TestGetDeliveryPipelineWithoutSettingsIs404(t *testing.T) {
 }
 
 func TestGetDeliveryPipelineRejectsMalformedAt(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresSettings(t, database)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/pipeline?at=yesterday", nil, "alice")
@@ -230,6 +234,7 @@ func TestGetDeliveryPipelineRejectsMalformedAt(t *testing.T) {
 // TestGetDeliveryPipelineIsAgentReadable: an agent reads the Pipeline numbers with its bearer, as a
 // person's browser does; an anonymous caller reads nothing.
 func TestGetDeliveryPipelineIsAgentReadable(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresSettings(t, database)
 	target := "/api/v1/delivery/pipeline?at=" + pipelineAt
@@ -245,6 +250,7 @@ func TestGetDeliveryPipelineIsAgentReadable(t *testing.T) {
 // numbers are the prototype's (measures/pipeline_test.go cites the command that produced them),
 // and the merge_group, workflow_dispatch and feature/x runs are left out by the store's selection.
 func TestGetDeliveryPipelineComputesTheFixture(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedPipelineFixture(t, database, pipelineSettings())
 	pool := database.Pool
@@ -336,6 +342,7 @@ func TestGetDeliveryPipelineComputesTheFixture(t *testing.T) {
 // TestGetDeliveryPipelineAnswersEmptyListsAsArrays: with no run stored, the lists are [] and the
 // optional cards null, never omitted.
 func TestGetDeliveryPipelineAnswersEmptyListsAsArrays(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresSettings(t, database)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/pipeline?at="+pipelineAt, nil, "alice")

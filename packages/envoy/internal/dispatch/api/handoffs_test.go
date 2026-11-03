@@ -67,6 +67,7 @@ func fortyKilobyteHandoff() string {
 // A session's writes to one phase are versions 1 and 2, another phase counts from 1 on its own,
 // and each write answers its metadata with no body, under the session that wrote it.
 func TestHandoffWritesNumberVersionsPerIssueAndPhase(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff versions", "spec")
 
@@ -100,6 +101,7 @@ func TestHandoffWritesNumberVersionsPerIssueAndPhase(t *testing.T) {
 // Writes racing on one issue and phase each take their own version: the issue's row lock orders
 // them, so none collides on the unique version.
 func TestConcurrentHandoffWritesTakeDistinctVersions(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Concurrent handoffs", "spec")
 	const writers = 5
@@ -127,6 +129,7 @@ func TestConcurrentHandoffWritesTakeDistinctVersions(t *testing.T) {
 
 // A 40 KB body reads back byte for byte, from the phase's latest and by id alike.
 func TestHandoffBodyReadsBackExactlyAsWritten(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff round trip", "spec")
 	body := fortyKilobyteHandoff()
@@ -156,6 +159,7 @@ func TestHandoffBodyReadsBackExactlyAsWritten(t *testing.T) {
 // The body cap is contracts.DispatchHandoffBodyMax bytes: a body of exactly that many is
 // recorded, one byte more is 413 CAP_EXCEEDED naming the cap, and so is a request far past it.
 func TestHandoffBodyCapIsEnforcedInBytes(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff cap", "spec")
 	wrapper := len(`{"a":""}`)
@@ -181,6 +185,7 @@ func TestHandoffBodyCapIsEnforcedInBytes(t *testing.T) {
 // What is not a handoff write is refused before anything is written: a body that is not one JSON
 // object, a missing body, a phase that is not a slug, a bearer naming no session, and a person.
 func TestHandoffWriteRefusals(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff refusals", "spec")
 	path := "/api/v1/issues/" + issue.Key + "/handoffs/implement"
@@ -231,6 +236,7 @@ func TestHandoffWriteRefusals(t *testing.T) {
 // The list is every handoff's metadata, newest first and without bodies; latest answers a phase's
 // newest, and a phase or id with none is 404 HANDOFF_NOT_FOUND.
 func TestHandoffReadsListNewestFirstAndRefuseWhatIsAbsent(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff reads", "spec")
 	planned := recordedHandoff(t, handler, issue.Key, "plan", `{"step":"plan"}`)
@@ -270,6 +276,7 @@ func TestHandoffReadsListNewestFirstAndRefuseWhatIsAbsent(t *testing.T) {
 
 // A closed issue refuses a handoff write with 409 ISSUE_CLOSED, and its handoffs still read.
 func TestClosedIssueRefusesHandoffWritesAndKeepsItsReads(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Closed handoffs", "spec")
 	written := recordedHandoff(t, handler, issue.Key, "review", `{"verdict":"approve"}`)
@@ -298,6 +305,7 @@ func TestClosedIssueRefusesHandoffWritesAndKeepsItsReads(t *testing.T) {
 // Each write appends one handoff.recorded on the issue, under the writing session: its payload is
 // exactly {handoff_id, phase, version}, never the body, and it notifies no one.
 func TestHandoffWriteAppendsHandoffRecordedWithoutTheBody(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Handoff event", "spec")
 	const secret = "the body never rides on the event"
@@ -357,6 +365,7 @@ func spilledHandoff(note string) string {
 // handoff under that key is another request, 422 KEY_REUSED, read under the handoff write's own
 // limit however large it is, and it records nothing.
 func TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Keyed handoff write", "spec")
 	const key = "11111111-2222-3333-4444-555555555555"
@@ -396,6 +405,7 @@ func TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion(t *testing.T) 
 // layer reads the handoff write's own limit (routeBody), not the megabyte every other JSON route
 // reads.
 func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Spilled handoff write", "spec")
 	const key = "22222222-3333-4444-5555-666666666666"
@@ -436,6 +446,7 @@ func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
 // key a first write still holds is answered 409 KEY_IN_FLIGHT once a body past a JSON body's
 // megabyte has arrived whole.
 func TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Drained handoff write", "spec")
 	target := "/api/v1/issues/" + issue.Key + "/handoffs/implement"

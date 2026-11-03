@@ -95,6 +95,7 @@ func (body groupsTimeline) parentAgents() map[string]string {
 // of every pull request whose first session it holds, in the pull requests, the facet counts, the
 // colours, the facet filter and the measures, while the Session facet keeps each session apart.
 func TestTimelineShowsAGroupAsTheParentAgentOfItsSessionsPRs(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedGroupsTimeline(t, database, []string{"s1", "s2", "s3", ""}, map[int]bool{2: true}, map[string]string{
 		"s1": "Planner one", "s2": "Planner two", "s3": "Reviewer",
@@ -141,6 +142,7 @@ func TestTimelineShowsAGroupAsTheParentAgentOfItsSessionsPRs(t *testing.T) {
 // TestDeletingAGroupRestoresItsSessionsOwnValues: once its group is gone, each session's pull
 // request shows the session by its title again.
 func TestDeletingAGroupRestoresItsSessionsOwnValues(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedGroupsTimeline(t, database, []string{"s1", "s2"}, nil, map[string]string{"s1": "Planner one", "s2": "Planner two"})
 	group := createSessionGroup(t, handler, "Planners", "s1", "s2")
@@ -157,6 +159,7 @@ func TestDeletingAGroupRestoresItsSessionsOwnValues(t *testing.T) {
 // after the group was named, without being in it, shows with its id beside the title, so the
 // group and the session count apart.
 func TestALaterSessionTakingAGroupsNameStandsApart(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedGroupsTimeline(t, database, []string{"s1", "s5"}, nil, map[string]string{"s1": "Planner", "s5": "Builder"})
 	group := createSessionGroup(t, handler, "Planner", "s1")
@@ -176,6 +179,7 @@ func TestALaterSessionTakingAGroupsNameStandsApart(t *testing.T) {
 // TestGroupedMeasuresMatchTheTimelines: the measures route, read for a group's filter, answers what
 // the timeline carries for the same query, as for every other facet.
 func TestGroupedMeasuresMatchTheTimelines(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedGroupsTimeline(t, database, []string{"s1", "s2", "s3"}, map[int]bool{2: true}, map[string]string{"s1": "One", "s2": "Two", "s3": "Three"})
 	group := createSessionGroup(t, handler, "Planners", "s1", "s2")

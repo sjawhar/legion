@@ -77,6 +77,7 @@ func databaseClockAhead(t *testing.T, database *store.Store, ahead time.Duration
 		int64(ahead/time.Second))); err != nil {
 		t.Fatalf("create the shadowing now(): %v", err)
 	}
+	dropWhenDone(t, database, `drop function public.now()`)
 	config := database.Pool.Config()
 	config.ConnConfig.RuntimeParams["search_path"] = "public, pg_catalog"
 	opened, err := pgxpool.NewWithConfig(ctx, config)
@@ -100,6 +101,7 @@ func databaseClockAhead(t *testing.T, database *store.Store, ahead time.Duration
 // A claim's time is the transaction's that writes it: the answer's claim.at is its updated_at,
 // which the same update stamps, and the issue.claimed event's created_at.
 func TestAClaimTakesItsTimeFromTheDatabase(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	key := claimIssueKey(t, handler, "todo")
 
@@ -129,6 +131,7 @@ func TestAClaimTakesItsTimeFromTheDatabase(t *testing.T) {
 // An answer's time is the transaction's that writes it, a first answer and a changed one alike:
 // each answer's `at` is its ask.answered event's created_at.
 func TestAnAnswerTakesItsTimeFromTheDatabase(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answer on the database clock", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)
@@ -156,6 +159,7 @@ func TestAnAnswerTakesItsTimeFromTheDatabase(t *testing.T) {
 // (docs.answerApprovalAsk): the request's answer `at` is that transaction's time, its
 // ask.answered event's created_at.
 func TestACarriedApprovalAnswerTakesItsTimeFromTheDatabase(t *testing.T) {
+	t.Parallel()
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Carry on the database clock", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
@@ -179,6 +183,7 @@ func TestACarriedApprovalAnswerTakesItsTimeFromTheDatabase(t *testing.T) {
 // a snooze an hour out by this host is already past and refused 400, one two days out is stored,
 // and an ask that does not exist is still 404 rather than either.
 func TestASnoozeIsInTheFutureByTheDatabasesClock(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "CORE", "Snooze on the database clock", "A spec")
 	askID := createSnoozeAsk(t, handler, "/api/v1/issues/"+issue.Key+"/asks", "Issue question")

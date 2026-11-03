@@ -15,6 +15,7 @@ import (
 // approval.version: the graph reads the version recorded at the write, never the document's
 // latest version or the request's current one.
 func TestALaterVersionMovesNoUnanchoredItemsVersion(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")

@@ -44,6 +44,7 @@ func nameBoundTargets(issueKey, session string) []nameBoundTarget {
 // one, and writes nothing. A name whose key is exactly the bound is stored, read back by its slug,
 // and takes a second version.
 func TestANewArtifactNamePastTheBoundIsRefused(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "CORE", "Long artifact names", "Context paragraph.\n")
 	const session = "session-0123456789abcdef"
@@ -111,6 +112,7 @@ func TestANewArtifactNamePastTheBoundIsRefused(t *testing.T) {
 // writes as before: an upload under its name stores a new version, an edit stores another, and the
 // artifact reads.
 func TestAnArtifactStoredPastTheNameBoundTakesVersionsAndEdits(t *testing.T) {
+	t.Parallel()
 	_, handler, database := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "CORE", "Stored long name", "Context paragraph.\n")
 	ctx := context.Background()

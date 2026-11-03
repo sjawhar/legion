@@ -61,6 +61,7 @@ const (
 // none for any other: an unwanted type by a user comes back with no payload, and through/at name
 // the last row scanned, whether or not it came back.
 func TestLiveEventsSinceCarriesOnlyTheWantedPayloads(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	ids := seedLiveEvents(t, database, []liveEventSeed{
@@ -103,6 +104,7 @@ func TestLiveEventsSinceCarriesOnlyTheWantedPayloads(t *testing.T) {
 // the newest event the read returns nothing with through at the cursor and at zero. The read stops
 // at the horizon it is given: a lower bound leaves the rows above it for a later read.
 func TestLiveEventsSinceMovesPastARunItIgnores(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	ids := seedLiveEvents(t, database, []liveEventSeed{
@@ -141,6 +143,7 @@ func TestLiveEventsSinceMovesPastARunItIgnores(t *testing.T) {
 
 // limit bounds the rows scanned, not the rows returned, and the next read starts after through.
 func TestLiveEventsSinceScansAtMostLimitRows(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	ids := seedLiveEvents(t, database, []liveEventSeed{
@@ -176,6 +179,7 @@ func TestLiveEventsSinceScansAtMostLimitRows(t *testing.T) {
 // eventCursorCheck reads the newest event's id and the time of the event at the cursor; once the
 // cursor's row is gone (a reset of the log), cursorAt is nil.
 func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 
@@ -289,6 +293,7 @@ func (r scanThen) Scan(dest ...any) error {
 // the new log's lower ids then read as a second reset that closed the subscription opened after
 // the first (TestEventStreamRelayRecoversWhenTheEventLogIsReset).
 func TestEventCursorCheckReadsOneLogWhenTheLogIsResetMidCheck(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)

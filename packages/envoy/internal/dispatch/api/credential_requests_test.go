@@ -95,6 +95,7 @@ var featureOffRoutes = []struct {
 }
 
 func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
+	t.Parallel()
 	handler := newCredentialTestHandler(t, "")
 	for _, route := range featureOffRoutes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
@@ -117,6 +118,7 @@ func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
 // failed request, while the request is held to the same human caller and `approver=me` as one a
 // broker would answer.
 func TestListCredentialPendingWithAndWithoutABroker(t *testing.T) {
+	t.Parallel()
 	t.Run("without a broker", func(t *testing.T) {
 		handler := newCredentialTestHandler(t, "")
 		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, "alice")
@@ -189,6 +191,7 @@ func newFakeBrokerRig(t *testing.T) *fakeBrokerRig {
 // The pending list relays the broker's answer untouched, a secret request's approve_url among its
 // rows. That link is the broker's, and Dispatch adds nothing to it.
 func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, brokerRoute, dispatchPath, body string
 	}{
@@ -219,6 +222,7 @@ func TestCredentialRouteForwardsBrokerSuccessBodyAndAuth(t *testing.T) {
 // A secret request is decided on the broker's page alone, so the broker refuses Dispatch's approve
 // or deny of one; the browser gets that refusal, and the page it names, exactly as the broker sent it.
 func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
+	t.Parallel()
 	refusal := `{"code":"DECIDE_ON_BROKER_PAGE","error":"decide it at https://secrets.example.com/approve/rec1","approve_url":"https://secrets.example.com/approve/rec1"}`
 	for _, action := range []string{"approve", "deny"} {
 		t.Run(action, func(t *testing.T) {
@@ -240,6 +244,7 @@ func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
 }
 
 func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
+	t.Parallel()
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
@@ -258,6 +263,7 @@ func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
 // revoke must send the login Dispatch's own session resolved, canonical lowercase, and forward a
 // machine login's typed code — never an approver, or anything else, the browser put in its body.
 func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
+	t.Parallel()
 	browserBody := map[string]any{"approver": "bob", "code": "ABCD-1234", "assertion": map[string]string{"id": "x"}}
 	for _, tc := range []struct {
 		path     string
@@ -285,6 +291,7 @@ func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
 }
 
 func TestCredentialRouteTransportFailureIsAgentSecretsUnavailable(t *testing.T) {
+	t.Parallel()
 	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	deadURL := dead.URL
 	dead.Close() // nothing listens here now: every call is a transport failure.
@@ -306,6 +313,8 @@ func TestCredentialRouteTransportFailureIsAgentSecretsUnavailable(t *testing.T) 
 // names Dispatch's own credential, never the unreachable broker 503 AGENT_SECRETS_UNAVAILABLE
 // would send the operator to, and the one log line it writes names the file to fix.
 func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	rig := newFakeBrokerRig(t)
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
@@ -338,6 +347,7 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 }
 
 func TestListCredentialPendingResolvesApproverMeToCallerCanonicalLogin(t *testing.T) {
+	t.Parallel()
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
@@ -351,6 +361,7 @@ func TestListCredentialPendingResolvesApproverMeToCallerCanonicalLogin(t *testin
 }
 
 func TestListCredentialGrantsResolvesApproverMeToCallerCanonicalLogin(t *testing.T) {
+	t.Parallel()
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
@@ -364,6 +375,7 @@ func TestListCredentialGrantsResolvesApproverMeToCallerCanonicalLogin(t *testing
 }
 
 func TestApproverLiteralOtherValueIsRejectedBeforeReachingTheBroker(t *testing.T) {
+	t.Parallel()
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 

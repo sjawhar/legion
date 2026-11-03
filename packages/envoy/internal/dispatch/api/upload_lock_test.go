@@ -24,6 +24,10 @@ import (
 // load. Holding the owner row here must therefore stop the upload before the room lock, leaving
 // the room free to take behind it.
 func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
@@ -79,6 +83,8 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 // commit (Ledger.Commit's recordLatestEditSource), after its event, would wait for the answer and
 // then finish; what fails this test is a lock the two come to share in opposite orders.
 func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents(t *testing.T) {
+	// No t.Parallel: this test reads what the process's own default logger was handed, which
+	// every other test running beside it would write into too.
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	logs := &storetest.LockedLog{}
@@ -120,6 +126,10 @@ func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTh
 			t.Fatalf("hold the upload and the answer before their events: %v", err)
 		}
 	}
+	dropWhenDone(t, database,
+		`drop trigger dispatch_test_hold_upload on artifact_versions`,
+		`drop trigger dispatch_test_hold_answer on asks`,
+		`drop function dispatch_test_hold()`)
 	hold := func(key int64) pgx.Tx {
 		t.Helper()
 		tx, err := database.Pool.Begin(ctx)
@@ -263,6 +273,10 @@ func awaitCopyShows(t *testing.T, ctx context.Context, database *store.Store, co
 // doc_updates' foreign key, and while the owner lock was `for update` that key share conflicted
 // and the two deadlocked.
 func TestProjectDocumentUploadOwnerLockLeavesTheForeignKeyFree(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})

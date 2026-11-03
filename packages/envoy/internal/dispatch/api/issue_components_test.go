@@ -109,6 +109,7 @@ func issueAttachments(component model.ArchitectureTreeComponent) map[string]stri
 // when several ways apply; own_* keeps only the issues naming this component itself. A `none`
 // row is inherited like an explicit one, and a closed issue can still be classified.
 func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
+	t.Parallel()
 	handler, fake := newComponentTreeServer(t)
 
 	root := createComponentIssue(t, handler, "Root", nil, map[string]any{"mode": "explicit", "ids": []string{"legion"}})
@@ -270,6 +271,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 // component, and the reference graph resolves a component of either source. An external
 // component is still refused, whichever source defines it.
 func TestIssueComponentsFromEverySource(t *testing.T) {
+	t.Parallel()
 	handler, fake := newComponentTreeServer(t)
 	fake.installations["acme/infra"] = "read"
 	fake.repos["acme/infra"] = &fakeArchitectureRepo{commit: shaInfra, files: map[string]string{
@@ -359,6 +361,7 @@ func TestIssueComponentsFromEverySource(t *testing.T) {
 // Every refused shape names what was wrong with COMPONENTS_INPUT; other closed-issue writes
 // still answer ISSUE_CLOSED.
 func TestIssueComponentsInputValidation(t *testing.T) {
+	t.Parallel()
 	handler, _ := newComponentTreeServer(t)
 	createReferenceAPIProject(t, handler, "OPS")
 	issue := createComponentIssue(t, handler, "Validate", nil, nil)
@@ -410,6 +413,7 @@ func TestIssueComponentsInputValidation(t *testing.T) {
 
 // Without a source the tree is 404 SOURCE_NOT_FOUND, and like every read it needs a caller.
 func TestArchitectureTreeWithoutSource(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/projects/CORE/architecture", nil, "alice")

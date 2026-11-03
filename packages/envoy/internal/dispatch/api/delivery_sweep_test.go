@@ -139,6 +139,10 @@ var sweepRoutes = map[string]sweepRoute{
 // drops if the first frame did land; a second pass sends nothing more, and the dead sender's late
 // outcome changes nothing.
 func TestTheDeliverySweepFinishesEveryDeliveringRouteOnce(t *testing.T) {
+	// No t.Parallel: this test holds a transaction, a row lock or an advisory lock open on
+	// purpose. The event log's safe horizon is proven from pg_snapshot_xmin, the oldest
+	// transaction id running anywhere on the instance (internal/dispatch/events,
+	// horizon.go), so a hold here stalls every parallel test reading that feed.
 	for name, route := range sweepRoutes {
 		t.Run(name, func(t *testing.T) {
 			listener := newHoldingListener(t)
@@ -263,6 +267,7 @@ func TestTheDeliverySweepFinishesEveryDeliveringRouteOnce(t *testing.T) {
 // mention is being sent leaves that send to finish, and its attempt settles as what the listener
 // answered rather than as cut off or pending.
 func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
+	t.Parallel()
 	for name, path := range map[string]func(issue, document string) string{
 		"an issue comment":   sweepRoutes["a comment's mention"].path,
 		"a document comment": sweepRoutes["a document comment's mention"].path,
@@ -338,6 +343,7 @@ func TestACommentsMentionFinishesWhenItsClientGivesUp(t *testing.T) {
 // later retry overtook, one opened inside the last minute that its writer has not claimed yet, and
 // one past the window a repeat is recognised in are each left alone.
 func TestTheDeliverySweepLeavesWhatIsNotOwed(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, agentSessions)
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 	author, err := json.Marshal(model.Actor{Kind: "user", ID: "alice"})
@@ -385,6 +391,7 @@ func TestTheDeliverySweepLeavesWhatIsNotOwed(t *testing.T) {
 // The maintenance loop's pass is what runs the sweep: started as cmd/dispatch starts it, with the
 // server's resume, it sends what a dead process owed without anybody asking.
 func TestTheMaintenanceLoopResumesOwedDeliveries(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, agentSessions)
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 	author, err := json.Marshal(model.Actor{Kind: "user", ID: "alice"})
@@ -535,6 +542,7 @@ func (rig sweepRig) strandMentions(issue string, count int, ago string, mentione
 // one pass delivers the three sendable ones and settles every other. A second pass changes
 // nothing.
 func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
+	t.Parallel()
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 	rig := sweepRig{t: t, database: database}
@@ -637,6 +645,7 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 // and the sweep owes only the retry's, the latest: it sends that one, in its own mode and to its
 // own session, and never the older attempt in its place, which stays the retry's to answer.
 func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
+	t.Parallel()
 	t.Run("a comment's mention", func(t *testing.T) {
 		listener, sends := newBroadcastListener(t, agentSessions)
 		handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
@@ -715,6 +724,7 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 // whatever its indexes: the assertion is that the index serves the query, as the custom plan a
 // statement's first runs get and as the generic plan Postgres may cache for it afterwards.
 func TestTheSweepsKeyedSendReadUsesItsPartialIndex(t *testing.T) {
+	t.Parallel()
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)

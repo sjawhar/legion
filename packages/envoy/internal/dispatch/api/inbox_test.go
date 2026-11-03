@@ -13,6 +13,7 @@ import (
 )
 
 func TestInboxCarriesDocumentForDocumentAsks(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -95,6 +96,7 @@ func TestInboxCarriesDocumentForDocumentAsks(t *testing.T) {
 }
 
 func TestInboxHydratesTheSameThreadsAsAskReads(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Inbox threads", "A spec")
 	edited := createEditableAsk(t, handler, issue.Key)
@@ -143,6 +145,7 @@ func TestInboxHydratesTheSameThreadsAsAskReads(t *testing.T) {
 }
 
 func TestInboxCarriesAnchorDocumentForIssueAsk(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Anchored inbox", "A quoted passage.")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -188,6 +191,7 @@ func TestInboxCarriesAnchorDocumentForIssueAsk(t *testing.T) {
 // assignee), and no filter is everything. A named person is lowercased before it is checked
 // against the people who have signed in.
 func TestInboxFiltersByAssignee(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -285,6 +289,7 @@ func TestInboxFiltersByAssignee(t *testing.T) {
 // reply chain and the Inbox card's, are both seeded from the ask's own replies. A cycle among
 // those rows has to be a visited row, not a request that never returns.
 func TestAskThreadReadsTerminateOnACyclicReplyChain(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	issue := createInteractionIssue(t, handler, "TEST", "Cyclic ask thread", "A spec")

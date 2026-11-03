@@ -62,6 +62,7 @@ func replyToAskAs(t *testing.T, handler http.Handler, issueKey, askID, sessionID
 }
 
 func TestEveryoneWhoWritesToAnAskFollowsIt(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Followers", "A spec")
 	askID := openAskAs(t, handler, issue.Key, "s1", "Ship it?")
@@ -95,6 +96,7 @@ func TestEveryoneWhoWritesToAnAskFollowsIt(t *testing.T) {
 }
 
 func TestApprovalAskFollowsItsRequestingSession(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approval followers", "A spec")
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{
@@ -114,6 +116,7 @@ func TestApprovalAskFollowsItsRequestingSession(t *testing.T) {
 }
 
 func TestApprovalHandBackFollowsItsActorWithoutChangingTheRequester(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -177,6 +180,7 @@ func TestApprovalHandBackFollowsItsActorWithoutChangingTheRequester(t *testing.T
 }
 
 func TestAskBlockWrittenBySessionFollowsThatSession(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
@@ -228,6 +232,7 @@ func followerRequest(t *testing.T, handler http.Handler, method, target string, 
 }
 
 func TestASessionFollowsAndUnfollowsOnlyItself(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Self follow", "A spec")
 	askID := openAskAs(t, handler, issue.Key, "s1", "Ship it?")
@@ -307,6 +312,7 @@ func TestASessionFollowsAndUnfollowsOnlyItself(t *testing.T) {
 }
 
 func TestAHumanAddsAndRemovesAnyFollower(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Human follow", "A spec")
 	askID := openAskAs(t, handler, issue.Key, "s1", "Ship it?")

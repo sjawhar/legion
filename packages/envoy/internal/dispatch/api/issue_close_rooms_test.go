@@ -37,6 +37,7 @@ func (d *hangUpDocs) SetIssueClosed(ctx context.Context, issueKey string, closed
 // never gets the flag keeps taking edits from the browsers connected to it until something
 // else reloads it.
 func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
+	t.Parallel()
 	var documentService *docs.Service
 	requestCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

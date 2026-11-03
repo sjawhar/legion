@@ -76,6 +76,7 @@ func countEvents(t *testing.T, database *store.Store, eventType string) int {
 // naming the thread's root, its subject and the reply, and a total of one. Bob, who wrote nothing
 // there, sees none of it.
 func TestMyRepliesListsACommentThreadASessionRepliedIn(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Replies", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Ship it on Friday?\nOr wait."}, "alice")
@@ -112,6 +113,7 @@ func TestMyRepliesListsACommentThreadASessionRepliedIn(t *testing.T) {
 // in Waiting on you already shows the reply; an open ask on a closed issue, which the Inbox hides,
 // stays; so do an answered ask's later reply and a resolved comment thread, until read.
 func TestMyRepliesKeepsWhatTheInboxDoesNotShow(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Open ask", "A spec")
 	closing := createAnswerListIssue(t, handler, "Closing")
@@ -168,6 +170,7 @@ func TestMyRepliesKeepsWhatTheInboxDoesNotShow(t *testing.T) {
 // answer (who answered, the chosen option and the answer's text), naming the ask. A mark through
 // the answer's own time, which carries nanoseconds, clears it, as the ask's card sends it.
 func TestMyRepliesListsAnAnswerSomeoneElseGave(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Regions", "A spec")
 	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -212,6 +215,7 @@ func TestMyRepliesListsAnAnswerSomeoneElseGave(t *testing.T) {
 // message thread each reach the page, each linking to its root; ?issue= and ?artifact= narrow the
 // rows to one owner.
 func TestMyRepliesListsDocumentAndMessageThreads(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Documents", "The quick brown fox.")
 	other := createAnswerListIssue(t, handler, "Other")
@@ -277,6 +281,7 @@ func TestMyRepliesListsDocumentAndMessageThreads(t *testing.T) {
 // Authorship is the author's kind: a session running under Alice's own personal token is still a
 // session, so its reply reaches her page. And one person is one login however it is cased.
 func TestMyRepliesCountsASessionUnderThePersonsOwnToken(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Own token", "A spec")
 	minted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/me/agent-tokens", map[string]string{"name": "mine"}, "alice")
@@ -311,6 +316,7 @@ func TestMyRepliesCountsASessionUnderThePersonsOwnToken(t *testing.T) {
 // viewer's other tabs hear; a repeat writes nothing. A later reply brings the row back, and a thread
 // on a closed issue can still be marked.
 func TestMarkThreadReadClearsTheRowUntilTheNextReply(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Mark", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Ready?"}, "alice")
@@ -366,6 +372,7 @@ func TestMarkThreadReadClearsTheRowUntilTheNextReply(t *testing.T) {
 }
 
 func TestMarkThreadReadRefusesWhatItCannotStore(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Refusals", "A spec")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Root"}, "alice")
@@ -425,6 +432,7 @@ func readThrough(t *testing.T, database *store.Store, threadID string) (time.Tim
 // the other an issue message thread answered through the session's message reply route
 // (POST /api/v1/messages/{id}/reply), which locks the issue before it inserts.
 func TestMarkThreadReadRacingASessionReply(t *testing.T) {
+	t.Parallel()
 	t.Run("comment thread", func(t *testing.T) {
 		handler, database := newTestHandlerWithStore(t)
 		issue := createInteractionIssue(t, handler, "TEST", "Race", "A spec")
@@ -491,6 +499,7 @@ func TestMarkThreadReadRacingASessionReply(t *testing.T) {
 // then ask_transitions.go's update asks): the mark takes the issue before Alice's row, so it never
 // holds the row the answer's trigger waits on while waiting for the event lock the answer holds.
 func TestMarkThreadReadRacingABlockAskAnswerThatRefreshesAnAnchor(t *testing.T) {
+	t.Parallel()
 	handler, database := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block race", "decision", transportAsk, "Which transport?")
 	anchored := createThreadComment(t, handler, issue.Key, map[string]any{
@@ -568,6 +577,7 @@ func requireThreadLogins(t *testing.T, database *store.Store, eventType, id stri
 // A comment, message or ask event names the people with a Replies row in its thread once the write
 // is in - the people whose Replies count it can move - and nobody who never wrote there.
 func TestReplyEventsNameTheThreadsParticipants(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Participants", "A spec")
 	comments := "/api/v1/issues/" + issue.Key + "/comments"
@@ -625,6 +635,7 @@ func TestReplyEventsNameTheThreadsParticipants(t *testing.T) {
 // session's reply to an issue message through the same reply route names the issue thread's
 // writers.
 func TestSessionRepliesNameThreadLoginsOnlyOnAnIssue(t *testing.T) {
+	t.Parallel()
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
 	if logins, carried := threadLoginsOf(t, database, "message.created", root.ID); carried {
 		t.Fatalf("a direct message's message.created carries thread_logins %#v, want none", logins)

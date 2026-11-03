@@ -67,6 +67,7 @@ func publishBuild(t *testing.T, database *store.Store, build, entry string) {
 // heartbeat has left the live window, whose build no process published, whose page names no entry
 // or that serves no dashboard adds nothing; once a process ages out, its build leaves the list.
 func TestDashboardBuildsNamesTheEntryChunksOfTheLiveProcesses(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{dashboardEntry: "/assets/index-a.js"})
 	publishBuild(t, database, "build-a", "/assets/index-a.js")
 	publishBuild(t, database, "build-b", "/assets/index-b.js")
@@ -101,6 +102,7 @@ func TestDashboardBuildsNamesTheEntryChunksOfTheLiveProcesses(t *testing.T) {
 // With no live process and no dashboard of its own, the route answers an empty serving and an
 // empty live array, never null, and refuses a caller with no credential.
 func TestDashboardBuildsWithNothingLive(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{})
 	publishBuild(t, database, "build-a", "/assets/index-a.js")
 	if code, body, live := getDashboardBuildsAs(t, handler, "cookie"); code != http.StatusOK || body.Serving != "" || live != "[]" {

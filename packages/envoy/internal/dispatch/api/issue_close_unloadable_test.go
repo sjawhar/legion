@@ -19,6 +19,7 @@ import (
 // older release made and restoring for its reopen, succeed rather than fail on that document for
 // good.
 func TestClosingAnIssueWithAnUnloadableDocumentWithdrawsItsAsksAndReopeningRestoresThem(t *testing.T) {
+	t.Parallel()
 	// An hour, so no settlement timer loads the unloadable document between the requests.
 	f := newRepairFixtureSettlingAfter(t, time.Hour)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Closing beside an unloadable document", "Context\n")
@@ -71,6 +72,7 @@ func TestClosingAnIssueWithAnUnloadableDocumentWithdrawsItsAsksAndReopeningResto
 // so once it commits the block reads resolved, as the withdrawn ask's row does, rather than open
 // on a closed issue until a reopen. The reopen then opens the block again with its ask.
 func TestRebuildingAClosedIssuesUnloadableDocumentShowsItsWithdrawnDecisionBlockResolved(t *testing.T) {
+	t.Parallel()
 	f := newRepairFixture(t)
 	issue := createInteractionIssue(t, f.handler, "TEST", "Rebuilding a closed issue's document", "Context\n")
 	uploaded := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{

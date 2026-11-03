@@ -35,6 +35,7 @@ func requireAskBacklinkCount(t *testing.T, counts map[string]*int, askID string,
 }
 
 func TestAskListsCarryBatchedBacklinkCounts(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -169,6 +170,7 @@ func requireIssueBacklinkCount(t *testing.T, handler http.Handler, key string, w
 // the event has to name them. The write itself is the only place that knows: refs.ReplaceCounted
 // reconciles the edges and resolves what moved in the same transaction that appends the event.
 func TestReferenceWritesNameChangedTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -241,6 +243,7 @@ func TestReferenceWritesNameChangedTargets(t *testing.T) {
 // An ask's own clarification replies are inbound `replies_to` edges, and its card already shows
 // that thread: an ask nothing cites must read as zero and its panel must stay empty.
 func TestAskBacklinksExcludeItsOwnReplies(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -289,6 +292,7 @@ func TestAskBacklinksExcludeItsOwnReplies(t *testing.T) {
 // succeed and name nothing: a write never fails because of what its text cites, and a row
 // stored that way stays editable.
 func TestMalformedReferencesNeverFailAWrite(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -345,6 +349,7 @@ func TestMalformedReferencesNeverFailAWrite(t *testing.T) {
 // A project document's body cites the same nodes a message can, and its readers hold the same
 // batched counts, so the version event has to name what the write moved.
 func TestDocumentVersionsNameChangedTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -406,6 +411,7 @@ func requireArtifactEventNames(t *testing.T, handler http.Handler, path, artifac
 // to name what the new markdown moved: the edits endpoint (both its unnamed snapshot and its
 // named version, the route `dispatch doc-edit` calls) and accepting a suggestion.
 func TestDocumentWritePathsNameChangedTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
@@ -469,6 +475,7 @@ func TestDocumentWritePathsNameChangedTargets(t *testing.T) {
 // An ask's question is a body like any other: opening one that cites an issue, and editing the
 // citation away again, each move that issue's own backlink count, so both events name it.
 func TestAskWritesNameChangedTargets(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -500,6 +507,7 @@ func TestAskWritesNameChangedTargets(t *testing.T) {
 // that excerpt names the target although its count stays; an edit that leaves it alone names
 // nothing.
 func TestEditsThatKeepAnEdgeNameItsTargetWhenItsExcerptMoves(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -566,6 +574,7 @@ func TestEditsThatKeepAnEdgeNameItsTargetWhenItsExcerptMoves(t *testing.T) {
 // it, not as the log stored it: an ask citing an issue must name that issue there too, or the
 // cited issue's header keeps its old count until something unrelated refetches it.
 func TestAnOpenedAskPublishesWhatItsQuestionCites(t *testing.T) {
+	t.Parallel()
 	handler, _, deps := newTestServer(t, testServerOptions{})
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -618,6 +627,7 @@ func TestAnOpenedAskPublishesWhatItsQuestionCites(t *testing.T) {
 // same transaction, so that body's citations move counted nodes: issue.created is the event that
 // has to name them, or the ask card and the ask lists the reader already holds stay one short.
 func TestIssueCreateNamesWhatItsSpecCited(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -677,6 +687,7 @@ func TestIssueCreateNamesWhatItsSpecCited(t *testing.T) {
 // issue's documents (its spec among them) are each named by their uuid, the node id the panel's
 // own read reports, and by the reference the panel is opened on.
 func TestReferenceWritesNameTheDocumentsTheyCite(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
@@ -777,6 +788,7 @@ func TestReferenceWritesNameTheDocumentsTheyCite(t *testing.T) {
 // names the block by its node id, its reference and its document's uuid; a version that changes
 // only a block nothing cites names nothing.
 func TestReferenceWritesNameTheBlocksTheyCite(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	issue, blockRef := createShipItSpec(t, handler, "CORE")

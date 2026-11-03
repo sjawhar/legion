@@ -213,6 +213,7 @@ func seedMeasuresSettings(t *testing.T, database *store.Store) {
 }
 
 func TestGetDeliveryMeasuresWithoutSettingsIs404(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/delivery/measures", nil, "alice")
 	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"DELIVERY_NOT_CONFIGURED"`) {
@@ -221,6 +222,7 @@ func TestGetDeliveryMeasuresWithoutSettingsIs404(t *testing.T) {
 }
 
 func TestGetDeliveryMeasuresRejectsMalformedWindow(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresSettings(t, database)
 	for _, target := range []string{
@@ -239,6 +241,7 @@ func TestGetDeliveryMeasuresRejectsMalformedWindow(t *testing.T) {
 // TestGetDeliveryMeasuresIsAgentReadable: an agent optimizing against the measures reads them
 // with its bearer, as a person's browser does; an anonymous caller reads nothing.
 func TestGetDeliveryMeasuresIsAgentReadable(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresSettings(t, database)
 	target := "/api/v1/delivery/measures?" + measuresFixtureWindow
@@ -255,6 +258,7 @@ func TestGetDeliveryMeasuresIsAgentReadable(t *testing.T) {
 // facets, so the Delivery page reads the population once when no brush narrows the measures.
 // Only computed_at, the moment each answer was computed, may differ.
 func TestGetDeliveryTimelineCarriesTheMeasuresOfItsWindow(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	seedMeasuresFixture(t, database)
 	for _, query := range []string{
@@ -293,6 +297,7 @@ func TestGetDeliveryTimelineCarriesTheMeasuresOfItsWindow(t *testing.T) {
 // derives from the stored rows; measures_test.go's TestComputeOnStoredContainment holds the same
 // set.
 func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	fixture := seedMeasuresFixture(t, database)
 

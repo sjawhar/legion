@@ -221,6 +221,7 @@ func createChildIssue(t *testing.T, handler http.Handler, project, parent, spec 
 // them; a fact Dispatch never recorded is empty. The facts are on the wire for every node, made_by
 // and changed_by as arrays even when empty.
 func TestEveryNodeKindCarriesItsFacts(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -374,6 +375,7 @@ func TestEveryNodeKindCarriesItsFacts(t *testing.T) {
 // A11: the other end of an edge, a document read's block at an edge, and every node of a
 // block-links read carry the same facts as the node read by its own reference.
 func TestTheFactsOfAnEdgesOtherEndAreTheNodesOwn(t *testing.T) {
+	t.Parallel()
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
 	parentIssue := createSpecIssue(t, handler, "CORE", "Parent spec.\n")
@@ -455,6 +457,7 @@ func TestTheFactsOfAnEdgesOtherEndAreTheNodesOwn(t *testing.T) {
 // claim is no change of the issue. A spec edit is the spec's last change and the edited block's,
 // and leaves the other blocks' and every block's maker.
 func TestAChangeMovesOnlyTheChangedNode(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -541,6 +544,7 @@ func TestAChangeMovesOnlyTheChangedNode(t *testing.T) {
 // appears, need not be where it was made. Its last change is that version. A block a later
 // version adds names that version's author as its maker.
 func TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -593,6 +597,7 @@ func TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker(t *testing.T) {
 // a block no current version holds is made as the block was, last changed by the version that
 // removed it, and part of the latest version indexed before that, the last known to hold it.
 func TestAPinnedBlockCarriesItsFacts(t *testing.T) {
+	t.Parallel()
 	handler, database := blockIndexHandler(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -637,6 +642,7 @@ func TestAPinnedBlockCarriesItsFacts(t *testing.T) {
 // current when it was written. A later edit of the document and the ask's answer, which each move
 // the block's changed version, leave it there.
 func TestABlockAskBelongsToTheVersionThatAddedIt(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -686,6 +692,7 @@ func TestABlockAskBelongsToTheVersionThatAddedIt(t *testing.T) {
 // does not decode as its column's shape (one actor, or a list of them) fails the read with a 500,
 // never a node made by nobody recorded.
 func TestAnActorThatDoesNotDecodeFailsTheRead(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")

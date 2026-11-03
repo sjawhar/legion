@@ -26,6 +26,7 @@ import (
 // a real corpus's planner would choose - search_bench_test.go's latency bound is what proves that
 // at scale.
 func TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan(t *testing.T) {
+	t.Parallel()
 	const title, spec = "A title to embed for the index test", "Body text."
 	embedder := &fakeEmbedder{vectors: map[string][]float32{
 		issueEmbeddingText(title, spec): angledVector(0.9, 2),

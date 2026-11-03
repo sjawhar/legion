@@ -64,6 +64,7 @@ func mentionOf(t *testing.T, handler http.Handler, target string) model.GraphEdg
 // become nodes, and the backlink to what it mentions names the block holding the mention rather
 // than the document. The write itself records no block and no block edge.
 func TestADocumentPastTheBlockBoundLeavesItsBlocksToTheReconciliation(t *testing.T) {
+	t.Parallel()
 	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
 	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
@@ -109,6 +110,7 @@ func TestADocumentPastTheBlockBoundLeavesItsBlocksToTheReconciliation(t *testing
 // indexed by its own write, with no block-index reconciliation pass at all. Its blocks are nodes
 // and the backlink names the block holding the mention as soon as the write answers.
 func TestADocumentUnderTheBlockBoundIsIndexedByItsOwnWrite(t *testing.T) {
+	t.Parallel()
 	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	createReferenceAPIProject(t, handler, "CORE")
 	mentioned := createReferenceAPIIssue(t, handler, "CORE")

@@ -29,6 +29,7 @@ func createEditableAsk(t *testing.T, handler http.Handler, issueKey string) edit
 }
 
 func TestEditOpenAskByAuthorPersistsUpdatedAskAndEditEvent(t *testing.T) {
+	t.Parallel()
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Edit ask", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -152,6 +153,7 @@ func TestEditOpenAskByAuthorPersistsUpdatedAskAndEditEvent(t *testing.T) {
 }
 
 func TestEditAskRejectsAnsweredAsk(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered ask", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -169,6 +171,7 @@ func TestEditAskRejectsAnsweredAsk(t *testing.T) {
 }
 
 func TestEditAskRejectsOtherAgentSession(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Agent ownership", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -183,6 +186,7 @@ func TestEditAskRejectsOtherAgentSession(t *testing.T) {
 }
 
 func TestEditAskAllowsHumanEditor(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Human ask edit", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -196,6 +200,7 @@ func TestEditAskAllowsHumanEditor(t *testing.T) {
 }
 
 func TestEditAskRejectsEmptyPatch(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Empty ask edit", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -207,6 +212,7 @@ func TestEditAskRejectsEmptyPatch(t *testing.T) {
 }
 
 func TestEditAskValidatesChangedFields(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Validate ask edit", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
@@ -222,6 +228,7 @@ func TestEditAskValidatesChangedFields(t *testing.T) {
 	}
 }
 func TestEditAskRejectsMalformedID(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/not-a-uuid", map[string]string{
 		"question": "A corrected question",
@@ -232,6 +239,7 @@ func TestEditAskRejectsMalformedID(t *testing.T) {
 }
 
 func TestAnswerAskRejectsAQuestionEditedAfterTheHumanReadIt(t *testing.T) {
+	t.Parallel()
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Revision check", "A spec")
 	ask := createEditableAsk(t, handler, issue.Key)
