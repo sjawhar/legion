@@ -136,6 +136,49 @@ func TestAControllerOnTheBrokerRouteIsHandedNoBearerPointer(t *testing.T) {
 	}
 }
 
+// TestAnOperatorsWrittenTokenDoesNotShadowTheControllersBrokerRoute: the controller keeps the
+// operator's HOME, and the envoy.json there is that person's own, `dispatch.token` and all, for
+// the very Dispatch the controller writes. Dropping DISPATCH_TOKEN and DISPATCH_TOKEN_FILE does
+// not reach a file, and the Envoy client resolves a written token before it trades anything: the
+// controller would write Dispatch as the operator, which is the whole of what
+// `dispatch_token_broker` exists to stop. So the environment says which route this session is on
+// — DISPATCH_TOKEN_BROKER=1 — under which the client reads no bearer from any source at all and
+// turns Dispatch off rather than falling back (packages/envoy-client/src/dispatch-config.ts).
+func TestAnOperatorsWrittenTokenDoesNotShadowTheControllersBrokerRoute(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{dispatchBroker: true})
+	c.provesAnIdentity(newStubBroker(t, ""))
+	// `~/.config/legion/envoy.json`, as a person who runs `dispatch` on this box has it: the
+	// chosen file of every session started in this HOME, the controller's included.
+	configDir := filepath.Join(c.home, ".config", "legion")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	written := `{"dispatch":{"serverUrl":"https://dispatch.test","token":"a-person-s-dispatch-token"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(configDir, "envoy.json"), []byte(written), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errb := c.run()
+	if code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	for _, env := range []map[string]string{c.env(), c.probeEnv()} {
+		// The premise: that file is the controller's to read, since this is the operator's HOME.
+		if got := env["HOME"]; got != c.home {
+			t.Errorf("HOME = %q, want the operator's %q", got, c.home)
+		}
+		if got := env["DISPATCH_TOKEN_BROKER"]; got != "1" {
+			t.Errorf("DISPATCH_TOKEN_BROKER = %q, want 1: without it the envoy.json in %s writes Dispatch as the operator", got, configDir)
+		}
+		for _, name := range []string{"DISPATCH_TOKEN_FILE", "DISPATCH_TOKEN"} {
+			if value, set := env[name]; set {
+				t.Errorf("%s = %q; this session trades for its own credential", name, value)
+			}
+		}
+	}
+}
+
 // TestABrokerThatRefusesThisMachineRefusesTheStartBeforeTheMint: the credential the controller
 // writes Dispatch with is traded at the broker, so a broker that refuses this machine's identity
 // is a controller that can write nothing. The start says what the broker said and stops before

@@ -129,7 +129,7 @@ decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 ## End a session
 
 Ending a session's enrollment revokes all of its grants and cancels all of its pending requests
-in one step, and the approver's Inbox drops them. A session ends in one of three ways:
+in one step, and the approver's Inbox drops them. A session ends in one of four ways:
 
 - **Its launcher revokes it.** A machine session ends when its process exits: the helper sees the
   registered process go and revokes its enrollment (it logs
@@ -148,13 +148,24 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
 - **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
   person who approved a person's machine login, or anyone signed in for a service's — revokes that
   login, which ends every session it enrolled ([end a machine's login](#end-a-machines-login)).
+- **Its machine login ends, for a machine's own session.** A session a machine enrolled under the
+  login its Google identity token traded for renews only while that login is live, so it also ends
+  when that login passes its expiry — an hour from the token it was minted from, unless the machine
+  trades again — or when the machine's account is dropped from the broker's `BROKER_VM_SERVICES`.
+  Its next renewal is refused `ENROLLMENT_NOT_LIVE`, the broker logs `broker: machine session
+  renewal refused: its machine login has ended`, and it lapses within `BROKER_LEASE_SECONDS`. A
+  person's sign-in sessions on that box are not ended this way; they end when the sign-in is
+  revoked ([end your sign-in on a machine](#end-your-sign-in-on-a-machine)).
 
 ## End a machine's login
 
 A person's machine login lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its last refresh, and
 its helper refreshes it at least daily, but its sessions outlive it either way: a session renews its lease
-with its own key, never with the machine's credential, so a box keeps working after the machine's
-credential expires, and so does a machine session while the helper that renews it runs. A login
+with its own key, and the broker reads no credential to renew a session a person's machine login
+enrolled, so a box keeps working after the machine's credential expires, and so does a machine
+session while the helper that renews it runs. (A machine's own session, enrolled under the login
+its Google identity traded for, is the exception above: it renews only while that login is live.)
+A login
 can be ended, with every session it enrolled,
 at any time: for a machine that is lost, compromised or no longer used, or a Legion daemon whose pods
 must lose their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine

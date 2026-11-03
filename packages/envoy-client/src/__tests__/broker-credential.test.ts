@@ -115,6 +115,96 @@ test("a configured bearer is still the credential, whatever this machine could t
   expect(resolution.credential.secret()).toBe("written");
 });
 
+/** An envoy.json of a person's own, holding the Dispatch token that person writes Dispatch with:
+ * what a box's operator has in `~/.config/legion/envoy.json`, and what a session launched on that
+ * box reads as its chosen file. */
+function personalFile(env: DispatchEnvironment, serverUrl: string, token: string) {
+  const file = path.join(tempDir(), "envoy.json");
+  writeFileSync(file, JSON.stringify({ dispatch: { serverUrl, token } }));
+  return readEnvoyConfig(file, env, { cwd: tempDir() });
+}
+
+test("told to hold its credential at the broker, a session reads no person's token", () => {
+  // `legion controller start` under `dispatch_token_broker` launches the controller in the
+  // operator's own HOME, where an envoy.json holds that person's Dispatch token for the very
+  // server the controller writes. Unset, the variable leaves that token the credential, which is
+  // the controller writing Dispatch as the operator; set, the session trades for its own.
+  const broker = stubBroker(600);
+  const env = podEnvironment(broker.url, "http://dispatch.test");
+  const config = personalFile(env, "http://dispatch.test", "a-person-s-dispatch-token");
+
+  const shadowed = dispatchSettings(env, config, { session: "legion-demo-controller" });
+  if (!shadowed.enabled) throw new Error(`Dispatch is off: ${shadowed.error}`);
+  expect(shadowed.credential.secret()).toBe("a-person-s-dispatch-token");
+
+  const forced = dispatchSettings({ ...env, DISPATCH_TOKEN_BROKER: "1" }, config, {
+    session: "legion-demo-controller",
+  });
+  if (!forced.enabled) throw new Error(`Dispatch is off: ${forced.error}`);
+  expect(forced.credential.scheme).toBe("DPoP");
+  expect(forced.url).toBe("http://dispatch.test");
+});
+
+test("told to hold its credential at the broker, a session reads no bearer variable either", () => {
+  const broker = stubBroker(600);
+  const env = {
+    ...podEnvironment(broker.url, "http://dispatch.test"),
+    DISPATCH_TOKEN: "a-person-s-dispatch-token",
+    DISPATCH_TOKEN_BROKER: "1",
+  };
+  const resolution = dispatchSettings(env, noFile(env), { session: "legion-demo-controller" });
+  if (!resolution.enabled) throw new Error(`Dispatch is off: ${resolution.error}`);
+  expect(resolution.credential.scheme).toBe("DPoP");
+});
+
+test("told to hold a credential it cannot trade for, a session writes Dispatch with nothing", () => {
+  // The refusal is the point: a machine whose broker or identity has gone is one that writes
+  // nothing, never one that falls back to the bearer the box happens to hold.
+  const broker = stubBroker(600);
+  const env = {
+    ...podEnvironment(broker.url, "http://dispatch.test"),
+    DISPATCH_TOKEN: "a-person-s-dispatch-token",
+    DISPATCH_TOKEN_BROKER: "1",
+  };
+
+  const noBroker = dispatchSettings({ ...env, AGENT_SECRETS_URL: "" }, noFile(env));
+  expect(noBroker.enabled).toBe(false);
+  expect(noBroker.enabled === false && noBroker.error).toContain(
+    "AGENT_SECRETS_URL names no secrets broker"
+  );
+
+  const noIdentity = dispatchSettings({ ...env, AGENT_SECRETS_MACHINE_IDENTITY: "" }, noFile(env));
+  expect(noIdentity.enabled === false && noIdentity.error).toContain(
+    "AGENT_SECRETS_MACHINE_IDENTITY names no identity this machine proves"
+  );
+
+  // A pool identity is the Go client's alone, so this process trades nothing with it; unforced it
+  // is a machine with no TypeScript route, forced it is a session that cannot write.
+  const pool = dispatchSettings({ ...env, AGENT_SECRETS_MACHINE_IDENTITY: "pool" }, noFile(env));
+  expect(pool.enabled === false && pool.error).toContain("traded by the Go client alone");
+
+  // A named identity missing its own variables still says which variable.
+  const halfNamed = dispatchSettings({ ...env, AGENT_SECRETS_MACHINE_TOKEN_FILE: "" }, noFile(env));
+  expect(halfNamed.enabled === false && halfNamed.error).toContain(
+    "AGENT_SECRETS_MACHINE_TOKEN_FILE is required"
+  );
+});
+
+test("a DISPATCH_TOKEN_BROKER that is neither 1 nor unset is refused", () => {
+  // Read as on, a typo would turn a person's session into one that writes nothing; read as off,
+  // it would put a deployment that meant the broker route back on the operator's bearer.
+  const broker = stubBroker(600);
+  const env = {
+    ...podEnvironment(broker.url, "http://dispatch.test"),
+    DISPATCH_TOKEN_BROKER: "true",
+  };
+  const resolution = dispatchSettings(env, noFile(env));
+  expect(resolution.enabled).toBe(false);
+  expect(resolution.enabled === false && resolution.error).toContain(
+    'DISPATCH_TOKEN_BROKER is "true" and takes 1'
+  );
+});
+
 test("with no bearer at all, the session's credential is its own identity traded at the broker", async () => {
   const broker = stubBroker(600);
   const dispatch = stubDispatch();

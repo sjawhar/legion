@@ -195,9 +195,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// the Slack channels the daemon tells its own controller (LEGION_SLACK_CHANNELS): only that
 	// controller can reply in Slack, and an inherited list is no project's word for this one. A
 	// machine that holds its Dispatch credential at the broker drops the operator's own Dispatch
-	// bearer and pointer as well: the Envoy client takes the broker route only where no bearer
-	// resolves at all, and either of those would be presented in its place as a bearer Dispatch
-	// refuses (controllerDispatchBroker). The one difference between the probed and the launched
+	// bearer and pointer as well: either would be presented in place of the traded token as a
+	// bearer Dispatch refuses (controllerDispatchBroker). The drop is not the whole of it — the
+	// operator's HOME is the controller's, and the envoy.json there holds that person's
+	// `dispatch.token`, which no delete here reaches — so the controller's set carries
+	// DISPATCH_TOKEN_BROKER, the session's word that its Dispatch credential is this machine's
+	// own identity and nothing else, under which the client reads no bearer from any source and
+	// turns Dispatch off saying so when it can trade none (dispatch-config.ts, dispatchTarget).
+	// The one difference between the probed and the launched
 	// environment is GH_CONFIG_DIR, which names
 	// the default owner's directory only once the credential fetch after the mint has named that
 	// owner.
@@ -318,9 +323,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // and git read the bundle's hosts.yml rather than an inherited pointer of the operator's own.
 // Secrets travel as `<NAME>_FILE` pointers only, and under `dispatch_token_broker` — this machine
 // holding its Dispatch credential at the secrets broker (controllerDispatchBroker) — DISPATCH_URL
-// travels with no bearer beside it at all, since the client trades for a DPoP-bound token of its
-// own and consults that route only where no bearer resolves. Later pairs replace any inherited
-// value of the same name.
+// travels with DISPATCH_TOKEN_BROKER=1 and no bearer beside it at all: the client trades for a
+// DPoP-bound token of its own, and that variable is what keeps it on that route. Without it the
+// client takes the broker route only where no bearer resolves, and the operator's own envoy.json,
+// which the controller reads because it keeps the operator's HOME, names a `dispatch.token` that
+// resolves first — the controller would write Dispatch as the operator, which is the whole of
+// what this setting exists to stop. Set, no bearer of any source is read, and a machine that can
+// trade nothing turns Dispatch off saying so rather than falling back to a person's token. Later
+// pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string) [][2]string {
 	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
@@ -345,7 +355,9 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL})
-		if !cfg.DispatchTokenBroker {
+		if cfg.DispatchTokenBroker {
+			env = append(env, [2]string{"DISPATCH_TOKEN_BROKER", "1"})
+		} else {
 			env = append(env, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
 		}
 	}

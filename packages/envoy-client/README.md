@@ -610,6 +610,20 @@ against it rather than the API's URL, which every call still goes to; a dashboar
 `ref` resolves on either address; and a value that is not an http or https URL disables Dispatch,
 naming it in `error`.
 
+With no bearer configured at all, a machine that proves an identity of its own trades it at the
+secrets broker instead (`AGENT_SECRETS_URL` with `AGENT_SECRETS_MACHINE_IDENTITY`,
+`brokerCredential`): the credential is then a DPoP-bound access token presented under the `DPoP`
+scheme rather than a bearer. Every bearer source above is resolved first and unchanged, so a
+session that has one behaves exactly as it did. `DISPATCH_TOKEN_BROKER=1` makes that route the
+only one: no bearer is read at all — not the variables, not the chosen file's `dispatch.token`,
+not a checkout's pair — and a machine that can trade none leaves Dispatch disabled with an
+`error` naming the broker variable that is missing, rather than falling back to whatever bearer
+the box holds. A deployment sets it on a session whose Dispatch credential must be that machine's
+own identity and nothing else, such as the controller `legion controller start` launches under
+`dispatch_token_broker`, which runs in the operator's own HOME where that person's envoy.json
+holds their `dispatch.token`. Any other value of the variable is refused, naming it:
+`DISPATCH_TOKEN_BROKER is "<value>" and takes 1 …`.
+
 ### The `dispatch` command
 
 Agents reach Dispatch through one command, `dispatch <command> [flags]`, which each host plugin

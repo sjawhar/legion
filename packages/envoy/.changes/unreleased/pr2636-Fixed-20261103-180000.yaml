@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A session told to hold its Dispatch credential at the secrets broker now reads no bearer at all. `DISPATCH_TOKEN_BROKER=1` makes the broker route the only one Dispatch''s section consults — no `DISPATCH_TOKEN`, no `DISPATCH_TOKEN_FILE`, no chosen envoy.json''s `dispatch.token`, no checkout pair — and a machine that can trade none turns Dispatch off with an error naming the broker variable that is missing, rather than falling back to whatever bearer the box holds; any other value of the variable is refused by name. `legion controller start` hands that variable to the controller under `dispatch_token_broker`, which it needs because the controller keeps the operator''s HOME: before this, the operator''s own envoy.json wrote Dispatch as the operator whenever its `dispatch.token` named the same server, and turned Dispatch off when it named another.'
+time: 2026-11-03T18:00:00.000000000Z
+custom:
+    Issue: pr2636

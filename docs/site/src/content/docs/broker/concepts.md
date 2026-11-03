@@ -68,6 +68,17 @@ its pods enroll only once a person approves the daemon's new login, and a pod th
 enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
 until its session ends, so a copy that keeps renewing keeps the grant one approval gave it.
 
+A machine's own session is held to its machine login as well: the broker reads that login on every
+renewal, and refuses one whose login has ended — revoked, past the hour's expiry its Google
+identity token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`.
+So a box dropped from its fleet's settings, and one that stops being able to prove its identity,
+lose their sessions within one `BROKER_LEASE_SECONDS`: the renewal is refused
+`ENROLLMENT_NOT_LIVE`, the broker logs `broker: machine session renewal refused: its machine login
+has ended`, and the sweep ends the enrollment at its lease. A copy of such a session's key and
+enrollment id taken off the box renews nothing once that box's login has ended. Only a machine's
+own session is held this way: a pod's renewal proves the pod's own projected token, and a person's
+session on such a box runs until they revoke the sign-in, which ends it at once.
+
 An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
 login
@@ -168,9 +179,12 @@ revoked from Dispatch's machine-login page by the person who approved it and no 
 any of their machines under its machine login (`agent-secrets machine revoke`), before or after it
 expires, which also ends every session it enrolled and every refresh token it holds
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
-sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
-credential, so a box keeps working after the machine's credential expires, and the page lists an
-expired login, marked as expired with sessions still running, until its last session ends. Whoever
+sessions outlive its expiry: a session renews its lease with its own key, and the broker reads no
+credential to renew one a person's machine login enrolled, so a box keeps working after the
+machine's credential expires, and the page lists an expired login, marked as expired with sessions
+still running, until its last session ends. (A machine's own session, enrolled under the login its
+Google identity traded for, is the one exception: it renews only while that login is live, as
+[Sessions and enrollment](#sessions-and-enrollment) says.) Whoever
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
 a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A person's machine
