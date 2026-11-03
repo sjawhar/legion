@@ -22,7 +22,7 @@ type userIssueState struct {
 }
 
 func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -59,22 +59,22 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Pinned      *bool        `json:"pinned"`
-		LastReadSeq *int         `json:"last_read_seq"`
-		Dismissed   *[]string    `json:"dismissed"`
-		Seq         *int64       `json:"seq"`
-		Actor       *model.Actor `json:"actor"`
+		Pinned      *bool     `json:"pinned"`
+		LastReadSeq *int      `json:"last_read_seq"`
+		Dismissed   *[]string `json:"dismissed"`
+		Seq         *int64    `json:"seq"`
+		// Actor is read off the body and not used: this state is the calling person's, keyed on
+		// the login requireScope resolves, and a bearer that names its session here is naming a
+		// writer this row has no column for. The field stays so a client that has always sent
+		// one is not refused for an unknown key (decodeJSON).
+		Actor *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	actor, ok := s.requireActor(w, r, input.Actor)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
-		return
-	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "user state is only available to users")
 		return
 	}
 	if input.LastReadSeq != nil && *input.LastReadSeq < 0 {
@@ -233,7 +233,7 @@ func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionI
 }
 
 func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -269,7 +269,7 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 // replies already read by id or passed by the read mark (one the Clear hides is neither), and
 // answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

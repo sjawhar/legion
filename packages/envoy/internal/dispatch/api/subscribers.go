@@ -79,14 +79,14 @@ func exactTopics(topics []string, base string) []string {
 }
 
 func (s *server) listIssueSubscribers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	s.writeSubscribers(w, r, issueSubscriberBase(r.PathValue("key")))
 }
 
 func (s *server) listArtifactSubscribers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	artifact, _, err := s.documentOwnerFromRequest(r.Context(), s.deps.Store.Pool, r)
@@ -151,7 +151,7 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 }
 
 func (s *server) unsubscribeIssueSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -160,7 +160,7 @@ func (s *server) unsubscribeIssueSession(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *server) unsubscribeArtifactSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

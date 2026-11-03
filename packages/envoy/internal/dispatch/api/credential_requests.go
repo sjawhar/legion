@@ -7,7 +7,7 @@
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
 // The one thing Dispatch supplies is who acts: a machine login's approve and deny, a revoke and the
-// machine-login list send the login requireHuman resolved, in Dispatch's canonical lowercase form,
+// machine-login list send the login requireScope resolved, in Dispatch's canonical lowercase form,
 // as the approver, which the broker takes on Dispatch's word, and never forward the browser's body,
 // so nothing a browser sends can name the approver.
 package api
@@ -25,7 +25,7 @@ import (
 
 // requireAgentSecrets answers 404 FEATURE_OFF when this Dispatch has no broker configured
 // (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route but the pending list needs it
-// after requireHuman.
+// after requireScope.
 func (s *server) requireAgentSecrets(w http.ResponseWriter) (*agentsecrets.Client, bool) {
 	if s.deps.AgentSecrets == nil {
 		writeError(w, "FEATURE_OFF", http.StatusNotFound, "agent-secrets is not configured on this Dispatch")
@@ -120,7 +120,7 @@ func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model
 // an ordinary one, so "no broker" is an answer here rather than the 404 FEATURE_OFF the other
 // credential routes give: a 404 made every page of such a deployment log a failed request.
 func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -143,7 +143,7 @@ func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 // answers either route for one 403 DECIDE_ON_BROKER_PAGE with its approve_url, relayed verbatim like
 // every answer.
 func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
 	if !ok {
 		return
 	}
@@ -160,7 +160,7 @@ func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
 	if !ok {
 		return
 	}
@@ -177,7 +177,7 @@ func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove); !ok {
 		return
 	}
 	client, ok := s.requireAgentSecrets(w)
@@ -195,7 +195,7 @@ func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request)
 // --- GET /api/v1/credential-grants, POST .../{id}/revoke ---
 
 func (s *server) listCredentialGrants(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -215,7 +215,7 @@ func (s *server) listCredentialGrants(w http.ResponseWriter, r *http.Request) {
 // login is the grant's approver or its enrollment's operator. The browser's body carries nothing
 // Dispatch reads.
 func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
 	if !ok {
 		return
 	}
@@ -234,7 +234,7 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 // one whose sessions still run among them. Dispatch names the caller, so no one lists another
 // person's machines.
 func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -251,7 +251,7 @@ func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
 // from anyone signed in, and for a person's machine login only when the caller is the person who
 // approved it. The browser's body carries nothing Dispatch reads.
 func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson, model.ScopeApprove)
 	if !ok {
 		return
 	}

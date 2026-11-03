@@ -168,7 +168,7 @@ func parseReplacesAnswer(raw json.RawMessage) (*time.Time, error) {
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

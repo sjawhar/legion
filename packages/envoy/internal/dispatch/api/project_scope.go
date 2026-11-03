@@ -322,6 +322,15 @@ func refuseWriteOutsideProjectScope(w http.ResponseWriter, covers, belongsTo str
 // names one in the body where a route needs it, so the check leaves it to the handler, which is
 // the rule those routes have always kept.
 //
+// A credential holding every OAuth scope the row declares passes whatever session it proved,
+// because those rows are the person's own writes into someone else's conversation:
+// `POST /api/v1/agents/{session_id}/messages` and `PUT /api/v1/me/agents/{session_id}/state`
+// need the `person` scope (routeScopes), and a person writing to a session is by design writing
+// into a session that is not theirs. Without this a person's own broker-issued credential could
+// only ever address the session it was issued for, which is nobody's conversation but its own.
+// A credential that holds none of the row's scopes is refused here as it always was, and the
+// handler's own requireScope refuses it again.
+//
 // Every other row returns the handler unchanged, so no route it does not cover pays for it.
 func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
 	if !addressesOneSession(route) {
@@ -333,7 +342,7 @@ func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) ht
 			handler(w, r)
 			return
 		}
-		if addressed := r.PathValue("session_id"); addressed != proved {
+		if addressed := r.PathValue("session_id"); addressed != proved && !s.callerHoldsRouteScopes(r, route) {
 			writeError(w, codeSessionScope, http.StatusForbidden, fmt.Sprintf(
 				"this request's credential acts for session %s; %s %s writes into session %s",
 				proved, route.Method, route.Pattern, addressed))
@@ -341,6 +350,26 @@ func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) ht
 		}
 		handler(w, r)
 	}
+}
+
+// callerHoldsRouteScopes answers whether this request's credential holds every OAuth scope the
+// row declares. A row that declares none answers false: such a row is open to every
+// authenticated caller, so holding nothing is no reason to pass a check made for the rows a
+// person's credential opens.
+func (s *server) callerHoldsRouteScopes(r *http.Request, route apiRoute) bool {
+	if len(route.OAuthScopes) == 0 {
+		return false
+	}
+	actor, _, err := s.optionalActor(r)
+	if err != nil {
+		return false
+	}
+	for _, scope := range route.OAuthScopes {
+		if !actor.Credential.Holds(scope) {
+			return false
+		}
+	}
+	return true
 }
 
 // addressesOneSession answers whether route is a write to the rows of the one session its path

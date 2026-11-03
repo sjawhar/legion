@@ -74,7 +74,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 // A send under an Idempotency-Key commits its message as the key's recovery point, and a repeat is
 // answered from it (replayAgentMessage).
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -813,7 +813,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // A session's own conversation, relayed to a person watching it through an agent view on the live
@@ -87,7 +88,7 @@ func responderEvent(responding bool) []byte {
 // frame to each). Whether this deployment's relay takes frames from a test hook at all is judged
 // here, on the process the call reached.
 func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	if _, ok := s.deps.AgentStream.(*agentstream.Memory); !ok {

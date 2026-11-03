@@ -189,7 +189,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	pinned := query.Get("pinned") == "true"
 	login := ""
 	if pinned {
-		actor, ok := s.requireHuman(w, r)
+		actor, ok := s.requireScope(w, r, model.ScopePerson)
 		if !ok {
 			return
 		}

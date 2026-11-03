@@ -17,7 +17,7 @@ import (
 // written into its seed (docs.Service.RebuildDocument), so a block whose ask the close withdrew
 // reads resolved once the rebuild commits, not open as the latest version saved it.
 func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

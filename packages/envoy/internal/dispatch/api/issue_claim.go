@@ -522,8 +522,10 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if input.Force && actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only a human may force a claim away from a live session")
+	// Taking a live session's claim away is the person's call, so the credential and not the
+	// actor decides it: a bearer records the session it acts for, and what it may do is the
+	// scopes its own credential holds (requireCallerScope, server.go).
+	if input.Force && !s.requireCallerScope(w, r, model.ScopePerson) {
 		return
 	}
 	key := r.PathValue("key")

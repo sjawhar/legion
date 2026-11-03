@@ -127,7 +127,7 @@ type broadcastTarget struct {
 // a retry of a send that landed owes nothing to the registry and must not fail because the
 // listener is down.
 func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -566,7 +566,7 @@ func (s *server) sendOwedBroadcastRecipients(ctx context.Context, read broadcast
 
 // GET /api/v1/broadcasts
 func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -613,7 +613,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/broadcasts/{id}
 func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	id := r.PathValue("id")

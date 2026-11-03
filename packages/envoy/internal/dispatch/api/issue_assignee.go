@@ -80,7 +80,7 @@ type dispatchUser struct {
 
 // listUsers returns everyone who has signed in, sorted by email: the assignee picker's options.
 func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.requireScope(w, r, model.ScopePerson); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `select email from people order by email`)

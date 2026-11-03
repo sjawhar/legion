@@ -117,7 +117,7 @@ func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err e
 // listMyReplies answers GET /api/v1/me/replies: one page of the caller's unread threads and how
 // many there are in all.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -197,7 +197,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 // on a writer waiting on it. Owner first, then the project the event names, is the order every
 // multi-owner transaction takes (LockOwners).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

@@ -40,7 +40,7 @@ type userAskSnooze struct {
 
 // PUT /api/v1/me/asks/{id}/snooze
 func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
@@ -117,7 +117,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/v1/me/asks/{id}/snooze
 func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}

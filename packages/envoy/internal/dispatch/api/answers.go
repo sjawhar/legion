@@ -37,7 +37,7 @@ func parseMyAnswersPage(r *http.Request) (limit, offset int, err error) {
 // listMyAnswers returns the caller's real answer transitions (answerEventsQuery) and their replies
 // on asks, newest first.
 func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
 		return
 	}
