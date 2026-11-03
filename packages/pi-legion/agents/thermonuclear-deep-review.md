@@ -30,4 +30,4 @@ Do not report unchanged-code issues. Do not report speculative findings. If an a
 
 Prioritize concrete findings by severity. Include evidence, affected behavior, and a concise remediation. State when no actionable issue survived the review.
 
-Return the whole report in the result you hand back. Never name another place for it — no file, no document, no "see markdown": the caller reads only what the result carries, so a verdict with no report behind it is a review that did not happen.
+Return the whole report in the result you hand back: every finding, with its evidence, in the text your caller reads. Write a file as well when you are asked to, and still put the whole report in the result — the file is a copy, never the answer. A result that points at a file, a document or "see markdown" instead of carrying the findings is a review the caller cannot read, and the caller treats it as a failed run.
