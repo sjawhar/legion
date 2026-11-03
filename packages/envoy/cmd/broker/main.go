@@ -910,8 +910,9 @@ func machineCredentials(enr *enroll.Service) oauth.MachineCredentials {
 // personSignIns is oauth.ExchangeConfig.PersonSignIns over the broker's store: the sign-in a
 // person's trade belongs to, written in the exchange's own transaction
 // (store.RecordPersonSignIn), so the sign-in and the access token minted under it land
-// together. A box key that person has revoked is store.ErrSignInRevoked, which the exchange
-// answers invalid_grant naming the sign-in command.
+// together. A box key that person has revoked is store.ErrSignInRevoked, and one whose sign-in
+// was made on another machine is store.ErrSignInMachineChanged; the exchange answers both
+// invalid_grant naming the sign-in command.
 func personSignIns() oauth.PersonSignIns {
 	return func(ctx context.Context, in oauth.PersonSignIn) error {
 		tx, ok := oauthstore.TxFrom(ctx)
@@ -919,8 +920,11 @@ func personSignIns() oauth.PersonSignIns {
 			return errors.New("broker: a person's sign-in is recorded in the exchange's transaction")
 		}
 		err := store.RecordPersonSignIn(ctx, tx, in.Person, in.Thumbprint, in.Machine)
-		if errors.Is(err, store.ErrSignInRevoked) {
+		switch {
+		case errors.Is(err, store.ErrSignInRevoked):
 			return fmt.Errorf("%w: %v", oauth.ErrSignInRevoked, err)
+		case errors.Is(err, store.ErrSignInMachineChanged):
+			return fmt.Errorf("%w: %v", oauth.ErrSignInMachineChanged, err)
 		}
 		return err
 	}

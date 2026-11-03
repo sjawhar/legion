@@ -3,17 +3,22 @@
 -- RFC 7638 thumbprint of the box key that command made and keeps with Google's refresh token, and
 -- the Google account of the machine it was made on. It is what the RFC 8693 token exchange holds
 -- a person's trade to: the first trade of a person and a box key writes the row, every later
--- trade of that pair is the same sign-in used again, and a trade whose box key the person has
--- revoked is refused. It is in Postgres, and not in each process, because a person revokes a
+-- trade of that pair from that same machine is the same sign-in used again, and a trade whose
+-- box key the person has revoked, or whose box key belongs to a sign-in made on another
+-- machine, is refused. It is in Postgres, and not in each process, because a person revokes a
 -- sign-in on one replica and every replica must refuse it from that moment, and because a sign-in
 -- outlives any process: a box that has not traded for a week signs in with the key it already
 -- holds.
 --
--- A person holds at most one live sign-in per box key, which the live-unique index says. A
--- revoked row stays beside a later live one of the same person: it is what refuses that key for
--- good, so the revoke a person made is not undone by signing in again with the very key they
--- revoked. The person signing in on a second box is a second thumbprint and a row of its own,
--- which is what makes their other sign-ins go on working when one is revoked.
+-- A person holds at most one row per box key, live or revoked, which the unique index says. A
+-- revoked row keeps that pair's slot forever: it is what refuses that key for good, so the
+-- revoke a person made is not undone by signing in again with the very key they revoked, and the
+-- insert's own conflict is the one place a racing revoke and trade meet. The person signing in
+-- on a second box is a second thumbprint and a row of its own, which is what makes their other
+-- sign-ins go on working when one is revoked. The machine's account never changes on a row: the
+-- launcher credential a sign-in holds is keyed by the person, the machine and the key together,
+-- so a row that followed its key to another machine would ask for a subject no live credential
+-- has and every trade of it from then on would be refused with nothing naming the cure.
 --
 -- Every vocabulary this table holds is closed here rather than in Go alone, because what reads
 -- these rows is a route that lists a person's machines to that person: the login is lowercase, as
@@ -35,8 +40,10 @@ create table person_signins (
   revoked_at timestamptz,
   check (revoked_at is null or revoked_at >= created_at)
 );
--- One live sign-in per person and box key, which is what the exchange's upsert writes through:
--- a second trade of the pair moves the row it already has rather than adding another.
-create unique index person_signins_live on person_signins (person, thumbprint) where revoked_at is null;
+-- One sign-in per person and box key, live or revoked, which is what the exchange's upsert
+-- writes through: a second trade of the pair moves the row it already has, and a revoked row's
+-- conflict is what refuses the trade rather than a read of its own, so a revoke committing
+-- between that read and the insert cannot leave a second live row behind.
+create unique index person_signins_key on person_signins (person, thumbprint);
 -- The person's own list, newest first, which is what the route Dispatch relays reads.
 create index person_signins_person on person_signins (person, created_at desc);

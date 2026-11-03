@@ -105,7 +105,7 @@ func TestAPersonSigningInOnASecondBoxGetsASignInOfItsOwn(t *testing.T) {
 // TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking: the revoke refuses that one box
 // key from then on, whoever presents it and however often, while the person's other boxes go on
 // trading. A key revoked once is refused even when it is presented again, since the revoked row
-// stays beside any later one.
+// keeps that pair's slot and the trade's own conflict lands on it.
 func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
@@ -132,6 +132,39 @@ func TestARevokedSignInIsRefusedForeverAndLeavesTheOthersWorking(t *testing.T) {
 	}
 	if len(live) != 1 || live[0].Thumbprint != signInBoxTwo {
 		t.Fatalf("PersonSignIns after the revoke = %+v, want the one box key that is left", live)
+	}
+}
+
+// TestASignInsBoxKeyPresentedFromAnotherMachineIsRefused: a sign-in is the person, the key and
+// the machine together, and the launcher credential it holds is keyed by all three
+// (exchange.PersonSubject). A row that followed its key to a new machine would ask for a
+// subject no live credential has, and every trade of it from then on would collide on
+// launcher_credentials_live_key and be refused invalid_grant with nothing naming the cure. So
+// the machine is held, the row keeps the account it was made with, and the box signs in again.
+func TestASignInsBoxKeyPresentedFromAnotherMachineIsRefused(t *testing.T) {
+	st := storetest.Open(t)
+	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+		t.Fatalf("the first trade: %v", err)
+	}
+	made := onlySignIn(t, st, signInPerson)
+	if err := record(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInMachineChanged) {
+		t.Fatalf("the same box key from %s = %v, want %v", signInOtherVM, err, store.ErrSignInMachineChanged)
+	}
+	kept := onlySignIn(t, st, signInPerson)
+	if kept.ID != made.ID || kept.MachineAccount != signInMachine {
+		t.Fatalf("the sign-in is now %+v, want the one row it was, still on %s", kept, signInMachine)
+	}
+	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+		t.Fatalf("the machine the sign-in was made on trades again: %v, want it still working", err)
+	}
+	// A revoke outranks the machine in the wording, since it is the refusal that is final for
+	// the person rather than for the box.
+	revoked := signInFor(t, st, signInPerson, signInBoxOne)
+	if _, _, err := revokeSignIn(t, st, revoked.ID, signInPerson); err != nil {
+		t.Fatalf("RevokePersonSignInTx: %v", err)
+	}
+	if err := record(t, st, signInPerson, signInBoxOne, signInOtherVM); !errors.Is(err, store.ErrSignInRevoked) {
+		t.Fatalf("a revoked sign-in's key from another machine = %v, want %v", err, store.ErrSignInRevoked)
 	}
 }
 
@@ -321,12 +354,12 @@ func tokenActive(t *testing.T, st *store.Store, signature string) bool {
 	return active
 }
 
-// TestMigrationTwentyFiveHoldsOneLiveSignInPerPersonAndBoxKey: the live-unique index is what
-// makes a person's second trade of a box key move the row it already has rather than add
-// another, and a revoked row is outside it, so the pair can be revoked and the index still
-// admits a row for it — which is why the refusal of a revoked key is a read of its own rather
-// than the index.
-func TestMigrationTwentyFiveHoldsOneLiveSignInPerPersonAndBoxKey(t *testing.T) {
+// TestMigrationTwentyFiveHoldsOneSignInPerPersonAndBoxKey: the unique index is what makes a
+// person's second trade of a box key move the row it already has rather than add another, and a
+// revoked row is inside it, so the pair's slot is kept for good and a trade of a revoked key
+// has the index's own conflict to land on rather than a read that a concurrent revoke can slip
+// past.
+func TestMigrationTwentyFiveHoldsOneSignInPerPersonAndBoxKey(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
 	insert := func() error {
@@ -338,24 +371,81 @@ func TestMigrationTwentyFiveHoldsOneLiveSignInPerPersonAndBoxKey(t *testing.T) {
 		t.Fatalf("the first sign-in: %v", err)
 	}
 	if err := insert(); err == nil {
-		t.Fatal("a second live sign-in of one person and one box key was accepted, want the live-unique index to refuse it")
+		t.Fatal("a second sign-in of one person and one box key was accepted, want the unique index to refuse it")
 	}
 	if _, err := st.Pool.Exec(ctx, `update person_signins set revoked_at = now() where person = $1`, signInPerson); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if err := insert(); err != nil {
-		t.Fatalf("a sign-in beside a revoked one of the same pair: %v, want the index to admit it", err)
+	if err := insert(); err == nil {
+		t.Fatal("a sign-in beside a revoked one of the same pair was accepted, want the revoked row to keep the pair's slot")
 	}
 	var rows int
 	if err := st.Pool.QueryRow(ctx, `select count(*) from person_signins`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 2 {
-		t.Fatalf("the table holds %d rows, want the revoked one kept beside the live one", rows)
+	if rows != 1 {
+		t.Fatalf("the table holds %d rows, want the one revoked row and no other", rows)
 	}
 	// A revoked time before the row was made is refused: a revoke that could predate its own
 	// sign-in would read as a sign-in that never worked.
 	if _, err := st.Pool.Exec(ctx, `update person_signins set revoked_at = created_at - interval '1 hour' where revoked_at is not null`); err == nil {
 		t.Error("a revoke dated before its sign-in was accepted, want Postgres to refuse it")
+	}
+}
+
+// TestATradeRacingTheRevokeThatCommitsFirstIsRefused: the revoke holds its transaction open
+// while the trade's statement waits on the row it locked, so the trade's snapshot is older than
+// the revoke. A statement that read the revoked rows first would find none, insert, and leave a
+// second live row for one person and box key behind the revoke's back — the whole reason the
+// index is not partial and the conflict decides.
+func TestATradeRacingTheRevokeThatCommitsFirstIsRefused(t *testing.T) {
+	st := storetest.Open(t, "pool_max_conns=6")
+	ctx := context.Background()
+	if err := record(t, st, signInPerson, signInBoxOne, signInMachine); err != nil {
+		t.Fatalf("the first trade: %v", err)
+	}
+	signIn := signInFor(t, st, signInPerson, signInBoxOne)
+
+	revoking, err := st.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the revoke: %v", err)
+	}
+	defer revoking.Rollback(ctx)
+	if _, _, err := store.RevokePersonSignInTx(ctx, revoking, signIn.ID, signInPerson); err != nil {
+		t.Fatalf("RevokePersonSignInTx: %v", err)
+	}
+
+	traded := make(chan error, 1)
+	go func() {
+		trading, err := st.Pool.Begin(ctx)
+		if err != nil {
+			traded <- err
+			return
+		}
+		defer trading.Rollback(ctx)
+		if err := store.RecordPersonSignIn(ctx, trading, signInPerson, signInBoxOne, signInMachine); err != nil {
+			traded <- err
+			return
+		}
+		traded <- trading.Commit(ctx)
+	}()
+
+	// The trade is waiting on the row the revoke locked, which is the race: its snapshot was
+	// taken before the revoke committed.
+	storetest.AwaitLockWaiters(t, st.Pool, revoking, 1)
+	if err := revoking.Commit(ctx); err != nil {
+		t.Fatalf("commit the revoke: %v", err)
+	}
+	if err := <-traded; !errors.Is(err, store.ErrSignInRevoked) {
+		t.Fatalf("the trade racing the revoke = %v, want %v", err, store.ErrSignInRevoked)
+	}
+
+	var live, all int
+	if err := st.Pool.QueryRow(ctx, `select count(*) filter (where revoked_at is null), count(*)
+		from person_signins where person = $1 and thumbprint = $2`, signInPerson, signInBoxOne).Scan(&live, &all); err != nil {
+		t.Fatal(err)
+	}
+	if live != 0 || all != 1 {
+		t.Fatalf("the pair holds %d live of %d rows, want the one revoked row and nothing live", live, all)
 	}
 }

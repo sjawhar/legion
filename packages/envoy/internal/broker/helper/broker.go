@@ -1160,7 +1160,11 @@ func isLauncherInvalid(err error) bool {
 // (dropOutsideRefresh). A refusal of a credential a newer login or a refresh has already replaced
 // drops nothing and is returned as it came: the helper holds a credential, and the caller's retry
 // uses it. A credential it drops is handed to the refresh loop, which refreshes it at once so
-// its machine file is deleted if the broker has ended the login (settleRefused).
+// its machine file is deleted if the broker has ended the login (settleRefused). In identity
+// mode there is no refresh loop and no file: the trade loop is what holds the credential, so
+// the drop wakes it instead (brokerclient.Client.Wake) and it trades again at once. Without
+// that wake the helper would answer NO_CREDENTIAL to every register and sign until the loop's
+// own renewal came round — ten minutes at a 900 s token, fifty-five at an hour's.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	if !isLauncherInvalid(err) {
 		return err
@@ -1169,7 +1173,11 @@ func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	errors.As(err, &be)
 	dropped, held := b.dropOutsideRefresh(cred, dropRefused, "code", be.Code)
 	if dropped {
-		b.wakeRefused(cred)
+		if b.Identity != nil {
+			b.Identity.Wake()
+		} else {
+			b.wakeRefused(cred)
+		}
 	}
 	if !dropped && held {
 		return err

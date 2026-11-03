@@ -50,8 +50,10 @@ type signInFixture struct {
 	// recorded is every sign-in the exchange asked to record, in order.
 	recorded []oauth.PersonSignIn
 	// revoked is the box key thumbprints the recorder answers ErrSignInRevoked for, as the
-	// broker's own table answers a sign-in the person has revoked.
+	// broker's own table answers a sign-in the person has revoked, and moved those it answers
+	// ErrSignInMachineChanged for, as it answers a sign-in's key presented from elsewhere.
 	revoked map[string]bool
+	moved   map[string]bool
 }
 
 // newSignInFixture starts the Google issuer and builds a provider that takes a person's sign-in
@@ -64,7 +66,7 @@ func newSignInFixture(t *testing.T) *signInFixture {
 	if err != nil {
 		t.Fatalf("Google keys: %v", err)
 	}
-	f := &signInFixture{google: google, googleKey: googleKey, revoked: map[string]bool{}}
+	f := &signInFixture{google: google, googleKey: googleKey, revoked: map[string]bool{}, moved: map[string]bool{}}
 	f.exchangeFixture = newExchangeFixture(t, func(c *oauth.Config) {
 		c.Exchange.Policy = newPolicy(t, nil, nil, exchange.GoogleEntry{Account: signInMachine, Service: signInFleet})
 		c.Exchange.Google = oauth.IssuerConfig{Issuer: google.URL(), Audience: machineAudience, Keys: googleKeys}
@@ -82,8 +84,11 @@ func newSignInFixture(t *testing.T) *signInFixture {
 func (f *signInFixture) record(_ context.Context, in oauth.PersonSignIn) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.revoked[in.Thumbprint] {
+	switch {
+	case f.revoked[in.Thumbprint]:
 		return fmt.Errorf("%w: the person revoked it", oauth.ErrSignInRevoked)
+	case f.moved[in.Thumbprint]:
+		return fmt.Errorf("%w: it was made on another machine", oauth.ErrSignInMachineChanged)
 	}
 	f.recorded = append(f.recorded, in)
 	return nil
@@ -103,6 +108,15 @@ func (f *signInFixture) revoke(t *testing.T, key *ecdsa.PrivateKey) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked[thumbprint(t, key)] = true
+}
+
+// move makes the recorder refuse key's thumbprint as a sign-in made on another machine, as the
+// broker's table does when the box key of one machine's sign-in is presented from another.
+func (f *signInFixture) move(t *testing.T, key *ecdsa.PrivateKey) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.moved[thumbprint(t, key)] = true
 }
 
 // personToken is a person's own Google identity token as the device grant answers one: the
@@ -254,6 +268,35 @@ func TestARevokedSignInIsRefusedAndNamesTheSignInCommand(t *testing.T) {
 	}
 	if status, body := trade(kept, "ada-box-2"); status != http.StatusOK {
 		t.Fatalf("the person's other box = %d %v, want 200: revoking one sign-in leaves the others working", status, body)
+	}
+}
+
+// TestASignInsKeyPresentedFromAnotherMachineIsRefusedAndNamesTheSignInCommand: a sign-in
+// belongs to the machine it was made on, because the credential it holds is keyed by the
+// person, the machine and the key together. A trade of that key from another machine is
+// invalid_grant naming the command that makes a key of its own — not a 500, and not a quiet
+// move that would collide on every trade after it.
+func TestASignInsKeyPresentedFromAnotherMachineIsRefusedAndNamesTheSignInCommand(t *testing.T) {
+	f := newSignInFixture(t)
+	key := newKey(t)
+	f.exchanged(t, signInForm(
+		f.personToken(t, person, deviceAudience, true, signInDomain),
+		f.machineToken(t, signInMachine, machineAudience, true),
+		"ada-box-1"), key)
+	f.move(t, key)
+
+	status, body := f.exchange(t, signInForm(
+		f.personToken(t, person, deviceAudience, true, signInDomain),
+		f.machineToken(t, signInMachine, machineAudience, true),
+		"ada-box-1"), key)
+	if status != http.StatusBadRequest || body["error"] != "invalid_grant" || body["access_token"] != nil {
+		t.Fatalf("a sign-in's key from another machine = %d %v, want 400 invalid_grant and no access token", status, body)
+	}
+	description, _ := body["error_description"].(string)
+	for _, names := range []string{"agent-secrets login", "another machine"} {
+		if !strings.Contains(description, names) {
+			t.Errorf("the refusal reads %q, which does not name %q", description, names)
+		}
 	}
 }
 

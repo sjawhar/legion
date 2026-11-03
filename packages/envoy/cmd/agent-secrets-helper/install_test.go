@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
@@ -214,11 +215,73 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	}
 }
 
+// TestInstallWritesThisMachinesIdentityIntoTheUnit: without these the installed helper proves
+// no identity of its own — it falls back to the device-grant machine login, which a broker with
+// BROKER_MACHINE_LOGIN_URL unset does not serve — and knows no sign-in client, so it ignores
+// every `agent-secrets login` on the box. Each is written when set, with the same escaping and
+// absolute-path rules as the helper's own files.
+func TestInstallWritesThisMachinesIdentityIntoTheUnit(t *testing.T) {
+	r := newInstallRig(t)
+	dir := filepath.Dir(r.sock)
+	identity := map[string]string{
+		brokerclient.IdentityVar:               brokerclient.IdentityPool,
+		brokerclient.MachineTokenFileVar:       filepath.Join(dir, "token"),
+		brokerclient.MachineAudienceVar:        "https://secrets.example",
+		brokerclient.PoolAudienceVar:           "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
+		brokerclient.PoolAccountVar:            "example-fleet@example-project.iam.gserviceaccount.com",
+		brokerclient.SignInIssuerVar:           "https://accounts.google.com",
+		brokerclient.SignInClientIDVar:         "example-device-client.apps.googleusercontent.com",
+		brokerclient.SignInClientSecretFileVar: filepath.Join(dir, "device-client-secret"),
+		brokerclient.PersonVar:                 "ada@example.com",
+		brokerclient.SessionVar:                "this-box",
+	}
+	for name, value := range identity {
+		r.env[name] = value
+	}
+	// install loads the helper's own configuration, which reads the device client's secret.
+	if err := os.WriteFile(identity[brokerclient.SignInClientSecretFileVar], []byte("example-device-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(r.unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range identity {
+		if want := "\nEnvironment=" + name + "=" + value + "\n"; !strings.Contains(string(data), want) {
+			t.Errorf("unit lacks %q:\n%s", want, data)
+		}
+	}
+
+	spaced := newInstallRig(t)
+	spaced.env[brokerclient.PoolAccountVar] = "an account@example.com"
+	if err := spaced.run("--url", "https://secrets.example"); err == nil || !strings.Contains(err.Error(), brokerclient.PoolAccountVar) {
+		t.Fatalf("install with a spaced pool account: %v; want a refusal naming %s", err, brokerclient.PoolAccountVar)
+	}
+	if _, err := os.Stat(spaced.unit); !os.IsNotExist(err) {
+		t.Fatalf("a refused install wrote the unit: %v", err)
+	}
+
+	// An identity's own words are not paths, so a value with no leading slash is no refusal:
+	// a pool audience begins `//iam.googleapis.com/`, and a client id and a person never do.
+	relative := newInstallRig(t)
+	relative.env[brokerclient.IdentityVar] = brokerclient.IdentityMetadata
+	relative.env[brokerclient.MachineAudienceVar] = "https://secrets.example"
+	if err := relative.run("--url", "https://secrets.example"); err != nil {
+		t.Fatalf("install with a metadata identity: %v; want it written, since neither value is a path", err)
+	}
+}
+
 // TestInstallRefusesARelativeHelperPath: the unit's helper runs in another working directory than
 // install, so a relative path in any variable install writes would name another file; install
 // refuses it, naming the variable, and writes nothing.
 func TestInstallRefusesARelativeHelperPath(t *testing.T) {
-	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {
+	for _, name := range []string{
+		"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE",
+		brokerclient.MachineTokenFileVar, brokerclient.SignInClientSecretFileVar,
+	} {
 		r := newInstallRig(t)
 		r.env[name] = "relative/" + strings.ToLower(name)
 		err := r.run("--url", "https://secrets.example")

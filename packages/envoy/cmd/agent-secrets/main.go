@@ -528,7 +528,7 @@ func selectSigner(dir string) (string, Signer, error) {
 		if id == "" {
 			return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, enrollmentFile))
 		}
-		return id, &fileSigner{key: key, enrollmentID: id}, nil
+		return id, &fileSigner{key: key, enrollmentID: id, register: machineReregister(dir, key)}, nil
 	}
 	if record, err := signInSigner(); err != nil {
 		return "", nil, err
@@ -549,54 +549,85 @@ func selectSigner(dir string) (string, Signer, error) {
 
 // machineSigner is the signer of a machine that proves an identity of its own and holds no
 // launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
-// credential, registers a key it makes here under it, and writes the key and the enrollment
-// into the key dir exactly as a launcher would have, so the next call of this machine's takes
-// the file branch above and trades nothing. It answers nil where this machine proves no
-// identity, which is every deployment that has not turned the exchange on.
+// credential, registers a key it makes here under it, and writes the key, the enrollment and
+// the marker that says whose session this is into the key dir, so the next call of this
+// machine's takes the file branch above and trades nothing. It answers nil where this machine
+// proves no identity, which is every deployment that has not turned the exchange on.
 func machineSigner(dir string) (*fileSigner, error) {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil || identity == nil {
 		return nil, err
 	}
-	base := brokerBaseURL()
-	if base == "" {
-		return nil, fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to", brokerclient.IdentityVar, brokerURLVar)
-	}
 	key, err := proof.NewKey()
 	if err != nil {
 		return nil, err
 	}
-	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	enrollmentID, err := registerMachineSession(context.Background(), dir, key)
 	if err != nil {
 		return nil, err
+	}
+	return &fileSigner{key: key, enrollmentID: enrollmentID, register: machineReregister(dir, key)}, nil
+}
+
+// machineReregister is how a machine session in the key dir is made again when the broker says
+// its enrollment is not live: it trades this machine's identity afresh and registers key under
+// the credential that trade mints. It is nil unless this key dir's session is one this command
+// registered for a machine that proves an identity of its own (machineSessionMarker) — a box or
+// pod its launcher enrolled writes no marker, and its lapsed enrollment is the launcher's.
+func machineReregister(dir string, key *ecdsa.PrivateKey) func(context.Context) (string, error) {
+	if !exists(filepath.Join(dir, machineSessionMarker)) {
+		return nil
+	}
+	return func(ctx context.Context) (string, error) { return registerMachineSession(ctx, dir, key) }
+}
+
+// registerMachineSession trades this machine's identity for a launcher credential, registers key
+// under it as a session, and writes the key, the enrollment and the marker into the key dir.
+func registerMachineSession(ctx context.Context, dir string, key *ecdsa.PrivateKey) (string, error) {
+	identity, err := brokerclient.MachineIdentity(os.Getenv)
+	if err != nil {
+		return "", err
+	}
+	if identity == nil {
+		return "", fmt.Errorf("this machine proves no identity of its own, so no session can be registered for it: set %s", brokerclient.IdentityVar)
+	}
+	base := brokerBaseURL()
+	if base == "" {
+		return "", fmt.Errorf("%s names the identity this machine proves, so %s must name the secrets broker it proves it to", brokerclient.IdentityVar, brokerURLVar)
+	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		return "", err
 	}
 	client, err := brokerclient.New(brokerclient.Config{
 		BrokerURL: base, Key: key, Subject: identity,
 		Session: os.Getenv(brokerclient.SessionVar), HTTP: brokerclient.HTTPClient(),
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	ctx := context.Background()
 	token, err := client.Token(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if token.CredentialID == "" {
-		return nil, errors.New("the broker took this machine's identity but named no launcher credential, so no session can be registered under it")
+		return "", errors.New("the broker took this machine's identity but named no launcher credential, so no session can be registered under it")
 	}
 	enrollmentID, err := enrollUnderCredential(ctx, base, key, thumbprint, token.CredentialID, "this machine")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := writeMachineSession(dir, key, enrollmentID); err != nil {
-		return nil, err
+		return "", err
 	}
-	return &fileSigner{key: key, enrollmentID: enrollmentID}, nil
+	return enrollmentID, nil
 }
 
-// writeMachineSession keeps the key and the enrollment a machine registered for itself, in the
-// key dir and in the modes a launcher writes them with (a 0700 directory, a 0600 key).
+// writeMachineSession keeps the key, the enrollment and the marker of a machine that registered
+// a session for itself, in the key dir and in the modes a launcher writes them with (a 0700
+// directory, a 0600 key). The marker is what later calls read to know this key dir's session is
+// one this command may register again when its lease lapses (machineReregister); a launcher's
+// key dir has none.
 func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string) error {
 	pemBytes, err := encodeKeyPEM(key)
 	if err != nil {
@@ -608,6 +639,9 @@ func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string)
 	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, keyFile), pemBytes, 0o600); err != nil {
 		return err
 	}
+	if err := brokerclient.WriteFileAtomic(filepath.Join(dir, machineSessionMarker), nil, 0o600); err != nil {
+		return err
+	}
 	return brokerclient.WriteFileAtomic(filepath.Join(dir, enrollmentFile), []byte(enrollmentID+"\n"), 0o600)
 }
 
@@ -617,13 +651,18 @@ func writeMachineSession(dir string, key *ecdsa.PrivateKey, enrollmentID string)
 // must never read one colleague's secrets under another's name. A sign-in whose enrollment has
 // not been made yet is registered now, under a fresh trade of that person's identity, and the
 // record is rewritten with it, so a record that outlived its enrollment heals itself.
+//
+// So does one whose enrollment the broker no longer holds: nothing renews a sign-in's lease, so
+// every enrollment it makes ends after BROKER_LEASE_SECONDS, and without this the box would
+// answer nothing but a dead id until somebody ran `agent-secrets login` again — which would
+// make a second box key and a second sign-in on that person's list (client.reenroller).
 func signInSigner() (*fileSigner, error) {
 	store := signInStore()
 	records, err := store.List()
 	if err != nil || len(records) == 0 {
 		return nil, err
 	}
-	record, err := store.Choose(os.Getenv(personVar))
+	record, err := store.Choose(os.Getenv(brokerclient.PersonVar))
 	if err != nil {
 		return nil, err
 	}
@@ -631,12 +670,21 @@ func signInSigner() (*fileSigner, error) {
 	if err != nil {
 		return nil, err
 	}
+	register := func(ctx context.Context) (string, error) {
+		record.EnrollmentID = ""
+		fresh, err := registerSignInSession(ctx, record, key)
+		if err != nil {
+			return "", err
+		}
+		record = fresh
+		return fresh.EnrollmentID, nil
+	}
 	if record.EnrollmentID == "" {
-		if record, err = registerSignInSession(context.Background(), record, key); err != nil {
+		if _, err := register(context.Background()); err != nil {
 			return nil, err
 		}
 	}
-	return &fileSigner{key: key, enrollmentID: record.EnrollmentID}, nil
+	return &fileSigner{key: key, enrollmentID: record.EnrollmentID, register: register}, nil
 }
 
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated

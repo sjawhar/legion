@@ -227,6 +227,27 @@ func (c *client) doStatus(ctx context.Context, method, url string, body []byte, 
 // errNothingSent is the cause of a call this client could not even build a request for.
 var errNothingSent = errors.New("nothing was sent")
 
+// reenroller is a signer that can replace an enrollment the broker no longer holds: a person's
+// sign-in on this box, and a machine that registered its own session here (proofsource.go).
+// Nothing else is one — a box or pod its launcher enrolled is the launcher's to enrol again,
+// and a launcher proof names no enrollment at all.
+type reenroller interface {
+	Reenroll(ctx context.Context) error
+}
+
+// enrollmentNotLive reports whether err is the broker's answer to a proof naming an enrollment
+// it no longer holds: the lease lapsed, or it was revoked. Only the renew route answers
+// ENROLLMENT_NOT_LIVE; every other session route says PROOF_INVALID with "not live" in its
+// message, which no recoverable proof failure (iat skew, key, URL) says.
+func enrollmentNotLive(err error) bool {
+	var refusal *apiError
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	return refusal.Code == "ENROLLMENT_NOT_LIVE" ||
+		(refusal.Code == terminalRenewal.LegacyCode && strings.Contains(refusal.Message, terminalRenewal.LegacyMessage))
+}
+
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
 func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
@@ -235,7 +256,29 @@ func (c *client) doProof(ctx context.Context, signer proofSigner, method, path s
 }
 
 // doProofStatus is doProof, also answering the 2xx status (doStatus).
+//
+// A signer that can register itself again (reenroller) gets exactly one retry when the broker
+// says the enrollment its proof named is not live. Nothing renews a sign-in's or a machine's own
+// session enrollment otherwise, so after BROKER_LEASE_SECONDS every call on that box would fail
+// with the dead id still in its record, and only signing in again would cure it — making a
+// second box key and a second sign-in on the person's list. One retry, because a second refusal
+// is the broker saying no to the enrollment this call just made, which no further retry changes.
 func (c *client) doProofStatus(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
+	status, data, err := c.proofCall(ctx, signer, method, path, body)
+	again, ok := signer.(reenroller)
+	if !ok || !enrollmentNotLive(err) {
+		return status, data, err
+	}
+	if reErr := again.Reenroll(ctx); reErr != nil {
+		return status, data, fmt.Errorf("%w; registering this session again: %v", err, reErr)
+	}
+	return c.proofCall(ctx, signer, method, path, body)
+}
+
+// proofCall is one signed call, which is all `renew` may make: its whole contract is to report
+// the enrollment the broker no longer holds (terminalRenewal, exit 76) rather than quietly
+// register another.
+func (c *client) proofCall(ctx context.Context, signer proofSigner, method, path string, body []byte) (int, []byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
@@ -462,7 +505,7 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 			return time.Time{}, err
 		}
 	}
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
+	_, raw, err := c.proofCall(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}

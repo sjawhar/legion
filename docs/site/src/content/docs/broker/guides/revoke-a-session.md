@@ -268,13 +268,21 @@ signed in on and not revoked, naming the machine's fleet account, the first char
 key's thumbprint, which is what tells two boxes of one fleet apart, when you signed in there and
 when that box last used the sign-in. Click **Revoke** on a row and confirm.
 
-Revoking ends three things at once: the sign-in, so that box trades no token for you again; every
-access token it already minted, so the sessions running there lose Dispatch within seconds; and
-the machine login that sign-in held, so every session it enrolled ends as
+Revoking ends three things at once: the sign-in, so the box key it was made with trades no token
+for you again; every access token it already minted, so the sessions running there lose Dispatch
+within seconds; and the machine login that sign-in held, so every session it enrolled ends as
 [ending a session](#end-a-session) does. Your sign-ins on other machines, and the fleet's own
 machine login, are untouched — the machine goes on reading what its service owns. Nobody sees or
 revokes anyone else's sign-ins: Dispatch names the person from its own session, so another
 person's id is an id the broker does not have.
+
+What it ends is the box key, not your Google grant. `agent-secrets login` keeps Google's refresh
+token on the machine beside that key, and anyone who can read that machine's files can copy both
+and sign in again from somewhere else, as a sign-in of its own, which this revoke does not reach.
+So to cut off a box you believe is compromised, revoke the grant at Google — your Google Account's
+**Security → Your connections to third-party apps** page, the entry for the sign-in client your
+deployment uses — which ends every copy of that refresh token at once. Revoking the sign-in here
+is the right tool for a box you have simply finished with.
 
 Signing in again with the very key that was revoked is refused: the box makes a new key, which is
 a sign-in of its own. Run `agent-secrets login` on the machine to sign in again.

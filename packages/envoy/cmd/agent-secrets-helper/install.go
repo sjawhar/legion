@@ -15,14 +15,50 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/brokerclient"
 	"github.com/sjawhar/envoy/internal/redact"
 )
 
+// unitVariables is every AGENT_SECRETS_* variable besides the broker URL that install copies
+// from its own environment into the unit, in the order the unit lists them. path marks the ones
+// whose value is a filesystem path, which must be absolute because the unit's helper runs in
+// another working directory than install does; the rest are an identity's own words — a kind, an
+// audience, a pool, an account, an issuer, a client, a person, a session name — which have no
+// directory to be resolved from.
+//
+// The identity and sign-in half is not optional decoration: a helper started without
+// AGENT_SECRETS_MACHINE_IDENTITY proves no identity of its own and falls back to the
+// device-grant machine login, and one started without the key directory and the sign-in client
+// enrols every session under this machine rather than under the person who ran
+// `agent-secrets login` on it.
+var unitVariables = []struct {
+	name string
+	path bool
+}{
+	{name: "AGENT_SECRETS_HELPER_SOCK", path: true},
+	{name: "AGENT_SECRETS_OPERATOR_FILE", path: true},
+	{name: "AGENT_SECRETS_MACHINE_FILE", path: true},
+	{name: "AGENT_SECRETS_KEY_DIR", path: true},
+	{name: brokerclient.IdentityVar},
+	{name: brokerclient.MachineTokenFileVar, path: true},
+	{name: brokerclient.MachineAudienceVar},
+	{name: brokerclient.PoolAudienceVar},
+	{name: brokerclient.PoolAccountVar},
+	{name: brokerclient.SignInIssuerVar},
+	{name: brokerclient.SignInClientIDVar},
+	{name: brokerclient.SignInClientSecretFileVar, path: true},
+	{name: brokerclient.PersonVar},
+	{name: brokerclient.SessionVar},
+}
+
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved), the
-// broker URL from --url or AGENT_SECRETS_URL and each of AGENT_SECRETS_HELPER_SOCK,
-// AGENT_SECRETS_OPERATOR_FILE, AGENT_SECRETS_MACHINE_FILE and AGENT_SECRETS_KEY_DIR set in its
-// environment, so the unit's helper uses the socket install probes, the machine file the caller
-// named, and the key directory whose sign-ins say whose authority a session enrols under, in
+// broker URL from --url or AGENT_SECRETS_URL, and every other AGENT_SECRETS_* variable of its
+// environment the unit's helper needs (unitVariables): the socket install probes, the operator
+// and machine files the caller named, the key directory whose sign-ins say whose authority a
+// session enrols under, and this machine's own identity at the broker's token exchange with
+// the sign-in client a person logs in with. Without those last the installed helper falls back
+// to the device-grant machine login, which a broker with BROKER_MACHINE_LOGIN_URL unset does
+// not serve, and ignores every `agent-secrets login` on the box. It works in
 // three steps. First the preflight: a helper
 // answering on its socket while the unit is not active was not started by it, and starting the
 // unit would put a second helper on that socket, so install refuses, listing that helper's
@@ -56,19 +92,19 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 		return fmt.Errorf("broker URL %q holds characters a unit's Environment= line would need escaped", redact.URL(*url))
 	}
 	environment := "Environment=AGENT_SECRETS_URL=" + *url + "\n"
-	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE", "AGENT_SECRETS_KEY_DIR"} {
-		value := getenv(name)
+	for _, v := range unitVariables {
+		value := strings.TrimSpace(getenv(v.name))
 		if value == "" {
 			continue
 		}
 		if strings.ContainsAny(value, needsEscaping) {
-			return fmt.Errorf("%s %q holds characters a unit's Environment= line would need escaped", name, value)
+			return fmt.Errorf("%s %q holds characters a unit's Environment= line would need escaped", v.name, value)
 		}
 		// The unit's helper runs in another working directory than install does.
-		if !filepath.IsAbs(value) {
-			return fmt.Errorf("%s %q is a relative path, which the unit's helper would resolve from another directory; set it to an absolute path", name, value)
+		if v.path && !filepath.IsAbs(value) {
+			return fmt.Errorf("%s %q is a relative path, which the unit's helper would resolve from another directory; set it to an absolute path", v.name, value)
 		}
-		environment += "Environment=" + name + "=" + value + "\n"
+		environment += "Environment=" + v.name + "=" + value + "\n"
 	}
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {

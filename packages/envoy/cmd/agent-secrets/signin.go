@@ -9,16 +9,6 @@ package main
 
 import "github.com/sjawhar/envoy/internal/brokerclient"
 
-const (
-	// personVar names which person a session acts for where the box has more than one sign-in.
-	personVar = brokerclient.PersonVar
-	// signInCommand is the command every refusal a sign-in would cure names.
-	signInCommand = brokerclient.SignInCommand
-)
-
-// signIn is one person's sign-in on this machine.
-type signIn = brokerclient.SignInRecord
-
 // signInStore is where this machine keeps them: under the key dir, so a box, a pod and a
 // person's machine each keep their own where everything else of that session's identity is.
 // The directory inside it is brokerclient's own (SignInsIn), the one place that names it, since

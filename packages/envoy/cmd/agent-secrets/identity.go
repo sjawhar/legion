@@ -36,6 +36,11 @@ const (
 	// writes, and the enrollment id enroll (or the pod's launcher) writes beside it.
 	keyFile        = "key.pem"
 	enrollmentFile = "enrollment"
+	// machineSessionMarker says this key dir's key and enrollment are a session this command
+	// registered for a machine that proves an identity of its own, which is what makes the
+	// enrollment one this command may register again when the broker says it is not live. A
+	// launcher's key dir holds no such file: its enrollment is the launcher's to make again.
+	machineSessionMarker = "machine-session"
 	// pendingMarker is the file a box's launcher keeps in the key dir while it sets the box up.
 	pendingMarker = "enrollment.pending"
 	// pendingMarkerLife bounds how long a client trusts a marker, by its mtime. It covers the

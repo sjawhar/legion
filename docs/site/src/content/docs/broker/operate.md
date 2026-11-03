@@ -254,6 +254,16 @@ sign-in on another. Revoking that sign-in (`POST /v1/person-signins/{id}/revoke`
 relays from her page) ends the access tokens it minted and the machine login with them, so every
 session it enrolled ends at once; the fleet's own machine login, and her sign-ins on other
 machines, are untouched.
+That revoke ends the box key, not her grant at Google: `agent-secrets login` keeps Google's
+refresh token on the machine beside the key, and whoever can read that machine's files can copy
+both and sign in again from elsewhere, as a sign-in of its own that this revoke does not reach.
+To cut off a box you believe is compromised, have her revoke the grant at Google — her Google
+Account's third-party connections page, the entry for the deployment's `agent-secrets login`
+client — which ends every copy of that refresh token at once; the broker's own revoke is for a
+box she has finished with.
+A sign-in belongs to the machine it was made on: the same box key presented with another
+machine's identity token is refused `invalid_grant` naming `agent-secrets login`, since the
+machine login it holds is keyed by the person, the machine and the key together.
 The broker refuses an exchange whose token is for another audience or does not verify, whose email
 Google does not hold verified, whose account no entry lists, or whose Compute Engine project or
 instance name the entry's pins do not allow, each `400 invalid_request` naming what did not match.

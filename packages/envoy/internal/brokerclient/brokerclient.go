@@ -84,7 +84,8 @@ type Token struct {
 // RefusedError is a trade the broker refused: a plain error naming what it said. Almost every
 // one is a refusal no retry can cure — an identity no entry lists, a sign-in a person revoked,
 // a token of the wrong audience — and the renewal loop stops on those rather than asking again
-// every quarter minute. The one exception is the broker's 429 (Permanent).
+// every quarter minute. The exceptions are the broker's 429 and its two DPoP refusals
+// (Permanent).
 type RefusedError struct {
 	// Status is the HTTP status of the refusal.
 	Status int
@@ -126,11 +127,28 @@ func (e *RefusedError) Error() string {
 func (e *RefusedError) Unwrap() error { return &e.answer }
 
 // Permanent reports whether this refusal is one no retry can cure, which every refusal is but
-// the broker's 429: its token endpoint spends a bucket per source address, and a bucket
+// three.
+//
+// The broker's 429: its token endpoint spends a bucket per source address, and a bucket
 // refills. A client that stopped trading on a 429 would stop for good over a burst — its own,
 // or that of another process behind the same address — and enrol nothing once the credential
 // it holds lapsed, with nothing but a restart to cure it.
-func (e *RefusedError) Permanent() bool { return e.Status != http.StatusTooManyRequests }
+//
+// `invalid_dpop_proof`, which is what the broker answers a proof whose iat is outside its 60 s
+// skew window. A helper started at boot, before NTP has corrected the clock, would otherwise
+// stop trading for good and hold no launcher credential until somebody restarted it; the next
+// trade after the correction succeeds.
+//
+// `use_dpop_nonce`, which the transport already retries once with the nonce the answer carried
+// (dpop.go). One that reaches here is an answer that carried no nonce, or a nonce the broker
+// then refused in turn — a server state the next trade can find changed.
+func (e *RefusedError) Permanent() bool {
+	switch {
+	case e.Status == http.StatusTooManyRequests, e.Code == "invalid_dpop_proof", e.Code == "use_dpop_nonce":
+		return false
+	}
+	return true
+}
 
 // Config is one client: the broker it trades at, the identity it trades, and the key it proves.
 type Config struct {
@@ -174,6 +192,9 @@ type Client struct {
 	renewBefore time.Duration
 	now         func() time.Time
 	after       func(time.Duration) <-chan time.Time
+	// wake carries a Wake to the renewal loop's sleep, one slot deep: the instruction is "trade
+	// now", which two of are one.
+	wake chan struct{}
 
 	mu   sync.Mutex
 	held *Token
@@ -191,6 +212,7 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("brokerclient: no subject token source: nothing names the identity to trade")
 	}
 	client := &Client{
+		wake:        make(chan struct{}, 1),
 		brokerURL:   strings.TrimSuffix(strings.TrimSpace(cfg.BrokerURL), "/"),
 		key:         cfg.Key,
 		subject:     cfg.Subject,
@@ -254,9 +276,11 @@ func (c *Client) Token(ctx context.Context) (*Token, error) {
 //
 // It stops with a plain error when the broker refuses the identity in a way no retry can cure
 // (RefusedError.Permanent), and when onToken fails. A broker that does not answer, or answers
-// 429, is retried, from defaultRetryWait doubling to maxRetryWait, for as long as ctx lives: an
-// outage past the token's own life is the same event as a short one, since this grant has no
-// rotation window to miss. A cancelled ctx is no error.
+// 429 or either of its DPoP refusals, is retried, from defaultRetryWait doubling to
+// maxRetryWait, for as long as ctx lives: an outage past the token's own life is the same event
+// as a short one, since this grant has no rotation window to miss, and a host whose clock NTP
+// corrects after boot trades again on the next pass rather than holding no credential until
+// somebody restarts it. A cancelled ctx is no error.
 func (c *Client) Run(ctx context.Context, onToken func(context.Context, *Token) error) error {
 	wait := defaultRetryWait
 	for {
@@ -309,7 +333,8 @@ func (c *Client) untilRenewal(token *Token) time.Duration {
 	return 0
 }
 
-// sleep waits d, reporting false when ctx ended first.
+// sleep waits d, reporting false when ctx ended first. A Wake cuts the wait short, so the
+// caller trades at once rather than at the renewal it was waiting for.
 func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return ctx.Err() == nil
@@ -317,8 +342,22 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
 		return false
+	case <-c.wake:
+		return true
 	case <-c.after(d):
 		return true
+	}
+}
+
+// Wake makes the renewal loop trade now rather than at the renewal it is waiting for, and is
+// how a caller that has just thrown the credential away — the broker refused a launcher proof
+// signed with it — gets another without waiting out the token's life. It never blocks: a wake
+// already waiting is the same instruction, and a client with no loop running trades at its next
+// Token anyway, so the one sent to nobody is spent by the next sleep and costs one early trade.
+func (c *Client) Wake() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
 	}
 }
 

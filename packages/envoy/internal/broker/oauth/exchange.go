@@ -746,21 +746,26 @@ func (p *Provider) machineCredential(ctx context.Context, r *http.Request, sessi
 
 // personSignIn records the sign-in the person's trade belongs to
 // (ExchangeConfig.PersonSignIns), in the exchange's own transaction, and refuses a trade whose
-// box key that person has revoked.
+// box key that person has revoked, or whose box key belongs to a sign-in made on another
+// machine.
 //
 // The sign-in is the person, the box key and the machine: the person the decision named, the
 // RFC 7638 thumbprint of the key the request's DPoP proof presented — which is the key
 // `agent-secrets login` made at the sign-in and keeps with Google's refresh token — and the
 // Google account the actor token named. The first trade of a person and a box key writes the
-// row; every later trade of that pair is the same sign-in, used again.
+// row; every later trade of that pair, from that same machine, is the same sign-in used again.
 //
 // It runs in the transaction the token is written in, for the reason the machine's credential
 // does: a revoke that commits first refuses this trade, and one that commits after it ends the
 // token this trade minted, so no token outlives the sign-in it was minted under.
 //
-// A revoked key is invalid_grant rather than a server error, and names the sign-in command: the
+// Both refusals are invalid_grant rather than a server error, and name the sign-in command: the
 // subject token is sound and it is the broker's own record that refuses, which the person fixes
-// by signing in again, with a key of its own.
+// by signing in again, with a key of its own. The machine's is a refusal and not an update
+// because the credential this sign-in holds is keyed by all three (exchange.PersonSubject): a
+// row that followed its key to another machine would ask for a subject no live credential has,
+// and every trade of it from then on would collide on launcher_credentials_live_key and be
+// refused invalid_grant with nothing naming the cure.
 func (p *Provider) personSignIn(ctx context.Context, session *oauthstore.ExchangeSession) error {
 	person, _ := session.Extra[ClaimPerson].(string)
 	machine, _ := session.Extra[ClaimMachine].(string)
@@ -770,8 +775,11 @@ func (p *Provider) personSignIn(ctx context.Context, session *oauthstore.Exchang
 			person != "", machine != "", thumbprint != "")
 	}
 	err := p.exchange.PersonSignIns(ctx, PersonSignIn{Person: person, Thumbprint: thumbprint, Machine: machine})
-	if errors.Is(err, ErrSignInRevoked) {
+	switch {
+	case errors.Is(err, ErrSignInRevoked):
 		return oauth2.ErrInvalidGrant.WithHintf("%s revoked this machine's sign-in, so the key this proof was signed with trades nothing. Sign in again with `agent-secrets login`.", person).WithWrap(err).WithDebugError(err)
+	case errors.Is(err, ErrSignInMachineChanged):
+		return oauth2.ErrInvalidGrant.WithHintf("%s's sign-in on this box key was made on another machine, and a sign-in belongs to the machine it was made on. Sign in again with `agent-secrets login`.", person).WithWrap(err).WithDebugError(err)
 	}
 	if err != nil {
 		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)

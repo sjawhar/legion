@@ -259,6 +259,57 @@ func TestARefusedCredentialIsTradedAgain(t *testing.T) {
 	}
 }
 
+// TestARefreshTokenTheIssuerNoLongerHonoursFallsBackToTheMachine: Google, not the broker, is
+// what refuses when a person revokes the grant there or it expires, and that refusal is as
+// final as a revoke the broker records. Without it every enrolment on the box would fail — and
+// ask the issuer again each time — instead of falling back to this machine's own authority,
+// which Current's own contract promises. It is remembered, which the issuer honouring the token
+// again proves: the box does not ask it.
+func TestARefreshTokenTheIssuerNoLongerHonoursFallsBackToTheMachine(t *testing.T) {
+	rig := newSignInRig(t, nil)
+	rig.signIn(t, "ada@example.com")
+	rig.issuer.FailToken(400, "invalid_grant")
+	for i := range 2 {
+		authority, err := rig.authority.Current(context.Background())
+		if authority != nil || err != nil {
+			t.Fatalf("enrolment %d under a sign-in the issuer has ended answered %+v, %v; want nil and no error, so the session enrols under this machine", i, authority, err)
+		}
+	}
+	rig.issuer.FailToken(0, "")
+	authority, err := rig.authority.Current(context.Background())
+	if authority != nil || err != nil {
+		t.Fatalf("the issuer honouring the token again answered %+v, %v; want the refusal remembered until somebody signs in afresh", authority, err)
+	}
+	if n := len(rig.broker.Requests()); n != 0 {
+		t.Fatalf("the broker was asked %d times to trade a sign-in the issuer had ended; want none", n)
+	}
+}
+
+// TestARefusalARetryCanCureIsNotTheSignInEnding: the broker's 429 is a bucket that refills, not
+// a person's revoke. Remembering one would enrol every later session on the box under this
+// machine for the life of the process, silently giving each one less authority than its person
+// has; so it is an error the caller sees, and the next enrolment trades again.
+func TestARefusalARetryCanCureIsNotTheSignInEnding(t *testing.T) {
+	const person = "ada@example.com"
+	rig := newSignInRig(t, func(n int, _ url.Values) (int, map[string]any) {
+		if n == 0 {
+			return 429, map[string]any{"error": "slow_down", "error_description": "too many trades from this address"}
+		}
+		return 200, mintedToken(n)
+	})
+	rig.signIn(t, person)
+	if authority, err := rig.authority.Current(context.Background()); authority != nil || err == nil {
+		t.Fatalf("a 429 answered %+v, %v; want no authority and an error: nothing about this sign-in is settled", authority, err)
+	}
+	authority, err := rig.authority.Current(context.Background())
+	if err != nil {
+		t.Fatalf("the enrolment after the 429: %v", err)
+	}
+	if authority == nil || authority.Operator != person {
+		t.Fatalf("the enrolment after the 429 answered %+v; want %s's credential, the bucket having refilled", authority, person)
+	}
+}
+
 // TestABrokerThatDoesNotAnswerIsNoAnswerAboutWhoIsSignedIn: an undecided trade is an error, never
 // a quiet fall back to the machine, so a session is never given less authority than its person
 // has because one call timed out. (The enrolment it would have signed goes to the same broker,

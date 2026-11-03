@@ -81,7 +81,7 @@ type SignInAuthority struct {
 	// identity token from the refresh token their record holds.
 	Flow *DeviceFlow
 	// BrokerURL, HTTP and Log are the trade's, as Config's own members of those names. The
-	// session name is not: it is the person's, and sessionFor settles it.
+	// session name is not: it is the person's, and SessionFor settles it.
 	BrokerURL string
 	HTTP      *http.Client
 	Log       *slog.Logger
@@ -108,12 +108,15 @@ type SignInAuthority struct {
 // than the enrolment it decides. Asking costs a read of one small directory, not a trade — the
 // client holds one access token live and trades again only before that token lapses.
 //
-// Nobody signed in here is nil and no error, and so is a sign-in the broker has refused (the
-// person revoked it, or the issuer no longer honours their refresh token), which is remembered
-// so the next enrolment does not ask again. Every other failure is an error, which a caller
-// must not read as "nobody is signed in": a broker that did not answer says nothing about who
-// is signed in here, and a box with two sign-ins and nothing naming which is refused by name
-// rather than acting as either (SignInStore.Choose).
+// Nobody signed in here is nil and no error, and so is a sign-in refused for good — the person
+// revoked it, or the issuer no longer honours their refresh token — which is remembered so the
+// next enrolment does not ask again. A refusal a later trade could still cure, the broker's 429
+// and a clock-skewed DPoP proof among them, is an error rather than that: remembering one of
+// those would enrol every later session under this machine for the life of the process. Every
+// other failure is an error too, which a caller must not read as "nobody is signed in": a
+// broker that did not answer says nothing about who is signed in here, and a box with two
+// sign-ins and nothing naming which is refused by name rather than acting as either
+// (SignInStore.Choose).
 func (a *SignInAuthority) Current(ctx context.Context) (*Authority, error) {
 	if a.Machine == nil || a.Flow == nil {
 		return nil, errors.New("brokerclient: a sign-in's authority needs this machine's own identity and the sign-in client that renews the person's")
@@ -142,7 +145,7 @@ func (a *SignInAuthority) Current(ctx context.Context) (*Authority, error) {
 			Key:       key,
 			Subject:   &PersonIdentity{Flow: a.Flow, RefreshToken: record.RefreshToken, Person: record.Person},
 			Actor:     a.Machine,
-			Session:   sessionFor(record),
+			Session:   SessionFor(record),
 			HTTP:      a.HTTP,
 			Log:       a.Log,
 		})
@@ -153,8 +156,18 @@ func (a *SignInAuthority) Current(ctx context.Context) (*Authority, error) {
 	}
 	token, err := a.held.Token(ctx)
 	var refusal *RefusedError
-	if errors.As(err, &refusal) {
-		a.markRefused(name, record.Person, refusal)
+	switch {
+	case errors.As(err, &refusal) && refusal.Permanent():
+		// A refusal a retry could cure — the broker's 429, a skewed DPoP proof — is not this
+		// sign-in ending: marking it refused on one of those would enrol every later session
+		// under this machine for the life of the process.
+		a.markRefused(name, record.Person, refusal.Code)
+		return nil, nil
+	case errors.Is(err, ErrSignInEnded):
+		// The issuer, not the broker, is what refused: a refresh token Google no longer
+		// honours is as final as a revoke, and asking it again at every enrolment would fail
+		// every enrolment on this box rather than fall back to the machine.
+		a.markRefused(name, record.Person, "invalid_grant")
 		return nil, nil
 	}
 	if err != nil {
@@ -167,15 +180,20 @@ func (a *SignInAuthority) Current(ctx context.Context) (*Authority, error) {
 	return &Authority{Key: a.held.Key(), CredentialID: token.CredentialID, Operator: record.Person}, nil
 }
 
-// sessionFor is the session name a person's trade on this box asks under. The exchange fixes
+// SessionFor is the session name a person's trade on this box asks under. The exchange fixes
 // none for a sign-in and requires the request to name one (exchange.Set.Person,
 // ErrSessionRequired), and a session name belongs to one identity, so the name this machine
-// trades its own identity under (SessionVar) is one a person's trade is refused for. This name
-// is the person's own and the same on every trade of that sign-in: their address and the box
-// key's thumbprint, which is what tells two boxes of one person apart on the sign-ins page
-// itself. It is never read back here — a caller of this package wants the launcher credential,
-// not the access token — but the broker records who a name belongs to, so it must be theirs.
-func sessionFor(record SignInRecord) string {
+// trades its own identity under (SessionVar) is one a person's trade is refused for: a trade
+// under it is refused permanently once the machine has claimed it, and claims it away from the
+// machine when the person trades first. This name is the person's own and the same on every
+// trade of that sign-in: their address and the box key's thumbprint, which is what tells two
+// boxes of one person apart on the sign-ins page itself. It is never read back here — a caller
+// of this package wants the launcher credential, not the access token — but the broker records
+// who a name belongs to, so it must be theirs.
+//
+// It is exported because `agent-secrets login` makes the very first trade of a sign-in, before
+// any record is written, and that trade must ask under the same name every later one does.
+func SessionFor(record SignInRecord) string {
 	name := "signin-" + record.Person
 	if thumbprint := record.Thumbprint; thumbprint != "" {
 		name += "-" + thumbprint[:min(12, len(thumbprint))]
@@ -197,17 +215,18 @@ func (a *SignInAuthority) Refused(credentialID string) {
 	}
 }
 
-// markRefused records that the broker has refused this record's sign-in and logs it once: the
-// person reads it on Dispatch's sign-ins page, and the box goes on working under its own
-// authority. The caller holds a.mu.
-func (a *SignInAuthority) markRefused(name, person string, refusal *RefusedError) {
+// markRefused records that this record's sign-in has been refused for good — by the broker, or
+// by the issuer that no longer honours the person's refresh token — and logs it once with the
+// code that named the refusal: the person reads it on Dispatch's sign-ins page, and the box
+// goes on working under its own authority. The caller holds a.mu.
+func (a *SignInAuthority) markRefused(name, person, code string) {
 	if a.refused == nil {
 		a.refused = map[string]bool{}
 	}
 	a.refused[name] = true
 	a.held, a.heldFor, a.heldCredential = nil, "", ""
 	if a.Log != nil {
-		a.Log.Warn("the broker refused this machine's sign-in; sessions enrol under this machine's own authority until somebody signs in again",
-			"person", person, "code", refusal.Code, "command", SignInCommand)
+		a.Log.Warn("this machine's sign-in was refused; sessions enrol under this machine's own authority until somebody signs in again",
+			"person", person, "code", code, "command", SignInCommand)
 	}
 }

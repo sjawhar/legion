@@ -167,6 +167,45 @@ func TestATokenShorterThanRenewBeforeIsNotRenewedInALoop(t *testing.T) {
 	}
 }
 
+// TestADPoPRefusalKeepsTheRenewalLoopTrading: a proof the broker refuses for its own clock, or
+// for a nonce it wanted, is nothing a restart cures and everything the next trade may. A helper
+// started at boot, before NTP has corrected the host's clock, is refused `invalid_dpop_proof`
+// by a broker whose skew window is 60 s; stopping there would leave it holding no launcher
+// credential, answering NO_CREDENTIAL to every register and sign, until somebody restarted it.
+// The loop is proved still waiting to trade again by its context ending it with no error, while
+// the control — a refusal that is the broker's final word — returns at once.
+func TestADPoPRefusalKeepsTheRenewalLoopTrading(t *testing.T) {
+	for _, tc := range []struct {
+		code  string
+		stops bool
+	}{
+		{"invalid_dpop_proof", false},
+		{"use_dpop_nonce", false},
+		{"invalid_grant", true},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			broker := newStubBroker(t, func(int, url.Values) (int, map[string]any) {
+				return 400, map[string]any{"error": tc.code, "error_description": "the proof was refused"}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			err := refusalClient(t, broker).Run(ctx, func(context.Context, *Token) error {
+				t.Error("the loop handed its caller a token the broker refused to mint")
+				return nil
+			})
+			var refused *RefusedError
+			switch stopped := errors.As(err, &refused); {
+			case tc.stops && !stopped:
+				t.Fatalf("Run on %s = %v, want it to stop with the broker's refusal", tc.code, err)
+			case !tc.stops && stopped:
+				t.Fatalf("Run on %s stopped with %v, want it still waiting to trade again: the next trade can succeed", tc.code, err)
+			case !tc.stops && err != nil:
+				t.Fatalf("Run on %s = %v, want no error when its context ends", tc.code, err)
+			}
+		})
+	}
+}
+
 func refusalClient(t *testing.T, broker *stubBroker) *Client {
 	t.Helper()
 	client, err := New(Config{BrokerURL: broker.URL(), Key: testKey(t), Subject: projectedStub()})

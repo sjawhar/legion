@@ -95,12 +95,17 @@ func login(ctx context.Context, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	record := brokerclient.SignInRecord{
+		Person: signedIn.Person, Issuer: flow.Issuer, ClientID: flow.ClientID,
+		RefreshToken: signedIn.RefreshToken, BoxKey: string(keyPEM(boxKey)), Thumbprint: thumbprint,
+		SignedInAt: time.Now().UTC(),
+	}
 	client, err := brokerclient.New(brokerclient.Config{
 		BrokerURL: base,
 		Key:       boxKey,
 		Subject:   &brokerclient.PersonIdentity{Flow: flow, RefreshToken: signedIn.RefreshToken, Person: signedIn.Person},
 		Actor:     machine,
-		Session:   os.Getenv(brokerclient.SessionVar),
+		Session:   brokerclient.SessionFor(record),
 		HTTP:      brokerclient.HTTPClient(),
 	})
 	if err != nil {
@@ -112,12 +117,6 @@ func login(ctx context.Context, stdout, stderr io.Writer) error {
 	}
 	if token.CredentialID == "" {
 		return fmt.Errorf("the broker took the sign-in but named no launcher credential, so this machine can enrol no session for %s", signedIn.Person)
-	}
-
-	record := brokerclient.SignInRecord{
-		Person: signedIn.Person, Issuer: flow.Issuer, ClientID: flow.ClientID,
-		RefreshToken: signedIn.RefreshToken, BoxKey: string(keyPEM(boxKey)), Thumbprint: thumbprint,
-		SignedInAt: time.Now().UTC(),
 	}
 	if record.EnrollmentID, err = enrollUnderCredential(ctx, base, boxKey, thumbprint, token.CredentialID, signedIn.Person); err != nil {
 		return err
@@ -195,7 +194,7 @@ func enrollUnderCredential(ctx context.Context, base string, key *ecdsa.PrivateK
 // enrollment in the record. A machine or a sign-in client the deployment no longer configures is
 // refused by name, and so is a record made with another client than this machine now has, since
 // nothing here could renew that person's identity token.
-func registerSignInSession(ctx context.Context, record signIn, boxKey *ecdsa.PrivateKey) (signIn, error) {
+func registerSignInSession(ctx context.Context, record brokerclient.SignInRecord, boxKey *ecdsa.PrivateKey) (brokerclient.SignInRecord, error) {
 	base := brokerBaseURL()
 	if base == "" {
 		return record, fmt.Errorf("%s is required: it names the secrets broker %s's session registers at", brokerURLVar, record.Person)
@@ -207,10 +206,10 @@ func registerSignInSession(ctx context.Context, record signIn, boxKey *ecdsa.Pri
 	switch {
 	case flow == nil:
 		return record, fmt.Errorf("this machine is told of no sign-in client, so %s's sign-in cannot be renewed: set %s and %s, then run: %s",
-			record.Person, brokerclient.SignInClientIDVar, brokerclient.SignInClientSecretFileVar, signInCommand)
+			record.Person, brokerclient.SignInClientIDVar, brokerclient.SignInClientSecretFileVar, brokerclient.SignInCommand)
 	case record.ClientID != "" && record.ClientID != flow.ClientID:
 		return record, fmt.Errorf("%s signed in with another client than this machine now has (%s), so their sign-in cannot be renewed; run: %s",
-			record.Person, record.ClientID, signInCommand)
+			record.Person, record.ClientID, brokerclient.SignInCommand)
 	}
 	machine, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil {
@@ -224,7 +223,7 @@ func registerSignInSession(ctx context.Context, record signIn, boxKey *ecdsa.Pri
 		Key:       boxKey,
 		Subject:   &brokerclient.PersonIdentity{Flow: flow, RefreshToken: record.RefreshToken, Person: record.Person},
 		Actor:     machine,
-		Session:   os.Getenv(brokerclient.SessionVar),
+		Session:   brokerclient.SessionFor(record),
 		HTTP:      brokerclient.HTTPClient(),
 	})
 	if err != nil {
@@ -232,7 +231,7 @@ func registerSignInSession(ctx context.Context, record signIn, boxKey *ecdsa.Pri
 	}
 	token, err := client.Token(ctx)
 	if err != nil {
-		return record, fmt.Errorf("%w; run: %s", err, signInCommand)
+		return record, fmt.Errorf("%w; run: %s", err, brokerclient.SignInCommand)
 	}
 	if token.CredentialID == "" {
 		return record, fmt.Errorf("the broker took %s's sign-in but named no launcher credential, so no session can be registered under it", record.Person)

@@ -122,9 +122,16 @@ func (d *DeviceFlow) Wait(ctx context.Context, authorization *oauth2.DeviceAuthR
 	return d.signIn(token, true)
 }
 
+// ErrSignInEnded is a kept refresh token the issuer no longer honours: the person revoked the
+// grant at Google, or it expired. It is a sentinel because it is as final as a revoke the
+// broker records — no retry and no other caller cures it — so every reader of a sign-in falls
+// back to this machine's own authority on it rather than asking the issuer again at every
+// enrolment (SignInAuthority.Current).
+var ErrSignInEnded = errors.New("the issuer no longer honours this sign-in")
+
 // Refresh mints a fresh ID token from a kept refresh token, with no step by the person. A
 // refresh token the issuer no longer honours — the person revoked the grant, or it expired — is
-// answered as a sign-in that is over, which names the command that makes another.
+// ErrSignInEnded, a sign-in that is over, which names the command that makes another.
 func (d *DeviceFlow) Refresh(ctx context.Context, refreshToken string) (*SignIn, error) {
 	config, err := d.discover(ctx)
 	if err != nil {
@@ -134,7 +141,7 @@ func (d *DeviceFlow) Refresh(ctx context.Context, refreshToken string) (*SignIn,
 	if err != nil {
 		var refused *oauth2.RetrieveError
 		if errors.As(err, &refused) && refused.ErrorCode == "invalid_grant" {
-			return nil, fmt.Errorf("%s no longer honours this sign-in; run: agent-secrets login", d.Issuer)
+			return nil, fmt.Errorf("%s %w; run: %s", d.Issuer, ErrSignInEnded, SignInCommand)
 		}
 		return nil, fmt.Errorf("renew the sign-in at %s: %w", d.Issuer, err)
 	}
