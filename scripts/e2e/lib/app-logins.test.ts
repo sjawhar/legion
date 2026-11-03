@@ -247,6 +247,14 @@ describe("app-logins.ts", () => {
     expect(JSON.parse(stdout).implement).toBe("example-implement[bot]");
   });
 
+  test("a token command whose newline-delimited stderr exceeds the cap is killed", async () => {
+    const noisy =
+      "i=0; while [ \"$i\" -lt 257 ]; do printf '%04095d\\n' 0 >&2; i=$((i + 1)); done; exit 3";
+    const { code, stderr } = await run(config(app("101", noisy), app("202")));
+    expect(code).toBe(1);
+    expect(stderr.slice(-1000)).toContain("wrote more than 1048576 bytes to stderr");
+  });
+
   test("output that is no release, an expired token, or no installation is refused without quoting it", async () => {
     const cases: [string, string][] = [
       [`echo '{"token":"${tokenOf(101)}"'`, "printed no release"],
@@ -381,7 +389,7 @@ describe("read_app_logins", () => {
 // on PATH, which, as the real CLI does, puts the release the github-app secret it names gives
 // (STORE/<name>) into the environment of the command after `--` under that name. It appends its
 // argv to ARGV_LOG, fails with exit 3 when the `<owner>/<read-only>` it was asked for matches
-// FAIL_MINT, and releases nothing when EMPTY_MINT is set.
+// FAIL_MINT, releases nothing when EMPTY_MINT is set, and streams stdout when OVERSIZED_MINT is set.
 const store = join(dir, "store");
 const fakeBin = join(dir, "bin");
 mkdirSync(store);
@@ -406,6 +414,7 @@ if [ -n "\${FAIL_MINT:-}" ]; then
   case "$owner/$ro" in $FAIL_MINT) echo "grant for $name denied" >&2; exit 3 ;; esac
 fi
 if [ -n "\${EMPTY_MINT:-}" ]; then export "$name="; exec "$@"; fi
+if [ -n "\${OVERSIZED_MINT:-}" ]; then exec yes x; fi
 value=$(cat "\${STORE:-${store}}/$name") || exit 9
 export "$name=$value"
 exec "$@"
@@ -724,6 +733,22 @@ mint_app_tokens "$TOKEN_DIR" sjawhar`
     expect(code).toBe(1);
     expect(stderr).toMatch(/^FAIL prerequisites: the implement App \(App 101, .*_all\.json: agent-secrets printed nothing$/m);
     expect(readdirSync(join(tokenDir, "implement"))).toEqual([]);
+  });
+
+  test("an oversized release returns the documented overflow status and leaves no file", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, OVERSIZED_MINT: "1" },
+      `set +e
+app_token_mint_file "$TOKEN_DIR/release.json" "" "" IMPLEMENT_APP
+status=$?
+set -e
+printf 'status %s\n' "$status"`
+    );
+    expect(code).toBe(0);
+    expect(stdout).toBe("status 126");
+    expect(stderr).toBe("");
+    expect(existsSync(join(tokenDir, "release.json"))).toBe(false);
   });
 
   test("a release whose rename fails leaves no temporary file", async () => {

@@ -139,14 +139,22 @@ async function runTokenCommand(field: string, command: string): Promise<string> 
   );
   const decoder = new TextDecoder();
   let stderr = "";
+  let stderrBytes = 0;
   let pendingLine = "";
   const relayLine = (line: string) => {
     const clean = redactTokens(line);
     process.stderr.write(clean);
-    if (stderr.length < outputLimit) stderr += clean;
+    stderr += clean;
   };
   const relay = (async () => {
     for await (const chunk of child.stderr) {
+      if (ended !== "") continue;
+      stderrBytes += chunk.byteLength;
+      if (stderrBytes > outputLimit) {
+        pendingLine = "";
+        end(`wrote more than ${outputLimit} bytes to stderr`);
+        continue;
+      }
       pendingLine += decoder.decode(chunk, { stream: true });
       let newline = pendingLine.indexOf("\n");
       while (newline >= 0) {
@@ -154,12 +162,8 @@ async function runTokenCommand(field: string, command: string): Promise<string> 
         pendingLine = pendingLine.slice(newline + 1);
         newline = pendingLine.indexOf("\n");
       }
-      if (pendingLine.length > outputLimit) {
-        pendingLine = "";
-        end(`wrote more than ${outputLimit} bytes to stderr`);
-      }
     }
-    if (pendingLine !== "") relayLine(pendingLine);
+    if (pendingLine !== "" && ended === "") relayLine(pendingLine);
   })();
   const chunks: Uint8Array[] = [];
   let size = 0;

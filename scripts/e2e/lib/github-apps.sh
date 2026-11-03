@@ -162,6 +162,8 @@ app_token_mint() {
         case "$status" in
           0) continue ;;
           125) app_token_mint_failed="agent-secrets printed nothing" ;;
+          126) app_token_mint_failed="agent-secrets printed more than $app_token_release_limit bytes, which no release is" ;;
+          123) app_token_mint_failed="agent-secrets wrote more than $app_token_release_limit bytes to stderr" ;;
           *) app_token_mint_failed="agent-secrets exited $status; no token is printed" ;;
         esac
         app_token_mint_failed="the $role App (App ${!id_var}, github-app secret ${!secret_var}) gave no release for $file: $app_token_mint_failed"
@@ -170,31 +172,53 @@ app_token_mint() {
     done
   done
 }
-# app_token_redact copies its stdin to its stdout with every GitHub token form replaced, as the
-# daemon redacts a token command's stderr (internal/appauth, tokenPattern).
+# app_token_redact copies its stdin to its stdout, line by line as it arrives, with every GitHub
+# token form replaced, as the daemon redacts a token command's stderr (internal/appauth,
+# tokenPattern).
 app_token_redact() {
-  LC_ALL=C sed -E 's/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g'
+  LC_ALL=C sed -u -E 's/(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/[redacted]/g'
+}
+# app_token_stderr_bound LIMIT MARKER passes on whole lines of its stdin while their bytes stay
+# within LIMIT. Its input is cut at LIMIT+1 bytes by the caller, so the line that crosses LIMIT,
+# which may end in a fragment of a token, is dropped, nothing after it is read, and MARKER is
+# created to say the stream overflowed. Every line it passes is whole, so app_token_redact, after
+# it, sees each token whole.
+app_token_stderr_bound() {
+  LC_ALL=C awk -v limit="$1" -v marker="$2" '
+    { total += length($0) + 1
+      if (total > limit) { printf "" > marker; exit }
+      print; fflush() }'
 }
 # app_token_mint_file FILE OWNER READ_ONLY SECRET writes one release atomically. The token command
 # runs under `timeout` (35 minutes: agent-secrets' 30-minute approval wait and a margin; killed 10 s
-# after), its stdout capped at app_token_release_limit bytes and its stderr at the same, reaching
-# the run's through app_token_redact. It returns the token command's non-zero status (124 when it
-# timed out), 126 when it printed more than the limit, or 125 when it succeeded and printed nothing;
-# either way it leaves no temporary file and FILE as it was.
+# after). Its stdout is cut at app_token_release_limit+1 bytes. Its stderr reaches the run's as it
+# is written, whole lines only, through app_token_stderr_bound and app_token_redact, at most
+# app_token_release_limit bytes. It returns the token command's non-zero status (124 when it timed
+# out), 126 when it printed more than the limit, 123 when it wrote more than the limit to stderr,
+# or 125 when it succeeded and printed nothing; either way it leaves no temporary file and FILE as
+# it was.
 app_token_release_limit=1048576
 app_token_mint_file() {
-  local file=$1 owner=$2 ro=$3 secret=$4 tmp status=0
+  local file=$1 owner=$2 ro=$3 secret=$4 tmp overflow status=0
   tmp=$(umask 077 && mktemp "$(dirname -- "$file")/.mint.XXXXXXXX") || return 1
+  overflow=$tmp.stderr-overflow
   (
     umask 077
     set -o pipefail
-    LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro timeout --kill-after=10s 35m sh -c "$(app_token_command "$secret")" \
-      2> >(head -c "$app_token_release_limit" | app_token_redact >&2) </dev/null |
-      head -c "$((app_token_release_limit + 1))" >"$tmp"
+    {
+      LEGION_GITHUB_OWNER=$owner LEGION_GITHUB_READ_ONLY=$ro timeout --kill-after=10s 35m sh -c "$(app_token_command "$secret")" \
+        2>&1 1>&3 3>&- </dev/null |
+        head -c "$((app_token_release_limit + 1))" |
+        app_token_stderr_bound "$app_token_release_limit" "$overflow" |
+        app_token_redact >&2
+    } 3>&1 | head -c "$((app_token_release_limit + 1))" >"$tmp"
   ) || status=$?
-  if [ "$status" = 0 ] && [ "$(wc -c <"$tmp")" -gt "$app_token_release_limit" ]; then
+  if [ -e "$overflow" ]; then
+    status=123
+  elif { [ "$status" = 0 ] || [ "$status" = 141 ]; } && [ "$(wc -c <"$tmp")" -gt "$app_token_release_limit" ]; then
     status=126
   fi
+  rm -f -- "$overflow"
   if [ "$status" != 0 ]; then
     rm -f -- "$tmp"
     return "$status"
