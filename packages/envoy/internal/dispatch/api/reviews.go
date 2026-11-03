@@ -20,9 +20,10 @@ import (
 // Document approval: a human review pinned to a document version. Approve, or
 // request changes with a reason. A later version makes an approval stale, unless
 // it is the version a human's own answer to a decision block writes and that
-// answer is the whole change since the version he approved, in which case
-// Dispatch carries his approval to it (docs writes that carry). A request for
-// approval is an ask of kind "approval" with fixed options, so it reaches the
+// answer is the whole change since the version he approved, or a version whose
+// text is byte for byte the approved version's with no decision block in it
+// decided since; then Dispatch carries the approval to it (docs writes that carry).
+// A request for approval is an ask of kind "approval" with fixed options, so it reaches the
 // human through the Inbox like any question; one opened on a document with an
 // earlier approval carries that approval's version, time and approver
 // (approval.approved: version, at, by). Answering it, or reviewing from
@@ -490,6 +491,12 @@ func (s *server) openApprovalAsk(
 		return nil, model.Event{}, err
 	}
 	askChanges, err := s.replaceReferences(ctx, tx, "ask", ask.ID, ask.Question)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
+	// The request's parts - its question and its two review options - beside its own
+	// references, both named by the ask.opened below.
+	askChanges, err = s.indexAskParts(ctx, tx, ask, ask.CreatedAt, askChanges)
 	if err != nil {
 		return nil, model.Event{}, err
 	}

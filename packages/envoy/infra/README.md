@@ -66,7 +66,10 @@ pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/le
 
 Keep the single quotes: Pulumi fills in `${VERSION}` itself and downloads
 `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` from the GitHub release tagged
-`envoy-infra-v<version>`. `pulumi package add` records the package in `Pulumi.yaml`:
+`envoy-infra-v<version>`. The address after `--server` is the one the release built into the
+plugin from the repository it ran in,
+`https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}` today.
+`pulumi package add` records the package in `Pulumi.yaml`:
 
 ```yaml
 packages:
@@ -558,8 +561,8 @@ those is, the sandbox in the paragraph under it.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
-| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, the component's own `tags`, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so a Service that already exists under that name is adopted and its comment, ports and tags overwritten ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
-| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
+| Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so one that already exists under that name is adopted, its comment and ports overwritten; the request carries no tags, and Tailscale's API reference does not say whether the live Service keeps its own ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. The RoleBinding names the Role by an output that waits on the Role's ID, so a preview that creates the Role leaves the name unknown and pulumi-kubernetes sends no server-side dry run of the binding, which an account without the `bind` verb would see refused as "not found" while the Role does not exist. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
 | Three ClusterIP Services and three NetworkPolicies (two Services with `natsInCluster`) | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener, neither the Service nor that rule rendered with `natsInCluster`, which leaves the front door's policy admitting nothing; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
 | Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. | Not built |
@@ -679,7 +682,7 @@ PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
 The component declares the Tailscale Service itself, so no input names it and a consumer has one
 thing to apply: `svc:<hostname>`, the name the certificate and the URL carry, with its one port
-`tcp:443`, the component's own `tags`, and a comment naming the tailnet name it serves,
+`tcp:443`, no tags, and a comment naming the tailnet name it serves,
 `<hostname>.<tailnetDnsName>`. What a consumer passes instead is a `tailscale` provider, which
 the component requires wherever it builds the front door — every deployment but the sandbox and
 `clusterOnly`, neither of which builds one — and the tailnet that provider is configured for is
@@ -694,15 +697,24 @@ it, so on a fresh stack no pod advertises the Service before it exists: a node t
 Service before it exists is not approved when the Service appears.
 
 **The component adopts a Service that already exists under that name.** The Tailscale provider's
-create is an upsert (`VIPServices().CreateOrUpdate`), so a first apply does not fail on a live
-`svc:<hostname>`: it takes the Service over and overwrites its comment, its ports and its tags
-with the component's. A stack that declared that Service itself must therefore hand it over
-before the apply that moves the pin, with `retainOnDelete: true` on its own declaration rather
-than a state edit
+create is an upsert (`VIPServices().CreateOrUpdate`, a `PUT` of the Service), so a first apply
+does not fail on a live `svc:<hostname>`: it takes the Service over and overwrites its comment
+and its ports with the component's. It sends no tags: the provider's `tags` defaults to the
+empty set, and its client leaves an empty list out of the request (`tags,omitempty` in
+tailscale-client-go-v2 v2.9.0). Tailscale's API reference does not say whether a `PUT` without
+`tags` keeps the tags a live Service already carries; the component's state records none either
+way. A stack that declared that Service itself must therefore hand it over before the apply that
+moves the pin, with `retainOnDelete: true` on its own declaration rather than a state edit
 ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)
 below); removing the declaration without that, while the component's own Service is in the same
 apply, deletes the Service the component has just adopted, and readers lose
 `<hostname>.<tailnetDnsName>`.
+
+**The Service requests no tags.** Tailscale refuses a Service whose requested tags the OAuth
+client creating it may not set (`requested tags ... are invalid or not permitted`), so a
+consumer whose `services` client may set no tags could not create a Service that requested any.
+The component's `tags` input is unchanged and still reaches the front door's nodes, which is
+where it is needed: the nodes' own tag is what the tailnet policy's auto-approval names.
 
 The tailnet policy is still the operator's. The Service's hosts are approved there, so give
 `tags` an auto-approval for `svc:<hostname>` before an apply creates the front door's pods; that
@@ -710,8 +722,9 @@ auto-approval only lets those nodes host the Service, and gives no client access
 Service is a grant destination of its own
 ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services),
 "Configure Service access"), so the tailnet policy also needs a grant that reaches it for every
-client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or one whose `dst`
-names `tags`, since the Service carries the same `tags` the front door's nodes do.
+client of Dispatch: one with `dst: ["svc:<hostname>"]` and `ip: ["443"]`. A grant whose `dst`
+names `tags` does not reach a Service the component creates, which carries none, so name the
+Service in the grant for an adopted Service too.
 
 `frontDoorToolsImage`, one of the tailnet group and pinned by digest like the other three
 images, is the image the front door's `cert-publish` container runs on. Its scripts call
@@ -1406,13 +1419,13 @@ and selector are unchanged. Before it:
 
 1. Prepare the tailnet policy: an auto-approval for `svc:<hostname>` to the front door's `tags`,
    and access for every client of Dispatch. A Tailscale Service is a grant destination of its
-   own, so a grant reaches it either with `dst: ["svc:<hostname>"]` and `ip: ["443"]`, or with a
-   `dst` naming `tags`, since the component gives the Service the same `tags` its nodes carry.
-   Without a grant of one of those two shapes, no client reaches Dispatch after the move.
+   own, so a grant reaches it with `dst: ["svc:<hostname>"]` and `ip: ["443"]`; the Service
+   carries no tags, so a grant whose `dst` names `tags` does not reach it. Without a grant of
+   that shape, no client reaches Dispatch after the move.
 2. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
    name a machine holds. Dispatch is off the tailnet from here on.
 3. Pass the stack a `tailscale` provider for the tailnet: the component declares `svc:<hostname>`
-   itself, with its port `tcp:443` and its `tags`, after the Cloud SQL instance, and the Serve
+   itself, with its port `tcp:443` and no tags, after the Cloud SQL instance, and the Serve
    ConfigMap and the front door's Deployment wait for it.
 4. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
    ([The front door](#the-front-door)).
@@ -1449,8 +1462,8 @@ in one apply:
 2. In the next apply, remove that resource and the `tailnetService` argument from the program and
    pass the component a `tailscale` provider. The component registers the Service without the
    consumer's dependency, its create is an upsert, so it adopts the live `svc:<hostname>` and
-   writes the component's comment, port `tcp:443` and `tags` over it; the consumer's retained
-   delete then removes its own state entry and leaves the Service where it is.
+   writes the component's comment and port `tcp:443` over it, sending no tags; the consumer's
+   retained delete then removes its own state entry and leaves the Service where it is.
 
 Do not reach for `pulumi state delete` on the consumer's Service instead. A stack that passed
 that Service's `Name` as `tailnetService` has the component depending on it — the SDK puts the
@@ -1463,7 +1476,7 @@ Removing the consumer's declaration without the retain deletes the Service in th
 after the component has adopted it: readers lose `<hostname>.<tailnetDnsName>`, and the
 component's state still records a Service that is gone, so the next `up` plans nothing until a
 `pulumi refresh`. Keeping both declarations is no better: two resources then own one Service and
-each apply overwrites the other's tags.
+each apply overwrites what the other declared.
 
 ### YAML
 

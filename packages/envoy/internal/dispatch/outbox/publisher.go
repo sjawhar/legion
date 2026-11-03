@@ -16,8 +16,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -29,8 +27,7 @@ import (
 
 const (
 	// batchSize is the most events a batch sends, and the most it reads of one owner.
-	batchSize       = 100
-	compactInterval = 24 * time.Hour
+	batchSize = 100
 	// dispatchTopicPrefix is the prefix of every owner's topic family: an issue's, a document's
 	// and a project's events are published under it.
 	dispatchTopicPrefix = "notifications.dispatch."
@@ -67,11 +64,6 @@ type Publisher interface {
 	ConnectionChanged() <-chan struct{}
 }
 
-// documentCompactionLease names the lease the daily document compaction runs under. It walks
-// every document, so two envoy-dispatch processes compacting at the same moment is twice the work
-// for one result.
-const documentCompactionLease = "document-compaction"
-
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	// Store is what the outbox reads and records events through, and its pool is the one the
@@ -85,11 +77,6 @@ type Deps struct {
 	// Listen dials the outbox's LISTEN connection (pglisten.Listener.Dial): cmd/dispatch passes
 	// store.Pool.Listener.
 	Listen func(ctx context.Context) (*pgx.Conn, error)
-	Docs   docs.API
-	// Leases is where the compaction tick takes documentCompactionLease (compactDaily). It
-	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
-	// exits at boot if the lease pool cannot be opened.
-	Leases duty.Leases
 	// RoleClaims and Sessions are where a role route's holder is resolved (roles.ResolveHolder,
 	// resolveRoleHolders): role claims read from the role bucket, released there when their holder
 	// is gone, and holders read from the session bucket. cmd/dispatch passes one roles.Buckets for
@@ -120,31 +107,6 @@ func (d Deps) countPublishFailure(reason string) {
 		return
 	}
 	d.PublishFailures.Inc([2]string{"reason", reason})
-}
-
-// compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
-// own: a compaction walks every document for minutes, and on the outbox's loop nothing would
-// publish meanwhile. It goes through the document service's store, not the outbox's pool.
-//
-// Each compaction runs under documentCompactionLease, so that one process does that walk however
-// many serve the database, once per compactInterval and not once per process: the period is this
-// loop's own interval, so a process whose tick comes hours after the other's finds the day's
-// compaction already done and skips it. The ticks are duty.RunLeased's, a ticker's: the first one
-// interval after the call, then one each interval; the first tick a compaction overran comes at
-// once with the moment it was due, and only the ones after it are dropped.
-func compactDaily(ctx context.Context, deps Deps) {
-	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeased(ctx, deps.Leases, documentCompactionLease, compactInterval, duty.TickAfterInterval, func(ctx context.Context) {
-		compactDocuments(ctx, deps)
-	})
-}
-
-// compactDocuments is one daily compaction of every document, the pass compactDaily runs under
-// documentCompactionLease.
-func compactDocuments(ctx context.Context, deps Deps) {
-	if err := deps.Docs.CompactAll(ctx); err != nil {
-		slog.Error("dispatch outbox: compact documents", "error", err)
-	}
 }
 
 // fence is what a batch checks before each act it may make only while this process holds the

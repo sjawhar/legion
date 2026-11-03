@@ -112,6 +112,14 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
+	// repositories is the daemon's view of the project's repositories, which the outbox reads for
+	// the deployment's repository equivalence alone (`repository_renames`): which repository
+	// GitHub holds a recorded one under now, for the token and the address of every GitHub call
+	// it makes (serving), and whether two names are one repository, for a deploy run's head
+	// repository against the name a check's record keeps (repositories.same). Nil in a test that
+	// configures neither, where a recorded repository is served under its own name and two names
+	// are one when they match without case.
+	repositories *repositories
 	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
 	// deadline: a row that spends one of those budgets waits for the latest deadline among them
 	// (standingLimit) rather than meet a limit again. The lanes run rows on many goroutines, so
@@ -138,13 +146,13 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, repositories *repositories, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -1297,11 +1305,21 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 	}
 	// The token is minted when the provision opens GitHub, under the repository's store lock
 	// (workspace.FromGitHub), never here: a provision may wait on that lock behind its
-	// repository's whole queue, longer than a cached token has left to live.
+	// repository's whole queue, longer than a cached token has left to live. Its owner is the one
+	// GitHub holds the repository under now (serving), since a configured rename's transfer moved
+	// the repository onto that owner's installation; the address below stays the repository the
+	// record names. GitHub's own documentation of a transfer says "All links to the previous
+	// repository location are automatically redirected to the new location. When you use `git
+	// clone`, `git fetch`, or `git push` on a transferred repository, these commands will
+	// redirect to the new repository location or URL", so the clone this provisions reaches the
+	// repository under either name — and the name it keeps is what this issue's workspace, its
+	// shared clone and, under the Sandbox runtime, its pod's feed and repository cache are keyed
+	// by, which a rename must not move.
+	owner := r.repositories.serving(repo).Owner()
 	mint := func() (string, error) {
-		lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+		lease, err := r.tokens.Token(ctx, appauth.Implement, owner)
 		if err != nil {
-			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", owner, key, err)
 		}
 		return lease.Token, nil
 	}
@@ -1512,10 +1530,15 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	if r.tokens == nil {
 		return errors.New("check compare executor has no GitHub App token manager")
 	}
-	repository, err := ghrepo.Parse("the production check's repository", check.Repo)
+	recorded, err := ghrepo.Parse("the production check's repository", check.Repo)
 	if err != nil {
 		return fmt.Errorf("compare %s's production check: %w", row.Issue, err)
 	}
+	// The check's record keeps the repository it was written under, while GitHub holds it under
+	// the name a configured rename moved it to, on that owner's installation: the compare and the
+	// merge-commit read below are REST reads, so both the token and the address are that one
+	// (serving), mapped once here.
+	repository := r.repositories.serving(recorded)
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
@@ -1582,10 +1605,13 @@ type deployJob struct {
 // merged_at, the cutoff, and its merge commit, recorded when the check has none (adoptMergeCommit)
 // as a build compare records it. The run attempt is read from GitHub rather than trusted from the
 // envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
-// another workflow file, branch or head repository, or one a pull request triggered (whose head is
-// the pull request's, never production's), wakes nothing, and neither does a run GitHub does not
-// know (404); each is logged. Nor does an attempt GitHub does not name `completed`, whatever the
-// envelope said: a forged completion of an attempt still running would wake the check mid-run and
+// another workflow file or branch, one whose head repository is neither the check's nor the other
+// name of a configured rename of it (`repository_renames`: GitHub answers a repository's name as
+// it is today, while the check's record keeps the name it was written under), or one a pull
+// request triggered (whose head is the pull request's, never production's), wakes nothing, and
+// neither does a run GitHub does not know (404); each is logged. Nor does an attempt GitHub does
+// not name `completed`, whatever the envelope said: a forged completion of an attempt still
+// running would wake the check mid-run and
 // spend the jobs' event ids, so the genuine completion would wake nothing. It is logged and
 // finishes without a retry, since the attempt's own completion queues a row of its own. A completed
 // attempt is read whatever its conclusion: a failed run whose deploy step succeeded still deployed.
@@ -1650,7 +1676,7 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		why = fmt.Sprintf("the run is of workflow %q, not %q", run.Path, deploy.Workflow)
 	case run.HeadBranch != deploy.Branch:
 		why = fmt.Sprintf("the run is on branch %q, not the default branch %q", run.HeadBranch, deploy.Branch)
-	case !strings.EqualFold(run.HeadRepository.FullName, check.Repo):
+	case !r.repositories.same(run.HeadRepository.FullName, check.Repo):
 		why = fmt.Sprintf("the run's head repository is %q, not %s", run.HeadRepository.FullName, check.Repo)
 	case run.Event == "pull_request" || run.Event == "pull_request_target":
 		why = fmt.Sprintf("a %s event triggered the run", run.Event)
@@ -1822,17 +1848,21 @@ func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload 
 	return nil
 }
 
-// createBranch creates issue's branch on GitHub, in the repository its record names, at the
-// default branch the record names, unless GitHub already has it, as the implement App for that
-// repository's owner: the App of the roles that write an issue branch (appauth.AppRoleFor), and
-// the one workspace provisioning clones with.
+// createBranch creates issue's branch on GitHub, in the repository GitHub holds the one its
+// record names under now (serving), at the default branch the record names, unless GitHub
+// already has it, as the implement App for that repository's owner: the App of the roles that
+// write an issue branch (appauth.AppRoleFor), and the one workspace provisioning clones with.
+// The create is a REST write, so a tree recorded before a transfer gets its branch on the
+// repository as GitHub holds it today rather than a write to an owner whose installation has
+// lost it.
 func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
 	defer cancel()
-	repo, err := issue.Repository()
+	recorded, err := issue.Repository()
 	if err != nil {
 		return err
 	}
+	repo := r.repositories.serving(recorded)
 	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)

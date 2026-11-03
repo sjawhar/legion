@@ -25,12 +25,12 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 ```
 
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
-- An open ask is the request. Do not repeat it in each message.
+- An open ask is the request; never repeat it per message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
-- Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
+- Reply on an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note needing nothing. An approval request a newer version moved needs `request-approval` again.
 - When an answer's option and text disagree, the text wins.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
-- An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
+- An ask reaches the issue's assignee; if none, name who answers.
 
 ## Choosing what to work on
 
@@ -47,8 +47,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. `dispatch resolve-ask` it that turn once anything makes it needless: another answer, a later write, work dropped.
-- Retract an ask a new one replaces.
+- Resolve your open ask (`dispatch resolve-ask`) the turn it turns needless: another answer, a later write, dropped work, a replacement. If a person said keep it open, say why in its thread; they close it.
 
 ## Structure over stream
 
@@ -67,8 +66,10 @@ Link each item you name:
 ```text
 dispatch://KEY
 dispatch://KEY/spec
+dispatch://KEY/spec#b-<block>[@vN]
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@vN]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>
@@ -78,9 +79,9 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id, filename or local path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
+A bare id, filename or path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: the command takes a prefix, a person's link does not.
 
 ## Setup and the HTTP API
 
-- Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
+- Use a personal token from **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
 - `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.
