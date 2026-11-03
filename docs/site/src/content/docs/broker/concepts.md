@@ -114,10 +114,11 @@ is refused, to the 30-second client timeout, when nothing behind a front door ev
 with a proxy that gives up or a terminating pod that resets ending one between the two.
 Each renewer waits from the instant its failure comes back, so that instant is what decides
 where its next renewal falls.
-Which renewer sets the floor changes with the sweep: `agent-secrets-helper` waits at least 30
-seconds after any failed renewal, which costs it at short sweeps, while `agent-secrets renew`
-retries every 2 to 10 seconds, which lets it spend more of a long gap and still have a renewal
-left to lose at the end of it.
+Which renewer sets the floor changes with the sweep: `agent-secrets renew`'s floor grows steadily
+with the sweep, while `agent-secrets-helper`, which waits at least 30 seconds after any failed
+renewal, stays at 91 seconds up to a 10-second sweep, where an outage can refuse only its first
+renewal, and rises faster after that. So `agent-secrets renew` is the stricter of the two only
+at sweeps of 7 to 10 seconds, and the helper at every other.
 The default lease
 of 900 seconds passes at every sweep the broker takes.
 A deployment whose `BROKER_LEASE_SECONDS` is below its sweep's floor has to raise it before it

@@ -43,7 +43,7 @@ func delaysOf(p Phase) []time.Duration {
 //
 // A renewal the outage refuses fails at any instant from the one it went out at to ClientTimeout
 // after it, not only at one of those two. That is what the rows at a 10-second and a 60-second
-// sweep turn on: three renewals refused at once, one that fails part of the way through its
+// sweep turn on: two renewals refused at once, one that fails part of the way through its
 // timeout and so goes out again at the last instant inside the gap, and that one held for the
 // whole timeout, which is what pushes the renewal that gets through past the lease.
 func TestSurvivesWalksEachRenewersOwnRetrySchedule(t *testing.T) {
@@ -153,9 +153,11 @@ func TestSurvivesWalksEachRenewersOwnRetrySchedule(t *testing.T) {
 //
 // A short sweep is searched whole: at one second the gap is three seconds, so an outage
 // refuses two or three renewals and a grid of one second over each one's failure instant
-// covers every walk. The longer sweeps let an outage refuse twenty renewals, where a whole
-// search is nothing any test can run, so they are sampled: ten thousand walks per lease, their
-// delays drawn from a seed this row fixes, beside the two walks at the ends of the range.
+// walks every combination of those instants. A grid can only miss a worse instant, never
+// invent one, so it checks the pass from one side, the side that matters: no walk it finds
+// renews later than WorstFor. The longer sweeps let an outage refuse twenty renewals, where a
+// whole search is nothing any test can run, so they are sampled: ten thousand walks per lease,
+// their delays drawn from a seed this row fixes, beside the two walks at the ends of the range.
 func TestNoOutageRenewsLaterThanWorstForFound(t *testing.T) {
 	m := Production()
 	for _, sweep := range []time.Duration{time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute} {
@@ -223,10 +225,10 @@ func (m Model) sampleFailures(r Renewer, lease, gapEnd time.Duration, walks int)
 
 // TestShortestIsTheWorseOfTheTwoRenewers pins the shortest lease the broker can accept at the
 // sweeps the documents and the tests name, and that it is the worse of the two renewers' own
-// floors at every sweep the broker takes. Which renewer sets it changes with the sweep: the
-// helper waits at least 30 s after a failed renewal, which costs it at short sweeps, while
-// agent-secrets renew retries every 2 to 10 seconds, which lets it spend more of a long gap and
-// still have a renewal left to hold at the end of it.
+// floors at every sweep the broker takes. Which renewer sets it changes with the sweep:
+// agent-secrets renew's floor grows steadily with the sweep, while the helper's stays at 91 s
+// up to a 10-second sweep, where its gap can refuse only its first renewal, and rises faster
+// after that. So agent-secrets renew is the stricter only at sweeps of 7 to 10 seconds.
 func TestShortestIsTheWorseOfTheTwoRenewers(t *testing.T) {
 	m := Production()
 	for _, c := range []struct {

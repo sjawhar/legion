@@ -136,12 +136,13 @@ func TestRenewLoopOutlivesAnOutageOnlyAboveTheLeaseBound(t *testing.T) {
 					delays = append(delays, a.Delay())
 				}
 			}
-			// The model's worst outage ends on the very instant the renewal it refuses last
-			// goes out, which no real-time rig can reproduce: the loop's own renewal lands
-			// some milliseconds late and finds the broker already back. The rig holds the gap
-			// open margin longer, so that renewal is inside it by more than any loaded machine
-			// adds, while the renewal after it is still well outside. The guard below measures
-			// that against this phase rather than assuming it.
+			// The model's worst outage ends one instant after the renewal it refuses last goes
+			// out; in the two rows below that renewal is the first, which goes out on the very
+			// instant the gap begins. No real-time rig can land a renewal on a model instant:
+			// the loop's own renewal lands some milliseconds late. The rig holds the gap open
+			// margin longer, so a late renewal still meets the outage, while the renewal that
+			// gets through is still well outside it. The guard below measures that against this
+			// phase rather than assuming it.
 			const margin = 10 * outageUnit
 			if slack := want.Renewed - want.GapEnd; slack < 4*margin {
 				t.Fatalf("a gap held open %v longer leaves %v before the renewal that gets through (%v); this row needs the margin well inside that", margin, slack, want.Renewed)

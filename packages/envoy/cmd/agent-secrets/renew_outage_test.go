@@ -29,10 +29,11 @@ import (
 //
 // The outage is the worst one the model found, and this rig reproduces the whole of it: it
 // begins gapOffset from the renewer's first renewal (which is at or before that renewal, since
-// a gap that began later would let it through and start the lease again), and holds the
-// renewals holds names, refusing the rest at once. That pattern is the half of the worst case a
-// gap start alone does not carry: a renewer refused at once retries sooner, which can place a
-// later renewal just before the broker returns, where holding that one costs the whole timeout.
+// a gap that began later would let it through and start the lease again), and fails each
+// renewal it refuses after the delay delays names for it, from at once to the whole client
+// timeout. That pattern is the half of the worst case a gap start alone does not carry: a
+// renewal that fails part of the way through its timeout puts the next one just before the
+// broker returns, where holding that one costs the whole timeout.
 type outageRig struct {
 	mu        sync.Mutex
 	now       time.Duration
@@ -138,10 +139,11 @@ func (r *outageRig) after(cancel context.CancelFunc, t *testing.T) func(time.Dur
 }
 
 // TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound drives the real renewLoop through the worst
-// outage of leasetime.NotServingSweeps sweeps the model found for this renewer, at the two
-// leases either side of its own boundary. At the largest lease the model refuses, the renewal
-// that gets through comes after the enrollment ended and the renewer exits 76, the exit that
-// told INFRA-487's pods their session was gone; one second more and it renews. The walk it
+// outage of leasetime.NotServingSweeps sweeps the model found for this renewer, at one lease
+// below its floor and one above it, each far enough from the boundary that a real-time loop
+// cannot carry it across (minMargin). Below the floor, the renewal that gets through comes after
+// the enrollment ended and the renewer exits 76, the exit that told INFRA-487's pods their
+// session was gone; above it, it renews. The walk it
 // takes is asserted instant by instant against the model config.Load refuses by, so the two can
 // never say different things about the same renewer.
 func TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound(t *testing.T) {
@@ -200,9 +202,9 @@ func TestRenewLoopOutlivesAnOutageOnlyAtTheLeaseBound(t *testing.T) {
 			}
 			// The renewer reads its lease a few milliseconds after the broker granted it —
 			// signing the proof and the round trip are inside that reading — so its own walk
-			// is the model's at the lease it read, three times the wait it kept. The boundary
-			// above is two thirds of a second wide, far wider than that reading costs, so
-			// which side of it this lease falls on is the same either way.
+			// is the model's at the lease it read, three times the wait it kept. Each lease
+			// above is at least minMargin from the boundary, far more than that reading costs,
+			// so which side of it this lease falls on is the same either way.
 			if short := leasetime.RenewAfter(c.lease) - rig.firstWait; short < 0 || short > 100*time.Millisecond {
 				t.Fatalf("the renewer waited %v after a lease of %v, want a third of it", rig.firstWait, c.lease)
 			}

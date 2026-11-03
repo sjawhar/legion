@@ -920,9 +920,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	// A gap of up to leasetime.NotServingSweeps sweeps still reads as a broker serving, so none
 	// of it is given back and a lease that ran out inside it is simply over. Surviving one is
-	// not one wait but the whole retry schedule of whichever renewer holds the lease, with one
-	// of its renewals held to the client timeout where that costs the renewer most, which
-	// leasetime walks for both of them.
+	// not one wait but the whole retry schedule of whichever renewer holds the lease, each
+	// renewal the outage refuses failing at whatever instant from at once to the client timeout
+	// costs the renewer most, which leasetime walks for both of them.
 	//
 	// This refuses pairs an older broker booted: the rule it replaced counted only two thirds
 	// of the lease, so a deployment whose BROKER_LEASE_SECONDS is below the floor this prints
