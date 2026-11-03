@@ -108,6 +108,27 @@ func TestTLSCertificateErrorRecognizesClientRefusals(t *testing.T) {
 	}
 }
 
+// curl names one refusal in two ways, by version, and an image may carry either: an image built
+// on another distribution keeps that distribution's curl. Read as no certificate error, a positive
+// control's refusal is "unavailable" and the probe fails an image that is safe.
+func TestTLSCertificateErrorRecognizesEachCurlRefusal(t *testing.T) {
+	for _, testCase := range []struct {
+		name, detail string
+		want         bool
+	}{
+		{"curl 8.14", "curl: (60) SSL certificate problem: unable to get local issuer certificate", true},
+		{"curl 8.18", "curl: (60) SSL certificate OpenSSL verify result: unable to get local issuer certificate (20)", true},
+		{"no route", "curl: (7) Failed to connect to example.com port 443 after 3 ms: Could not connect to server", false},
+		{"timeout", "curl: (28) SSL connection timeout", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := tlsCertificateError(testCase.detail); got != testCase.want {
+				t.Fatalf("tlsCertificateError(%q) = %v, want %v", testCase.detail, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestTLSCommandDetailKeepsCertificateErrorTail(t *testing.T) {
 	detail := trimTLSDetail(tlsCommandMessage(nil, strings.Repeat("x", tlsDetailLimit)+" invalid peer certificate"))
 	if !tlsCertificateError(detail) {

@@ -805,8 +805,12 @@ of its `.opencode/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.
 The extension registers no Dispatch tool: agents run the `dispatch` command in their shell
 (`dispatch --help`, `dispatch <command> --help`), one command per spec of `@legion/contracts`'s
 `dispatchToolSpecs`. `bin/dispatch` is a shim that runs the bundled `dist/dispatch.js` with `bun`,
-and exits 2 naming the file when the plugin was not built. At module load `extensions/envoy.ts`
-puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH`, sets
+and exits 2 naming the file when the plugin was not built. The manifest's `omp.bin` names the
+plugin's `bin/`, and an Oh My Pi that supports the field puts it on `PATH` under the plugin's
+installed path before the module loads; a realpath entry, which is all the module's own location
+gives, dies with its directory when a symlinked plugins root is re-pointed and the old target
+removed. At module load `extensions/envoy.ts` puts `bin/` (one directory above the module in both
+layouts) first on `PATH` only when no `PATH` entry already resolves to it (an older Oh My Pi), sets
 `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`
 ("Configuration"); Oh My Pi snapshots `process.env` for its shell when it first runs one, after
 every extension has loaded, so all three reach every shell command. `bindDispatchSession` sets
@@ -889,19 +893,35 @@ every request as a session without it, plus the skill's own tokens. `src/dispatc
 holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after
 a compaction, and without Dispatch on the real binary.
 
-The same `context` handler appends, after the last message of each main-loop request, what
+The same `context` handler adds to each main-loop request what
 people wrote to the session in the last 72 hours: `readSessionAnswers`
 from `@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
-separate user message (`src/session-answers-context.ts`), never merged into the last message and
-never at the head. The session is the one `replyAddress` names: the top-level one's
+separate user message (`src/session-answers-context.ts`), never merged into a message of the
+conversation and never at the head. The session is the one `replyAddress` names: the top-level one's
 `getSessionId()`, and for a `task` subagent its parent's, resolved through `resolveEnvoySession`,
 which is also the session it writes to Dispatch as (`DISPATCH_SESSION_ID`); a subagent this
 process cannot place carries no list. Dispatch is resolved per request with `commands: "kept"`,
 so no `!` token command runs on the request path, and `readSessionAnswers` works out the cache's
-directory from `process.env`. Position: Oh My Pi marks every message a `context` handler adds as
-per-call, and its Anthropic placement puts no `cache_control` on a per-call message, so the
-anchors stay on the conversation's own last messages and a change in the list re-reads none of
-the cached prefix; at the head, every change would invalidate everything after it.
+directory from `process.env`. Position: the list goes after the request's last message only when
+it shows an item, or an answer or comment a person changed, that the session's list before it did
+not (`SessionAnswersRead.words`, from `sessionAnswersWords` over the items the list shows, so an item the cap left out was not seen: each item's kind, id, author, times,
+options chosen and words, so an issue title, an ask's question or a cached list's header does not
+count); on the requests after that it stays right after that message, found by role, timestamp
+and a tool result's call id, with its current text, so the request ends with its own last message
+and the model does not read a list with nothing new in it as a new turn and answer it on every
+turn. A list that only lost items, or the failure line, keeps its place. A session with no list
+placed yet in this process, or whose list's message is no longer in the request (a compaction
+summarized it, the branch moved), gets it after the last message again. Each session's place and
+last list live in a process-wide `WeakMap` by `sessionManager` and then session id, since Oh My Pi
+keeps one `sessionManager` across a session switch (on `globalThis` under
+`Symbol.for("legion.pi-envoy.session-answers-placements.v1")`). While the session compacts
+(`compacting`) or right after a cut, the list goes after the last message and no place moves, so
+a main-loop request between a speculative compaction's cut and its whole conversion leaves the
+compaction the messages it counts. Oh My Pi marks every message a
+`context` handler adds as per-call, and its Anthropic placement puts no `cache_control` on a
+per-call message and keeps the rolling tail anchor on the conversation's last message, so a list
+that keeps its place and its bytes is inside the cached prefix of the next request, and a change
+in it re-reads only the bytes after it; at the head, every change would invalidate everything after it.
 
 The pinned host (18.12.2) runs a `context` handler on every conversion of messages for a model,
 not only on the main loop's requests, and `withSessionAnswers` adds no list, and starts no read,
@@ -913,14 +933,17 @@ handoff converts `[...conversation, user prompt]`, the prompt `attribution: "age
 with the host's `handoff-document.md`; Anthropic remote compaction (`buildLiveProviderContext`)
 converts the conversation up to its cut, counts the result and keeps that many messages of the
 whole conversation's conversion, so the request that ends at a message the session's branch
-(`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, which a
-retry drops from the context but not from the branch, does not count as later). The branch's
+(`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, and the
+results the host wrote for its tool calls, which a retry drops from the context but not from the
+branch, do not count as later). The branch's
 messages are those the compaction builds its conversation from (`MI`): a `message` entry's
 message, a `custom_message` entry as role `custom` (every Envoy delivery with `triggerTurn` is
 one, and the cut can fall right after it) and a `branch_summary` entry as role `branchSummary`,
 each timestamped `new Date(entry.timestamp).getTime()`, matched by role and timestamp; a
 `compaction` entry becomes none there, since the earlier summary heads the conversion. The whole
-conversation's conversion carries the list at its end, past the cut. A compaction that keeps no
+conversation's conversion carries the list after its last message, past the cut, and moves no
+session's place, since a list before the cut would push a message out of what the compaction
+keeps. A compaction that keeps no
 tail converts the same messages twice, both ending at the branch's last message, so nothing on
 the branch tells either from a main-loop request: the second is a repeat of the conversion
 before it in the same session (`sessionManager`), ending at the same branch tip with the same
@@ -932,18 +955,22 @@ matching its whole conversion. Each session's last conversion lives in a process
 (on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
 open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
 branch still holds) beside the main loop's request matching it, which can lose that request's
-list; and a `task` subagent, which the host's registry does not list, so its compaction that
-keeps no tail carries the list. The dispatch-first skill goes on all of them as before. Not
+list. The dispatch-first skill goes on all of them as before. Not
 covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
 the queued steers alone through the same handler, which no message tells apart from a first
 turn, so the skill and the list go out with a live steer there.
 
-Two copies of the extension run their handlers in turn on one request. The list's first line is
-`SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is checked for
-it, so a second copy appends no second list. A copy that read no text appends nothing, so each
-copy also records the messages array it decided in a process-wide `WeakSet` (on `globalThis`
-under `Symbol.for("legion.pi-envoy.session-answers-requests.v1")`): the host hands the next
-handler that same array when one returns nothing, and the second copy neither reads nor waits.
+Two copies of the extension run their handlers in turn on one request. Each copy records the
+messages array it decided, and the array it returned with the list, in a process-wide `WeakSet`
+(on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-requests.v1")`): the host
+hands the next handler the array the one before returned, or the same array when it returned
+nothing, so the second copy neither reads, waits nor adds a second list. A copy of an older
+version puts the list after the last message of every request and records no returned array, so a
+request whose last message is a user message stamped 0 (as `userTextMessage` stamps the list)
+starting with the list's first line (`SESSION_ANSWERS_MARKER`, the failure line has its own) is
+decided too: this copy reads nothing for it and moves that list where its own would go. A
+person's own message quoting the marker is never moved, and a list quoted anywhere else is
+conversation and never switches the list off.
 Bounds, all in the shared module: under 8,000 characters (at most 7,999) for the whole message, items newest first as a
 strict prefix with a left-out line naming `dispatch answers`; one read in flight per session and
 Dispatch URL for the whole process, the parent's and every subagent's requests joining it; each
@@ -960,13 +987,14 @@ handler no abort signal: it races the handler against the run's own and drops an
 handler's result. A handler that throws loses
 everything it returns, the skill included, so a read that throws rather than answering carries
 the failure line naming the error. `src/session-answers-context.test.ts` holds the insertion
-rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
+and placement rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
 handler, a subagent reading its parent's id, a Dispatch that answers no list (the failure line)
 and one with no answers route (no line, one warning for two requests), and
 `extensions/session-answers-omp.test.ts` the real binary: a new answer in the next turn, after a
 compaction and in a subagent's first request; every kind of item word for word; the cap; a route
 that never answers costing a request under one second; a route that answers 404 (no line); the cache
-prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
+prefix byte for byte with no `cache_control` on the list; a list with nothing new staying after
+the first turn's prompt while later requests end with their own and cache through it; a `/btw` side turn and the handoff
 ending with their own prompts, with no list and no read; a remote compaction request ending at
 its cut, after a question and after a delivered message, and one that keeps no tail carrying no
 list (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which the
@@ -1082,7 +1110,7 @@ state never nudges.
 | Registration and role state | `src/registration-state.ts`, `src/registration-state.test.ts` | The two serial queues (`passes` and `roleMoves`), each task's deadline and its handle, the registration and role state queued tasks write, this extension instance's client instance id, and each named operation the plugin makes outside a queue. `extensions/envoy.ts` declares none of it ("Critical conventions" below) |
 | Legion lifecycle | `../pi-legion/` | The daemon client, the claim and controller sessions, the `legion` tool and the phase stall are `@sjawhar/pi-legion`'s: see `packages/pi-legion/AGENTS.md` |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
-| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
+| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts`, `package.json`'s `omp.bin` | The extension registers no Dispatch tool: Oh My Pi puts the plugin's `bin/` on `PATH` from `omp.bin`, and at load the extension puts it first on `PATH` itself only when no entry already resolves to it, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
 | AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules-check.ts`, `breaker.ts`, `decision-record.ts` (the Dispatch record of each rule decision, each override and each unmarked write that carries an ask) and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and the report: `scripts/askgate-report.ts` over the `advisor-gate` entries on disk (`--sessions`), which also reads the command line of both modes, `scripts/askgate-report-dispatch.ts` over a project's decision documents (`--dispatch-project`), and `scripts/askgate-report-common.ts` what the two count with. The gate's own Dispatch, like the extension's, is built by `src/dispatch-session.ts` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |

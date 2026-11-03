@@ -10,7 +10,7 @@ date: 2026-10-24
 status: active
 module: skills/legion-worker
 applies_when:
-  - A planner records decisions in the Dispatch plan document and a summary in plan.json
+  - A planner records decisions in the Dispatch plan document and a summary in the plan handoff
   - A phase worker is about to act on something the plan did not spell out in its own handoff
   - A reviewer submits a round while still checking part of the diff
   - A finding or ruling lands after a review has been submitted

@@ -763,10 +763,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
-	// the room's ready barrier after it), so nothing writes the tree while this walks it.
+	// the room's ready barrier after it), so nothing writes the tree while this walks it. Its
+	// rendering, with the layout recorded with it, goes to the room's replica (keepReplica, below),
+	// whose first run takes it as its base's: nothing from here to OpenUpdateLog hands the document
+	// to anything, so the state rendered here is the one the log opens on
+	// (renderedReplica.start). This load holds it only until it hands it over.
+	var loaded *replicaRendering
 	tree, err := treeOf(doc)
 	if err == nil {
-		_, err = documentMarkdown(tree)
+		rendering := &replicaRendering{}
+		rendering.markdown, _, rendering.layout, err = documentRenderingWithLayout(tree)
+		if err == nil {
+			loaded = rendering
+		}
 	}
 	var askBlocks map[string]struct{}
 	switch {
@@ -819,9 +828,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.
-	replica := s.keepReplica(doc, doc.OpenUpdateLog())
+	replica := s.keepReplica(doc, doc.OpenUpdateLog(), loaded)
 	instance := s.keepInstance(room, doc)
-	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (bool, bool, bool) {
+	replica.classify = func(logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (bool, bool, bool) {
 		return s.classifyDrained(room, instance, logged, seq, contentChanged, asks)
 	}
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -877,18 +886,18 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 
 // classifyDrained records the class of logged, the update room's log handed over at commit
 // position seq in instance, given whether it changed the room's rendered markdown and the ask
-// blocks it left when it did (renderedReplica, observedAsks). It is the room's drainClassifier,
-// which runs holding the replica's lock. It reports whether a settlement follows the update, which
-// is every update but a repair's, whether it changed the content, and whether this process made
-// it - a peer's update or a published live write's, rather than another process's append a
-// catch-up applied.
+// blocks it left when it did (renderedReplica). It is the room's drainClassifier, which runs
+// holding the replica's lock. It reports whether a settlement follows the update, which is every
+// update but a repair's, whether it changed the content, and whether this process made it - a
+// peer's update or a published live write's, rather than another process's append a catch-up
+// applied.
 //
 // The cursor is the instance's, taken here rather than looked up when the update reaches the
 // store: a room evicted and reloaded in between is a different instance, which did not take this
 // update and must not be recorded as holding the version it is stored at. An update only the room
 // holds is listed on the instance as unstored (roomInstance.unstored) as it is classified, so a
 // room query of another process can answer with it (unstoredShare).
-func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks *observedAsks) (settles, changed, local bool) {
+func (s *Service) classifyDrained(room string, instance *roomInstance, logged crdt.LoggedUpdate, seq uint64, contentChanged bool, asks func() map[string]struct{}) (settles, changed, local bool) {
 	class := documentUpdateClass{seq: seq, contentChanged: contentChanged, cursor: &instance.cursor, observed: time.Now()}
 	if _, identityRepair := logged.Origin.(*identityClosureOrigin); identityRepair {
 		// A repair's writer appends its update in its own transaction, under the document's
@@ -902,7 +911,7 @@ func (s *Service) classifyDrained(room string, instance *roomInstance, logged cr
 	}
 	var attributed map[string]model.Actor
 	if asks != nil {
-		attributed = s.observeAskBlocksForUpdate(room, asks.askBlocks(), logged.Origin)
+		attributed = s.observeAskBlocksForUpdate(room, asks(), logged.Origin)
 	}
 	class.durable = true
 	origin, published := logged.Origin.(*liveWriteOrigin)
@@ -975,16 +984,26 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // and attributes each one not already recorded (observeAskBlocks), in the same critical section
 // the update observer classifies the update in (renderedReplica.observe): the observer classifies
 // each update in the order the replica took them, so the room's record of its ask blocks moves
-// forward only. The tree walk that lists those ask blocks (observedAsks.askBlocks) runs only once
-// the cheap markdown comparison inside observe already showed a real change, so the no-op path,
-// the common one, pays for neither. It returns the authors it named for blocks no write
-// registered, which the update's append records.
+// forward only. The walk that lists those ask blocks is the asks function the replica's measure
+// of the update answers with (changedBy), which takeLocked hands the replica's drainClassifier,
+// classifyDrained, the caller here: that measure answers one only for an update it found to be a
+// real change, so the no-op path, the common one, pays for neither. A nil askBlocks is that
+// walk's answer when it could not read the document, never a document holding no ask block
+// (askBlockIDs): the room's record is left as it is. It returns the authors it named for the
+// blocks no write registered, which the update's append records.
 //
 // An update another process stored, which a catch-up applied (origin is a remoteUpdateOrigin),
 // introduced its blocks on that process: none of this room's connected peers wrote them, so the
 // blocks are recorded with no author here, as the blocks a room loads with are, and a settlement
 // finds the author that process recorded (askBlockSources.author).
 func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}, origin any) map[string]model.Actor {
+	if askBlocks == nil {
+		// The walk could not read the document it had to walk, and logged that
+		// (renderedReplica.spliceTouched): the room keeps the ask blocks and the authors it
+		// recorded, as it does for an update whose own render failed, which is handed no asks
+		// at all.
+		return nil
+	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor
@@ -998,16 +1017,49 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 	return state.observeAskBlocks(askBlocks, author)
 }
 
-// creditContentChange credits an observed content change to its authors. A service repair (origin
-// registered by serviceTransact) is credited to no one; a browser that was only connected while it
-// happened is not credited either. A committed transaction's live write, which Ledger.Commit
-// applies, was credited when the transaction committed and is not credited again; another
-// process's update, which a catch-up applies (remoteUpdateOrigin), was credited on that process,
-// whose append recorded its authors, and none of this room's peers made it. Any other update is a
-// browser edit by one of the peers, which ygo applies while that peer's connection is registered.
-// ygo does not say which connection sent it, so every connected peer is credited with it: when
-// exactly one is connected it is the latest edit source and replaces `lastActor`, and otherwise
-// the edit cannot be pinned on a single peer and no older actor may stand in for it.
+// originCreditsNoOne is whether a commit's origin names nobody to credit for the update, the one
+// rule both credit paths follow (creditContentChange, unchangedCredit). Four origins credit no
+// one. A service repair's origin, the one serviceTransact registered: the service made that
+// commit, and a browser that was only connected while it happened is not credited for it. A
+// published live write's *liveWriteOrigin: Ledger.Commit credited that write when its transaction
+// committed, and it is not credited again - a case only creditContentChange reaches, since
+// classifyDrained takes no shadow credit for a published update at all (it calls unchangedCredit
+// for an unpublished update alone), so naming it here leaves unchangedCredit's answer on every
+// reachable path the answer it gave before. A catch-up's *remoteUpdateOrigin: another process
+// stored that update, and its append recorded the authors that process credited it to, so none
+// of this room's peers may be named for it on either path. And no origin at all: every commit a
+// loaded room makes names an origin - a browser's update names the peer ygo applied it for (its
+// *peer, ygo's provider/websocket peer_update.go), a service mutation names the sentinel ygo's
+// Server.Apply makes for the call (applyOriginSentinel), which serviceTransact registers as a
+// service origin, a repair names its own *identityClosureOrigin (applySuppressed), a published
+// live write its *liveWriteOrigin and a catch-up its *remoteUpdateOrigin. The room's own load
+// decodes the stored history with no origin, before OnLoadDocument opens the update log and
+// registers this observer (ygo's loadRoomDoc), so no observer ever sees it. A nil origin here can
+// therefore only be ygo's own cleanup transaction, which a document commits for itself after a
+// remote delete leaves a text's formatting markers covering no text (reearth/ygo #284): nobody
+// typed it, so neither credit path may name anyone for it. On the replica's recover path, where
+// every update it could not place counts as a content change, crediting it would hand every
+// connected browser an edit none of them made (INFRA-644); on the shadow path, a cleanup the room
+// measured as no change is stored as a change wherever an open write's shadow measures one
+// (storedClasses), which would store those browsers as its authors.
+func (s *Service) originCreditsNoOne(origin any) bool {
+	if origin == nil {
+		return true
+	}
+	switch origin.(type) {
+	case *liveWriteOrigin, *remoteUpdateOrigin:
+		return true
+	}
+	_, service := s.serviceOrigins.Load(origin)
+	return service
+}
+
+// creditContentChange credits an observed content change to its authors, or to no one where its
+// origin credits no one (originCreditsNoOne). Any other update is a browser edit by one of the
+// peers, which ygo applies while that peer's connection is registered. ygo does not say which
+// connection sent it, so every connected peer is credited with it: when exactly one is connected
+// it is the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned
+// on a single peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
 // (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it, and how
@@ -1015,11 +1067,7 @@ func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]st
 // reach the durable record in the same append. This takes no advisory lock and touches no
 // database: nothing reads F without holding state.mu.
 func (s *Service) creditContentChange(room string, origin any, hold *roomHold, askAuthors map[string]model.Actor) *UpdateCredit {
-	switch origin.(type) {
-	case *liveWriteOrigin, *remoteUpdateOrigin:
-		return nil
-	}
-	if _, service := s.serviceOrigins.Load(origin); service {
+	if s.originCreditsNoOne(origin) {
 		return nil
 	}
 	state := s.lockState(room)
@@ -1034,13 +1082,15 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold, a
 
 // unchangedCredit is the credit a browser update the room's update observer measured as no change
 // carries for the room's shadow (documentUpdateClass.roomCredit): the peers connected as the room
-// took it, as creditContentChange would credit them, recorded only while a live write is open,
-// whose shadow may measure the update a change once the write is stored before it. It is not in F
-// and takes no credit sequence: no version lists an update recorded as no change, and its append
-// writes these authors only when it stores the update as a change. Nil for a service repair, and
-// while no write is open.
+// took it, the authors creditContentChange would credit the same commit to, recorded only while a
+// live write is open, whose shadow may measure the update a change once the write is stored before
+// it. It is not in F and takes no credit sequence: no version lists an update recorded as no
+// change, and its append writes these authors only when it stores the update as a change. It
+// weighs the origin by the same rule that path does (originCreditsNoOne), so a service repair and
+// a commit with no origin at all - ygo's own cleanup, which nobody typed - carry no authors for a
+// shadow to store them with either. Nil too while no write is open.
 func (s *Service) unchangedCredit(room string, origin any, hold *roomHold) *UpdateCredit {
-	if _, service := s.serviceOrigins.Load(origin); service {
+	if s.originCreditsNoOne(origin) {
 		return nil
 	}
 	state := s.lockState(room)
