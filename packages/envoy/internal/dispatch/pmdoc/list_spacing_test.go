@@ -277,12 +277,15 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // would store it are refused by every reader of caller markdown: the blank lines after a quoted item
 // ending in a footnote definition whose typed block holds a fence no fence closed, which that
 // parser reads as the code's; a definition inside a typed block with a list item around it,
-// whose lines and the blank lines next to it that parser counts otherwise; and a blank line
+// whose lines and the blank lines next to it that parser counts otherwise; a blank line
 // inside a typed block a footnote definition in a list item holds, where that parser's reading of
-// the definition's own end and of the item's blank lines meet and this one decides neither.
+// the definition's own end and of the item's blank lines meet and this one decides neither; and a
+// blank line of tight quote markers whose tab opens where the item's content does, where no column
+// rule reads both it and the same line after a spaced marker as that parser reads them.
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
 		"item-definition-callout-opening-with-a-blank-line":                                       typedDefinitionBlankInItem,
+		"tight-quote-markers-with-a-tab-at-the-item-content":                                      tightMarkerTabInItem,
 		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
 		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
 		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,

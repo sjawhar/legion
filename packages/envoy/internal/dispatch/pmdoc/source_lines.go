@@ -290,13 +290,100 @@ func (l sourceLines) blockIndentColumns(typed *typedDirective, depth int) int {
 	return l.textColumn(l.pastQuoteMarkers(start, depth)) - l.quoteContentColumn(start, depth)
 }
 
+// tightMarkerTabEndsBlock reports whether a blank-looking line ending typed block directive, which
+// no fence closes, holds quote markers written tight (a marker another marker follows with no
+// space) and a last tab that opens exactly where the content of the list item around directive
+// does. That is the one shape where this reader's column rule and the browser editor's parser part
+// and no column rule reads both it and the same shape after a spaced marker alike
+// (tightMarkerTabInItem).
+func (l sourceLines) tightMarkerTabEndsBlock(directive *typedDirective) bool {
+	depth := quoteDepth(directive)
+	if depth < 2 {
+		return false
+	}
+	item, ok := ancestor[*ast.ListItem](directive)
+	if !ok || item.FirstChild() == nil {
+		return false
+	}
+	next := nextBlock(directive)
+	end, byFence := l.typedBlockEnd(directive, next)
+	if byFence {
+		return false
+	}
+	content := l.textColumn(startOf(item.FirstChild()))
+	matching := 0
+	first := l.lineOf(startOf(directive)) + 1
+	for line := first; line < end && line < len(l.starts); line++ {
+		if !l.blank(line, quoteBlankLineAt(depth)) {
+			continue
+		}
+		start := l.starts[line]
+		columns := l.textColumn(l.pastQuoteMarkers(start, depth)) - l.quoteContentColumn(start, depth)
+		if columns < tabWidth || columns > l.blockIndentColumns(directive, depth) {
+			// Either measure reads the line the same way, so nothing turns on the tab's column.
+			continue
+		}
+		if l.markersAreTight(start, depth) && l.lastTabOpensAt(start, depth, content) {
+			matching++
+		}
+	}
+	// One such line ends the item wherever the tab's column lands, so both readings agree on it;
+	// it takes a second for the count to decide the item's spread (typedBlankEndNeeds).
+	return matching > 1
+}
+
+// markersAreTight reports whether the first count quote markers on position's line are written
+// with no space between two of them.
+func (l sourceLines) markersAreTight(position, count int) bool {
+	index := position
+	for ; count > 0; count-- {
+		for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+			index++
+		}
+		if index >= len(l.source) || l.source[index] != '>' {
+			return false
+		}
+		index++
+		if count > 1 && index < len(l.source) && l.source[index] == '>' {
+			return true
+		}
+		if index < len(l.source) && l.source[index] == ' ' {
+			index++
+		}
+	}
+	return false
+}
+
+// lastTabOpensAt reports whether the whitespace past count quote markers on position's line ends in
+// a tab that opens at column.
+func (l sourceLines) lastTabOpensAt(position, count, column int) bool {
+	index, at := position, 0
+	for ; count > 0; count-- {
+		for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+			at, index = advanceColumn(at, l.source[index]), index+1
+		}
+		if index >= len(l.source) || l.source[index] != '>' {
+			return false
+		}
+		at, index = at+1, index+1
+	}
+	opens := false
+	for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+		opens = l.source[index] == '\t' && at == column
+		at, index = advanceColumn(at, l.source[index]), index+1
+	}
+	return opens
+}
+
 // lastTabCrossesItemContent reports whether the whitespace past count quote markers on position's
-// line ends in a tab that begins before the content of the list item around typed starts and ends
-// past it. A list item strips the columns before its content from every line it continues, and
-// that parser strips no part of a tab: where the line's last tab is the one straddling that column
-// and the line measures a whole tab or more past the quote's content, the line keeps columns of
-// its own however far typed is indented. With no list item around typed, or one holding nothing,
-// no column answers and none crosses.
+// line ends in a tab that begins at or before the content of the list item around typed starts and
+// ends past it. A list item strips the columns before its content from every line it continues,
+// and that parser strips no part of a tab: where the line's last tab is the one reaching across
+// that column and the line measures a whole tab or more past the quote's content, the line keeps
+// columns of its own however far typed is indented. The tab that begins exactly at that column
+// counts, measured against the headless engine over 9,561 documents, where it is the only verdict
+// the inclusive form moves. With no list item around typed, or one holding nothing, no column
+// answers and none crosses.
 func (l sourceLines) lastTabCrossesItemContent(position, count int, typed *typedDirective) bool {
 	item, ok := ancestor[*ast.ListItem](typed)
 	if !ok || item.FirstChild() == nil {
@@ -442,12 +529,15 @@ func (l sourceLines) typedBlankSpreadsItem(directive *typedDirective) bool {
 	}
 	// A whitespace-only line wider than the block's own indentation holds content for the block to
 	// that parser, which a paragraph after the block continues lazily, so the item's lines carry no
-	// blank line there. A container opening after such a line, and the end of the source, leave it
-	// the item's (typedBlankEndNeeds). Where the block's content ends in a list, such a line is
-	// the item's all the same when its whitespace ends in a tab: measured against the headless
-	// engine, a line of `\t` or ` \t` there spreads the item, while `   ` and `\t ` do not. In a
-	// quote every such line is the item's, the quote's own content ending at it.
-	if depth == 0 && next != nil && isParagraph(next) && !l.holdsOnlyBlockIndent(end-1, depth, directive) &&
+	// blank line there. It takes a block no fence closes for that paragraph to continue: where a
+	// closing fence ends the block, the line is one of the block's own and spreads the item. A
+	// container opening after such a line, and the end of the source, leave it the item's
+	// (typedBlankEndNeeds). Where the block's content ends in a list, such a line is the item's
+	// all the same when its whitespace ends in a tab: measured against the headless engine, a line
+	// of `\t` or ` \t` there spreads the item, while `   ` and `\t ` do not. In a quote every such
+	// line is the item's, the quote's own content ending at it.
+	if depth == 0 && !byFence && next != nil && isParagraph(next) &&
+		!l.holdsOnlyBlockIndent(end-1, depth, directive) &&
 		!(endsInList(directive) && l.whitespaceEndsInTab(end-1)) {
 		return false
 	}

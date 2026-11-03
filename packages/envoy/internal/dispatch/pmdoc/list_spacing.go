@@ -119,8 +119,8 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 				return ast.WalkContinue, nil
 			}
 			reason := readListSpacing(node, lines)
-			if reason == typedDefinitionBlankInItem {
-				refusal = typedDefinitionBlankInItem
+			if reason == typedDefinitionBlankInItem || reason == tightMarkerTabInItem {
+				refusal = reason
 				return ast.WalkStop, nil
 			}
 			if reason == typedFootnoteListBlank && !goldmarkSpreadsItemsBeforeBlanks(node) {
@@ -230,6 +230,11 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	// as that definition's end and as a blank line of the item alike, and refused by name.
 	if holdsTypedBlankInDefinition(list, lines) {
 		return typedDefinitionBlankInItem
+	}
+	// A line of tight quote markers whose last tab opens where the item's content does is read by
+	// neither column rule alone, and refused by name.
+	if holdsTightMarkerTabInItem(list, lines) {
+		return tightMarkerTabInItem
 	}
 	// In a typed block in a footnote definition, whatever quotes or typed blocks stand between, the
 	// browser editor reads a blank line at or after a list as spacing it by what follows.
@@ -404,6 +409,30 @@ func typedBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
 // (typedDefinitionBlankInItem).
 func typedBlankUnder(container ast.Node, lines sourceLines) bool {
 	return eachTypedBlockUnder(container, false, lines.typedBlankSpreadsItem)
+}
+
+// tightMarkerTabInItem is the refusal of a blank-looking line of tight quote markers (`>>`) whose
+// last tab opens exactly where the list item's content does, inside a typed block no fence closes
+// that the item holds. The browser editor's parser reads such a line as the item's where this
+// reader's column rule reads it as the block's, and the rule that would read it as that parser
+// does - counting a tab that opens at the item's content column as crossing it - reads a line of
+// the same shape after a marker written with its space (`> `) as the item's where that parser
+// reads it as the block's (measured against the headless engine: `> 1. a` with its content six
+// columns in and two lines of `>` tab-space-tab). This reader decides neither and refuses the
+// document by this name.
+const tightMarkerTabInItem = "a blank line of tight quote markers whose tab opens where the list item's content does, inside a typed block in that item, which the browser editor reads as a blank line of the item and this reader as the block's own"
+
+// holdsTightMarkerTabInItem reports whether an item of list holds a typed block no fence closes
+// whose own blank-looking lines carry that shape (tightMarkerTabInItem).
+func holdsTightMarkerTabInItem(list *ast.List, lines sourceLines) bool {
+	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
+		if eachTypedBlockUnder(item, false, func(directive *typedDirective) bool {
+			return lines.tightMarkerTabEndsBlock(directive)
+		}) {
+			return true
+		}
+	}
+	return false
 }
 
 // typedDefinitionBlankInItem is the refusal of a blank line inside a typed block that a footnote
