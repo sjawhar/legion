@@ -1705,9 +1705,9 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // sent to subject: the key, a colon, the subject. A publish and a window's
 // JetStream send stamp an envelope that earns a MsgId with it
 // (publishJetStream, window.sendJetStream), so each topic one upstream event
-// is published on keeps its own copy, and a forward passes it to startForward
-// (for RequestCoreTo, StartRequestCoreTo and StartRequestStoredTo alike) as
-// the forward's Nats-Msg-Id. A stream that captures subject stores a forward
+// is published on keeps its own copy, and a forward passes it to
+// StartRequestCoreTo, which RequestCoreTo publishes through, as the forward's
+// Nats-Msg-Id. A stream that captures subject stores a forward
 // sent again to the same subject once, within its duplicate window, and one
 // sent to another subject again, as a message of its own there.
 func ForwardMsgID(dedupeKey, subject string) string {
@@ -1761,9 +1761,9 @@ func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msg
 }
 
 // StartRequestStoredTo publishes a forward as StartRequestCoreTo does, under the same msgID rule,
-// for a holder with no NATS subscriber to answer it: a serving-port session whose stored messages
-// its session consumer delivers, with acknowledgement and redelivery, through the listener's relay.
-// Its Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting
+// for a recipient that answers nothing: a session past its live window (session.Unresponsive),
+// which is still registered and still has the stream's copy waiting for it, but sends no receipt
+// while it is stalled. Its Wait succeeds on the stream's acknowledgement alone, which is that
 // copy, and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or
 // the server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping
 // the reason, and the one publishConfirmed could not confirm the publish for, when it could not).
@@ -1771,18 +1771,8 @@ func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, m
 	return c.startForward(subject, item, msgID, timeout, true)
 }
 
-// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
-// Wait reads.
-type PendingForward struct {
-	receipt  *nats.Subscription
-	deadline time.Time
-	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
-	// may still overrule; nil when it confirmed the publish.
-	unconfirmed error
-	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
-	storedOnly bool
-}
-
+// startForward is what both publish: the forward, its reply subscription and the pending wait,
+// with storedOnly deciding which replies that wait needs.
 func (c *Client) startForward(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
 	if err := checkSubject(subject); err != nil {
 		return nil, err
@@ -1815,9 +1805,21 @@ func (c *Client) startForward(subject string, item contracts.Envelope, msgID str
 	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err, storedOnly: storedOnly}, nil
 }
 
+// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
+// Wait reads.
+type PendingForward struct {
+	receipt  *nats.Subscription
+	deadline time.Time
+	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
+	// may still overrule; nil when it confirmed the publish.
+	unconfirmed error
+	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
+	storedOnly bool
+}
+
 // Wait reads the forward's replies until its outcome is known or its window ends, and releases its
-// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published, and
-// StartRequestStoredTo's for one that published.
+// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published,
+// and StartRequestStoredTo's for one that published.
 func (f *PendingForward) Wait() error {
 	defer f.receipt.Unsubscribe()
 	received, stored := false, false

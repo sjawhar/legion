@@ -161,10 +161,7 @@ func pauseBeforeRetry(ctx context.Context) bool {
 // forwardAndWait forwards item to subject, under msgID as its Nats-Msg-Id when that is not empty,
 // through the delivery configuration's forwardRole and waits for its outcome, which is the form a
 // route needs: it answers its sender with what the forward did, where the role lane hands the wait
-// over and reports it later. storedOnly asks for a forward that counts as delivered once the
-// stream acknowledges storing it, with no receipt (roleForwardStoredOnly): a holder served on a
-// port has no NATS subscriber to answer one, and takes the stored copy through its listener
-// instead.
+// over and reports it later.
 func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, msgID string, window time.Duration, storedOnly bool) error {
 	wait, err := d.delivery.forwardRole(subject, item, msgID, window, storedOnly)
 	if err != nil {
@@ -196,7 +193,7 @@ func unconfirmedReason(lastForward error) sendOutcome {
 // confirm records that sessionID's receipt for the message under dedupeKey arrived through the
 // route. The route's own record (listenerDeps.confirmed) is what a later send of the same key
 // reads, so envoy-client's retry of a send skips a recipient the first attempt confirmed; the
-// delivery handlers' cache is told too, so they do not push the same key to it again.
+// delivery handlers' cache is told too, so they do not deliver the same key to it again.
 func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 	d.confirmed.Record(dedupeKey, sessionID)
 	d.delivery.dedupeCache.Record(dedupeKey, sessionID)
@@ -313,7 +310,7 @@ func (s *roleSend) timedOut(lastForward error) {
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
 // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
-// session whose push they skipped, having heard nothing from it, so a role send under a key one of
+// session whose delivery they skipped, having heard nothing from it, so a role send under a key one of
 // them saw would be answered 200 for a holder that never confirmed it.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
@@ -410,7 +407,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			// The forward carries the same Nats-Msg-Id on every attempt, so the stream, which
 			// captures agent subjects, keeps one copy of it per message and recipient however
 			// many attempts this send makes.
-			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, roleForwardStoredOnly(resolved.Entry))
+			err := d.forwardAndWait(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window, roleForwardStoredOnly(resolved.HolderState))
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -434,9 +431,9 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 // topicRecipients lists the sessions an ad-hoc topic send sends the message to: every session
 // whose registered interests match the topic on any machine (store.Registry.MatchAll), whose
 // session record is not gone and that is self-subscribed, other than the sender. A self-subscribed
-// session holds its own NATS connection and answers a receipt on its agent subject; a session
-// served on a port does not, and keeps the live lane's delivery. A session past the live window is
-// listed here and forwarded to by confirmTopicRecipient, which asks it for no receipt, so the
+// session holds its own NATS connection and answers a receipt on its agent subject; a session that
+// holds none answers nothing, so the route confirms nothing with it. A session past the live window
+// is listed here and forwarded to by confirmTopicRecipient, which asks it for no receipt, so the
 // message is kept for it and the skip of the wait is counted, logged and answered once per send
 // rather than hidden in this filter.
 func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
@@ -474,9 +471,11 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // reported like any other, rather than passed off as a skip.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
-// on, the lane receives this send's own publish on the topic, and its fanout records there every
-// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
+// record (listenerDeps.confirmed) and not the delivery handlers' dedupe cache: that cache holds
+// the session a delivery handed the message to and the session whose delivery it skipped alike,
+// and neither entry is a recipient's word that it has the message. An ad-hoc topic's own publish
+// is core NATS, which the stream does not store (sendToTopic below), so no delivery handler reads
+// this send back at all: the receipts this loop records are the only account of who took it.
 func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {
@@ -524,15 +523,14 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 
 // sendToTopic delivers an ad-hoc topic message through the publish route: a topic no stream subject
 // captures (bus.UsesCoreTransport), which core NATS hands once to whoever is subscribed at that
-// moment. It still publishes the envelope on the topic, for the serve-port sessions the live lane
-// delivers to and any subscriber the registry does not know; then it forwards the same envelope,
-// topic, event_id and dedupe_key unchanged, to the agent subject of every recipient
-// (topicRecipients) in parallel and answers once each confirmed, or 504 not_confirmed naming each
-// that did not once publishDeliveryWindow from arrived has passed. A recipient that took both
-// copies drops the second by its event_id. A recipient past the live window is forwarded to like
-// the rest, so the stream keeps the message for it, and is asked for no receipt: it holds no
-// answer open and fails none, and both the 200 and the 504 name it under unresponsive, so the
-// sender learns the message was kept rather than taken.
+// moment. It still publishes the envelope on the topic, for any subscriber the registry does not
+// know; then it forwards the same envelope, topic, event_id and dedupe_key unchanged, to the
+// agent subject of every recipient (topicRecipients) in parallel and answers once each confirmed,
+// or 504 not_confirmed naming each that did not once publishDeliveryWindow from arrived has
+// passed. A recipient that took both copies drops the second by its event_id. A recipient past
+// the live window is forwarded to like the rest, so the stream keeps the message for it, and is
+// asked for no receipt: it holds no answer open and fails none, and both the 200 and the 504 name
+// it under unresponsive, so the sender learns the message was kept rather than taken.
 //
 // A send whose own publish on the topic did not reach NATS answers 504 publish_failed, whether the
 // window ended first (the publish's reconnect wait used it up) or the publish failed at once on a

@@ -59,7 +59,7 @@ func newWriteRouteRig(t *testing.T) *writeRouteRig {
 func (rig *writeRouteRig) register(t *testing.T, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
-		if err := rig.sessions.Put(id, session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/test/" + id, Title: id}); err != nil {
+		if err := rig.sessions.Put(id, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + id, Title: id}); err != nil {
 			t.Fatalf("register %s: %v", id, err)
 		}
 		if _, err := rig.sessions.Get(id); err != nil {

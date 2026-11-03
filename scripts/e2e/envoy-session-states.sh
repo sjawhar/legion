@@ -82,12 +82,12 @@
 # ---- the named checks ---------------------------------------------------------------------------
 # Each prints `PASS <name>` or `FAIL <name>: <reason>`, every selected check runs whatever the one
 # before it did, and the last line says how many ran and how many passed. The eight requirements of
-# this issue's proof map onto twelve names, because requirements 3 and 7 each hold separate things
+# this issue's proof map onto eleven names, because requirements 3 and 7 each hold separate things
 # whose needs differ and a reader has to be told which of them held:
 #   1  stalled-session-reads-unresponsive     (3) -> 3a send-to-stalled-session-is-stored
 #   2  bus-outage-keeps-claims                       3b stored-deliveries-arrive-once
-#   4  role-claim-survives-lookups                   3c send-to-serving-port-is-refused
-#   5  issue-claim-refuses-the-stalled-holder        3d role-route-reaches-its-holder
+#   4  role-claim-survives-lookups                   3c role-route-reaches-its-holder
+#   5  issue-claim-refuses-the-stalled-holder
 #   6  gone-only-past-the-horizon             (7) -> 7a every-plugin-shows-the-state
 #   8  max-age-change-reaches-both-listeners         7b every-plugin-names-a-stored-follower
 #
@@ -139,7 +139,6 @@ checks=(
   "send-to-stalled-session-is-stored"
   "stored-deliveries-arrive-once omp dispatch model"
   "role-route-reaches-its-holder omp dispatch model"
-  "send-to-serving-port-is-refused"
   "role-claim-survives-lookups"
   "issue-claim-refuses-the-stalled-holder dispatch"
   "gone-only-past-the-horizon omp claude model"
@@ -439,27 +438,16 @@ api() { # api PORT METHOD PATH [BODY]
   [ "$api_status" = 200 ]
 }
 
-# free_port prints a loopback port the kernel has just handed out and nothing is listening on. It
-# is what a serving port the rig registers is picked from, so the registration names a real port
-# and a push to it would reach nothing.
-free_port() {
-  python3 -c 'import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1])
-s.close()'
-}
-
-# registered SESSION PORT SELF TOPICS… writes one session's registration straight onto the wire:
-# the same POST /v1/interests/subscribe a plugin's heartbeat makes, for the sessions a check needs
-# to age by the second rather than by a process's own clock. PORT is the session's serving port, 0
-# for one that receives on its own NATS connection instead.
+# registered SESSION SELF TOPICS… writes one session's registration straight onto the wire: the
+# same POST /v1/interests/subscribe a plugin's heartbeat makes, for the sessions a check needs to
+# age by the second rather than by a process's own clock. The listener refuses a registration that
+# names a port (sjawhar/legion#2674), so every session here receives on its own NATS connection.
 registered() {
-  local session=$1 port=$2 self=$3 body
-  shift 3
+  local session=$1 self=$2 body
+  shift 2
   body=$(jq -cn --arg s "$session" --arg d "$work/registered" --arg t "rig $session" \
-    --argjson p "$port" --argjson self "$self" --args \
-    '{session_id:$s,dir:$d,title:$t,port:$p,self_subscribed:$self,driving:true,topics:$ARGS.positional}' "$@")
+    --argjson self "$self" --args \
+    '{session_id:$s,dir:$d,title:$t,self_subscribed:$self,driving:true,topics:$ARGS.positional}' "$@")
   api "$port_a" POST /v1/interests/subscribe "$body" ||
     refuse "registering $session answered $api_status: $(head -c 200 "$answer")"
 }
@@ -1140,8 +1128,8 @@ check_bus_outage_keeps_claims() {
   local issue first second role=ess-outage-$$ outage=180 claimed_at record
   first=ses_ess_outage_first_$$
   second=ses_ess_outage_second_$$
-  registered "$first" 0 true "notifications.agent.$first" || return 1
-  registered "$second" 0 true "notifications.agent.$second" || return 1
+  registered "$first" true "notifications.agent.$first" || return 1
+  registered "$second" true "notifications.agent.$second" || return 1
   api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$first" --arg r "$role" '{session_id:$s,role:$r}')" ||
     refuse "the role claim was refused: $(head -c 200 "$answer")" || return 1
   issue=$(make_issue "$second" "Bus outage keeps the claims") ||
@@ -1188,7 +1176,7 @@ check_bus_outage_keeps_claims() {
 # ---- 3a. a send to a stalled session is stored, not refused ------------------------------------------------
 check_send_to_stalled_session_is_stored() {
   local target=ses_ess_send_target_$$
-  registered "$target" 0 true "notifications.agent.$target" || return 1
+  registered "$target" true "notifications.agent.$target" || return 1
   wait_until 180 "the target to read unresponsive" state_is "$port_a" "$target" unresponsive unresponsive || return 1
   api "$port_a" POST /v1/messages/send \
     "$(jq -cn --arg t "$target" '{source:"agent",source_session:"ess-sender",target_session:$t,message:"A stored message for a stalled session."}')" ||
@@ -1454,33 +1442,6 @@ check_role_route_reaches_its_holder() {
   note "held through the stall over $attempts attempts, the role forward arrived once after SIGCONT with the claim untouched"
 }
 
-# ---- 3c. a send to a stalled session that receives on a port is refused ---------------------------------------
-# A session with a serving port is reached by a push to that port, and a stalled one answers no
-# push. That send is refused by name, with the state it was refused on, so the sender routes around
-# the pane instead of believing its message was taken.
-#
-# The session is registered straight onto the wire, the same POST /v1/interests/subscribe a
-# plugin's heartbeat makes, on a loopback port the kernel has just handed out: no agent runtime
-# this proof starts receives on a serving port — both plugins register port 0 and receive on their
-# own NATS connection — while the listener's registration route still takes a port and its send
-# route still refuses a stalled session that carries one, so the wire is where that case is driven.
-check_send_to_serving_port_is_refused() {
-  local target=ses_ess_serving_$$ port
-  port=$(free_port) || refuse "no loopback port to register as a serving port" || return 1
-  registered "$target" "$port" false || return 1
-  wait_until 180 "the session on a serving port to read unresponsive" \
-    state_is "$port_a" "$target" unresponsive unresponsive || return 1
-  ! api "$port_a" POST /v1/messages/send \
-    "$(jq -cn --arg t "$target" '{source:"agent",source_session:"ess-sender",target_session:$t,message:"A push to a stalled serving port."}')" ||
-    refuse "the send to the stalled session on port $port was accepted; a push to a port nothing answers must be refused" || return 1
-  [ "$api_status" = 404 ] ||
-    refuse "the send to the stalled session on port $port answered $api_status, not the 404 that names its state" || return 1
-  jq -e --arg s "$target" \
-    '(.error | startswith("no live session " + $s)) and .state == "unresponsive" and (.last_seen | numbers)' "$answer" >/dev/null ||
-    refuse "the refusal does not name the session's unresponsive state and last_seen: $(head -c 300 "$answer")" || return 1
-  note "a send to the stalled session on serving port $port was refused 404 naming unresponsive"
-}
-
 # ---- 4. a role claim outlives every lookup --------------------------------------------------------------
 # What used to release a claim: a lookup, a publish through the listener, a message straight onto
 # the role's topic, and a reaper pass. None of them may now, while the holder is only unresponsive,
@@ -1488,7 +1449,7 @@ check_send_to_serving_port_is_refused() {
 check_role_claim_survives_lookups() {
   local role=ess-lookup-$$ holder=ses_ess_lookup_holder_$$ heir=ses_ess_lookup_heir_$$
   local second=ses_ess_lookup_second_$$ i before after
-  registered "$holder" 0 true "notifications.agent.$holder" "notifications.role.$role" || return 1
+  registered "$holder" true "notifications.agent.$holder" "notifications.role.$role" || return 1
   api "$port_a" POST /v1/roles/set "$(jq -cn --arg s "$holder" --arg r "$role" '{session_id:$s,role:$r}')" ||
     refuse "the role claim was refused: $(head -c 200 "$answer")" || return 1
   before=$(role_record "$role")
@@ -1526,14 +1487,14 @@ check_role_claim_survives_lookups() {
   note "five lookups, a publish, a direct nats publish and a reaper pass left $role with $holder, claimed_at unchanged"
   # A soft claim is the one move that takes the role: a successor saying "this is me again", with
   # and without naming the predecessor it continues.
-  registered "$heir" 0 true "notifications.agent.$heir" || return 1
+  registered "$heir" true "notifications.agent.$heir" || return 1
   api "$port_a" POST /v1/roles/set \
     "$(jq -cn --arg s "$heir" --arg r "$role" --arg p "$holder" '{session_id:$s,role:$r,soft:true,previous_session_id:$p}')" ||
     refuse "a soft claim naming the stalled predecessor was refused $api_status: $(head -c 300 "$answer")" || return 1
   [ "$(jq -r '.holder_session_id' <<<"$(role_record "$role")")" = "$heir" ] ||
     refuse "the soft claim naming a predecessor did not take the role" || return 1
   wait_until 180 "the heir to read unresponsive" state_is "$port_a" "$heir" unresponsive unresponsive || return 1
-  registered "$second" 0 true "notifications.agent.$second" || return 1
+  registered "$second" true "notifications.agent.$second" || return 1
   api "$port_a" POST /v1/roles/set \
     "$(jq -cn --arg s "$second" --arg r "$role" '{session_id:$s,role:$r,soft:true}')" ||
     refuse "a soft claim with no named predecessor was refused for a holder past the live window: $(head -c 300 "$answer")" || return 1
@@ -1545,7 +1506,7 @@ check_role_claim_survives_lookups() {
 # ---- 5. an issue claim refuses the take while its holder is only unresponsive ------------------------------
 check_issue_claim_refuses_the_stalled_holder() {
   local issue holder=ses_ess_issue_holder_$$ other=ses_ess_issue_other_$$ out=$evidence/answers/$check
-  registered "$holder" 0 true "notifications.agent.$holder" || return 1
+  registered "$holder" true "notifications.agent.$holder" || return 1
   issue=$(make_issue "$holder" "An issue claim a stalled holder keeps") ||
     refuse "could not create the proof's issue" || return 1
   dispatch_cli "$holder" claim --issue "$issue" >"$out.claim.txt" 2>&1 ||
@@ -1680,7 +1641,7 @@ check_every_plugin_shows_the_state() {
   # is the behaviour this check reads. An ask that named one would have every host refuse the call
   # on its arguments (parseEnvoyToolArguments) before it reached the listener.
   ask="Call the envoy_sessions tool, then reply with the raw JSON row it gave for the session $peer and nothing else."
-  registered "$peer" 0 true "notifications.agent.$peer" || return 1
+  registered "$peer" true "notifications.agent.$peer" || return 1
   wait_until 180 "the peer to read unresponsive" state_is "$port_a" "$peer" unresponsive unresponsive || return 1
   [ -n "$omp_pid" ] || omp_start || return 1
   # omp_turn, not omp_typed: the transcript is read for what the tool answered, and the host takes
@@ -1734,7 +1695,7 @@ check_every_plugin_names_a_stored_follower() {
   local follower=ses_ess_publish_follower_$$ topic=notifications.team.ess-publish-$$.all
   local marker=ess-publish-$RANDOM$RANDOM ask transcript
   ask="Call the envoy_publish tool with topic $topic and message \"$marker\". Then reply with the tool's whole answer and nothing else."
-  registered "$follower" 0 true "$topic" || return 1
+  registered "$follower" true "$topic" || return 1
   wait_until 180 "the follower of the topic to read unresponsive" \
     state_is "$port_a" "$follower" unresponsive unresponsive || return 1
   # The listener's own answer is read first, straight off the wire, so a host that shows nothing
@@ -1792,7 +1753,7 @@ check_max_age_change_reaches_both_listeners() {
   wait_until 120 "listener B to read the raised $max_age maximum age" \
     healthz_max_age_is "$port_b" "$max_age_shown" || return 1
   note "the raise to $max_age reached both running listeners' /healthz"
-  registered "$late" 0 true "notifications.agent.$late" || return 1
+  registered "$late" true "notifications.agent.$late" || return 1
   note "registered $late after the raise; stalling it ${stall}s, past the shipping maximum age"
   sleep "$stall"
   state_is "$port_a" "$late" unresponsive unresponsive ||

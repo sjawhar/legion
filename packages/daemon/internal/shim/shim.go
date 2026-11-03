@@ -2,7 +2,7 @@
 // and the daemon's worker stream. The shim always dials the daemon — the stream is the daemon's
 // listener, never the shim's — authenticates with the pane's boot token, and spawns OMP only
 // once the daemon has acked it. From then on it carries OMP's stdio NDJSON to the stream and
-// back, answers the frames that are its own (`shutdown`, `adopt-working-copy`, a repeated
+// back, answers the frames that are its own (`shutdown`, `adopt-working-copy`, `rescue-unpushed`, a repeated
 // delivery), and outlives any one connection: a dropped stream is redialled, and what OMP says
 // meanwhile waits in a bounded backlog.
 //
@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -309,7 +310,7 @@ func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
 		switch typ := frameType(line); typ {
-		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
+		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeRescueUnpushed, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
 			// The daemon is its only sender, and it is never OMP's to read.
 			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
@@ -323,6 +324,9 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AdoptWorkingCopy:
 		go s.adopt(f)
+		return
+	case shimwire.RescueUnpushed:
+		go s.rescue(f)
 		return
 	case shimwire.AgentSecretsEnrollment:
 		s.enroll(f)
@@ -594,6 +598,34 @@ func (s *shim) adopt(request shimwire.AdoptWorkingCopy) {
 		result.OK, result.Error = false, err.Error()
 	} else if err := s.runAdoption(request); err != nil {
 		result.OK, result.Error = false, err.Error()
+	}
+	s.toDaemon(result)
+}
+
+// rescue answers `rescue-unpushed`: every workspace on the pod's disk is checked for work its
+// remote lacks, and that work is pushed to rescue branches, as this role and with its own
+// credential (internal/rescue). The disk is the one the shim's LEGION_WORKSPACE is on; a shim
+// without one (the project controller's) has no workspace and refuses.
+func (s *shim) rescue(request shimwire.RescueUnpushed) {
+	result := shimwire.RescueUnpushedResult{ID: request.ID, OK: true}
+	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
+	if err := request.Validate(); err != nil {
+		if request.ID == "" {
+			s.log.Printf("[worker-shim] refusing a rescue-unpushed frame: %v", err)
+			return
+		}
+		result.OK, result.Error = false, err.Error()
+	} else if workspace == "" {
+		result.OK, result.Error = false, "worker-shim: LEGION_WORKSPACE is not set; no disk to check"
+	} else {
+		timeout := time.Duration(request.TimeoutMs) * time.Millisecond
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		result.Workspaces = rescue.Run(ctx, rescue.Request{
+			StateDir: rescue.StateDirOf(workspace), Branch: request.Branch, Env: s.cfg.Env,
+			WorkspaceTimeout: time.Duration(request.WorkspaceTimeoutMs) * time.Millisecond,
+			Deadline:         time.Now().Add(timeout),
+		})
+		cancel()
 	}
 	s.toDaemon(result)
 }

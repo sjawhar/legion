@@ -1095,3 +1095,70 @@ func TestAConfirmationDoesNotSurviveHalfWritten(t *testing.T) {
 			stored.State, stored.Pending)
 	}
 }
+
+// A root architect's task of a run is held, never dropped, while its root has nobody to hear it
+// (Deps.RootHears): such a task names no phase, so nothing else would keep it from being prompted
+// to an architect whose tree is parked, lingering or waiting for its slot, and the decisions it
+// names are told when the turn that takes it starts. It stays pending, uncharged, and the next deliver
+// request — the start of the root's next run, which the pending task refuses — is what sends it.
+// A task of no run is nobody's to hold: an operator's own is prompted whatever the root is doing.
+func TestARootArchitectsTaskIsHeldUntilItsRootHasAnArchitectToHearIt(t *testing.T) {
+	h := newBareHarness(t)
+	h.token = rootToken
+	hears := false
+	asked := 0
+	h.deps.RootHears = func(_ context.Context, c Claim, d Delivery) (bool, error) {
+		asked++
+		if c.Token != rootToken || d.Generation == 0 || d.Phase != "" {
+			t.Errorf("RootHears asked about claim %s and delivery %+v, want only the root architect's task of a run", c.Token, d)
+		}
+		return hears, nil
+	}
+	c := rootClaim()
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	h.start(c)
+	h.reach(StateReady)
+
+	h.must(RequestDeliver{Claim: rootToken, Task: "a person decided on the tree", Generation: 2, Row: 7})
+	h.wantPrompts(0)
+	if p := h.pending(); p.Task != "a person decided on the tree" || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending delivery = %+v, want the held task, unsent and unconfirmed", p)
+	}
+	h.wantBudgets(Budgets{})
+	if asked == 0 {
+		t.Fatal("the held task was never put to RootHears")
+	}
+
+	// The root runs again: its start row is refused by the held task, and that refusal is what
+	// sends the held task on.
+	hears = true
+	err := h.handle(RequestDeliver{Claim: rootToken, Task: "the next run's task", Generation: 3, Row: 11})
+	if !errors.Is(err, ErrDeliveryPending) {
+		t.Fatalf("the next run's deliver = %v, want it refused by the pending task", err)
+	}
+	sent := h.wantPrompts(1)[0]
+	if sent.Message != "a person decided on the tree" {
+		t.Fatalf("prompt = %q, want the task held through the park", sent.Message)
+	}
+}
+
+// An operator's own task names no run, so the hold never applies to it: it is prompted while the
+// root has no architect to hear a task of a run.
+func TestAnOperatorsTaskIsPromptedWhileTheRootHasNoArchitectToHearOne(t *testing.T) {
+	h := newBareHarness(t)
+	h.token = rootToken
+	h.deps.RootHears = func(context.Context, Claim, Delivery) (bool, error) { return false, nil }
+	c := rootClaim()
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	h.start(c)
+	h.reach(StateReady)
+
+	h.must(RequestDeliver{Claim: rootToken, Task: "the operator's own task"})
+	if sent := h.wantPrompts(1)[0]; sent.Message != "the operator's own task" {
+		t.Fatalf("prompt = %q, want the operator's task sent", sent.Message)
+	}
+}

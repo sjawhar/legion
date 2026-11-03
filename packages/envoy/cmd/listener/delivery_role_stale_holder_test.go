@@ -12,12 +12,12 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 )
 
-// storeSessionHeartbeat registers sessionID with the registration time the test chose, by writing
-// its entry into the session bucket itself: SessionRegistry.Put stamps UpdatedAt with the moment
-// of the write (mergeForClaim), so a holder that last registered a while ago is written the way
-// another writer's entry arrives, through the bucket. Every reader judges the record by that
-// UpdatedAt and by nothing else (session.StateOf), so the entry is in the cache and in the bucket
-// for as long as the test runs while its last registration is as old as the test says.
+// storeSessionHeartbeat registers sessionID with the heartbeat the test chose, by writing its
+// entry into the session bucket itself: SessionRegistry.Put stamps UpdatedAt with the moment of
+// the write, so a holder that last heartbeated a while ago is written the way
+// another writer's entry arrives, through the bucket. The session cache dates its copy from the
+// bucket entry's own creation (SessionRegistry.applyWatched), so the entry is in the cache and in
+// the bucket for as long as the test runs while its heartbeat is as old as the test says.
 func storeSessionHeartbeat(t *testing.T, client *bus.Client, sessionID string, heartbeat time.Time) {
 	t.Helper()
 	value, err := json.Marshal(session.SessionEntry{
@@ -63,7 +63,7 @@ func TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating(t *testing.T) {
 		{"a holder whose last registration is past the live window", session.LiveWindow + time.Minute, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			storeSessionHeartbeat(t, harness.client, holder, time.Now().Add(-tc.since))
 			if _, err := harness.registry.SetRole(holder, "test-machine", role, false); err != nil {
 				t.Fatalf("claim the role: %v", err)

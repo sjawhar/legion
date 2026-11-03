@@ -111,7 +111,7 @@ func TestARoleIsHeldByTheSessionItsClaimNamesWhateverTheRecordsTopics(t *testing
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{stale: {contracts.RoleTopicPrefix + "reviewer"}, holder: nil, target: nil},
-		map[string]int{stale: 1, holder: 1, bare: 1, target: 1})
+		[]string{stale, holder, bare, target})
 	// The claims go in as another listener's claim would, straight to the role bucket, so no record
 	// gains a topic on the way.
 	roles, err := client.JS().KeyValue(bus.RoleClaimBucket)
@@ -171,7 +171,7 @@ func TestAClaimsViewThatCannotAnswerIsTheBusNotAnsweringOnTheSessionRoutes(t *te
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{sender: nil, target: nil},
-		map[string]int{sender: 1, target: 1})
+		[]string{sender, target})
 	claimRoles(t, registry, sender, "reviewer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	if got := publishedSender(t, state, sender, target).Roles; !slices.Equal(got, []string{"reviewer"}) {
@@ -276,7 +276,7 @@ func TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes(t
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{holder: nil, target: nil},
-		map[string]int{holder: 1, target: 1})
+		[]string{holder, target})
 	claimRoles(t, registry, holder, "reviewer")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	if got := decodeSessionInfo(t, sessionEntryRoute(t, state, holder)).Roles; !slices.Equal(got, []string{"reviewer"}) {
@@ -323,7 +323,7 @@ func TestARecreatedRoleBucketIsNeverAnsweredAsAHolderWithoutItsRole(t *testing.T
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t,
 		map[string][]string{holder: nil, target: nil},
-		map[string]int{holder: 1, target: 1})
+		[]string{holder, target})
 	claimRoles(t, registry, holder, "reviewer", "planner")
 	claimRoles(t, registry, target, "architect")
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}

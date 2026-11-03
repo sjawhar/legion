@@ -138,7 +138,7 @@ type subscribeResponse struct {
 	store.Interest
 	Warnings []string `json:"warnings,omitempty"`
 	// Delivery is the session's delivery (deliveryAnswer), present whenever the registration
-	// carried delivery or registered a serving port.
+	// carried a delivery object.
 	Delivery *deliveryAnswer `json:"delivery,omitempty"`
 }
 
@@ -935,31 +935,35 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// sessionInfo is the joined view of an Interest (topics, dir, machine) and a
-// SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
-// recorded host or else MachineID (HostOrMachine). Only the session's owner delivers to it
-// (session.Deliverer): the listener its stored subscription names, the one store.Registry.Match
-// delivers on, else the one MachineID names. The owner reaches a session registered through it at
-// its host bridge when one is set, else at the recorded host, else at host.docker.internal; a
-// session that re-registered through another listener is reached at its recorded host, else at
-// MachineID. Any other listener leaves inbox messages to the owner silently.
+// sessionInfo is the joined view of an Interest (topics, dir, machine) and a SessionEntry (its
+// title, its capabilities and how it receives). Returned by GET /v1/sessions. Its host is where
+// the session runs, its recorded host or else MachineID (HostOrMachine); no delivery reads it. An
+// inbox message is the session's owner's to deliver (session.HandleAgentMessage): the listener
+// its stored subscription names, the one store.Registry.Match delivers on, else the one MachineID
+// names. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
 	SessionID string `json:"session_id"`
 	// State is what the session's last registration says about it (session.StateOf): live, or
 	// unresponsive for one past the live window that is not gone. LastSeen below is that
 	// registration, so the two together say how long it has been stalled.
-	State          session.State `json:"state"`
-	MachineID      string        `json:"machine_id"`
-	Host           string        `json:"host"`
-	Dir            string        `json:"dir"`
-	Port           int           `json:"port"`
-	Title          string        `json:"title"`
-	Capabilities   []string      `json:"capabilities"`
-	SelfSubscribed bool          `json:"self_subscribed"`
-	Topics         []string      `json:"topics"`
-	Roles          []string      `json:"roles"`
-	UpdatedAt      int64         `json:"updated_at"`
-	LastSeen       int64         `json:"last_seen"`
+	State     session.State `json:"state"`
+	MachineID string        `json:"machine_id"`
+	Host      string        `json:"host"`
+	Dir       string        `json:"dir"`
+	// Port is 0 for every entry this listener writes: it refuses a registration that names a
+	// serving port (subscribeHandler) and delivers to no port. An entry an earlier listener
+	// stored with a port is answered with that port until it lapses (the session bucket's TTL).
+	// It is answered at all because every released client parses it
+	// (packages/envoy-client/src/transport.ts), and a client that does not tolerate its absence
+	// would break without it.
+	Port           int      `json:"port"`
+	Title          string   `json:"title"`
+	Capabilities   []string `json:"capabilities"`
+	SelfSubscribed bool     `json:"self_subscribed"`
+	Topics         []string `json:"topics"`
+	Roles          []string `json:"roles"`
+	UpdatedAt      int64    `json:"updated_at"`
+	LastSeen       int64    `json:"last_seen"`
 	// The plugin the session registered through and its build; absent for a session whose plugin
 	// predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
@@ -1449,6 +1453,13 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 		claimantInstanceID := entry.ClientInstanceID
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
+		// The claim renews the claimant's registration, so it writes the serving port out of
+		// the entry: this listener delivers nothing to a port, and a renewed entry still
+		// carrying one an earlier registration stored is a session that Resolve passes over as
+		// self-subscribed while Dispatch's outbox counts the stream's ack as its delivery
+		// (internal/dispatch/outbox), so its messages are reported delivered when nobody
+		// delivered them.
+		entry.Port = 0
 		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
 			writeStoreError(ctx, w, fmt.Errorf("refresh role claimant registration: %w", err), http.StatusServiceUnavailable)
 			return
@@ -1730,20 +1741,20 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		// A session on a serving port is reached at the host it records (session.Deliverer), so a
-		// host that could change the delivery URL's authority or path is refused before anything is
-		// written. An absent host is an older plugin's, and a registration with no port is never
-		// dialled, so neither is checked.
-		if body.Port > 0 && body.Host != "" && !session.ValidHost(body.Host) {
-			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
+		// A registration naming a serving port is refused before anything is stored: this
+		// listener opens no connection to a session, so a stored registration carrying one
+		// would leave its session waiting for deliveries that never come. The refusal names the
+		// field, as every other refusal of this route does, and says what to send instead.
+		if body.Port > 0 {
+			writeJSONError(w, http.StatusBadRequest, "port is not supported: this listener delivers nothing to a session's port. Register with no port (port 0) and receive the session's messages from its own consumer (delivery.consumer).", "port")
 			return
 		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
 		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
 		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
 		// a warning, the rest of the registration stored: the topics stored here drive the
-		// listener's fan-out to serve-port sessions (`store.Registry.Match`), and such a topic would
-		// hand this session messages meant for another session or for the controller's role holder;
+		// listener's fan-out (`store.Registry.Match`), and such a topic would hand this session
+		// messages meant for another session or for the controller's role holder;
 		// /v1/replay refuses such a subject on its own (`bus.SharedStreamTopic`). A registration
 		// naming one is not refused whole, since a released pi-envoy registers every subject it has
 		// open, a fork parent's agent subject and any topic its envoy_subscribe took included. The
@@ -1782,7 +1793,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// set to the topics just stored before the registration answers, so a message published on
 		// a newly followed stored topic after the answer is the consumer's to deliver.
 		delivery := d.consumers.register(r.Context(), body, item.Topics)
-		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
+		if body.SelfSubscribed || delivery.relayed() {
 			epochChanged := false
 			if delivery.relayed() {
 				previous, err := d.sessions.Get(body.SessionID)
