@@ -144,7 +144,7 @@ const bufferedFolds = store.RoomsPoolSize
 // wait for, the copy-heap bound below, has no holder that takes a slot - so every holder gives its
 // slot back.
 //
-// A log of more than one update is read and folded under a grant of that bound (copyGrant), the
+// A log of more than one update is read and folded under a grant of that bound (heapGrant), the
 // grant ctx carries - a room load's, whose fold is its first decode - or one of this read's own,
 // given back as it returns; use takes that ctx, so the fold's own covers grow the same grant
 // (fold, documentThrough). The grant is weighed by every update the fold reads, which the rows it

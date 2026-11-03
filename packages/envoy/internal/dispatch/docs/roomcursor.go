@@ -43,7 +43,7 @@ type loadedState struct {
 	// bytes runs as this decode did, with the format cleanup off and under the same pending cap
 	// (bootstrapLoadedState), so the room holds item for item what the copy holds.
 	decoded decodedState
-	// grant is the load's part of the copy-heap bound (copyGrant), which covers LoadDoc's read -
+	// grant is the load's part of the copy-heap bound (heapGrant), which covers LoadDoc's read -
 	// its fold of a history of several updates, covered where the rows are read (foldRead) - and
 	// its decode, and the room's own decode of the state after it; after a socket's admission,
 	// whose own grant covered its read and decode (loadTree), it covers that decode alone.

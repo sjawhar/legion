@@ -22,8 +22,9 @@ import (
 // whichever is less; the server's own remote applies scan at most the ceiling.
 
 // perFrameScanCeiling is the most items the scans of one remote apply may pass in a room, for a
-// browser's update the peer update hook weighs against applyHeapBound and for every remote apply
-// of the server's own. Measured on this pod (BenchmarkAnApplyJustUnderTheScanCeiling, GOMAXPROCS=1,
+// browser's update the peer update hook weighs against the apply-heap bound (MemoryBounds.ApplyHeap)
+// and for every remote apply of the server's own. Measured on this pod
+// (BenchmarkAnApplyJustUnderTheScanCeiling, GOMAXPROCS=1,
 // 2026-10-28, three runs of three to five applies each): a frame scanning 399,999 items, each a
 // distinct item of a run of 400,000 keystrokes, held the room's lock 213 to 320 ms, about 496 ns
 // an item past the 16 ms an apply that scans nothing holds it; a frame scanning a run of 2,000
@@ -61,8 +62,8 @@ const usedUpScanBudget = 64
 // keystrokes whose state re-scans 1,000,000 items: its decode took 2.22 s and allocated 457,822,248
 // bytes, against 1.46 s and 383,011,168 for the same run unscanned, 0.76 s and 74,811,080 bytes
 // more (an earlier run of the same decode took 2.47 s, against 1.25 to 1.36 s unscanned). Copies
-// take turns under the copy-heap bound (copyHeapBound). A rebuild is the way out of a room that
-// reaches it (RebuildDocument).
+// take turns under the copy-heap bound (MemoryBounds.CopyHeap). A rebuild is the way out of a room
+// that reaches it (RebuildDocument).
 const roomScanTotal = 1_000_000
 
 // honestHandoffScans is what one honest offline handoff scans: a browser that typed into a hundred
@@ -76,8 +77,9 @@ const honestHandoffScans = 35_800
 // apply-heap estimate is own (peerWeighing.ownApplyHeap): perFrameScanCeiling for an update the
 // hook weighs (own past unweighedApplyHeapBytes), whose estimate prices the marks its scans can
 // make (peerWeighing.applyHeap) and which applies only once it holds that estimate out of
-// applyHeapBound, or the whole bound for an estimate past it, and for any other what its marks can
-// hold in what is left of unweighedApplyHeapBytes past its own share, (2 MiB - own) / 76: 27,594
+// the apply-heap bound (MemoryBounds.ApplyHeap), or the whole bound for an estimate past it, and
+// for any other what its marks can hold in what is left of unweighedApplyHeapBytes past its own
+// share, (2 MiB - own) / 76: 27,594
 // for an update of no share, so typing never waits on the heap bound for its scans either. It is
 // at least 1, since an allowance of 0 would leave the apply unbounded (applyScanLimit,
 // sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:367-375).

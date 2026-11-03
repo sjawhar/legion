@@ -19,9 +19,10 @@ import (
 // replica's build from a base (renderedReplica.start), the measurer's copy for a server write
 // (structsAfter) and a rebuild's
 // decodes (its check of a resident room and of the stored history, nearACap, rebuildSource,
-// RebuildTx) - each hold copyHeapWeight of their encoded state out of
-// copyHeapBound while they decode. What each leaves behind is its owner's: a room's two copies are
-// charged by the room budget, a fork is its write's, a fold's state goes back to its caller. The
+// RebuildTx) - each hold copyHeapWeight of their encoded state out of the copy-heap bound
+// (MemoryBounds.CopyHeap, podCopyHeaps) while they decode. What each leaves behind is its owner's:
+// a room's two copies are charged by the room budget, a fork is its write's, a fold's state goes
+// back to its caller. The
 // copy a read of a resident room takes while the room's replica is busy (holdLive,
 // snapshotDocument) takes no grant: its callers hand it no request context to bound a wait by.
 //
@@ -77,8 +78,8 @@ const storedCountHeapPerByte = 160
 // than 65,025,848 bytes, a mebibyte of hard breaks, where the densest markdown held 50,703,568 and
 // a mebibyte of prose 13,607,960 (TestAStoredVersionsCountHoldsNoMoreThanItsGrant). It is about a
 // quarter more than that, so a mebibyte is granted 81,788,928 bytes rather than the 167,737,600
-// its bytes alone would ask for, and four counts of a mebibyte run at once inside copyHeapBound
-// rather than two.
+// its bytes alone would ask for, and four counts of a mebibyte run at once inside the copy-heap
+// bound (MemoryBounds.CopyHeap) rather than two.
 const storedCountHeapAtMost = 78 << 20
 
 // storedCountHeapPerStoredRowByte is the heap a count is granted for each byte of the largest

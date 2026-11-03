@@ -197,8 +197,8 @@ const maxPeerByteCreep = 64 << 10
 // Every update's apply is weighed too, by what the walk estimates ygo's apply of it allocates into
 // this room (peerWeighing.applyHeap), which is proportional to the values and structs it carries
 // whether or not the room already holds them, and to the room's clients and deleted items. One
-// whose estimate passes applyTooHeavyBytes, all of what the Go memory limit leaves above the room
-// budget, the cold reads' cache and the pressure reserve, could not apply even alone: it is
+// whose estimate passes MemoryBounds.ApplyTooHeavy, all of what the Go memory limit leaves above
+// the room budget, the cold reads' cache and the pressure reserve, could not apply even alone: it is
 // refused with DocumentTooLargeCloseCode and DocumentTooLargeCloseReason before any other rule
 // and never applied (errApplyTooHeavy), as a walk's refusal is: no document of the editor's
 // reaches it (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy), and a client that

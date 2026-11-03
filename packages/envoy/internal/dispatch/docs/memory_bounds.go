@@ -65,7 +65,7 @@ type MemoryBounds struct {
 	// 157,797,184 into the room holding it, so two apply at once, and at 482,930,134 into a fresh
 	// room, past the bound, so it runs alone.
 	ApplyHeap int64
-	// CopyHeap is the most the pod's full-state decodes are granted at once (copyHeaps): the
+	// CopyHeap is the most the pod's full-state decodes are granted at once (podCopyHeaps): the
 	// third of that remainder that neither ApplyHeap nor HeapSlack takes, so that every byte of
 	// it has a named holder, 393,705,336 bytes at the calibration, about 375 MiB.
 	//
