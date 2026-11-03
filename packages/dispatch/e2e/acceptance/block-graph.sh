@@ -13,6 +13,12 @@
 # `dispatch read` (A6), carrying the facts of every node, a part the ask has dropped included
 # (A11), pinned to a revision of the ask's parts (A15), holding a link of its own (R7), refused by
 # name where the ask holds no such part (R10) and named by a reply that answers that ask (R11).
+# It also reads the bounds the server owns and no client carries: a comment and a message of
+# 48,000 characters taken whole, a paragraph over the block bound refused by name, and
+# `dispatch limits` (A8); a passage only at the end of a block longer than 32,000 characters
+# found by meaning, and a one-line ask option found by its text, each hit naming the block (A9);
+# and a question of 2,001 characters taken by `dispatch ask` and by a document's decision
+# block (A14).
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally COMPONENT_SOURCE
@@ -73,7 +79,7 @@ case "$component_source" in
     ;;
 esac
 readonly dev_login="${DEV_SIGNIN_LOGIN-}"
-require_commands base64 bun curl jq
+require_commands base64 bun curl jq sleep
 read_bearer
 # No child process inherits the bearer from here: read_bearer has unset it from the environment,
 # curl reads it from a header file, and the CLI gets it in an environment this script builds.
@@ -1513,6 +1519,205 @@ pass "A15 ask" "dispatch read --ref <second option>@v1 names a part the ask no l
 # A11 for a part the ask has dropped: it carries the same six facts, part of the ask at the
 # revision its text last changed in, the reword's.
 node_facts "the dropped option" "$tuesday_pin" "$(wanted "$me" "$me" "$of_parts_ask" 2)" A11
+
+# A8: a body is held block by block, not as a whole. A comment and a message of 48,000
+# characters in sixteen paragraphs are taken and read back whole, where every client refused a
+# body over 32,000 before; one paragraph of 32,001 characters is sent by the command and refused
+# by the server, which names the block that passed the bound; and `dispatch limits` prints the
+# bounds a write is held to, read from the server itself.
+printf 'SKIP: A8 the stand-in published for an event NATS refuses is proved by a Go test (TestRunPublishesAStandInForAnEventNATSRefuses in packages/envoy/internal/dispatch/outbox) instead: this harness runs with NATS off (DISPATCH_NATS_DISABLED=1) and its broker has no maximum payload to set, so no write here can make NATS refuse an envelope\n'
+
+# One paragraph of 2,998 characters, built from a short word so no token passes Postgres's bound
+# on one indexed word; the first paragraph carries two characters more, so the body is 48,000.
+a8_paragraph="bodyline "
+while ((${#a8_paragraph} < 2998)); do a8_paragraph+="$a8_paragraph"; done
+a8_paragraph="${a8_paragraph:0:2998}"
+a8_body="${a8_paragraph}xx"
+for ((a8_i = 2; a8_i <= 16; a8_i++)); do
+  a8_body+=$'\n\n'"$a8_paragraph"
+done
+[[ "${#a8_body}" == 48000 ]] ||
+  fail A8 "the long body is 48,000 characters in sixteen paragraphs" "it is ${#a8_body}"
+pass A8 "the long body is 48,000 characters in sixteen paragraphs"
+printf '%s' "$a8_body" >"$work/a8-body.md"
+
+run A8 "a comment of 48,000 characters" comment --issue "$key" --body-file "$work/a8-body.md"
+posted A8 "a comment of 48,000 characters" comment
+a8_comment="$posted"
+get "/api/v1/comments/$a8_comment"
+want_status 200 A8 "read the 48,000-character comment back"
+expect A8 "the comment reads back whole, every one of its 48,000 characters" '[48000,true]' \
+  --rawfile want "$work/a8-body.md" '[(.comment.body | length), (.comment.body == $want)]'
+
+run A8 "a message of 48,000 characters" message --issue "$key" --body-file "$work/a8-body.md"
+posted A8 "a message of 48,000 characters" message
+a8_message="$posted"
+get "/api/v1/messages/$a8_message"
+want_status 200 A8 "read the 48,000-character message back"
+expect A8 "the message reads back whole, every one of its 48,000 characters" '[48000,true]' \
+  --rawfile want "$work/a8-body.md" '[(.message.body | length), (.message.body == $want)]'
+
+# The command sends the over-long paragraph: nothing on this side refuses it, and the words the
+# agent reads are the server's, naming the block and its length.
+a8_over="$a8_paragraph"
+while ((${#a8_over} < 32001)); do a8_over+="$a8_paragraph"; done
+a8_over="${a8_over:0:32001}"
+printf '%s' "$a8_over" >"$work/a8-over.md"
+if cli comment --issue "$key" --body-file "$work/a8-over.md" >"$work/out" 2>&1; then
+  fail A8 "a comment holding a 32,001-character paragraph" \
+    "dispatch comment took it: $(<"$work/out")"
+fi
+grep -qF 'body block 1' "$work/out" ||
+  fail A8 "the refusal names the block that passed the bound" "$(<"$work/out")"
+grep -qF '(32001/32000)' "$work/out" ||
+  fail A8 "the refusal names the block's length and the bound" "$(<"$work/out")"
+pass A8 "a 32,001-character paragraph is refused, naming the block and the bound"
+
+run A8 "dispatch limits" limits
+grep -qE '^One block of a body[^:]*: [0-9,]+ characters' "$work/out" ||
+  fail A8 "dispatch limits prints the block bound" "$(<"$work/out")"
+grep -qE '^Blocks in one body: [0-9,]+\.$' "$work/out" ||
+  fail A8 "dispatch limits prints how many blocks a body may hold" "$(<"$work/out")"
+grep -qE "^An ask's question and its options together: [0-9,]+ characters" "$work/out" ||
+  fail A8 "dispatch limits prints the ask bound" "$(<"$work/out")"
+pass A8 "dispatch limits prints the bounds the server holds a write to"
+
+# wait_until SECTION WHAT SECONDS CHECK: runs CHECK every two seconds until it succeeds, and
+# fails SECTION once SECONDS have passed. The embedding queue reads its rows in the background,
+# so a search by meaning is ready a moment after the write, not with it.
+wait_until() {
+  local section="$1" what="$2" seconds="$3" check="$4" deadline=$((SECONDS + $3))
+  until "$check"; do
+    ((SECONDS < deadline)) || fail "$section" "$what" "not so after $seconds s: $(body)"
+    sleep 2
+  done
+  pass "$section" "$what"
+}
+
+# A9: meaning search reads windows of neighbouring blocks, so a passage only at the end of a
+# block longer than 32,000 characters - past the cut the whole-text embedding made - is found,
+# and the hit names the block that matched. `block_id` is what proves the meaning list found it:
+# a hit only the keyword list found carries none. The harness's embedder hashes a text's words
+# (`DISPATCH_DEV_EMBEDDER`, packages/envoy/internal/dispatch/embed/dev.go), so it ranks by the
+# words a query and a window share: a query sharing no term with the text would be near no
+# window at all and would prove nothing, where a query of the passage's own words, which stand
+# nowhere else in the document, reaches the one window that covers the end of the block. The
+# block's filler is a multiple of the window's 1,200 characters, so that last window is the
+# window's 200-character overlap and the passage, and the passage is most of what it embeds.
+# A one-line ask option is the second half: a search for its text names that option's part.
+get "/api/v1/search/coverage"
+want_status 200 A9 "read meaning search's coverage"
+a9_identity="$(jq -r '.identity // ""' "$work/body")"
+if [[ -z "$a9_identity" ]]; then
+  printf 'SKIP: A9 this server has no embedder (GET /api/v1/search/coverage answers identity null), so no window is embedded and neither the passage at the end of a long block nor an ask option can be found by meaning; run against a server with an embedder configured, or the local harness, which sets DISPATCH_DEV_EMBEDDER=1\n'
+else
+  # Words no two alike, so the 200 characters of filler the last window carries weigh little
+  # beside the passage; 27 windows of 1,200 characters, the passage alone in the twenty-eighth.
+  a9_filler="The quarry crew logs its shift here: winch cables inspected, ladder bolts torqued, \
+drainage sumps pumped, floodlight housings cleaned, radio batteries swapped, haul road graded, \
+weighbridge calibrated, blast shelters aired, cabinets restocked, bowsers filled, conveyor \
+rollers greased, dust screens rinsed, gates padlocked, visitor badges collected, keys returned. "
+  while ((${#a9_filler} < 32400)); do a9_filler+="$a9_filler"; done
+  a9_filler="${a9_filler:0:32400}"
+  a9_passage="Vermilion kestrel lanterns drift above the winching gantry, where marmalade \
+pelicans hum beneath a frosted chapel."
+  printf '# Shift notes\n\n%s %s\n' "$a9_filler" "$a9_passage" >"$work/long.md"
+  upload A9 long.md "$work/long.md"
+  a9_doc_id="$doc_id"
+  get "/api/v1/artifacts/$a9_doc_id/blocks"
+  want_status 200 A9 "read the long document's blocks"
+  a9_block_id="$(jq -er 'max_by(.to - .from) | .id' "$work/body")" ||
+    fail A9 "the long document holds one block longer than the rest" "$(body)"
+  expect A9 "the document's longest block is longer than 32,000 characters" true \
+    --arg b "$a9_block_id" '[.[] | select(.id == $b) | .to - .from][0] > 32000'
+
+  a9_block_embedded() {
+    get "/api/v1/artifacts/$a9_doc_id/blocks"
+    [[ "$status" == 200 ]] || return 1
+    [[ "$(jq -r --arg b "$a9_block_id" '.[] | select(.id == $b) | .embedding // ""' \
+      "$work/body")" == embedded ]]
+  }
+  wait_until A9 "every window covering the long block carries a vector of its current text" \
+    180 a9_block_embedded
+
+  a9_query="vermilion kestrel lanterns winching gantry marmalade pelicans hum frosted chapel"
+  a9_passage_found() {
+    get "/api/v1/search?q=$(q "$a9_query")&project=$(q "$project")"
+    [[ "$status" == 200 ]] || return 1
+    [[ "$(jq -r --arg d "$a9_doc_id" --arg b "$a9_block_id" \
+      '[.results[] | select(.kind == "document" and .id == $d and .block_id == $b)] | length' \
+      "$work/body")" != 0 ]]
+  }
+  wait_until A9 "a search by meaning finds the passage at the end of the long block" \
+    180 a9_passage_found
+  expect A9 "the hit names that block, which only the meaning list sets" \
+    "$(jq -cn --arg b "$a9_block_id" '[$b]')" \
+    --arg d "$a9_doc_id" '[.results[] | select(.kind == "document" and .id == $d) | .block_id]'
+
+  a9_option="Hoist the beacon over the winching gantry at dawn"
+  run A9 "an ask whose option is one line" ask --issue "$child" \
+    --question "Which signal ends the quarry crew's shift? Recommendation: the beacon." \
+    --option "$a9_option" \
+    --option "Sound the horn inside the shed at dusk"
+  [[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+    fail A9 "an ask whose option is one line" "no ask id in: $(<"$work/out")"
+  a9_ask="${BASH_REMATCH[1]}"
+  ask_parts A9 "read the parts of the ask the search reads" "$a9_ask"
+  a9_option_part="${option_parts[0]}"
+  a9_option_found() {
+    get "/api/v1/search?q=$(q "$a9_option")&project=$(q "$project")"
+    [[ "$status" == 200 ]] || return 1
+    [[ "$(jq -r --arg a "$a9_ask" --arg b "$a9_option_part" \
+      '[.results[] | select(.kind == "ask" and .id == $a and .block_id == $b)] | length' \
+      "$work/body")" != 0 ]]
+  }
+  wait_until A9 "a search for the option's text names that option ($a9_option_part)" \
+    180 a9_option_found
+  run A9 "resolve the ask the search read" resolve-ask --ask "$a9_ask" --kind resolved \
+    --reason "block-graph.sh read this ask by meaning; nothing waits on a person."
+fi
+
+# A14: a question of 2,001 characters, one longer than the length every client refused before and
+# well inside the bound the server holds an ask's wording to, is taken by `dispatch ask` and by a
+# decision block in a document.
+a14_head="The quarry crew raises one signal at the end of a shift, and this question carries the \
+whole case so a reader decides from it alone. "
+a14_tail=" Which day does the crew raise it? Recommendation: Monday, so the week opens with it."
+a14_filler="filler words stand here. "
+while ((${#a14_filler} < 2001)); do a14_filler+="$a14_filler"; done
+a14_question="$a14_head${a14_filler:0:$((2001 - ${#a14_head} - ${#a14_tail}))}$a14_tail"
+[[ "${#a14_question}" == 2001 ]] ||
+  fail A14 "the question is 2,001 characters" "it is ${#a14_question}"
+pass A14 "the question is 2,001 characters"
+
+run A14 "an ask whose question is 2,001 characters" ask --issue "$child" \
+  --question "$a14_question"
+[[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+  fail A14 "an ask whose question is 2,001 characters" "no ask id in: $(<"$work/out")"
+a14_ask="${BASH_REMATCH[1]}"
+get "/api/v1/asks/$a14_ask"
+want_status 200 A14 "read the 2,001-character question back"
+expect A14 "the ask holds the question whole" '[2001,true]' \
+  --arg want "$a14_question" '[(.ask.question | length), (.ask.question == $want)]'
+
+doc_edit A14 "a decision block whose question is 2,001 characters" changes.md \
+  "$(jq -cn --arg q "$a14_question" \
+    '[{op: "insert", after: "end", markdown: (":::ask{#a14-decision urgency=\"med\"}\n" + $q +
+      "\n\n- Option one: what it costs.\n- Option two: what it costs.\n:::\n")}]')"
+a14_block_ask=""
+a14_block_ask_written() {
+  get "/api/v1/issues/$key/asks?state=open"
+  [[ "$status" == 200 ]] || return 1
+  a14_block_ask="$(jq -r --arg q "$a14_question" \
+    'first((.asks? // .)[] | select(.question == $q) | .id) // ""' "$work/body")"
+  [[ -n "$a14_block_ask" ]]
+}
+wait_until A14 "the decision block becomes an ask holding the 2,001-character question" \
+  60 a14_block_ask_written
+run A14 "resolve the decision block's ask" resolve-ask --ask "$a14_block_ask" --kind resolved \
+  --reason "block-graph.sh read this question's length; nothing waits on a person."
+run A14 "resolve the 2,001-character ask" resolve-ask --ask "$a14_ask" --kind resolved \
+  --reason "block-graph.sh read this question's length; nothing waits on a person."
 
 run A6 "resolve the ask whose parts the check read" resolve-ask --ask "$parts_ask" --kind resolved \
   --reason "block-graph.sh read this ask's parts; nothing waits on a person."

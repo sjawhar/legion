@@ -146,10 +146,14 @@ starts. When the list leaves older items out, its last line says how many; `disp
 reads them all. The request waits at most 800 ms for the list and carries the last one read when
 Dispatch does not answer.
 
-The server holds every write to a size, and refuses rather than truncates:
+The server holds every write to a size, refuses rather than truncates, and names what passed the
+bound; `dispatch limits` prints every bound the server you write to holds, and no command carries
+a bound of its own:
 
-- an ask's question is at most 2,000 characters, with at most eight options;
-- a comment or message body is at most 32,000 characters;
+- an ask's question and its options together are at most 32,000 characters, with at most eight
+  options;
+- a comment or message body is bounded block by block: each block — a paragraph, list, quote,
+  table or code block — is at most 32,000 characters, and one body holds at most 32,768 blocks;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
   few long anchored comments therefore fill a thread or a margin where many short ones used to

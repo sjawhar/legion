@@ -71,6 +71,42 @@ function specFor(name: string) {
   return spec;
 }
 
+/** A schema node that keeps every description its chain carries and validates nothing. */
+interface Described extends SchemaNode<Described> {}
+
+/**
+ * Every description one spec's arguments carry, nested objects' and array items' included: what
+ * a host shows beside each field, read through the builder rather than off the source.
+ */
+function argumentDescriptions(name: string): readonly string[] {
+  const texts: string[] = [];
+  const node = (): Described => ({
+    optional: node,
+    nullable: node,
+    describe: (text) => {
+      texts.push(text);
+      return node();
+    },
+  });
+  dispatchToolSchema(specFor(name), {
+    string: node,
+    number: node,
+    boolean: node,
+    enum: node,
+    array: node,
+    unknown: node,
+    object: node,
+    refineObject: node,
+  });
+  return texts;
+}
+
+/** The one rule every ask instruction gives, written once in `dispatch-tools.ts`. */
+const ASK_RULE =
+  "An ask is short and asks one thing; its reasoning goes in the document, not in the question.";
+/** A character count in words: a group of digits, then `character`. */
+const characterCount = /\d[\d,]*[\s-]*characters?\b/iu;
+
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
@@ -665,6 +701,21 @@ describe("dispatchToolSpecs", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({ issue: "DSP-1", question: "x".repeat(2001) }).success
     ).toBe(true);
+  });
+
+  // Every instruction an agent reads about an ask gives one rule and no count: the server owns
+  // the bound on a question and its options, names the bound in its refusal, and prints it
+  // through `dispatch limits`, so a number written here would be a second source that drifts the
+  // day the server's changes (INFRA-370). The rule itself is what the instruction carries.
+  test("every ask instruction gives one rule and states no character count", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"]) {
+      const texts = [specFor(name).description, ...argumentDescriptions(name)];
+
+      for (const text of texts) {
+        expect(characterCount.exec(text), `${name}: ${text}`).toBeNull();
+      }
+      expect(texts.join(" "), name).toContain(ASK_RULE);
+    }
   });
 
   // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);

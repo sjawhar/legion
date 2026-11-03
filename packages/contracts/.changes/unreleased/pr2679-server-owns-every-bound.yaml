@@ -1,0 +1,18 @@
+kind: Changed
+body: |-
+    No Dispatch tool carries a length of its own. `DISPATCH_BODY_MAX` and `ASK_QUESTION_MAX` are
+    gone, and the server's own bounds take their place: `DISPATCH_BLOCK_UNITS` (32000), one block
+    of a body, `DISPATCH_ITEM_BLOCKS` (32768), how many blocks a body may hold, and
+    `DISPATCH_EVENT_BODY_MAX` (32000), how much of a body one event carries whole and the bound an
+    ask's question and its options share. Each is generated into Go for the server, which refuses
+    a longer write and names what passed the bound, and the daemon's second generated file
+    (`packages/daemon/internal/dispatch/generated.go`) is gone with the bound it carried. The new
+    `dispatch_limits` spec reads them from the server (`GET /api/v1/limits`, `DispatchLimits`).
+    Every ask instruction gives one rule and states no character count: an ask is short and asks
+    one thing, and its reasoning goes in the document. An event whose body is longer than it
+    carries says `body_truncated`; a search hit carries `block_id`, the block of it a meaning
+    match named; and a document, comment or message block carries `embedding`, where meaning
+    search stands on it.
+time: 2026-11-03T09:00:00.000000000Z
+custom:
+    Issue: pr2679

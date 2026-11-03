@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    A session's reply to a person's typed input is posted whole, where it was cut at a length the
+    plugin carried. Dispatch holds it to the bounds the server owns, and a reply Dispatch refuses
+    is answered on the conversation with the server's own words
+    (`Your command ran, and Dispatch refused its output: …`), so a person who typed a command
+    whose output passes a bound reads why rather than nothing.
+time: 2026-11-03T09:03:00.000000000Z
+custom:
+    Issue: pr2679

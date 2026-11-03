@@ -64,7 +64,7 @@ func TestAlign(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, counter := Align(tc.stored, tc.next, tc.counter)
+			got, counter := Align(tc.stored, tc.next, tc.counter, nil)
 			if !reflect.DeepEqual(got, tc.want) || counter != tc.wantCounter {
 				t.Errorf("Align = %v, counter %d; want %v, counter %d", got, counter, tc.want, tc.wantCounter)
 			}
@@ -79,7 +79,7 @@ func TestAlignKeepsIdsAcrossASwitchToTheFallback(t *testing.T) {
 	align := func(stored []Stored, body string, counter int) ([]Stored, []string, int) {
 		t.Helper()
 		next := Split(body)
-		ids, counter := Align(stored, next, counter)
+		ids, counter := Align(stored, next, counter, nil)
 		return storedAfter(stored, next, ids), ids, counter
 	}
 	assertIDs := func(got []string, want ...string) {
@@ -95,7 +95,7 @@ func TestAlignKeepsIdsAcrossASwitchToTheFallback(t *testing.T) {
 	if next[1].Type != "text" {
 		t.Fatalf("Split read the body with block HTML as %+v, want the fallback", next)
 	}
-	ids, _ = Align(stored, next, counter)
+	ids, _ = Align(stored, next, counter, nil)
 	assertIDs(ids, "b1", "b2", "b4", "b3")
 
 	stored, ids, counter = align(nil, "First.\n\n- a\n\n- b\n\nLast.", 1)

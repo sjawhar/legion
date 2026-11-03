@@ -203,7 +203,12 @@ built-in printed (`/session`'s `Session:`, `Title:` and `CWD:` lines; `/compact`
 submits), that a built-in only the terminal runs (`/new`, `/resume`) runs only in the session's own
 terminal and nothing was sent, that a host mode which does not wire the method (an SDK embedder, a
 guest in a shared session) did not run it and nothing was sent, or why the host failed it; a
-prompt, skill or command that printed nothing gets no reply. On a host without `sendUserInput` a
+prompt, skill or command that printed nothing gets no reply. The reply is posted whole: nothing
+here cuts it, Dispatch holds it to the bounds the server owns, and a refusal from Dispatch
+(`DispatchServiceError.fromDispatch`) is posted in its place as
+`Your command ran, and Dispatch refused its output: <the server's words>`, so a person who typed
+a command whose output holds a block over the bound reads why rather than nothing. On a host
+without `sendUserInput` a
 body that starts with `/` is not sent, since the host would hand it to the model as words, and the
 reply names the host's Oh My Pi version and says nothing was sent; any other body goes through
 `pi.sendUserMessage` as before. The live view's model and thinking-level switch is this path too: a

@@ -1,15 +1,15 @@
-# The merge notices: what each one means and what you do
+# The notices the daemon writes when a write of its own did not go through
 
 Part of `skill://legion-architect`. Read the section for the notice that woke you. Each of
 `merge-refused`, `merge-stalled`, `merge-removed` and `merge-waiting` is the daemon reporting on
-the merge it submitted for an accepted READY, and each reaches the architect that owns the issue.
-The wake-routing table, in `skill://legion-architect/references/wake-routing.md`, gives each
-notice its move in one sentence; the section here is what that sentence stands on — what the
-notice's `reason` names, what the daemon has and has not stopped doing, and what you read before
-you ask a person.
+the merge it submitted for an accepted READY, and `message-refused` on a message it was posting
+on an issue; each reaches the architect that owns the issue. The wake-routing table, in
+`skill://legion-architect/references/wake-routing.md`, gives each notice its move in one
+sentence; the section here is what that sentence stands on — what the notice's `reason` names,
+what the daemon has and has not stopped doing, and what you read before you ask a person.
 
-In every one of the four the issue stays in `awaiting_merge`, where no worker holds a phase and a
-backward move is refused, so what a repository rule needs is a person's to give.
+In every one of the four merge notices the issue stays in `awaiting_merge`, where no worker holds
+a phase and a backward move is refused, so what a repository rule needs is a person's to give.
 
 ## `merge-refused`
 
@@ -61,3 +61,15 @@ only a person can give, or a merge queue that has not landed it. Act on what you
 or a repository rule needs is a person's: ask one with `dispatch ask`, naming the pull request at
 READY's head and what GitHub waits on; the merge closes the issue when GitHub completes it,
 whoever unblocks it. Never bypass a rule.
+
+## `message-refused`
+
+Its `reason` names the issue, how long the message was, its first line and Dispatch's own answer.
+Dispatch refused the message the way it would refuse every attempt, a block of the body over
+Dispatch's own block bound being the common one, so the message is on no issue and the daemon
+will not post it again. Nothing else about the issue changed: no phase moved, and no worker was
+told. Read the reason for which message it was. A READY packet refused this way is the merger's
+to rebuild shorter: tell it with `envoy_publish` to its role topic to send a packet whose every
+block is under the bound, linking the pull request body's `## Verification` section rather than
+quoting it, and to end its phase again. For any other message, post what it said on the issue
+yourself with `dispatch comment` when a person still needs it.

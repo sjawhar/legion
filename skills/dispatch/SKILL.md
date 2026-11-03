@@ -17,13 +17,14 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 ```md
 :::ask{urgency="med"}
-Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation: the option and its reason.
+The question and the recommendation, as `skill://dispatch-writing-specs` writes them.
 
 - Option one: what it costs.
 - Option two: what it costs.
 :::
 ```
 
+- An ask is short and asks one thing; its reasoning goes in the document.
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
 - An open ask is the request; never repeat it in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.

@@ -734,8 +734,8 @@ Dispatch's background loops come in three shapes, so that a database nobody writ
 With nothing written and nothing due they hold no timer and send no statement.
 The four that run passes (`duty.RunWoken`) start two passes no closer together than the period of the ticker each replaced, so under load each runs no more often than that ticker did.
 
-- The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding trigger calls, writes a row:
-  it notifies `dispatch_embeddings` (migration `0151`) for a new item or a text whose hash changed, and an update that leaves the text as it was notifies nothing.
+- The embedding queue (`embedqueue.Run`) scans when a write enqueues a row:
+  the issue trigger's `embeddings_enqueue` (migration `0151`) and each indexer's `embeddings_enqueue_window` (migration `20261102233625`) notify `dispatch_embeddings` for a new row or a text whose hash changed, and a write that leaves the text as it was notifies nothing.
   The rows the coverage pass writes wake it in process.
   Scans start at least 5 s apart.
   After each scan it reads when the earliest pending row falls due (a failed row's retry, or another process's claim lapsing after its two minutes) and arms one timer for it, never sooner than 5 s away.
@@ -1603,7 +1603,7 @@ An ask's parts are blocks too (migrations `20261101143211` and `20261101143212`)
 its question, each of its options and its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of one body, since an ask has no body — the question as the row holds it, an option as `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered` summary renders it.
 What identifies a part is its type and its text, and for the answer part its answerer, so the same answer from another person is a part of its own (`askAnswerPart`).
 Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each id the same way, except that an answer is replaced rather than reworded:
-`itemblocks.Align` takes a variadic list of the types a new block replaces instead of rewording, and the ask's index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's passes none.
+`itemblocks.Align` takes the types a new block replaces instead of rewording as an argument of its own, which every caller fills, and the ask's index passes the answer part's (`refs.AskAnswerPart`), where a comment's and a message's pass none.
 A later answer is a new part, so a reference to the answer it replaced reads `removed` where one to a reworded option reads `changed`.
 A part's reference is the ask's with `#b-` and the id: `dispatch://KEY/ask/<id>#b-<part>` or `dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>`, and an ask's dashboard page with a `#b-` fragment names it too;
 pinned, `#b-<part>@v<N>` names a revision of the ask's parts, as a comment's block pins a revision of the comment, and reads the part as that revision held it.
@@ -1662,13 +1662,14 @@ about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs.
 `search_vector` indexes a text whole when its vector fits, and otherwise the longest of its first half, quarter, eighth, … that fits, cut between two words, so keyword search finds such a document, comment, ask or message by the whole words in that opening part and not by the words after it;
 a text with no whitespace before the cut is found by none of its own.
 An issue's key is always indexed whole.
-Meaning search, where an embedder is configured (below), ranks by an embedding of a text's first 32,000 characters (`embed.maxInputChars`, which both clients cut at), not by its vector, so it can still return such a text for a query whose words the vector does not hold.
+Meaning search, where an embedder is configured (below), ranks by the embedding of a window of neighbouring blocks, not by the text's search vector, so it can still return such a text for a query whose words the vector does not hold, and it names the block of the window that ranks highest for the query (`block_id` on the hit).
 
 Meaning search embeds with Cohere Embed v4 at the place `DISPATCH_EMBEDDER` names:
 AWS Bedrock (`bedrock`, the default, on the AWS SDK's own region and credentials) or Azure AI Foundry (`azure`, the `DISPATCH_AZURE_*` settings, with the deployment's API key or a keyless sign-in that exchanges a federated token with Microsoft Entra).
 Bedrock with no AWS region logs `dispatch: meaning search
 unavailable` and leaves meaning search off;
 then, and whenever the query's embedding fails, a search answers by keyword alone with `degraded: embedder_unavailable`.
+A local harness embeds without a model service: `DISPATCH_DEV_EMBEDDER=1`, which the server reads only beside `DISPATCH_DEV_SIGNIN=1`, hashes a text's words into a vector in the process (`embed/dev.go`), so two texts rank near each other by the words they share and nothing else.
 Each vector records its embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and `azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored vectors of its own identity.
 An issue's write enqueues its text through its table's trigger (0073, as 0140 replaced it) in the same transaction.
 Every other kind is embedded in windows of its blocks: the indexer that writes a document's, a comment's, a message's blocks or an ask's parts writes that owner's windows beside them, in the same transaction, through `embeddings_enqueue_window`, and deletes the owner's windows the new set does not name.
@@ -1987,6 +1988,14 @@ Each item below names a path with its method and identity, then its purpose.
 
   List every `/api/v1` route with its auth and purpose.
 
+- `/api/v1/limits` (GET; cookie, trusted header, or bearer)
+
+  The bounds this server holds a write to, each read from the constant that enforces it:
+  `{block_units, item_blocks, ask_options, ask_units, event_body_units, request_bytes, document_bytes, handoff_bytes}`.
+  `block_units` is the longest one block of a body may be and `item_blocks` the most blocks it may hold, `ask_options` the most options an ask may have and `ask_units` how long its question and options are together, `event_body_units` how much of a body one event carries whole, and the last three the bytes a request, a document and a handoff body may hold;
+  the first five are UTF-16 code units or counts, the last three UTF-8 bytes.
+  `dispatch limits` prints them, so no client carries a copy of a bound that can drift from what the server refuses.
+
 - `/auth/start` (GET; none)
 
   Start Google sign-in at the sign-in issuer:
@@ -2252,6 +2261,8 @@ Each item below names a path with its method and identity, then its purpose.
   Every `ask` hit carries `ask`, where the ask stands when the search ran:
   `{state: "open"}`, `{state: "answered", answer}` with its latest answer, or `{state: "resolved", resolution, answer?}` with the last answer it had, absent when nobody answered;
   its excerpt is cut from the ask's indexed text ([Search](#search)).
+  A hit the meaning list found carries `block_id`, the block of it whose own text ranks highest for the query: a block of the document, of the comment's or the message's body, or the part of an ask's question, options or answer.
+  It is absent on an issue hit, which has no blocks, and on a hit only the keyword list found.
   An under-two-character query returns `400 INVALID_QUERY`;
   a stop-word-only query returns `200` with no results;
   `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL;
@@ -2261,8 +2272,9 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/search/coverage` (GET; cookie, trusted header, or bearer)
 
   Meaning search's coverage, counted in one statement ([Search](#search)):
-  `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder;
-  then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks).
+  `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock`, `azure`, or `dev` for a local harness's) and its model, all three null with no embedder;
+  then, in `total` and for each kind in `kinds` (`issue`, `document_block`, `comment_block`, `message_block`, `ask_part`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks).
+  A window kind's items are its own rows, since the indexers own which windows exist.
   With no embedder nothing is current.
 
 - `/api/v1/projects/{key}/related?title=&text=&exclude_issue=&keywords_only=` (GET, POST; cookie, trusted header, or bearer)
@@ -2431,7 +2443,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/comments/{id}/blocks` (GET; cookie, trusted header, or bearer)
 
   A comment's current blocks in body order:
-  `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body.
+  `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body, `embedding` where meaning search stands on the block: `embedded`, `pending`, or `none` while no window covers it.
   While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing.
   `400 COMMENT_ID_INPUT` for a non-uuid id.
 
@@ -2478,7 +2490,7 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/messages/{id}/blocks` (GET; cookie, trusted header, or bearer)
 
   A message's current blocks in body order:
-  `{item, indexed, blocks: [{id, type, text, ref, from, to}]}`, `item` the message's graph node, `from` and `to` UTF-16 code units into its stored body, `ref` absent for a direct message's block, which has no address.
+  `{item, indexed, blocks: [{id, type, text, ref, from, to, embedding}]}`, `item` the message's graph node, `from` and `to` UTF-16 code units into its stored body, `ref` absent for a direct message's block, which has no address, `embedding` where meaning search stands on the block, as a comment's block carries it.
   Read under `GET /api/v1/messages/{id}`'s rule:
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.

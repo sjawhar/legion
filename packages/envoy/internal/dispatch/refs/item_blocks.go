@@ -213,7 +213,7 @@ func IndexItem(
 				ids, counter := itemblocks.Carry(stored, next, spans, counter)
 				return ids, counter, nil
 			}
-			ids, counter := itemblocks.Align(stored, next, counter)
+			ids, counter := itemblocks.Align(stored, next, counter, nil)
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
