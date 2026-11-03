@@ -691,6 +691,7 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
 		{"a seed inside the agent secrets audience", "agentSecretsAudience", func(a *gcp.DispatchArgs) { a.AgentSecretsAudience = "https://" + lower + ".internal.example" }},
+		{"a seed inside the legion daemon audience", "legionDaemonAudience", func(a *gcp.DispatchArgs) { a.LegionDaemonAudience = lower }},
 		{"a seed as the app client ID", "appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = seed }},
 		{"a seed as the app ID", "appId", func(a *gcp.DispatchArgs) { a.AppId = seed }},
 		{"a seed as the app private key secret name", "appPrivateKeySecretName", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = lower }},
@@ -2408,6 +2409,48 @@ func TestDispatchWithABrokerPresentsItsOwnServiceAccountToken(t *testing.T) {
 		}
 	}
 	require.True(t, projected, "%s lies on volume %s, which projects no ServiceAccount token", path, volumeName)
+}
+
+// Dispatch calls the Legion daemon's settings route as its own Kubernetes ServiceAccount, never
+// with a copy of the operator token the daemon holds: DISPATCH_LEGION_DAEMON_TOKEN_FILE names a
+// file on a projected serviceAccountToken volume mounted into envoy-dispatch, which the kubelet
+// rotates, minted for the audience legionDaemonAudience gives and for legion-daemon when a stack
+// gives none. It renders whatever a stack sets, since the daemon is reached at a URL a Dispatch
+// setting names at run time: no input tells the component whether a deployment calls it.
+func TestDispatchProjectsTheLegionDaemonToken(t *testing.T) {
+	for _, row := range []struct {
+		name, audience string
+		set            func(*gcp.DispatchArgs)
+	}{
+		{"the default audience", "legion-daemon", func(*gcp.DispatchArgs) {}},
+		{"the audience given", "example-daemon-audience", func(a *gcp.DispatchArgs) {
+			a.LegionDaemonAudience = "example-daemon-audience"
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.set(args)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			template := deploymentPodTemplate(t, m, "example-dispatch")
+			container := podContainer(t, template, "envoy-dispatch")
+			path, ok := containerEnv(t, container)["DISPATCH_LEGION_DAEMON_TOKEN_FILE"].(string)
+			require.True(t, ok, "the app carries DISPATCH_LEGION_DAEMON_TOKEN_FILE with no broker and no daemon input set")
+			require.Equal(t, "/var/run/secrets/legion/daemon-token", path)
+			require.Contains(t, container["volumeMounts"],
+				map[string]any{"mountPath": "/var/run/secrets/legion", "name": "legion-daemon-token", "readOnly": true})
+			var volume map[string]any
+			for _, item := range template["spec"].(map[string]any)["volumes"].([]any) {
+				if v := item.(map[string]any); v["name"] == "legion-daemon-token" {
+					volume = v
+				}
+			}
+			require.NotNil(t, volume, "no legion-daemon-token volume holds %s", path)
+			require.Equal(t, map[string]any{"sources": []any{map[string]any{"serviceAccountToken": map[string]any{
+				"audience": row.audience, "expirationSeconds": 3600.0, "path": "daemon-token",
+			}}}}, volume["projected"])
+		})
+	}
 }
 
 // With both groups set, the listener's and the front door's pods are exactly as without them: the

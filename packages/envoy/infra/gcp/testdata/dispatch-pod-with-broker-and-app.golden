@@ -120,6 +120,10 @@
             }
           },
           {
+            "name": "DISPATCH_LEGION_DAEMON_TOKEN_FILE",
+            "value": "/var/run/secrets/legion/daemon-token"
+          },
+          {
             "name": "DISPATCH_AGENT_SECRETS_URL",
             "value": "https://example-broker.internal.example"
           },
@@ -219,6 +223,11 @@
             "readOnly": true
           },
           {
+            "mountPath": "/var/run/secrets/legion",
+            "name": "legion-daemon-token",
+            "readOnly": true
+          },
+          {
             "mountPath": "/var/run/secrets/dispatch",
             "name": "agent-secrets-account-token",
             "readOnly": true
@@ -300,6 +309,20 @@
           }
         },
         "name": "nats-seed"
+      },
+      {
+        "name": "legion-daemon-token",
+        "projected": {
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "audience": "legion-daemon",
+                "expirationSeconds": 3600,
+                "path": "daemon-token"
+              }
+            }
+          ]
+        }
       },
       {
         "name": "agent-secrets-account-token",
