@@ -552,7 +552,7 @@ printf '%s\n' "$*" >>"$FAKE_DIR/gh.log"
 case $* in
   *contents/dispatch/main.go*) printf 'const (\n\tdatabaseVersion = "POSTGRES_%s"\n)\n' "${FAKE_PROD_MAJOR:-16}" ;;
   *contents/dispatch/Pulumi.prod.yaml*) printf 'config:\n  example:listenerImage: ghcr.io/cybermonklabs/legion/envoy@sha256:%064d\n' 1 ;;
-  "api repos/sjawhar/legion/commits/"*)
+  "api repos/cybermonklabs/legion/commits/"*)
     c=${2##*/}
     awk -v c="$c" '$1 == c { print $2 }' "$FAKE_DIR/parents"
     ;;
@@ -1050,7 +1050,7 @@ reset_fake
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_none"
 ((RC != 0)) || fail "up accepted a commit with no image"
 grep -q "no image ghcr.io/cybermonklabs/legion/envoy:$commit_none" "$tmp/out" || fail "up's refusal does not name the commit"
-grep -q "newest first-parent ancestor on sjawhar/legion main that has one is $commit_ancestor" "$tmp/out" ||
+grep -q "newest first-parent ancestor on cybermonklabs/legion main that has one is $commit_ancestor" "$tmp/out" ||
   fail "up's refusal does not name the newest first-parent ancestor with an image"
 no_create || fail "up created something before refusing a commit with no image"
 pass "up refuses a commit with no image, naming its newest first-parent ancestor with one, before creating anything"
