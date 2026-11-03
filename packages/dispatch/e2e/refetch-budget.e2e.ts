@@ -10,6 +10,7 @@ import {
   patchIssue,
   putIssueState,
 } from "./api";
+import { inboxCountBadge, inboxCountText } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -346,10 +347,9 @@ test("pin: a pin from another tab shows in this tab's sidebar within 2 s with on
   }
 });
 
-test("replies: a reply in a thread alice wrote in moves her Replies count, and one in a thread she never wrote in reads nothing @phone", async ({
+test("replies: a reply in a thread alice wrote in moves her Inbox count, and one in a thread she never wrote in reads nothing @phone", async ({
   browser,
 }, testInfo) => {
-  const isPhone = testInfo.project.name === "iphone";
   await createProject({ key: "CORE", name: "Core" });
   const strangers = await createIssue({ project: "CORE", title: "Somebody else's thread" });
   const own = await createIssue({ project: "CORE", title: "Alice's thread" });
@@ -367,21 +367,13 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
         repliesReads += 1;
       }
     });
-    // From 1280 px the sidebar's Replies row carries the count; below, the compact header's
-    // `Replies N` link, absent at 0.
-    const repliesCount = isPhone
-      ? page.getByRole("link", { name: /^Replies \d+$/ })
-      : page
-          .getByRole("navigation", { name: "Navigation" })
-          .getByRole("link", { name: /^Replies/ });
+    // The shell's one Inbox number, wherever this width draws it: the sidebar's entry from
+    // 1280 px, the compact top bar's badge below. Nothing waits on alice yet, so it is bare.
+    const inboxCount = inboxCountBadge(page);
 
     await page.goto(`/issues/${strangers.key}/conversation`);
     const title = await eventBarrier(page, traffic, strangers.key, strangers.title);
-    if (isPhone) {
-      await expect(repliesCount).toHaveCount(0);
-    } else {
-      await expect(repliesCount).toHaveText("Replies");
-    }
+    await expect(inboxCount).toHaveText(inboxCountText(0));
     await settled(traffic);
     repliesReads = 0;
 
@@ -399,11 +391,7 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
     expect(repliesReads, "Replies reads after a reply in a thread alice never wrote in").toBe(0);
 
     await createComment(own.key, { body: "A reply to alice.", reply_to: ownRoot.id }, session);
-    if (isPhone) {
-      await expect(repliesCount).toHaveText("Replies 1", { timeout: 2_000 });
-    } else {
-      await expect(repliesCount).toHaveText(/^Replies\s*1$/, { timeout: 2_000 });
-    }
+    await expect(inboxCount).toHaveText(inboxCountText(1), { timeout: 2_000 });
     expect(repliesReads).toBeGreaterThan(0);
   } finally {
     await alice.close();

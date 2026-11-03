@@ -1235,6 +1235,12 @@ export function Inbox({
           // The two columns are a grid of two fractions, so the share the reader dragged the
           // divider to is exactly the share the pane takes, at any width; the divider is the
           // column between them and takes its own.
+          //
+          // One row, `minmax(0, 1fr)`: an implicit `auto` row is as tall as the taller column,
+          // so a long document in the pane would make the row - and with it both columns'
+          // boxes - taller than the page, and neither column would scroll in itself. The page
+          // would scroll instead, which is how the pane came to show a document's top however
+          // far down it the reader's section sat.
           <div
             className="grid min-h-0 flex-1"
             ref={columnsRef}
@@ -1243,13 +1249,14 @@ export function Inbox({
                 subject === undefined
                   ? "minmax(0, 1fr)"
                   : `minmax(0, ${1 - paneWidth}fr) auto minmax(0, ${paneWidth}fr)`,
+              gridTemplateRows: "minmax(0, 1fr)",
             }}
           >
             {listColumn}
             {subject === undefined ? null : (
               <>
                 <PaneDivider columns={columnsRef} onWidthChange={setPaneWidth} width={paneWidth} />
-                <div className="min-w-0" ref={paneRef}>
+                <div className="min-h-0 min-w-0" ref={paneRef}>
                   <ReadingPane
                     onAnswered={recordAnswered}
                     onSnoozeLive={onSnoozeLive}

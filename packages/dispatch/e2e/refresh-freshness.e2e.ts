@@ -234,7 +234,7 @@ test("inbox: a snooze from alice's other tab moves the row to Later in this tab 
   }
 });
 
-test("replies: an issue's new title shows on the open Replies page within 2 s", async ({
+test("replies: an issue's new title shows on the open Inbox's Reply row within 2 s", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -245,8 +245,9 @@ test("replies: an issue's new title shows on the open Replies page within 2 s", 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await openLive(page, "/replies");
-    const row = page.locator(`[data-replies-row="${root.id}"]`);
+    // The Replies page is the Inbox narrowed to its Reply rows now (`/replies` lands here).
+    await openLive(page, "/?type=reply");
+    const row = page.locator(`[data-inbox-row="reply:${root.id}"]`);
     await expect(row).toContainText("Release train");
 
     await patchIssue(issue.key, { title: "Release train, renamed" }, bob);

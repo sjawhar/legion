@@ -463,6 +463,12 @@ interface MentionComposerProps {
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
   readonly saveEdit?: SaveCommentEdit;
+  /** The reply target is this box's own standing address rather than a Reply the reader
+   *  pressed: the Inbox reading column's thread box, which is the thread's permanent reply and
+   *  is remounted whenever the column follows the selection onto another row. Taking a target
+   *  normally takes the focus, so the reader can write at once; a standing box takes neither,
+   *  since the reader's place is the list the column follows and the next `j` belongs to it. */
+  readonly standing?: boolean;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
    *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
@@ -491,6 +497,7 @@ export function MentionComposer({
   owner,
   replyTo = null,
   saveEdit,
+  standing = false,
 }: MentionComposerProps): ReactNode {
   // This composer's send, held by its target rather than by this mount (`useComposerSend`): a
   // composer that mounts where a send is out, or was refused, shows that send and its draft.
@@ -684,8 +691,13 @@ export function MentionComposer({
     }
     if (previousReply.current === replyTo.id) return;
     previousReply.current = replyTo.id;
+    // A standing box never takes the focus for its own target: nobody asked for it, and the
+    // Inbox column mounts one for every row the reader steps onto.
+    const takeFocus = () => {
+      if (!standing) textarea.current?.focus();
+    };
     if (tookHeldDraft) {
-      textarea.current?.focus();
+      takeFocus();
       return;
     }
     const initial = replyTo.mentions ?? [];
@@ -709,8 +721,8 @@ export function MentionComposer({
         return { end, start, target: mention.target, text };
       }),
     });
-    textarea.current?.focus();
-  }, [replaceDraft, replyTo]);
+    takeFocus();
+  }, [replaceDraft, replyTo, standing]);
 
   /** A send the server took, while this composer is mounted: the store has refreshed what it
    *  wrote. The draft is the composer's own, so it clears to what the channel it addresses now

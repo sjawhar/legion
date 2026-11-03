@@ -31,6 +31,7 @@ import { VersionView } from "../doc/VersionView";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
 import type { InboxListRow } from "./list-row";
+import { holdSection, type SectionHold } from "./pane-placement";
 import { questionLine } from "./question-line";
 import { ReadingPaneHead, ThreadPaneHead } from "./ReadingPaneHead";
 import { ThreadBody } from "./ThreadBody";
@@ -417,7 +418,7 @@ interface DocumentAtBlock {
   readonly ready: boolean;
   readonly scroller: RefObject<HTMLDivElement | null>;
   readonly sectionBar: SectionBar | undefined;
-  /** The heading of the section the column scrolled to, once the document has drawn. */
+  /** The heading of the section the column is opened at, once the block has drawn. */
   readonly sectionBlockId: string | undefined;
   readonly showsDocument: boolean;
   /** Puts the column back at the block it was opened for. */
@@ -451,6 +452,10 @@ function useDocumentAtBlock({
   // no blocks at all. A document that holds no such block is an anchor the column cannot place,
   // which is what its host falls back from.
   const [blockFound, setBlockFound] = useState<boolean | undefined>(undefined);
+  // This column's hold on its own placement, while one is on: the effect below takes it, and
+  // "Skip to the answer" - a placement of the reader's own, pressed in the head rather than in
+  // the column - lets it go.
+  const hold = useRef<SectionHold | undefined>(undefined);
   const settled = useSettled(artifactId);
 
   const user = useQuery(whoAmIQuery()).data;
@@ -477,7 +482,8 @@ function useDocumentAtBlock({
 
   // The editor draws its blocks after the socket syncs, and a diagram or a picture moves them
   // again afterwards, so the placement runs on every change of the drawn document: the scroll
-  // once, when the block is first there, and the bar whenever the blocks move.
+  // for as long as the column is the reader's to place (`holdSection`), and the bar whenever
+  // the blocks move.
   useEffect(() => {
     setSectionBar(undefined);
     setSectionBlockId(undefined);
@@ -487,9 +493,13 @@ function useDocumentAtBlock({
     if (column === null || drawn === null || !showsDocument) {
       return;
     }
-    // The column is placed once, when the block is first drawn; the bar follows the blocks for
-    // as long as they move.
-    let placed = false;
+    // One scroll is never enough for a section deep in a document: the editor draws its blocks
+    // in pieces, so the first scroll is clamped by a column still shorter than the document,
+    // and every block that lands above the heading afterwards pushes it down again. So the
+    // column is put back at its section on every change until the reader moves it, which is
+    // the only thing that ends the placement (`pane-placement.ts`).
+    const held = holdSection(column);
+    hold.current = held;
     const place = () => {
       const block = blockElement(drawn, blockId);
       if (block === null) {
@@ -501,26 +511,35 @@ function useDocumentAtBlock({
       }
       setBlockFound(true);
       const headingId = sectionHeadingId(drawn, blockId);
-      if (!placed) {
+      // Which section the column is opened at is known as soon as the block is drawn, whether
+      // or not the scroll has got there yet: it is what the head's "Open page" opens at.
+      setSectionBlockId(headingId);
+      if (held.held()) {
         if (headingId === undefined) {
           column.scrollTop = 0;
-          placed = true;
         } else {
-          placed = scrollBlockToTop(headingId, column);
-        }
-        if (placed) {
-          setSectionBlockId(headingId);
+          scrollBlockToTop(headingId, column);
         }
       }
       const bar = sectionBarOf(drawn, headingId, block);
       setSectionBar((current) => (sameBar(current, bar) ? current : bar));
     };
     place();
+    // The editor moves its blocks by more than it adds them: a picture or a diagram that draws
+    // where a node view already stood changes no child of `drawn`, so attributes and text are
+    // watched beside them.
     const drawing = new MutationObserver(place);
-    drawing.observe(drawn, { childList: true, subtree: true });
+    drawing.observe(drawn, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
     const resizing = new ResizeObserver(place);
     resizing.observe(drawn);
     return () => {
+      held.release();
+      hold.current = undefined;
       drawing.disconnect();
       resizing.disconnect();
     };
@@ -529,6 +548,8 @@ function useDocumentAtBlock({
   const skipToBlock = useCallback(() => {
     const column = scroller.current;
     if (column !== null) {
+      // The reader's own placement: the column is theirs from here, so the section's is over.
+      hold.current?.release();
       scrollBlockToTop(blockId, column);
     }
   }, [blockId]);

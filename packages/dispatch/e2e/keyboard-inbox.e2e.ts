@@ -1,6 +1,8 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { setLiveSessions } from "./agents";
 import { createAsk, createComment, createIssue, createProject, getInbox, patchIssue } from "./api";
+import { recordClipboard } from "./clipboard";
 import {
   assigneeFilter,
   assigneeOptions,
@@ -9,7 +11,14 @@ import {
   openAssigneeFilter,
   pickAssignee,
 } from "./inbox-filter";
-import { askControls, hasReadingPane, selectedRow, selectRow } from "./inbox-pane";
+import { askControls, hasReadingPane, inboxList, selectedRow, selectRow } from "./inbox-pane";
+import {
+  agentRowId,
+  replyRowId,
+  seedAgentThread,
+  seedCommentThread,
+  THREAD_SESSION,
+} from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -1005,4 +1014,103 @@ test.describe("inbox selection @phone", () => {
       await context.close();
     }
   });
+});
+
+/**
+ * The Inbox's keys over its thread rows (INFRA-450): a Reply row and an Agent row stand in the
+ * same list as the asks, so the movement keys step through them, `o` opens the thread and `y`
+ * copies its reference - and the keys that act on an open question, `x`, `h` and the row's own
+ * checkbox, act on no thread row at all.
+ */
+test("j, k and the arrows step through thread rows, o opens them, y copies only what has a reference", async ({
+  browser,
+}) => {
+  await setLiveSessions([THREAD_SESSION]);
+  await createProject({ key: "CORE", name: "Core" });
+  const asked = await createIssue({ project: "CORE", title: "Lease handover" });
+  const ask = await createAsk(asked.key, { question: "Ship the lease handover?" }, session);
+  const threadIssue = await createIssue({ project: "CORE", title: "Replay budget" });
+  const thread = await seedCommentThread(
+    threadIssue.key,
+    "How far back does a replay go?",
+    "One hour, then it gives up."
+  );
+  const agent = await seedAgentThread({ body: "What is the rollout status?", replies: ["Green."] });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const copied = await recordClipboard(page);
+    // Under **All threads**: a thread the column shows is read where it stands, and an Unread
+    // list would drop its row the moment the walk moved on, renumbering the rows underfoot.
+    await page.goto("/?threads=all");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(3);
+    await page.locator("body").focus();
+    test.skip(!hasReadingPane(page), "the selection the keys move is the reading column's");
+    const rows = page.locator("[data-inbox-row]");
+    const order = await rows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-inbox-row") ?? "")
+    );
+    expect(new Set(order)).toEqual(new Set([ask.id, replyRowId(thread), agentRowId(agent)]));
+
+    // The keys are pressed from the list, where a reader walking it stands. The column follows
+    // the selection and takes no focus of its own: the thread it draws has a standing reply
+    // box, not a Reply the reader opened, so the focus the walk needs stays in the list and
+    // the arrows stay the list's.
+    const press = async (key: string): Promise<void> => {
+      await page.keyboard.press(key);
+      await expect(inboxList(page).locator(":focus")).toHaveCount(1);
+    };
+    // The list selects a row for the reader on the first commit that has one, which is before
+    // the threads' own read has landed, so which row that is belongs to the list: the walk
+    // starts from the top row, picked the way a reader picks it.
+    await selectRow(page, order[0] ?? "");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", order[0] ?? "");
+    await selectedRow(page).focus();
+    for (const next of order.slice(1)) {
+      await press("j");
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", next);
+    }
+    for (const previous of [...order].reverse().slice(1)) {
+      await press("k");
+      await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", previous);
+    }
+    await press("ArrowDown");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", order[1] ?? "");
+    await press("ArrowUp");
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", order[0] ?? "");
+
+    // A thread row carries no checkbox, and neither x nor h has anything to act on there.
+    const threadRow = page.locator(`[data-inbox-row="${replyRowId(thread)}"]`);
+    await expect(threadRow.getByRole("checkbox")).toHaveCount(0);
+    await selectRow(page, replyRowId(thread));
+    await page.locator("body").focus();
+    await page.keyboard.press("x");
+    await page.keyboard.press("h");
+    await expect(page.getByRole("group", { name: "Selected asks" })).toHaveCount(0);
+
+    // y copies the thread's own reference.
+    await page.keyboard.press("y");
+    await expect.poll(copied).toEqual([`dispatch://${threadIssue.key}/comment/${thread}`]);
+
+    // An Agent row has no reference at all, so y writes nothing more; the question beside them
+    // still answers to x, which the bulk bar counts.
+    await selectRow(page, agentRowId(agent));
+    await page.locator("body").focus();
+    await page.keyboard.press("y");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(3);
+    expect(await copied()).toEqual([`dispatch://${threadIssue.key}/comment/${thread}`]);
+    await selectRow(page, ask.id);
+    await page.locator("body").focus();
+    await page.keyboard.press("x");
+    await expect(page.getByRole("group", { name: "Selected asks" })).toContainText("1 selected");
+
+    // o opens the thread's own page, not the issue it sits on.
+    await selectRow(page, replyRowId(thread));
+    await page.locator("body").focus();
+    await page.keyboard.press("o");
+    await expect(page).toHaveURL(new RegExp(`/issues/${threadIssue.key}/comments/${thread}$`));
+  } finally {
+    await context.close();
+  }
 });

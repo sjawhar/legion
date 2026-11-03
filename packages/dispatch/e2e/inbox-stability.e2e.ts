@@ -160,6 +160,12 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
+/** The address both turn-hold rows below open: the Inbox banded by whose turn it is
+ *  (`?group=waiting-on`), which is the banding a flipped turn moves a row between. The list's
+ *  own default bands by priority, where a progress note moves no row at all, so the hold under
+ *  the reader's hand would have nothing to hold. */
+const WAITING_ON_INBOX = "/?group=waiting-on";
+
 test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it @phone", async ({
   browser,
 }) => {
@@ -167,7 +173,7 @@ test("a row being typed into keeps its draft when an agent's progress note flips
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/");
+    await page.goto(WAITING_ON_INBOX);
     await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
     const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
@@ -224,7 +230,7 @@ test("the reader's own Ask back leaves the view still and holds the row only whe
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/");
+    await page.goto(WAITING_ON_INBOX);
     await expect(page.locator("[data-inbox-row]")).toHaveCount(BOTH_SECTIONS_ROWS);
     const row = inboxRow(page, target.ask.id);
     await expect(row).toHaveAttribute("data-inbox-section", "human");
@@ -371,23 +377,26 @@ test("the row under the pointer stays put when a row above it is answered elsewh
   }
 });
 
-test("a grouped header stays with its pointer-held row while a P0 ask arrives", async ({
+test("a band's header stays with its pointer-held row while a P0 ask arrives", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   // Older rows under the pair, so the list runs past the bottom of the viewport and has
-  // somewhere to scroll when the arrival pushes the pair down.
+  // somewhere to scroll when the arrival pushes the pair down. They carry no priority, so the
+  // list's own banding puts them in the band under the P1 pair.
   await seedAsks("Below", 14);
-  const grouped = await createIssue({ project: "CORE", title: "Grouped stability" });
-  await createAsk(grouped.key, { question: "Grouped first" }, session);
-  const held = await createAsk(grouped.key, { question: "Grouped held" }, session);
+  const banded = await createIssue({ project: "CORE", title: "Banded stability" });
+  await patchIssue(banded.key, { priority: 1 });
+  await createAsk(banded.key, { question: "Banded first" }, session);
+  const held = await createAsk(banded.key, { question: "Banded held" }, session);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
     const row = inboxRow(page, held.id);
-    const header = page.locator(`[data-inbox-group-header="issue:${grouped.key}"]`);
+    // The P1 band's own heading, which the arriving P0 band pushes down with its rows.
+    const header = page.getByRole("button", { name: "P1 (2)" });
     await expect(row).toBeVisible();
     await expect(header).toBeVisible();
     const box = await row.boundingBox();
@@ -410,12 +419,12 @@ test("a grouped header stays with its pointer-held row while a P0 ask arrives", 
   }
 });
 
-async function seedTravellingPointerGroup() {
+async function seedTravellingPointerBand() {
   await createProject({ key: "CORE", name: "Core" });
-  const grouped = await createIssue({ project: "CORE", title: "Grouped travelling pointer asks" });
-  await patchIssue(grouped.key, { priority: 1 });
-  await createAsk(grouped.key, { question: "Travelling pointer grouped first" }, session);
-  await createAsk(grouped.key, { question: "Travelling pointer grouped second" }, session);
+  const banded = await createIssue({ project: "CORE", title: "Banded travelling pointer asks" });
+  await patchIssue(banded.key, { priority: 1 });
+  await createAsk(banded.key, { question: "Travelling pointer banded first" }, session);
+  await createAsk(banded.key, { question: "Travelling pointer banded second" }, session);
   await seedAsks("Travelling pointer", 6);
 }
 
@@ -523,10 +532,10 @@ test("a travelling pointer keeps its destination when a P0 row arrives @phone", 
   }
 });
 
-test("a travelling pointer crosses a grouped owner without losing its destination @phone", async ({
+test("a travelling pointer crosses a band of its own without losing its destination @phone", async ({
   browser,
 }) => {
-  await seedTravellingPointerGroup();
+  await seedTravellingPointerBand();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();

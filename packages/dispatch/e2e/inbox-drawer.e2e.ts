@@ -90,12 +90,13 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
     await expect(
       page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Drawer issue" })
     ).toBeVisible();
+    // One name at both widths now: the compact top bar's Peek beside its Inbox count, and the
+    // rail's Peek beside the Inbox entry.
+    const peek = "Peek at the inbox without leaving this page";
     const trigger =
       testInfo.project.name === "iphone"
-        ? page.getByRole("button", { name: /^Open inbox/ })
-        : page
-            .getByRole("navigation", { name: "Navigation" })
-            .getByRole("button", { name: "Peek at the inbox without leaving this page" });
+        ? page.locator("header").first().getByRole("button", { name: peek })
+        : page.getByRole("navigation", { name: "Navigation" }).getByRole("button", { name: peek });
     await trigger.click();
     await expect(drawer(page).getByTestId(`ask-${askId}`)).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/issues/${issueKey}$`));
@@ -156,7 +157,6 @@ test("`i` toggles the drawer, is listed in ?, and is not offered on the Inbox pa
     await page.locator("body").focus();
     await page.keyboard.press("i");
     await expect(drawer(page)).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /^Open inbox/ })).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Peek at the inbox without leaving this page" })
     ).toHaveCount(0);

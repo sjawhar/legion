@@ -294,15 +294,25 @@ export function listMyAnswers(
   return request<MyAnswersResponse>(`/api/v1/me/answers${suffix}`, "GET", undefined, options);
 }
 
-/** `GET /api/v1/me/replies`: the threads the caller wrote in where someone else has written since
- *  they last read it, newest reply first, one page. */
+/** `GET /api/v1/me/replies`: the Inbox's thread rows - the threads the caller wrote in where
+ *  someone else has written since they last read it, and, with `kind` naming it, their one-off
+ *  messages to an agent session holding a reply - newest reply first. An absent `kind` is the
+ *  route's own default, `reply` alone; an absent `state` is `unread`; an absent `limit` is every
+ *  row, which is what the Inbox itself reads. */
 export function listMyReplies(
-  page: { limit?: number; offset?: number } = {},
+  page: {
+    kind?: readonly ("reply" | "agent")[];
+    limit?: number;
+    offset?: number;
+    state?: "all" | "unread";
+  } = {},
   options: ApiOptions = {}
 ): Promise<MyRepliesResponse> {
   const query = new URLSearchParams();
+  if (page.kind !== undefined) query.set("kind", page.kind.join(","));
   if (page.limit !== undefined) query.set("limit", String(page.limit));
   if (page.offset !== undefined) query.set("offset", String(page.offset));
+  if (page.state !== undefined) query.set("state", page.state);
   const suffix = query.size === 0 ? "" : `?${query}`;
   return request<MyRepliesResponse>(`/api/v1/me/replies${suffix}`, "GET", undefined, options);
 }
@@ -840,6 +850,22 @@ export function replyToMessageDelivery(
       actor,
       as: "agent",
     }
+  );
+}
+
+/** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the session an attempt went to
+ *  records that it took the message as a turn of its own live conversation. The Inbox lists no
+ *  Agent row for such a message, however the session replies to it (`myAgentRows`). */
+export function acceptAgentDelivery(
+  messageID: string,
+  attempt: number,
+  actor: Actor
+): Promise<MessageDelivery> {
+  return request<MessageDelivery>(
+    `/api/v1/messages/${encodeURIComponent(messageID)}/deliveries/${attempt}/accept`,
+    "POST",
+    {},
+    { actor, as: "agent" }
   );
 }
 

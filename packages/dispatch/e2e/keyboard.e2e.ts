@@ -93,7 +93,9 @@ test("? lists the registry with unavailable rows greyed, filters live, and Escap
     await page.keyboard.press("?");
     const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
     await expect(dialog).toBeVisible();
-    const backRow = dialog.getByRole("listitem").filter({ hasText: "Back to the ask row" });
+    const backRow = dialog
+      .getByRole("listitem")
+      .filter({ hasText: "Back to the row, then clear the focused row" });
     await expect(backRow).toHaveAttribute("data-enabled", "false");
     await expect(backRow.locator("kbd")).toHaveText(["Esc"]);
     await page.keyboard.press("Escape");

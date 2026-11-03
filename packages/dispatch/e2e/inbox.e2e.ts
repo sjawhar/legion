@@ -27,9 +27,11 @@ import {
   clearAssigneeFilter,
   closeAssigneeFilter,
   openAssigneeFilter,
+  openFilterFields,
   pickAssignee,
 } from "./inbox-filter";
 import { askCard, askControls, inboxRow } from "./inbox-pane";
+import { expectInboxCount } from "./inbox-threads";
 import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
@@ -88,8 +90,13 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     const highAccent = await askCard(page, high.id);
     await expect(highAccent).toHaveAccessibleName("Urgency: High");
     await expect(highAccent).toContainText("HIGH");
-    await expect(await askCard(page, medium.id)).toHaveAccessibleName("Urgency: Medium");
-    await expect(page.getByText("Medium", { exact: true })).toHaveCount(0);
+    const mediumAccent = await askCard(page, medium.id);
+    await expect(mediumAccent).toHaveAccessibleName("Urgency: Medium");
+    // The card spends no word on a medium question - its accent is the whole mark - while the
+    // row it belongs to wears the urgency mark the list gained, which is the word itself
+    // (`RowUrgencyMark`, outside the card).
+    await expect(mediumAccent.getByText("Medium", { exact: true })).toHaveCount(0);
+    await expect(inboxRow(page, medium.id).getByText("Medium", { exact: true })).toHaveCount(1);
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Close navigation" }).click();
     }
@@ -129,7 +136,7 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
   }
 });
 
-test("an ask thread shows its newest two replies, expands older replies, and puts a fresh reply first", async ({
+test("an ask thread shows its newest two replies, expands the earlier ones, and puts a fresh reply last", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -161,9 +168,11 @@ test("an ask thread shows its newest two replies, expands older replies, and put
     const thread = card.getByRole("region", { name: "Replies" });
     const replyBodies = () => thread.locator("li > div > .dispatch-markdown").allTextContents();
 
-    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    // The thread reads in the reader's own order, which starts at **Oldest first** (INFRA-450):
+    // the newest two replies are shown, oldest of the two first, with the rest behind the fold.
+    await expect.poll(replyBodies).toEqual(["Newer reply", "Newest reply"]);
     await expect(card.getByText("Middle reply", { exact: true })).toHaveCount(0);
-    const showMore = card.getByRole("button", { name: "Show 3 more replies" });
+    const showMore = card.getByRole("button", { name: "Show 3 earlier replies" });
     await expect(showMore).toHaveAttribute("aria-expanded", "false");
     const before = testInfo.outputPath(`ask-thread-before-${testInfo.project.name}.png`);
     await page.screenshot({ path: before, fullPage: true });
@@ -175,15 +184,15 @@ test("an ask thread shows its newest two replies, expands older replies, and put
     await showMore.click();
     await expect
       .poll(replyBodies)
-      .toEqual(["Newest reply", "Newer reply", "Middle reply", "Older reply", "Oldest reply"]);
+      .toEqual(["Oldest reply", "Older reply", "Middle reply", "Newer reply", "Newest reply"]);
     const showFewer = card.getByRole("button", { name: "Show fewer replies" });
     await expect(showFewer).toHaveAttribute("aria-expanded", "true");
     await showFewer.click();
-    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    await expect.poll(replyBodies).toEqual(["Newer reply", "Newest reply"]);
 
     await card.getByLabel("Your answer").fill("Fresh reply");
     await card.getByRole("button", { name: "Ask back" }).click();
-    await expect.poll(replyBodies).toEqual(["Fresh reply", "Newest reply"]);
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Fresh reply"]);
     const after = testInfo.outputPath(`ask-thread-after-${testInfo.project.name}.png`);
     await page.screenshot({ path: after, fullPage: true });
     await testInfo.attach(`ask thread after (${testInfo.project.name})`, {
@@ -587,7 +596,9 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
   try {
     const page = await alice.newPage();
     const rows = page.locator("[data-inbox-row]");
-    await page.goto("/");
+    // The turn bands are a choice of **Group by** now, not the Inbox's default banding, so the
+    // address asks for them (`?group=waiting-on`); a reload keeps it.
+    await page.goto("/?group=waiting-on");
     // Every open ask whose next turn is the human's appears in the top blocker section.
     await expect(rows).toHaveCount(2);
     await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
@@ -678,7 +689,9 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
   }
 });
 
-test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async ({ browser }) => {
+test("under Waiting on, Sort by priority puts a P0 ask ahead of a P2 ask clarified after it", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const p2Issue = await createIssue({ project: "CORE", title: "Earlier P2 issue" });
   await patchIssue(p2Issue.key, { priority: 2 });
@@ -694,13 +707,14 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
     await priority.selectOption("0");
     await expect(priority).toHaveValue("0");
     await expect.poll(() => getIssue(p0Issue.key)).toMatchObject({ priority: 0 });
-    await Promise.all([
-      createComment(p2Issue.key, { ask_id: p2Ask.id, body: `Clarify ${p2Ask.id}` }),
-      createComment(p0Issue.key, { ask_id: p0Ask.id, body: `Clarify ${p0Ask.id}` }),
-    ]);
+    // Clarified P0 first, so recency alone would put the P2 ask on top: the order under test is
+    // the priority one, not the one the writes happened to land in.
+    await createComment(p0Issue.key, { ask_id: p0Ask.id, body: `Clarify ${p0Ask.id}` });
+    await createComment(p2Issue.key, { ask_id: p2Ask.id, body: `Clarify ${p2Ask.id}` });
 
-    await page.goto("/");
-    // The band is the rows it holds, in the order the server listed them.
+    // The turn bands are a **Group by** choice and the order is a **Sort by** one; both live in
+    // the address.
+    await page.goto("/?group=waiting-on&sort=priority");
     const waitingOnAgents = page.locator('[data-inbox-section="agent"]');
     await expect(waitingOnAgents).toHaveCount(2);
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
@@ -719,20 +733,20 @@ test("the Unassigned filter lists a P0 ask above a P2 ask opened before it", asy
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   // Both issues are the shared token's, so nobody holds them and the Unassigned filter is where
-  // their questions are listed. Both wait on a person, so one band holds both and only the
-  // server's order - the owning issue's priority first - decides which leads; the SPA re-sorts
-  // nothing. Opened P2 first so recency alone would keep it on top.
-  const p2Issue = await createIssue({ project: "CORE", title: "Unassigned P2 issue" }, session);
-  await patchIssue(p2Issue.key, { priority: 2 });
-  const p2Ask = await createAsk(p2Issue.key, { question: "P2 waiting on a human" }, session);
+  // their questions are listed. Both wait on a person, so the **Waiting on** banding holds both
+  // in one band and only **Sort by** Priority decides which leads. Opened P0 first, so recency
+  // alone would put the P2 one on top.
   const p0Issue = await createIssue({ project: "CORE", title: "Unassigned P0 issue" }, session);
   await patchIssue(p0Issue.key, { priority: 0 });
   const p0Ask = await createAsk(p0Issue.key, { question: "P0 waiting on a human" }, session);
+  const p2Issue = await createIssue({ project: "CORE", title: "Unassigned P2 issue" }, session);
+  await patchIssue(p2Issue.key, { priority: 2 });
+  const p2Ask = await createAsk(p2Issue.key, { question: "P2 waiting on a human" }, session);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/?assignee=unassigned");
+    await page.goto("/?assignee=unassigned&group=waiting-on&sort=priority");
     // A question nobody holds is not the reader's own, so the band is not headed "you".
     await expect(page.getByRole("heading", { name: "Waiting on a person" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Waiting on you" })).toHaveCount(0);
@@ -795,9 +809,9 @@ test("the Inbox sets its question's issue priority in place", async ({ browser }
 
 // Deferring a row is only worth anything if it stops being asked about, so this case gates the
 // whole rule at the UI: the band, and the two counts that would otherwise keep nagging - the
-// Blocked-on-you banner and the rail's Needs-you badge - including after an agent replies,
+// Blocked-on-you banner and the shell's one Inbox count - including after an agent replies,
 // which hands the turn back and is exactly what could pull a deferred ask onto the list.
-test("a snoozed row leaves Later, the banner and the Needs-you badge alone until un-snoozed", async ({
+test("a snoozed row leaves Later, the banner and the Inbox count alone until un-snoozed", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -810,10 +824,11 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
     await page.goto("/");
     const row = inboxRow(page, ask.id);
     const banner = page.getByText(/Blocked on you: 1 item/);
-    const badge = page.getByText(/^Needs you 1$/);
-    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
+    // The shell carries one number now, the Inbox entry's (INFRA-450), and the band the row
+    // stands in is read off the row itself.
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
     await expect(banner).toBeVisible();
-    await expect(badge.first()).toBeVisible();
+    await expectInboxCount(page, 1);
 
     const put = page.waitForRequest(
       (request) =>
@@ -831,7 +846,7 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
     await expect(later).toBeVisible();
     await expect(row).toBeHidden();
     await expect(banner).toBeHidden();
-    await expect(badge).toHaveCount(0);
+    await expectInboxCount(page, 0);
     await expect
       .poll(async () => (await getInbox({ login: "alice" })).at(0)?.snoozed_until)
       .not.toBeNull();
@@ -843,7 +858,7 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
     await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
     await expect(row).toBeHidden();
     await expect(banner).toBeHidden();
-    await expect(badge).toHaveCount(0);
+    await expectInboxCount(page, 0);
 
     // The real pointer opens the disclosure; the row is there with its return time.
     await later.click();
@@ -866,7 +881,6 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
       .getByRole("button", { name: `Un-snooze ${issue.key}` })
       .click();
     await remove;
-    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
     await expect(row).toHaveAttribute("data-inbox-section", "human");
     await expect(page.getByText(/Blocked on you: 1 item/)).toBeVisible();
     // The row's link was not followed by any of it.
@@ -886,7 +900,7 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
 
 // A credential request is listed above the asks and waits on its approver as much as an ask
 // whose turn is theirs, so it is as much a reason not to say "Nothing needs you" and as much a
-// part of the Needs-you badge and the Blocked-on-you banner. A request waiting on someone else
+// part of the Inbox count and the Blocked-on-you banner. A request waiting on someone else
 // is in neither. A secret request is decided on the secrets broker's own page, so its row is a
 // plain link to the page the broker named for it, `approve_url`, as the broker gave it.
 test("a pending credential request alone is listed, counted, and keeps the empty state away", async ({
@@ -896,10 +910,9 @@ test("a pending credential request alone is listed, counted, and keeps the empty
   try {
     const page = await alice.newPage();
     const empty = page.getByText("Nothing needs you");
-    const badge = page.getByText(/^Needs you \d+$/);
     await page.goto("/");
     await expect(empty).toBeVisible();
-    await expect(badge).toHaveCount(0);
+    await expectInboxCount(page, 0);
 
     const approveUrl = "https://secrets.internal.example/approve/record-alice";
     await setPendingCredentialRequests([
@@ -928,7 +941,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
     await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
     await expect(requests.getByRole("link")).toHaveAttribute("href", approveUrl);
     await expect(empty).toHaveCount(0);
-    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+    await expectInboxCount(page, 1);
     await expect(page.getByText(/^Blocked on you: 1 item, oldest/)).toBeVisible();
 
     const shot = testInfo.outputPath(`inbox-credential-request-${testInfo.project.name}.png`);
@@ -1049,7 +1062,7 @@ test.describe("credential record path", () => {
       await expect(row).toContainText("Secret request");
       await expect(requests.getByRole("link")).toHaveCount(0);
       await expect(requests.locator("a")).toHaveCount(0);
-      await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+      await expectInboxCount(page, 1);
     } finally {
       await alice.close();
     }
@@ -1094,7 +1107,7 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
     const empty = page.getByText("Nothing needs you");
     await page.goto("/");
     await expect(empty).toBeVisible();
-    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
+    await expectInboxCount(page, 0);
 
     await setPendingCredentialRequests([
       {
@@ -1111,13 +1124,13 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
     await expect(requests.getByRole("link")).toHaveCount(1);
     await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
     await expect(empty).toHaveCount(0);
-    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+    await expectInboxCount(page, 1);
 
     await setPendingCredentialRequests([]);
     await page.clock.fastForward(15_500);
     await expect(requests).toHaveCount(0);
     await expect(empty).toBeVisible();
-    await expect(page.getByText(/^Needs you \d+$/)).toHaveCount(0);
+    await expectInboxCount(page, 0);
   } finally {
     await alice.close();
   }
@@ -1314,10 +1327,12 @@ test("the Inbox opens on the reader's own questions, every visit, and ?assignee=
     const bobPage = await bob.newPage();
 
     // Alice holds nothing, so her list is empty and says so: no band of other people's
-    // questions, and the filter - the switch's one replacement - says who it is listing for.
+    // questions, and the filter - the switch's one replacement, which stands behind the bar's
+    // **Filter** button now - says who it is listing for.
     await alicePage.goto("/");
     await expect(alicePage.getByText("Nothing needs you")).toBeVisible();
     await expect(alicePage.locator("[data-inbox-row]")).toHaveCount(0);
+    await openFilterFields(alicePage);
     await expect(assigneeFilter(alicePage)).toHaveText("Assignee · you");
     const shot = testInfo.outputPath(`inbox-own-work-${testInfo.project.name}.png`);
     await alicePage.screenshot({ path: shot, fullPage: true });
@@ -1342,6 +1357,7 @@ test("the Inbox opens on the reader's own questions, every visit, and ?assignee=
     await alicePage.goto("/?assignee=bob");
     await expect(alicePage.getByTestId(`ask-${theirsAsk.id}`)).toBeVisible();
     await expect(alicePage.locator("[data-inbox-row]")).toHaveCount(1);
+    await openFilterFields(alicePage);
     await expect(assigneeFilter(alicePage)).toHaveText("Assignee · bob");
 
     // And nothing of that visit is remembered: the bare address is her own work again.
@@ -1464,6 +1480,7 @@ test("the assignee filter takes several people and Unassigned, narrows its rows,
     await page.goto("/?assignee=nobody@example.invalid");
     await expect(page.getByText("Nothing matches this filter")).toBeVisible();
     await expect(page.locator("[data-inbox-row]")).toHaveCount(0);
+    await openFilterFields(page);
     await expect(assigneeFilter(page)).toHaveText("Assignee · nobody@example.invalid");
   } finally {
     await alice.close();
@@ -1541,7 +1558,6 @@ test("clearing the filter lists every question, and Assign to me takes one under
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await page.goto("/");
     await expect(inboxRow(page, nobodysAsk.id)).toHaveAttribute("data-inbox-section", "human");
-    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
     await expect(page.locator("[data-inbox-row]")).toHaveCount(2);
   } finally {
     await alice.close();
@@ -1552,7 +1568,7 @@ test("clearing the filter lists every question, and Assign to me takes one under
 // `features/inbox/BlockedOnYou.tsx`): open questions whose next move is a person's, on issues
 // assigned to them. Widening the list they are looking at is not more work waiting on them, so
 // no count moves with it; another issue assigned to them is, so they all move together.
-test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
+test("the Inbox count, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
   browser,
 }) => {
   await setLiveSessions([{ session_id: session.actor.id, title: "e2e-session-title" }]);
@@ -1569,33 +1585,33 @@ test("the rail, the banner and an Agents card count the reader's own work, whate
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // The rail's badge above `xl`, the compact header's on a phone: one count, one wording.
-    const badge = (count: number) => page.getByText(new RegExp(`^Needs you ${count}$`)).first();
+    // One count in the shell, wherever this width draws it: the sidebar's Inbox entry, or the
+    // compact top bar's own badge.
     await page.goto("/");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(2);
-    await expect(badge(2)).toBeVisible();
+    await expectInboxCount(page, 2);
     await expect(page.getByText(/^Blocked on you: 2 items/)).toBeVisible();
 
     // Widened to every question: twice the rows, the same two counts.
     await clearAssigneeFilter(page);
     await closeAssigneeFilter(page);
     await expect(page.locator("[data-inbox-row]")).toHaveCount(4);
-    await expect(badge(2)).toBeVisible();
+    await expectInboxCount(page, 2);
     await expect(page.getByText(/^Blocked on you: 2 items/)).toBeVisible();
 
     // The Agents card says the same number about the same session.
     await page.goto("/agents");
     const card = agentRow(page, session.actor.id);
     await expect(card.getByRole("link", { name: "Needs you 2" })).toBeVisible();
-    await expect(badge(2)).toBeVisible();
+    await expectInboxCount(page, 2);
 
     // One more issue assigned to her moves all three together.
     await patchIssue(theirs.key, { assignee: "alice" });
     await expect(card.getByRole("link", { name: "Needs you 3" })).toBeVisible();
-    await expect(badge(3)).toBeVisible();
+    await expectInboxCount(page, 3);
     await page.goto("/");
     await expect(page.getByText(/^Blocked on you: 3 items/)).toBeVisible();
-    await expect(badge(3)).toBeVisible();
+    await expectInboxCount(page, 3);
   } finally {
     await alice.close();
   }

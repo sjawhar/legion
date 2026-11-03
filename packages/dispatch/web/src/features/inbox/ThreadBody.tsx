@@ -350,6 +350,7 @@ function CommentThreadBody({
             }}
             owner={owner}
             replyTo={{ actor: root.author, excerpt: "", id: root.id, parentKind: "comment" }}
+            standing
           />
         )
       }
@@ -437,6 +438,7 @@ function MessageThreadBody({
                 ? {}
                 : { thread: { delivery: last?.delivery ?? "steer", target } }),
             }}
+            standing
           />
         )
       }
@@ -578,6 +580,7 @@ function AgentThreadBody({
                 onClose={noReturn}
                 replyTo={agentReplyTo(agent, read, newest)}
                 sendKey={sendKey}
+                standing
               />
             </div>
           )

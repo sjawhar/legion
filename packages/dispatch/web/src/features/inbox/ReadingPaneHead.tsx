@@ -61,7 +61,7 @@ export interface ReadingPaneHeadProps {
    *  holding `Snoozing…`, a refusal and its Retry is not unmounted by the fold the optimistic
    *  snooze causes - the column follows that row, so the fold would take this head with it. */
   onSnoozeLive: (askId: string, live: boolean) => void;
-  /** The heading of the section the column scrolled to, once the document has drawn. */
+  /** The heading of the section the column is opened at, once the block has drawn. */
   sectionBlockId: string | undefined;
   viewer: string | undefined;
 }
@@ -158,6 +158,11 @@ export function ReadingPaneHead({
  * the thread open, the issue's conversation, or `/agents/<id>/live` for an Agent row - and
  * **Copy ref**.
  *
+ * **Open page** is what `o` follows here (`data-inbox-owner`), as the card's **Open** is below
+ * this column's width: the key opens the thread, never the issue it happens to sit on, and it
+ * opens an Agent row's live view, which has no owner link to fall back to. The owner beside it
+ * is a link a reader can still follow by hand.
+ *
  * An Agent row has no **Copy ref**: Dispatch's reference grammar has no form for an issue-less
  * message (`dispatch://KEY/message/<id>` needs an issue key, and `dispatch://agent/` covers only
  * artifacts), which is why `y` does nothing on such a row either. Priority, **Assign to me** and
@@ -167,8 +172,8 @@ export function ThreadPaneHead({
   sectionBlockId,
   thread,
 }: {
-  /** The heading of the section the column scrolled to, where the column shows a document: the
-   *  page opens there rather than at the document's top. */
+  /** The heading of the section the column is opened at, where the column shows a document:
+   *  the page opens there rather than at the document's top. */
   sectionBlockId?: string | undefined;
   thread: MyReplyRow;
 }): ReactNode {
@@ -183,9 +188,9 @@ export function ThreadPaneHead({
           {thread.session?.name ?? "Agent message"}
         </span>
       ) : (
-        <AskOwnerLink className="grow" inboxOwner owner={owner} />
+        <AskOwnerLink className="grow" owner={owner} />
       )}
-      <Link className={`text-sm ${linkText} ${linkHoverText}`} to={page}>
+      <Link className={`text-sm ${linkText} ${linkHoverText}`} data-inbox-owner="" to={page}>
         Open page
       </Link>
       {reference === undefined ? null : <CopyRefButton route={reference} />}

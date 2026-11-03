@@ -1,13 +1,15 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
- * The Inbox's `?assignee=` control (`features/inbox/AssigneeFilter.tsx`), above the list.
+ * The Inbox's `?assignee=` control (`features/inbox/AssigneeFilter.tsx`), one of the five fields
+ * the bar's **Filter** button opens (INFRA-450; before it, the control stood in the bar itself).
  * Driving it, rather than opening a filtered address, is what a test needs when the Inbox must
  * stay mounted across the change: a pick is a client-side `replace`, so the marks, drafts and
  * held responses the page is carrying survive it, where `page.goto` would lose them.
  */
 
-/** The filter's trigger, whatever its selection reads (`Assignee · you`, `· everyone`, `· 2`). */
+/** The filter's trigger, whatever its selection reads (`Assignee · you`, `· everyone`, `· 2`);
+ *  absent until the bar's **Filter** panel is open. */
 export function assigneeFilter(page: Page): Locator {
   return page.getByRole("button", { name: "Filter by assignee" });
 }
@@ -17,8 +19,18 @@ export function assigneeOptions(page: Page): Locator {
   return page.getByRole("listbox", { name: "Assignee options" });
 }
 
+/** Opens the bar's five filter fields unless they are open already. */
+export async function openFilterFields(page: Page): Promise<void> {
+  const fields = page.locator("[data-inbox-filter-fields]");
+  if ((await fields.count()) === 0) {
+    await page.locator("[data-inbox-filter]").click();
+  }
+  await expect(fields).toHaveCount(1);
+}
+
 /** Opens the popover unless it is open already; the trigger says which it is. */
 export async function openAssigneeFilter(page: Page): Promise<void> {
+  await openFilterFields(page);
   const trigger = assigneeFilter(page);
   if ((await trigger.getAttribute("aria-expanded")) !== "true") {
     await trigger.click();
