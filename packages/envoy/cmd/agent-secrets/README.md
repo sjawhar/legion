@@ -164,7 +164,7 @@ Your own `tier=human` secret always goes to you for approval. A `shared` agent-t
 granted at once; a `shared` human-tier one waits for anyone who signs in to the broker. A
 service's secret goes only to that service's pods and VMs. Approvals happen on the broker's
 approval page, which the approver's Dispatch Inbox links to. The docs site's
-[Concepts](https://sjawhar.github.io/legion/broker/concepts/#owner-and-tier) page has the full
+[Concepts](https://sjawhar.github.io/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) page has the full
 table.
 
 ```sh
