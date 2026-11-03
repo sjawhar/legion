@@ -19,7 +19,8 @@ other change to the head voids it.
 ## The reviewer
 
 - The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
-  never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
+  never from a handoff — then, when the diff touches runtime code, runs
+  `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   waits for each one's result with `wait`, since each runs as a job of its own, and records the
   verdict from what those results say. A result that carries no report, or that names another
@@ -60,8 +61,9 @@ other change to the head voids it.
   run at the head holds the job, or nothing will run it (a check only a commit status reports, a
   workflow another repository defines), tell the architect and do not approve.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
-  On a docs-only PR the `Thermo` line still records the simplify pass, and its pair half reads
-  `pair: not run (docs-only)`. Submit **one review per round** —
+  On a docs-only PR the `Thermo` line still records the simplify pass and the defects it
+  reported, and its pair half reads `thermonuclear pair: not run (docs-only)`.
+  Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
   call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`

@@ -29,7 +29,7 @@ Dispatch three generic subagents — code-reuse, code-quality, and efficiency re
 - `references/personas/code-quality-reviewer.md`
 - `references/personas/efficiency-reviewer.md`
 
-Do not paraphrase these rubrics from memory — read each file and pass it verbatim, or the reviewer loses the gating rules that keep the pass behavior-preserving.
+Do not paraphrase these rubrics from memory — read each file and pass it verbatim, or the reviewer loses the gating rules that keep the pass behavior-preserving. Pass Step 3's **A defect you see is reported, never dropped** paragraph to each reviewer beside its rubric and the scope: the rubrics are written for code, and without that paragraph a reviewer handed a document or a workflow file has no criterion its findings can come from, so a docs-only scope would come back "nothing to flag" whatever is wrong in it.
 
 **Bounded dispatch.** Queue the three reviewers and launch only as many as the harness accepts at once; treat a concurrency/active-agent-limit error as backpressure (leave the reviewer queued and retry after a slot frees), not as reviewer failure. If a dispatch fails for a reason that survives correcting the invocation, run that reviewer's pass inline in the parent context using the same prompt asset, and disclose the substitution in one line.
 
@@ -55,7 +55,7 @@ An interface or data shape that existed only in an earlier iteration of the curr
 
 ## Step 4: Verify behavior is preserved
 
-Run project-wide typecheck and lint. Run tests matched to blast radius: scoped tests for local changes, broader tests for shared or wide-reach changes, and the full suite when the runner cannot scope tests.
+Run this step only when a fix was applied. Run project-wide typecheck and lint. Run tests matched to blast radius: scoped tests for local changes, broader tests for shared or wide-reach changes, and the full suite when the runner cannot scope tests. A pass that applied nothing left the head as it was, so there is nothing to verify: record `no fix applied; head unchanged, no verification run` in the summary and go to Step 5.
 
 Report failures with the check name and relevant output. Fix simplification-caused failures or revert the responsible change; never relax assertions, weaken types, or skip tests.
 
@@ -63,4 +63,4 @@ If no test suite, lint, or typecheck is configured, state that explicitly in the
 
 ## Step 5: Summarize
 
-Summarize what was already sound and what improved. Report applied counts by reuse, quality, and efficiency; skipped count; and check outcomes. Name the agent (or model) that produced each reviewer's findings, so the reader can see which model reviewed. If nothing changed, say so. Do not use net lines removed as the success metric.
+Summarize what was already sound and what improved. Report applied counts by reuse, quality, and efficiency; skipped count; defects reported but not fixed, each with its file and line; and check outcomes. Name the agent (or model) that produced each reviewer's findings, so the reader can see which model reviewed. If nothing changed, say so. Do not use net lines removed as the success metric.

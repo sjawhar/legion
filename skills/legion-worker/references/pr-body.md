@@ -30,8 +30,8 @@ later phase keeps it current rather than replacing it:
 - Thread <node id>: accepted by the reviewer — <its reason, one line>; resolved at <head-sha>.
 - Thread <node id>: still open — <what remains>; unresolved at <head-sha>.
 
-**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the reviewed head <sha>:
-<verdict>. (on a docs-only PR the simplify half is recorded as on any other diff, and the pair half reads `pair: not run (docs-only)`)
+**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; defects reported: <none | <n>, fixed in <sha>>; thermonuclear pair at the reviewed head <sha>:
+<verdict>. (on a docs-only PR the simplify half and the defects are recorded as on any other diff, and the pair half reads `thermonuclear pair: not run (docs-only)`)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
 Negative control: <deliberately broken input or call> → <refusal or failure observed>.
@@ -144,7 +144,7 @@ reported under *When no surface reaches the changed path* below, never passed.
   names and at the new head. Equal: re-run only the
   bare gates — the repository's CI green at the new head and its smoke check — and change the
   `E2E` line's head to the new SHA with
-  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean`. The
+  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings: <clean | what it found>`. A search that finds an instance is a failure, not a re-check: record it under `failures` and run a full test round. The
   real-surface verification is not repeated, except in a parent's last round, which the architect
   or the implementer's forward-merge comment names to you: then run a full test round. Different:
   a full test round.
@@ -160,8 +160,10 @@ reported under *When no surface reaches the changed path* below, never passed.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
   The pass covers every file of the diff, workflow YAML and documentation with the code, and a
   defect it reports is fixed outside the pass with the proof run again, never dropped as out of
-  scope.
-  The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
+  scope; the `Thermo` line's `defects reported` half names how many and the commit that fixed
+  them, so a head that moved for a reported defect is not recorded as `0 applied` alone.
+  The reviewer's pair runs at the head each round reviews, when the diff touches runtime code.
+  Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
   is made in the running round, because a later round costs a CI pass and a re-read of the whole

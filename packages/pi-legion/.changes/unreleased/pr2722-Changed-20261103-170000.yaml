@@ -1,0 +1,21 @@
+kind: Changed
+body: |-
+    Eight guidance rules, each closing one measured way a defect or a silent failure reached
+    review. `ce-simplify-code` now covers every file of its scope — documentation, workflow and
+    configuration files as much as code — runs on a scope with no code at all, and reports a
+    defect it sees with its file and line rather than dropping it as out of scope; its three
+    reviewer personas say the same, and its verification step runs only when a fix was applied.
+    `legion-worker`'s `pr-body.md` says a check that cannot fail is not a proof and that a
+    documented procedure counts only when it ran, carries the class search in the forward-merge
+    re-check line, and records what the simplify pass reported in the `Thermo` line;
+    `conflicts-and-rewrites.md` says the unchanged-diff fingerprint cannot show an instance the
+    merge brought in from the base; `merge-gate.md` makes a review result with no report a failed
+    run rather than a verdict; `legion-retro` and `merge-gate.md` name all five causes of
+    `READY_UNREVIEWED_CHANGE`. The two thermonuclear agents return their whole report in the result
+    they hand back; `deep-worker`, `plan-gap-analyst`, `plan-reviewer` and both thermonuclear
+    agents say how to read a piped command's status and never to pipe a write into a pager; the
+    three agents that may write, and both thermonuclear skills, say to make scratch with
+    `mktemp -d` and never to delete by a glob in the `$TMPDIR` every role of an issue shares.
+time: 2026-11-03T17:00:00.000000000Z
+custom:
+    Issue: pr2722

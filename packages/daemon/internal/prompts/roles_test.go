@@ -324,7 +324,7 @@ func TestNoPartKeepsItsWorkInTheForegroundAndEveryDispatchNamesWait(t *testing.T
 // reaches that role and no other: the simplify pass and the class search are the implementer's,
 // the procedure and can-fail rules the tester's, the open-decision rule the planner's, and the
 // planner's WAITING line is phase mechanics, so it lives in its residue rather than its core.
-func TestEveryGuidanceRuleOfINFRA332IsInItsRolesPart(t *testing.T) {
+func TestEveryRolePartCarriesItsGuidanceRule(t *testing.T) {
 	for _, pin := range []struct{ file, rule string }{
 		// R1: the simplify pass covers every file of the diff and reports what it sees.
 		{"core/implementer.md", "Your behaviour-preserving simplify pass covers every file of the change"},
@@ -333,10 +333,10 @@ func TestEveryGuidanceRuleOfINFRA332IsInItsRolesPart(t *testing.T) {
 		{"core/tester.md", "A documented procedure is passed only by running it."},
 		{"core/tester.md", "Every check you record must be able to fail"},
 		// R3: after a fix or a forward merge, search the new head for each earlier finding's class.
-		{"core/implementer.md", "search the whole new head for the class of every finding of every earlier review round"},
+		{"core/implementer.md", "search the head you are about to push for the class of every finding of every earlier review round"},
 		{"core/tester.md", "An equal fingerprint still gets the class search"},
-		{"implementer.md", "`classSearch` (one entry per finding of every earlier review round"},
-		{"tester.md", "`classSearch` (one entry per finding of every earlier review round"},
+		{"implementer.md", "`classSearch`, one entry per finding of every earlier review round"},
+		{"tester.md", "`classSearch`, one entry per finding of every earlier review round"},
 		// R4: the planner completes no phase with an open decision.
 		{"core/planner.md", "A decision only whoever owns the plan can make is never left open in the plan"},
 		{"core/planner.md", "An open decision in a finished plan is a gap the implementation inherits."},

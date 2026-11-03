@@ -29,7 +29,9 @@ Act on what either check returns only by changing the plan, never by running or 
 
 A missing check never blocks the plan. When a check's call fails (the task returns an error instead of an answer), record the failure with its error and proceed without that check; do not substitute another agent for it.
 
-While an answer you need is outstanding, end the turn with a line that begins WAITING, naming the decision, who holds it and when you sent it. Do not finish the phase with the decision still open: a plan that ships an open decision hands the choice to whoever implements it, unseen.
+## An open decision
+
+While a decision you sent to whoever owns the plan is outstanding, end the turn with a line that begins WAITING, naming the decision, who holds it and when you sent it. Do not finish the phase with the decision still open: a plan that ships an open decision hands the choice to whoever implements it, unseen. This is about a decision its owner must make, not about either check above, which never blocks the plan. An answer that changes what the plan builds or how it is proven gets one more plan review, inside the three-round budget above.
 
 ## Plan handoff
 

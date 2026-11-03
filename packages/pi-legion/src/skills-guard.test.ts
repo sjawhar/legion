@@ -322,16 +322,31 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
 // a later edit deletes the rule's key sentence; it does not show that an agent follows the rule,
 // which the issue's session runs measure. Whitespace is collapsed before the match, as
 // shipped-agents.test.ts collapses it, so a pin survives a rewrap of the file it reads.
-const collapsed = (file: string) => readFileSync(file, "utf8").replace(/\s+/g, " ");
+// Read once per file: a dozen pins read the same four references.
+const collapsedText = new Map<string, string>();
+function collapsed(file: string): string {
+  const seen = collapsedText.get(file);
+  if (seen !== undefined) return seen;
+  const text = readFileSync(file, "utf8").replace(/\s+/g, " ");
+  collapsedText.set(file, text);
+  return text;
+}
 
 // A sentence copied into several files is counted once per file, never over a composed prompt,
 // where a sentence in both roles/<role>.md and go/worker-common.md would appear twice. A file
 // that lost the sentence and a file that gained a second copy both fail, and the files are listed
 // rather than counted, so one that stopped carrying it fails as loudly as one that started.
+// A `skills/…` path is read from the staged partition, as every other skill pin here is, so what
+// is counted is the copy the plugin ships.
 function countedOncePerFile(rule: string, relativePaths: string[]) {
   const counts = relativePaths.map((relative) => ({
     file: relative,
-    found: collapsed(path.join(REPO_ROOT, relative)).split(rule).length - 1,
+    found:
+      collapsed(
+        relative.startsWith("skills/")
+          ? path.join(staged, relative.slice("skills/".length))
+          : path.join(REPO_ROOT, relative)
+      ).split(rule).length - 1,
   }));
   expect(counts).toEqual(relativePaths.map((file) => ({ file, found: 1 })));
 }
@@ -348,17 +363,18 @@ test("the simplify pass reads every file of its scope and reports the defects it
   const prBody = collapsed(path.join(staged, "legion-worker", "references", "pr-body.md"));
   expect(prBody).toContain("whatever the diff touches, a docs-only diff included.");
   expect(prBody).toContain(
-    "The pass covers every file of the diff, workflow YAML and documentation with the code, and a defect it reports is fixed outside the pass with the proof run again, never dropped as out of scope."
+    "The pass covers every file of the diff, workflow YAML and documentation with the code, and a defect it reports is fixed outside the pass with the proof run again, never dropped as out of scope; the `Thermo` line's `defects reported` half names how many and the commit that fixed them"
   );
-  // The Thermo line is written on every diff now; only its pair half is omitted on a docs-only
-  // one, which leaves the reviewer's pair exactly where it was.
+  // The Thermo line is written on every diff now, and carries what the pass reported; only its
+  // pair half is omitted on a docs-only one, which leaves the reviewer's pair where it was.
+  expect(prBody).toContain("defects reported: <none | <n>, fixed in <sha>>");
   expect(prBody).toContain(
-    "(on a docs-only PR the simplify half is recorded as on any other diff, and the pair half reads `pair: not run (docs-only)`)"
+    "(on a docs-only PR the simplify half and the defects are recorded as on any other diff, and the pair half reads `thermonuclear pair: not run (docs-only)`)"
   );
   expect(prBody).not.toContain("a docs-only diff gets none");
   const mergeGate = collapsed(path.join(staged, "legion-worker", "references", "merge-gate.md"));
   expect(mergeGate).toContain(
-    "On a docs-only PR the `Thermo` line still records the simplify pass, and its pair half reads `pair: not run (docs-only)`."
+    "On a docs-only PR the `Thermo` line still records the simplify pass and the defects it reported, and its pair half reads `thermonuclear pair: not run (docs-only)`."
   );
   expect(mergeGate).not.toContain("Skip the `Thermo` line entirely on a docs-only PR.");
 });
@@ -386,7 +402,7 @@ test("the forward-merge re-check searches the new head for each earlier finding'
     "the tester re-runs the bare gates only and the class search of every earlier round's findings at the new head;"
   );
   countedOncePerFile(
-    "forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean",
+    "forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings: <clean | what it found>",
     [
       "skills/legion-worker/references/pr-body.md",
       "packages/daemon/internal/prompts/roles/tester.md",
@@ -416,7 +432,7 @@ test("the reviewer treats a result with no report as a failed run, not a verdict
 test("every shipped prompt and bash-running agent says how to read a piped command's status", () => {
   countedOncePerFile(
     // biome-ignore lint/suspicious/noTemplateCurlyInString: `${PIPESTATUS[0]}` is the shell expansion the rule teaches, quoted verbatim.
-    "Read a piped command's status with `${PIPESTATUS[0]}`, or with `set -o pipefail` inside a subshell of that one line; never set `pipefail` at the top level of your shell, where a later `cmd | head` exits 141 and the next command loses its output. Never pipe a write — a `dispatch` command that records something, or any command whose own output tells you what it did — into `head`, `tail` or `grep`: the status you read would be the pager's, and the line that says what happened is the line you cut.",
+    "Read a piped command's status with `${PIPESTATUS[0]}`, or with `set -o pipefail` inside a subshell of that one line; never set `pipefail` at the top level of your shell, where a later `cmd | head` exits 141 and reads as a failure although it did its job. Never pipe a write — a `dispatch` command that records something, or any command whose own output tells you what it did — into `head`, `tail` or `grep`: the status you read would be the pager's, and the line that says what happened is the line you cut.",
     [
       "packages/daemon/internal/prompts/go/worker-common.md",
       "packages/daemon/internal/prompts/go/architect-common.md",
