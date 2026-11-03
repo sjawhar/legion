@@ -704,6 +704,9 @@ export interface ArtifactBlock {
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+  /** Where meaning search stands on the block (`BlockEmbedding`). Absent from a Dispatch older
+   *  than block windows. */
+  readonly embedding?: BlockEmbedding;
 }
 
 /** A table block's rows in child order, the header row first, each row and cell placed as
@@ -1422,7 +1425,16 @@ export interface ItemBlock {
   readonly to: number;
   readonly changed_revision?: number;
   readonly changed_at?: string;
+  /** Where meaning search stands on the block. Absent on a hit from a Dispatch older than block
+   *  windows. */
+  readonly embedding?: BlockEmbedding;
 }
+
+/** Where meaning search stands on one block: every window of blocks covering it is embedded at
+ *  the text it holds now, one of them is still waiting for its vector, or no window covers the
+ *  block at all - a block the indexer leaves out of every window, and every block of an item
+ *  whose windows are not written yet. */
+export type BlockEmbedding = "embedded" | "pending" | "none";
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
  *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
@@ -1883,6 +1895,12 @@ export interface SearchResult {
   };
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
+  /** The block of the hit whose own text matched: a block of the document, of the comment's or
+   *  the message's body, or the part of an ask's question, options or answer. Meaning search
+   *  reads windows of neighbouring blocks and names the covered block that ranks highest for the
+   *  query, so this is absent on an issue hit, which has no blocks, on a hit only the keyword
+   *  list found, and on every hit from a Dispatch older than block windows. */
+  readonly block_id?: string;
   readonly snippet: string;
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;

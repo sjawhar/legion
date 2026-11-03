@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // fakeEmbedder is a deterministic, text-keyed stand-in for Cohere (LEGION-549's tests use a fake
@@ -125,6 +127,45 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 	}
 }
 
+// windowTexts is the text each window of the owner whose key is ownerKey holds, of kind kind, by
+// the window's id suffix: the first block it covers, or "<block id>/p<n>" for one piece of a
+// block too long to hold in one window. A test reads what the indexers built (embed.Windows: the
+// owner's context, then its blocks' text) rather than spelling it out, and maps the text it finds
+// to the vector the fake embedder should answer for it.
+func windowTexts(t *testing.T, database *store.Store, kind, ownerKey string) map[string]string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(),
+		`select id, text_snapshot from embeddings where kind = $1 and split_part(id, '#', 1) = $2`, kind, ownerKey)
+	if err != nil {
+		t.Fatalf("read the windows of %s %s: %v", kind, ownerKey, err)
+	}
+	defer rows.Close()
+	texts := map[string]string{}
+	for rows.Next() {
+		var id, text string
+		if err := rows.Scan(&id, &text); err != nil {
+			t.Fatalf("scan a window of %s %s: %v", kind, ownerKey, err)
+		}
+		texts[strings.TrimPrefix(id, ownerKey+"#")] = text
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the windows of %s %s: %v", kind, ownerKey, err)
+	}
+	if len(texts) == 0 {
+		t.Fatalf("%s %s holds no window; its blocks are not indexed", kind, ownerKey)
+	}
+	return texts
+}
+
+// embedWindowsAs maps every window of owner ownerKey to vector, so the fake embedder answers it
+// for each of them once the queue drains.
+func embedWindowsAs(t *testing.T, database *store.Store, embedder *fakeEmbedder, kind, ownerKey string, vector []float32) {
+	t.Helper()
+	for _, text := range windowTexts(t, database, kind, ownerKey) {
+		embedder.vectors[text] = vector
+	}
+}
+
 // TestSearchFindsAMeaningOnlyMatch is LEGION-549's acceptance criterion: a query sharing no word
 // with the right issue, that means the same thing, finds it - here via a fake embedder's
 // deterministic cosine match, since keyword search (websearch_to_tsquery) cannot match a query
@@ -160,24 +201,25 @@ func TestSearchFindsAMeaningOnlyMatch(t *testing.T) {
 
 // TestSearchAskStateRidesAMeaningMatch proves an ask hit the meaning query serves
 // (searchQueryMeaning, the response not degraded) carries where the ask stands, as a keyword hit
-// does: the query shares no word with the ask, whose embedded text (question, a space, the
-// answer's text) cosine-matches it.
+// does, and names the part of the ask it matched. The query shares no word with the ask; the
+// window of the ask's parts - its question as the context, then the question, the two options
+// and the answer - cosine-matches it, and no part of it shares a term with the query, so the
+// block the hit names is the first the window covers, the question.
 func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
-	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Which lubricant for the bearings? Clock oil, sparingly.": angledVector(0.9, 2),
-		"wibbleflorp": queryVector(),
-	}}
+	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "MEAN", "Bearing upkeep", "Routine upkeep notes.")
 	askID := createSearchAsk(t, handler, issue.Key, "Which lubricant for the bearings?", "Clock oil", "Grease")
 	given := answerSearchAsk(t, handler, askID, map[string]any{"text": "Clock oil, sparingly."})
+	embedWindowsAs(t, database, embedder, "ask_part", "ask/"+askID, angledVector(0.9, 2))
 	processAllPending(t, database, embedder)
 
 	response := searchRequest(t, handler, "q=wibbleflorp")
 	if degraded := decodeBody[model.SearchResponse](t, response).Degraded; degraded != "" {
 		t.Fatalf("Degraded = %q, want empty: the embedder is configured and did not fail", degraded)
 	}
-	ask := rawHitAsk(t, rawSearchHit(t, rawSearchResults(t, response), "ask", askID))
+	hit := rawSearchHit(t, rawSearchResults(t, response), "ask", askID)
+	ask := rawHitAsk(t, hit)
 	if state := rawString(t, ask["state"]); state != "answered" {
 		t.Fatalf("state = %q, want answered", state)
 	}
@@ -185,6 +227,21 @@ func TestSearchAskStateRidesAMeaningMatch(t *testing.T) {
 	if answer.User != "alice" || !answer.At.Equal(given.At) || answer.Text == nil || *answer.Text != "Clock oil, sparingly." {
 		t.Fatalf("answer = %#v, want alice's answer %#v", answer, given)
 	}
+	if block := rawString(t, hit["block_id"]); block != askPartID(t, database, askID, 0) {
+		t.Fatalf("block_id = %q, want the ask's question part %q", block, askPartID(t, database, askID, 0))
+	}
+}
+
+// askPartID is the id of the ask's part at position (AskParts' order: the question, then each
+// option, then the answer).
+func askPartID(t *testing.T, database *store.Store, askID string, position int) string {
+	t.Helper()
+	var id string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select block_id from ask_blocks where ask_id = $1::uuid and position = $2`, askID, position).Scan(&id); err != nil {
+		t.Fatalf("read part %d of ask %s: %v", position, askID, err)
+	}
+	return id
 }
 
 // TestSearchStaysNonDegradedWhileEmbedqueueIsThrottled proves a live
@@ -475,40 +532,66 @@ func maxBlock(word string) string {
 
 // TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole: a comment and a message of one
 // block at DISPATCH_BLOCK_UNITS, written through the API, reach the embedder whole once the
-// queue drains - the block bound and the embedder's input bound (embed.MaxInputRunes) agree, so
-// no tail of a block the server accepted goes unsearched.
+// queue drains. A block longer than one window's budget is embedded as the pieces that cover it
+// (embed.Windows), so "whole" is now across those pieces rather than in one text: every stretch
+// of the block stands in a piece the embedder was given, and no tail of a block the server
+// accepted goes unsearched. Before windows the block reached the embedder as one text, which
+// held because the block bound and the embedder's input bound (embed.MaxInputRunes) agree; a
+// block past either bound had no vector for its tail at all, which is what windows fix.
 func TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole(t *testing.T) {
 	embedder := &recordingEmbedder{fakeEmbedder: &fakeEmbedder{}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "LONG", "Longest bodies", "Body text.")
 	commentBody, messageBody := maxBlock("astrolabe"), maxBlock("sextant")
-	if comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": commentBody}, "alice"); comment.Code != http.StatusCreated {
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": commentBody}, "alice")
+	if comment.Code != http.StatusCreated {
 		t.Fatalf("create comment: status=%d body=%s", comment.Code, comment.Body.String())
 	}
-	if message := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{"body": messageBody}, "alice"); message.Code != http.StatusCreated {
+	message := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{"body": messageBody}, "alice")
+	if message.Code != http.StatusCreated {
 		t.Fatalf("create message: status=%d body=%s", message.Code, message.Body.String())
 	}
 	processAllPending(t, database, embedder)
 
-	embedded := make(map[string]bool, len(embedder.texts))
-	for _, text := range embedder.texts {
-		embedded[text] = true
+	embedder.mu.Lock()
+	embedded := make([]string, len(embedder.texts))
+	copy(embedded, embedder.texts)
+	embedder.mu.Unlock()
+	bodies := map[string]string{
+		"comment/" + decodeBody[model.Comment](t, comment).ID: commentBody,
+		"message/" + decodeBody[model.Message](t, message).ID: messageBody,
 	}
-	for name, body := range map[string]string{"comment": commentBody, "message": messageBody} {
+	for owner, body := range bodies {
 		if len(body) != contracts.DispatchBlockUnits {
-			t.Fatalf("%s body is %d characters, want %d", name, len(body), contracts.DispatchBlockUnits)
+			t.Fatalf("%s body is %d characters, want %d", owner, len(body), contracts.DispatchBlockUnits)
 		}
-		if !embedded[body] {
-			t.Errorf("the %d-character %s never reached the embedder whole", len(body), name)
-		}
+		requireEveryStretchEmbedded(t, owner, body, embedded)
 	}
 	var notCurrent int
 	if err := database.Pool.QueryRow(context.Background(),
-		"select count(*) from embeddings where kind in ('comment', 'message') and (embedding is null or embedded_hash is distinct from content_hash)").Scan(&notCurrent); err != nil {
+		"select count(*) from embeddings where kind in ('comment_block', 'message_block') and (embedding is null or embedded_hash is distinct from content_hash)").Scan(&notCurrent); err != nil {
 		t.Fatalf("count unembedded rows: %v", err)
 	}
 	if notCurrent != 0 {
-		t.Errorf("%d comment or message rows are not embedded at their text after the queue drained", notCurrent)
+		t.Errorf("%d comment or message windows are not embedded at their text after the queue drained", notCurrent)
+	}
+}
+
+// requireEveryStretchEmbedded fails unless every stretch of body stands whole in one of the
+// texts the embedder was given: body is cut into the lengths one window holds (embed's own
+// windowTextChars, read here as the longest stretch the pieces are built from), and each cut
+// must be a substring of some embedded text. A piece that dropped a stretch, or cut one in two
+// with no piece holding it whole, fails.
+func requireEveryStretchEmbedded(t *testing.T, owner, body string, embedded []string) {
+	t.Helper()
+	const stretch = 1200 // embed.windowTextChars, the most block text one window holds
+	runes := []rune(body)
+	for start := 0; start < len(runes); start += stretch {
+		want := string(runes[start:min(start+stretch, len(runes))])
+		if !slices.ContainsFunc(embedded, func(text string) bool { return strings.Contains(text, want) }) {
+			t.Errorf("the %d characters of %s from %d reached no window the embedder was given", len(want), owner, start)
+			return
+		}
 	}
 }
 
@@ -541,11 +624,13 @@ func TestSearchAndWritesRideOutAnAzureOutage(t *testing.T) {
 		}
 		data := make([]item, len(request.Input))
 		for i, text := range request.Input {
+			// The comment's own text reaches this endpoint inside the window of its blocks: the
+			// issue's title, which gives the block its context, and then the block.
 			vector := defaultVector()
-			switch text {
-			case commentBody:
+			switch {
+			case strings.Contains(text, commentBody):
 				vector = angledVector(0.9, 2)
-			case "wibbleflorp":
+			case text == "wibbleflorp":
 				vector = queryVector()
 			}
 			data[i] = item{Index: i, Embedding: vector}
@@ -616,5 +701,138 @@ func TestSearchAndWritesRideOutAnAzureOutage(t *testing.T) {
 	}
 	if len(recovered.Results) != 1 || recovered.Results[0].ID != commentID {
 		t.Fatalf("Results = %+v once Azure answers 200, want the comment %q as a meaning hit", recovered.Results, commentID)
+	}
+}
+
+// searchHit is the one result of kind and id, failing the test when the page lacks it.
+func searchHit(t *testing.T, response model.SearchResponse, kind, id string) model.SearchResult {
+	t.Helper()
+	for _, result := range response.Results {
+		if result.Kind == kind && result.ID == id {
+			return result
+		}
+	}
+	t.Fatalf("results = %+v, want a %s hit %q", response.Results, kind, id)
+	return model.SearchResult{}
+}
+
+// requireNoKeywordHit fails unless a Dispatch with no embedder finds nothing for the query, so
+// a hit the test then asserts can only have come from the meaning leg.
+func requireNoKeywordHit(t *testing.T, query string) {
+	t.Helper()
+	if keywordOnly := searchResponse(t, newTestHandler(t), query); len(keywordOnly.Results) != 0 {
+		t.Fatalf("keyword-only baseline found %d results for %s, want none", len(keywordOnly.Results), query)
+	}
+}
+
+// TestMeaningSearchFindsACommentByItsBestBlock: a comment of three paragraphs is embedded as one
+// window over all three, and a hit on that window names the block whose own text ranks highest
+// for the query, not the comment's first block.
+func TestMeaningSearchFindsACommentByItsBestBlock(t *testing.T) {
+	const query = "theodolite recalibration"
+	embedder := &fakeEmbedder{vectors: map[string][]float32{query: queryVector()}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	issue := createInteractionIssue(t, handler, "BEST", "Survey gear", "Body text.")
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Alpha notes on the mounting bracket.\n\nBeta notes on the tripod legs.\n\nThe theodolite needs recalibration before the survey.",
+	}, "alice")
+	windows := windowTexts(t, database, "comment_block", "comment/"+comment.ID)
+	if len(windows) != 1 || windows["b1"] == "" {
+		t.Fatalf("the comment's windows = %v, want one window named for its first block", windows)
+	}
+	embedWindowsAs(t, database, embedder, "comment_block", "comment/"+comment.ID, angledVector(0.9, 2))
+	processAllPending(t, database, embedder)
+
+	response := searchResponse(t, handler, "q="+url.QueryEscape(query))
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty", response.Degraded)
+	}
+	hit := searchHit(t, response, "comment", comment.ID)
+	if hit.BlockID == nil || *hit.BlockID != "b3" {
+		t.Fatalf("block_id = %v, want b3, the block holding the query's words", hit.BlockID)
+	}
+}
+
+// TestALongBlocksTailIsFoundByMeaning is what windows are for: one document block longer than
+// embed.MaxInputRunes, whose only distinctive passage is at its end. The whole-text row this
+// replaced carried the document's first MaxInputRunes runes, so that passage had no vector and
+// no query reached it; the block is now embedded as the pieces that cover it, and the piece
+// holding its tail is the only one this query matches. The query shares no term with the
+// document, so no keyword leg can find it, and the hit names the long block and opens the
+// document at it.
+func TestALongBlocksTailIsFoundByMeaning(t *testing.T) {
+	const tail = "Vernier scales are read against the limb."
+	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	issue := createInteractionIssue(t, handler, "TAIL", "Long block", "Body text.")
+	filler := strings.Repeat("Routine survey notes repeated at length. ", 1+(embed.MaxInputRunes+2000)/40)
+	body := filler + tail + "\n"
+	uploaded := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "long.md"},
+		"body.md", "text/markdown", []byte(body), "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the long document: status=%d body=%.200s", uploaded.Code, uploaded.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	if len(body) <= embed.MaxInputRunes {
+		t.Fatalf("the document is %d characters, want more than embed.MaxInputRunes (%d)", len(body), embed.MaxInputRunes)
+	}
+
+	// The piece holding the tail is the only window mapped to a match: it is a later piece of
+	// one block, so the passage it holds is past where a whole-text row ever reached.
+	windows := windowTexts(t, database, "document_block", artifact.ID)
+	piece := ""
+	for suffix, held := range windows {
+		if strings.Contains(held, tail) {
+			piece = suffix
+			embedder.vectors[held] = angledVector(0.9, 2)
+		}
+	}
+	if piece == "" || strings.HasSuffix(piece, "/p1") || !strings.Contains(piece, "/p") {
+		t.Fatalf("the window holding the tail is %q of %d windows, want a piece of the long block past its first", piece, len(windows))
+	}
+	block := strings.Split(piece, "/p")[0]
+	processAllPending(t, database, embedder)
+
+	requireNoKeywordHit(t, "q=wibbleflorp")
+	response := searchResponse(t, handler, "q=wibbleflorp")
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty", response.Degraded)
+	}
+	hit := searchHit(t, response, "document", artifact.ID)
+	if hit.BlockID == nil || *hit.BlockID != block {
+		t.Fatalf("block_id = %v, want the long block %q", hit.BlockID, block)
+	}
+	if want := "#b-" + text.EncodeBlockID(block); !strings.HasSuffix(hit.Href, want) {
+		t.Fatalf("href = %q, want it to end at the block that matched (%s)", hit.Href, want)
+	}
+}
+
+// TestAnOptionIsTheHitThroughTheWindowHoldingItsQuestion: an ask's parts stand in one window,
+// named for the question that gives them their context, and a search for the one line of an
+// option finds the ask through that window and names the option's own part - not the question,
+// which the window is named for and whose text is its context.
+func TestAnOptionIsTheHitThroughTheWindowHoldingItsQuestion(t *testing.T) {
+	const query = "graphite powder"
+	embedder := &fakeEmbedder{vectors: map[string][]float32{query: queryVector()}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	issue := createInteractionIssue(t, handler, "OPTS", "Lubricant choice", "Body text.")
+	askID := createSearchAsk(t, handler, issue.Key, "Which lubricant for the bearings?", "Clock oil", "Graphite powder")
+	question, option := askPartID(t, database, askID, 0), askPartID(t, database, askID, 2)
+	windows := windowTexts(t, database, "ask_part", "ask/"+askID)
+	if len(windows) != 1 || windows[question] == "" {
+		t.Fatalf("the ask's windows = %v, want one window named for its question part %q", windows, question)
+	}
+	embedWindowsAs(t, database, embedder, "ask_part", "ask/"+askID, angledVector(0.9, 2))
+	processAllPending(t, database, embedder)
+
+	response := searchResponse(t, handler, "q="+url.QueryEscape(query))
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty", response.Degraded)
+	}
+	hit := searchHit(t, response, "ask", askID)
+	if hit.BlockID == nil || *hit.BlockID != option {
+		t.Fatalf("block_id = %v, want the option's part %q rather than the question's %q", hit.BlockID, option, question)
 	}
 }

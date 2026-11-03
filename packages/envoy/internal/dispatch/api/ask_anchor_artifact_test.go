@@ -107,13 +107,10 @@ func TestSearchKeywordAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 
 // Search's meaning ask arm (meaning_ask) carries its own copy of that coalesce, over the asks its
 // embeddings bring back rather than the ones a term matched: the query below shares no word with
-// either ask and reaches both only through the fake embedder.
+// either ask and reaches both only through the fake embedder, which answers the window of each
+// ask's parts - its question, its options and its answer - the vector mapped for it.
 func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
-	embedder := &fakeEmbedder{vectors: map[string][]float32{
-		"Keep the quadrant appendix? Yes, keep it.": angledVector(0.9, 2),
-		"Keep the quadrant diagram? Yes, keep it.":  angledVector(0.8, 3),
-		"wibbleflorp": queryVector(),
-	}}
+	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
 	issue := createInteractionIssue(t, handler, "SRCH", "Anchored ask meaning", "The quick brown fox jumps over the lazy dog")
 	blockDocument, blockSlug := secondDocument(t, handler, issue.Key)
@@ -122,6 +119,8 @@ func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 	answerSearchAsk(t, handler, canonical, map[string]any{"selected": []string{"Yes"}, "text": "Yes, keep it."})
 	answerSearchAsk(t, handler, uncastable, map[string]any{"selected": []string{"Yes"}, "text": "Yes, keep it."})
 	storeAnchorArtifactID(t, database, uncastable, blockDocument, `"not-a-uuid"`)
+	embedWindowsAs(t, database, embedder, "ask_part", "ask/"+canonical, angledVector(0.9, 2))
+	embedWindowsAs(t, database, embedder, "ask_part", "ask/"+uncastable, angledVector(0.8, 3))
 	processAllPending(t, database, embedder)
 
 	anchorHref := "/issues/" + issue.Key + "/spec?ask=" + canonical

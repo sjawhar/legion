@@ -743,6 +743,15 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The windows of a document's blocks are written under the artifact id; a block the live
+	// document holds and no window covers - a block inside another, whose text its parent's
+	// window already holds, and every block of a version the indexer has not windowed yet -
+	// reads as model.BlockNotEmbedded.
+	embedding, err := blockEmbeddingStates(r.Context(), s.deps.Store.Pool, refs.DocumentWindowKind, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	for index := range blocks {
 		counts := references[blocks[index].ID]
 		for _, descendantID := range blocks[index].DescendantIDs {
@@ -751,6 +760,7 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 			counts.Asks += descendant.Asks
 		}
 		blocks[index].References = counts
+		blocks[index].Embedding = blockEmbedding(embedding, blocks[index].ID)
 	}
 	WriteJSON(w, http.StatusOK, blocks)
 }

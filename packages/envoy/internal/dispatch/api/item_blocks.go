@@ -113,8 +113,62 @@ func (s *server) itemBlocks(ctx context.Context, kind refs.ItemKind, id string) 
 			ChangedAt:       row.changedAt,
 		}
 	}
+	embedding, err := blockEmbeddingStates(ctx, s.deps.Store.Pool, kind.WindowKind(), kind.WindowOwnerKey(id))
+	if err != nil {
+		return model.ItemBlocks{}, err
+	}
+	for index := range blocks {
+		blocks[index].Embedding = blockEmbedding(embedding, blocks[index].ID)
+	}
 	answer.Indexed, answer.Blocks = true, blocks
 	return answer, nil
+}
+
+// blockEmbeddingStates is where meaning search stands on each block of the owner whose windows
+// are kind kind under ownerKey: model.BlockEmbedded for a block every window covering it holds a
+// vector of its current text for, model.BlockEmbeddingPending while one of them waits for its
+// vector. A block no window covers is not in the map, and reads as model.BlockNotEmbedded - a
+// block the indexer puts in no window, and every block of an owner whose windows are not written
+// yet. The read names the window kinds as literals beside the parameter, as every read and write
+// of a window does (refs.writeWindows), so the planner can prove embeddings_window_owner's
+// partial predicate and reach the owner's rows through that index.
+func blockEmbeddingStates(ctx context.Context, q queryer, kind, ownerKey string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `
+		select covered.block_id, bool_and(e.embedded_hash is not distinct from e.content_hash)
+		from embeddings e cross join unnest(e.covers) as covered(block_id)
+		where e.kind = $1 and e.kind in ('document_block', 'comment_block', 'message_block', 'ask_part')
+		  and split_part(e.id, '#', 1) = $2
+		group by covered.block_id
+	`, kind, ownerKey)
+	if err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	defer rows.Close()
+	states := map[string]string{}
+	for rows.Next() {
+		var blockID string
+		var current bool
+		if err := rows.Scan(&blockID, &current); err != nil {
+			return nil, fmt.Errorf("scan the embedding state of a block of %s %s: %w", kind, ownerKey, err)
+		}
+		states[blockID] = model.BlockEmbeddingPending
+		if current {
+			states[blockID] = model.BlockEmbedded
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	return states, nil
+}
+
+// blockEmbedding is where states (blockEmbeddingStates) puts block blockID: a block no window
+// covers is in no window's covers and so in no entry of the map.
+func blockEmbedding(states map[string]string, blockID string) string {
+	if state, covered := states[blockID]; covered {
+		return state
+	}
+	return model.BlockNotEmbedded
 }
 
 // storedItemBlocks is an item's stored body, its block state (revision a comment's, nil for a

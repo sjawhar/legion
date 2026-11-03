@@ -58,19 +58,24 @@ const (
 // needing two near-identical copies of this text, one with the column and one without.
 //
 // Column shape after kind, list: issue_key, owner_artifact_id, artifact_id, id, block_id,
-// issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
-// block_id is an ask's typed block only while it is a node of the reference graph
-// (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
-// every spelling of an artifact_id Postgres casts names.
+// window_id, covers, issue_title, issue_status, owner_project, owner_slug, owner_name,
+// updated_at, own, r. block_id is an ask's typed block only while it is a node of the reference
+// graph (askBlockNodeSQL). window_id and covers are the embeddings window a meaning arm matched
+// and the blocks its vector covers; a keyword arm matched no window and carries null for both,
+// as it carries 'keyword' as list, so the two unions have one column shape. The ask arm's anchor
+// cast is store.CastableUUID's, which answers the document every spelling of an artifact_id
+// Postgres casts names.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
          i.key = q.own_key as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
   select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, v.created_at),
          false, ` + rank("v.search") + `
@@ -82,6 +87,7 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
    where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
   union all
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, c.created_at),
          false, ` + rank("c.search") + `
@@ -93,6 +99,7 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
          coalesce(k.artifact_id, k.block_artifact_id, ` + store.CastableUUID(`k.anchor->>'artifact_id'`) + `), k.id::text, ` + askBlockNodeSQL + `,
+         null::text, null::text[],
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
          false, ` + rank("k.search") + `
     from asks k
@@ -102,6 +109,7 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
    where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'message' as kind, 'keyword', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
+         null::text, null::text[],
          i.title, i.status, null::text, null::text, null::text, i.updated_at,
          false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
@@ -121,6 +129,19 @@ var searchKeywordLegsSQL = searchKeywordLegs(func(searchColumn string) string {
 // keyword one above and meaning_ask_candidates - select it.
 const askBlockNodeSQL = `case when exists (select 1 from document_blocks d where d.artifact_id = k.block_artifact_id and d.block_id = k.block_id) then k.block_id end`
 
+// windowOwnerUUID and windowItemUUID read the item a window belongs to out of the window's own
+// id, "<owner key>#<the first block it covers>": the owner key is the id up to the first #, and
+// it is the artifact id for a document's window and "<kind>/<uuid>" for a comment's, a message's
+// or an ask's (refs.ItemKind.WindowOwnerKey). Each meaning arm joins its item on that item's
+// primary key through one of these, so the planner reaches the row through the key rather than
+// reading the whole table to compare a text it computes per row. The cast is guarded
+// (store.CanonicalUUID) so a window id in any other shape resolves to no item instead of
+// answering SQLSTATE 22P02 for the whole search.
+var (
+	windowOwnerUUID = store.CanonicalUUID(`split_part(e.id, '#', 1)`)
+	windowItemUUID  = store.CanonicalUUID(`split_part(split_part(e.id, '#', 1), '/', 2)`)
+)
+
 // searchPageAndTailSQL is the "page the fused ranking, then stitch back the snippet" tail shared
 // by searchQuery and searchQueryMeaning - the other half of the LEGION-549 round-5 dedup above:
 // identical but for legsSource, the name of the CTE each query's own ranked/fused machinery hands
@@ -128,6 +149,17 @@ const askBlockNodeSQL = `case when exists (select 1 from document_blocks d where
 // row per (kind, id) after reciprocal-rank-summing the keyword and meaning lists together).
 // legsSource is always one of those two Go identifiers below, never caller input, so there is no
 // SQL injection surface in formatting it directly into the query text.
+//
+// The page also names the block a meaning hit matched (hit.block_id, INFRA-370). A meaning leg
+// matched one window of an owner's blocks, and that window covers a run of them (r.covers); the
+// block named is the covered block whose own text ranks highest for the query by ts_rank_cd over
+// the configuration the keyword legs are built with ('english' over search_text), ties broken by
+// the block's place in the window, and so the window's first block when no covered block shares a
+// term with the query. A search for the text of a one-line ask option therefore names the option,
+// not the question that gives the option its context and stands in the same window. The rank runs
+// in the page's own lateral join, over the rows of one page and the few blocks each window covers,
+// never over every candidate; a keyword row and an issue carry no covers, so the join answers
+// nothing for them.
 func searchPageAndTailSQL(legsSource string) string {
 	return fmt.Sprintf(`page as (
   select l.*, f.score, array_position(array['issue', 'document', 'ask', 'comment', 'message'], l.kind) as kind_order
@@ -138,7 +170,7 @@ func searchPageAndTailSQL(legsSource string) string {
 select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
        r.issue_key, r.issue_title, r.issue_status,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
-       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.score::float8,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, hit.block_id, r.score::float8,
        ts_headline('english',
          search_text(case when q.term <> '' and strpos(lower(txt.text), lower(q.term)) > 0
               then substr(txt.text, greatest(1, strpos(lower(txt.text), lower(q.term)) - 1500), 4000)
@@ -160,6 +192,32 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
       when 'message' then (select m.body from messages m where m.id = r.id::uuid)
     end as text
   ) txt on true
+  -- The block of r.covers that matched, if the row carries a window. Each covered block's own
+  -- text comes from the table its indexer writes it to: a document's, a comment's and an ask's
+  -- block texts are kept per version or revision, the latest being the current text. A message
+  -- is never edited and keeps no text table (refs/item_blocks.go's table map), so its block is
+  -- ranked on the excerpt its row holds, the block's first refs.BlockExcerptRunes runes.
+  left join lateral (
+    select covered.block_id
+      from unnest(r.covers) with ordinality as covered(block_id, ord)
+      cross join lateral (
+        select case r.kind
+          when 'document' then (select x.text from document_block_texts x
+                                 where x.artifact_id = r.artifact_id and x.block_id = covered.block_id
+                                 order by x.version desc limit 1)
+          when 'comment' then (select x.text from comment_block_texts x
+                                 where x.comment_id = r.id::uuid and x.block_id = covered.block_id
+                                 order by x.revision desc limit 1)
+          when 'ask' then (select x.text from ask_block_texts x
+                                 where x.ask_id = r.id::uuid and x.block_id = covered.block_id
+                                 order by x.revision desc limit 1)
+          when 'message' then (select x.excerpt from message_blocks x
+                                 where x.message_id = r.id::uuid and x.block_id = covered.block_id)
+        end as text
+      ) block
+     order by ts_rank_cd(to_tsvector('english', search_text(coalesce(block.text, ''))), q.tsq) desc, covered.ord
+     limit 1
+  ) hit on true
  order by r.score desc, r.kind_order, r.updated_at desc, r.id
 `, legsSource)
 }
@@ -237,6 +295,16 @@ totals as (
 // noise, not a weak match, and reaching legs at all would rank it by position exactly as the
 // strongest real match in an empty kind.
 //
+// Four of the five arms read windows of neighbouring blocks (INFRA-370: kinds document_block,
+// comment_block, message_block and ask_part), where an issue's arm still reads the issue's one
+// whole-text row. A window's id is "<owner key>#<suffix>", so the item it belongs to is
+// split_part(id, '#', 1) - the artifact id for a document, "<kind>/<uuid>" for a comment, a
+// message or an ask - and each arm projects the item's own kind and id, so fusion still ranks
+// one row per item however many of its windows the index hands back. Each arm keeps the item's
+// nearest window alone (distinct on (id), the highest cosine first) and carries that window's
+// id and covers, the blocks its vector holds, on to legs_unique and the page, which names the
+// one of them that matched (searchPageAndTailSQL).
+//
 // kinds unions searchKeywordLegs - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs
 // above. Every leg now carries which list it belongs to (list), and ranked's window partitions by
@@ -247,7 +315,8 @@ totals as (
 // keyword list reached, only the meaning list reached, or both, is ranked once, at the sum of
 // whichever lists found it. legs_unique picks one representative row's owner/text-location
 // columns per (kind, id) - both lists' rows carry the same ones, read from the same underlying
-// issue/document/comment/ask/message - before the page is cut and joined back to fused's score.
+// issue/document/comment/ask/message - preferring the row that names a window, since only that
+// row knows which blocks the hit covers, before the page is cut and joined back to fused's score.
 // total is every distinct (kind, id) either list matched, not a sum of list sizes, so an id both
 // lists reach is counted once.
 //
@@ -269,83 +338,93 @@ func searchQueryMeaningBody(keywordLegs string) string {
 ),
 meaning_issue as (
   select 'issue' as kind, 'meaning' as list, issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, id, null::text as block_id,
+         null::text as window_id, null::text[] as covers,
          issue_title, issue_status, null::text as owner_project, null::text as owner_slug, null::text as owner_name, updated_at,
          false as own, r
     from meaning_issue_candidates where r >= $10
 ),
 meaning_document_candidates as (
-  select a.issue_key, a.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+  select a.issue_key, a.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, v.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join artifacts a on a.id::text = e.id
+    join artifacts a on a.id = ` + windowOwnerUUID + `
     left join issues i on i.key = a.issue_key
     join projects p on p.key = a.project_key
     join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true
-   where e.kind = 'document' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
+   where e.kind = 'document_block' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
    order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_document as (
-  select 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+  select distinct on (meaning_document_candidates.id) 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_document_candidates where r >= $10
+   order by meaning_document_candidates.id, r desc, window_id
 ),
 meaning_comment_candidates as (
-  select c.issue_key, c.artifact_id, c.anchor, c.id, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
+  select c.issue_key, c.artifact_id, c.anchor, c.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
          coalesce(i.updated_at, c.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join comments c on c.id::text = e.id
+    join comments c on c.id = ` + windowItemUUID + `
     left join issues i on i.key = c.issue_key
     left join artifacts a on a.id = c.artifact_id
     left join projects p on p.key = a.project_key
-   where e.kind = 'comment' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   where e.kind = 'comment_block' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_comment as (
-  select 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+  select distinct on (meaning_comment_candidates.id) 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_comment_candidates where r >= $10
+   order by meaning_comment_candidates.id, r desc, window_id
 ),
 meaning_ask_candidates as (
-  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, i.title as issue_title, i.status as issue_status,
+  select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, e.id as window_id, e.covers,
+         i.title as issue_title, i.status as issue_status,
          p.key as owner_project, a.slug as owner_slug, a.name as owner_name, coalesce(i.updated_at, k.created_at) as updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join asks k on k.id::text = e.id
+    join asks k on k.id = ` + windowItemUUID + `
     left join issues i on i.key = k.issue_key
     left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
     left join projects p on p.key = a.project_key
-   where e.kind = 'ask' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   where e.kind = 'ask_part' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_ask as (
-  select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
+  select distinct on (meaning_ask_candidates.id) 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
          coalesce(artifact_id, block_artifact_id, ` + store.CastableUUID(`anchor->>'artifact_id'`) + `), id::text, block_id,
+         window_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_ask_candidates where r >= $10
+   order by meaning_ask_candidates.id, r desc, window_id
 ),
 meaning_message_candidates as (
-  select m.issue_key, m.id, i.title as issue_title, i.status as issue_status, i.updated_at,
+  select m.issue_key, m.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, i.updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
-    join messages m on m.id::text = e.id
+    join messages m on m.id = ` + windowItemUUID + `
     join issues i on i.key = m.issue_key
-   where e.kind = 'message' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
+   where e.kind = 'message_block' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
    order by e.embedding <=> $9::vector
    limit $7
 ),
 meaning_message as (
-  select 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+  select distinct on (meaning_message_candidates.id) 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
+         window_id, covers,
          issue_title, issue_status, null::text, null::text, null::text, updated_at,
          false, r
     from meaning_message_candidates where r >= $10
+   order by meaning_message_candidates.id, r desc, window_id
 ),
 kinds as (` + keywordLegs + `
   union all select * from meaning_issue
@@ -363,10 +442,10 @@ legs as (
 ),
 fused as (select kind, id, sum(1.0 / ($8 + pos)) as score from legs group by kind, id),
 legs_unique as (
-  select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id,
+  select distinct on (kind, id) kind, issue_key, owner_artifact_id, artifact_id, id, block_id, covers,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at
     from legs
-   order by kind, id
+   order by kind, id, (window_id is null), r desc
 ),
 totals as (
   select (select count(*) from (select distinct kind, id from kinds) u) as total,
@@ -525,6 +604,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 		var ownerKey, ownerTitle, ownerStatus, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
 		var primary bool
 		var blockID *string
+		var matchBlockID *string
 		var rank *float64
 		if err := rows.Scan(
 			&response.Total,
@@ -543,6 +623,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 			&primary,
 			&id,
 			&blockID,
+			&matchBlockID,
 			&rank,
 			&headline,
 		); err != nil {
@@ -552,7 +633,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 		if kind == nil {
 			continue
 		}
-		result.Kind, result.ID, result.Rank = *kind, *id, *rank
+		result.Kind, result.ID, result.Rank, result.BlockID = *kind, *id, *rank, matchBlockID
 		if *ownerKind == "issue" {
 			result.Owner = model.SearchOwner{Kind: *ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 			result.Issue = &model.SearchIssue{Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
@@ -569,7 +650,7 @@ func scanSearchRows(rows pgx.Rows, q string, limit, offset int) (model.SearchRes
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(*headline)
-		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, q)
+		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, matchBlockID, q)
 		response.Results = append(response.Results, result)
 	}
 	if err := rows.Err(); err != nil {
@@ -631,7 +712,13 @@ func issueDocumentHref(issueHref string, artifact *model.SearchArtifact, primary
 // (blockID, askBlockNodeSQL) names that block in the fragment instead, which a reader of the
 // href reads as the block's node; one whose block is no node names the ask. An item with no
 // document is a Conversation turn, named by its own route so the turn is focused.
-func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
+//
+// matchBlock is the block a meaning hit matched (INFRA-370), which a document hit names in its
+// fragment so the reader lands on the passage rather than at the top of the document. A comment,
+// a message and an ask keep the href they had: no item page reads a fragment, and the ask's own
+// fragment names the document block it is typed on, which is another block than the part of the
+// ask that matched.
+func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID, matchBlock *string, query string) string {
 	issueHref := "/issues/" + owner.Key
 	// The document a hit belongs beside: a project document's own route, or the issue document
 	// its anchor names. An issue item with no document has none, and keeps its own route.
@@ -646,11 +733,16 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 	case "issue":
 		return issueHref
 	case "document":
-		if owner.Kind == "document" {
-			return documentHref + "?q=" + url.QueryEscape(query)
-		}
 		// A document hit always has its artifact; reading it here says so.
-		return issueDocumentHref(issueHref, artifact, primary) + "?q=" + url.QueryEscape(query)
+		href := documentHref
+		if owner.Kind != "document" {
+			href = issueDocumentHref(issueHref, artifact, primary)
+		}
+		href += "?q=" + url.QueryEscape(query)
+		if matchBlock != nil {
+			href += "#b-" + text.EncodeBlockID(*matchBlock)
+		}
+		return href
 	case "comment":
 		if documentHref == "" {
 			return issueHref + "/comments/" + id

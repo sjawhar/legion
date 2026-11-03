@@ -372,9 +372,15 @@ type SearchResult struct {
 	Issue    *SearchIssue    `json:"issue,omitempty"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`
-	Snippet  string          `json:"snippet"`
-	Rank     float64         `json:"rank"`
-	Href     string          `json:"href"`
+	// BlockID is the block of the hit whose own text matched, read from the window of blocks the
+	// meaning leg found (INFRA-370): for a document the block of the document, for a comment or
+	// a message a block of its body, for an ask the part of its question, options or answer. It
+	// is nil on an issue hit, which has no blocks, and on a hit only the keyword list found,
+	// which matched the item's whole text rather than one of its windows.
+	BlockID *string `json:"block_id,omitempty"`
+	Snippet string  `json:"snippet"`
+	Rank    float64 `json:"rank"`
+	Href    string  `json:"href"`
 	// Ask is set on ask hits and nil on every other kind; an ask removed between the search and
 	// the read of its state keeps it nil too.
 	Ask *SearchAsk `json:"ask,omitempty"`
@@ -749,7 +755,9 @@ type ArtifactHumanEditedEventPayload struct {
 }
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
-// lists a table block's rows and cells; nil for every other block.
+// lists a table block's rows and cells; nil for every other block. Embedding is where meaning
+// search stands on the block (BlockEmbedded, BlockEmbeddingPending, BlockNotEmbedded), which the
+// blocks route sets and nothing that only indexes blocks does.
 type ArtifactBlock struct {
 	ID            string          `json:"id"`
 	Type          string          `json:"type"`
@@ -758,6 +766,7 @@ type ArtifactBlock struct {
 	Token         string          `json:"token"`
 	References    BlockReferences `json:"references"`
 	Table         *BlockTable     `json:"table,omitempty"`
+	Embedding     string          `json:"embedding,omitempty"`
 	DescendantIDs []string        `json:"-"`
 }
 
@@ -1433,7 +1442,8 @@ type ItemBlocks struct {
 // its author wrote it, its reference (none for a block of a direct message, which has no address),
 // and From and To, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
 // string index). A comment block also carries the revision its text last changed in and that
-// revision's time; a message block has neither.
+// revision's time; a message block has neither. Embedding is where meaning search stands on the
+// block (BlockEmbedded, BlockEmbeddingPending, BlockNotEmbedded).
 type ItemBlock struct {
 	ID              string     `json:"id"`
 	Type            string     `json:"type"`
@@ -1443,7 +1453,18 @@ type ItemBlock struct {
 	To              int        `json:"to"`
 	ChangedRevision *int       `json:"changed_revision,omitempty"`
 	ChangedAt       *time.Time `json:"changed_at,omitempty"`
+	Embedding       string     `json:"embedding"`
 }
+
+// Where meaning search stands on one block (ItemBlock.Embedding, ArtifactBlock.Embedding): every
+// window of blocks covering it is embedded at the text it holds now, one of them is still waiting
+// for its vector, or no window covers the block at all - a block the indexer leaves out of every
+// window, and every block of an item whose windows are not written yet.
+const (
+	BlockEmbedded         = "embedded"
+	BlockEmbeddingPending = "pending"
+	BlockNotEmbedded      = "none"
+)
 
 // Suggestion carries a proposed document replacement and its resolution.
 type Suggestion struct {
