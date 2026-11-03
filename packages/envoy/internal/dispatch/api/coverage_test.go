@@ -1,11 +1,16 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"slices"
+	"sync"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // twoRequirements is a spec marking two requirements, r1 and r2.
@@ -163,8 +168,9 @@ func TestCoverageFlagsAMissingPlanTaskOnlyOnceTheIssueHasAPlan(t *testing.T) {
 // approvalAnswer is what POST /api/v1/artifacts/{id}/approval-requests answers, as far as the
 // coverage lines and the ask it records.
 type approvalAnswer struct {
-	Ask      *model.Ask `json:"ask"`
-	Coverage []string   `json:"coverage"`
+	Ask            *model.Ask `json:"ask"`
+	Coverage       []string   `json:"coverage"`
+	CoverageUnread bool       `json:"coverage_unread"`
 }
 
 // requestSpecApproval asks for the document's approval and answers what came back; 200 is the
@@ -222,5 +228,75 @@ func TestApprovalRequestSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
 	}
 	if !slices.Equal(answer.Coverage, []string{noRequirementsGap}) {
 		t.Fatalf("coverage = %q, want %q", answer.Coverage, noRequirementsGap)
+	}
+}
+
+// unreadableSpecStore fails the next read of one document's stored state, whichever way the
+// document service reads it: its stamp, its history or its rendering.
+type unreadableSpecStore struct {
+	docs.VersionedStore
+	mu     sync.Mutex
+	broken map[string]bool
+}
+
+// failNextRead arms the next read of room to fail, once.
+func (s *unreadableSpecStore) failNextRead(room string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.broken[room] = true
+}
+
+func (s *unreadableSpecStore) take(room string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	broken := s.broken[room]
+	delete(s.broken, room)
+	return broken
+}
+
+func (s *unreadableSpecStore) DocumentStamp(ctx context.Context, room string) (docs.DocumentStamp, error) {
+	if s.take(room) {
+		return docs.DocumentStamp{}, errors.New("the document store this test stands on is unavailable")
+	}
+	return s.VersionedStore.DocumentStamp(ctx, room)
+}
+
+func (s *unreadableSpecStore) LoadDocument(ctx context.Context, room string) (docs.LoadedDocument, error) {
+	if s.take(room) {
+		return docs.LoadedDocument{}, errors.New("the document store this test stands on is unavailable")
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
+}
+
+// A coverage read that fails refuses nothing: the request is recorded as it always was — it
+// never read the live spec before the answer carried coverage — and the answer says the
+// coverage was not read rather than naming gaps it could not count.
+func TestApprovalRequestGoesThroughWhenTheCoverageReadFails(t *testing.T) {
+	var broken *unreadableSpecStore
+	handler, _, _ := newTestServer(t, testServerOptions{
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &unreadableSpecStore{VersionedStore: docs.NewPgVersioned(database), broken: map[string]bool{}}
+			return broken
+		},
+	})
+	issue := createInteractionIssue(t, handler, "COVF", "Unread coverage", twoRequirements)
+
+	// The next read of the spec's stored state fails, which is the read the coverage folds.
+	broken.failNextRead(issue.PrimaryArtifactID)
+	answer := requestSpecApproval(t, handler, issue.PrimaryArtifactID)
+	if answer.Ask == nil {
+		t.Fatalf("the request opened no ask when the coverage read failed: %+v", answer)
+	}
+	if !answer.CoverageUnread || len(answer.Coverage) != 0 {
+		t.Fatalf("answer = %+v, want coverage_unread with no gap lines", answer)
+	}
+	if read := readApproval(t, handler, issue.PrimaryArtifactID); read.Approval == nil || read.Approval.State != "awaiting" {
+		t.Fatalf("spec approval after the request = %#v, want awaiting", read.Approval)
+	}
+
+	// The read that follows works, so the same request's next answer names the spec's gaps.
+	again := requestSpecApproval(t, handler, issue.PrimaryArtifactID)
+	if again.CoverageUnread || !slices.Equal(again.Coverage, []string{"r1 has no check", "r2 has no check"}) {
+		t.Fatalf("answer after the read recovered = %+v, want both requirements' missing checks", again)
 	}
 }

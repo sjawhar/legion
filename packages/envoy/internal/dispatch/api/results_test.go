@@ -243,9 +243,13 @@ func TestClosedIssueTakesAnAfterMergeResultAndRefusesEveryOtherWrite(t *testing.
 // that moves that head makes it older with no write of Dispatch's, and a result at the new head
 // is current. Rewording one check makes only its own results older, and restoring the words makes
 // them current again.
+//
+// The issue resolves to a repository the App can read, which is what makes "this commit heads no
+// pull request I know" the older answer rather than the unknown one.
 func TestBeforeMergeResultCurrencyFollowsTheHeadAndTheChecksWords(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{})
-	issue := createInteractionIssue(t, handler, "RESH", "Heads", "A spec\n")
+	handler, database := resultsGitHub(t, map[string]bool{"acme/widgets": true},
+		func(string, string) string { return "diverged" })
+	issue := issueInRepository(t, handler, "RESH", "acme/widgets", "Heads")
 	owner := "/api/v1/issues/" + issue.Key
 	uploadDocument(t, handler, owner, "verification.md", siblingChecks)
 	writeHead(t, database, "acme/widgets", 7, headCommit, "open", issue.Key)
@@ -301,6 +305,26 @@ func currencyOf(t *testing.T, read issueResults, blockID, resultID string) strin
 	}
 	t.Fatalf("check %s holds no result %s", blockID, resultID)
 	return ""
+}
+
+// issueInRepository seeds a project whose default repository is repo and one issue of it, so
+// the check's issue resolves to that repository: the pair every currency answer turns on.
+func issueInRepository(t *testing.T, handler http.Handler, project, repo, title string) model.Issue {
+	t.Helper()
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects",
+		map[string]string{"key": project, "name": title}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/"+repo,
+		map[string]any{"project": project, "default": true}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map %s to %s: status=%d body=%s", repo, project, response.Code, response.Body.String())
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": project, "title": title, "spec": "A spec\n"}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue of %s: status=%d body=%s", project, response.Code, response.Body.String())
+	}
+	return decodeBody[model.Issue](t, response)
 }
 
 // resultsGitHub is a Dispatch holding an App key whose GitHub answers `handler`, with the
@@ -406,6 +430,46 @@ func TestAfterMergeResultCurrencyIsUnknownWhenTheAppCannotReadTheRepository(t *t
 	}
 }
 
+// A `before_merge` result of a repository Dispatch cannot see is marked neither current nor
+// older: nothing can teach Dispatch that repository's pull request heads, so "this commit heads
+// none I know" says nothing about the work, and the reviewer reads an unmarked pass rather than
+// a forced refusal. Where Dispatch can read the repository the same answer is older, which is
+// what makes the mark worth reading.
+func TestBeforeMergeResultCurrencyIsUnknownWhenDispatchCannotSeeTheRepository(t *testing.T) {
+	handler, database := resultsGitHub(t, map[string]bool{"acme/widgets": true},
+		func(string, string) string { return "diverged" })
+
+	hidden := issueInRepository(t, handler, "RESB", "acme/hidden", "Unreadable")
+	uploadDocument(t, handler, "/api/v1/issues/"+hidden.Key, "verification.md", twoChecks)
+	unreadable := decodeBody[recordedResult](t, recordResult(t, handler, hidden.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, hidden.Key), "k1", unreadable.Result.ID); got != model.CurrencyUnknown {
+		t.Fatalf("a pre-merge result of a repository the App cannot read = %q, want unknown", got)
+	}
+
+	// An issue that resolves to no repository at all is unknown too: createInteractionIssue
+	// creates the project itself, and nothing maps a repository to it.
+	loose := createInteractionIssue(t, handler, "RESL", "No repository", "A spec\n")
+	uploadDocument(t, handler, "/api/v1/issues/"+loose.Key, "verification.md", twoChecks)
+	none := decodeBody[recordedResult](t, recordResult(t, handler, loose.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, loose.Key), "k1", none.Result.ID); got != model.CurrencyUnknown {
+		t.Fatalf("a pre-merge result of an issue with no repository = %q, want unknown", got)
+	}
+
+	// The contrast, in a repository the App reads: a commit heading no pull request Dispatch
+	// knows is older, and one heading an open pull request of the issue is current.
+	seen := issueInRepository(t, handler, "RESV", "acme/widgets", "Readable")
+	uploadDocument(t, handler, "/api/v1/issues/"+seen.Key, "verification.md", twoChecks)
+	adrift := decodeBody[recordedResult](t, recordResult(t, handler, seen.Key, resultBody("k1", "pass", headCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, seen.Key), "k1", adrift.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("a pre-merge result heading no pull request of a readable repository = %q, want older", got)
+	}
+	writeHead(t, database, "acme/widgets", 31, newHeadCommit, "open", seen.Key)
+	atHead := decodeBody[recordedResult](t, recordResult(t, handler, seen.Key, resultBody("k1", "pass", newHeadCommit, nil)))
+	if got := currencyOf(t, readResults(t, handler, seen.Key), "k1", atHead.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("a pre-merge result at the open head = %q, want current", got)
+	}
+}
+
 // Recording a result at a commit that is the head of no pull request Dispatch has an event for
 // reads GitHub through the App and stores every pull request it names, so the result is current
 // without a webhook ever arriving.
@@ -427,7 +491,7 @@ func TestRecordingAResultReadsThroughToAPullRequestDispatchHasNoEventFor(t *test
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `[{"number":12,"title":%q,"body":"","html_url":"https://github.com/acme/widgets/pull/12",
 			"state":"open","merged":false,"updated_at":"2026-01-01T00:00:00Z",
-			"head":{"ref":"legion/x","sha":%q},"base":{"ref":"main"}}]`, issueKey+" work", headCommit)
+			"head":{"ref":"legion/x","sha":%q,"repo":{"full_name":"acme/widgets"}},"base":{"ref":"main"}}]`, issueKey+" work", headCommit)
 	})
 	upstream := httptest.NewServer(mux)
 	t.Cleanup(upstream.Close)
@@ -483,38 +547,38 @@ func TestRecordedResultAnswersTheTimeItWasStored(t *testing.T) {
 	}
 }
 
-// A child proving its parent's check records the result on the child, and the child's pull
-// request is what carries that work: its head makes the child's result current. The parent's
-// own result at that same commit is not made current by it, since no pull request of the
-// parent's holds the commit — the rule that a child's pull request never answers for a root's
-// own result still stands.
-func TestChildsResultAgainstAnAncestorsCheckIsCurrentAtTheChildsHead(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{})
-	parent := createInteractionIssue(t, handler, "RESX", "Parent", "A spec\n")
+// R4: a child's pull request never makes a root check's result current. A child proving its
+// parent's check records the result on the child, and the head of the child's own pull request
+// answers for nothing on the parent's tab. What reads current there is the parent's own result
+// at a head of the parent's own pull request.
+func TestChildsResultAgainstAnAncestorsCheckIsOlderAtTheChildsHead(t *testing.T) {
+	handler, database := resultsGitHub(t, map[string]bool{"acme/widgets": true},
+		func(string, string) string { return "diverged" })
+	parent := issueInRepository(t, handler, "RESX", "acme/widgets", "Parent")
 	uploadDocument(t, handler, "/api/v1/issues/"+parent.Key, "verification.md", siblingChecks)
 	child := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
 		map[string]any{"project": "RESX", "title": "Child", "parent": parent.Key, "force": true}, "alice"))
-	// One open pull request, attributed to the child, at the commit both results name.
+	// Two open pull requests in the one repository: the child's, and the parent's own.
 	writeHead(t, database, "acme/widgets", 21, headCommit, "open", child.Key)
+	writeHead(t, database, "acme/widgets", 22, newHeadCommit, "open", parent.Key)
 
 	fromChild := decodeBody[recordedResult](t, recordResult(t, handler, child.Key, resultBody("k1", "pass", headCommit, nil)))
-	fromParent := decodeBody[recordedResult](t, recordResult(t, handler, parent.Key, resultBody("k1", "pass", headCommit, nil)))
+	fromParent := decodeBody[recordedResult](t, recordResult(t, handler, parent.Key, resultBody("k1", "pass", newHeadCommit, nil)))
 
 	read := readResults(t, handler, parent.Key)
-	if got := currencyOf(t, read, "k1", fromChild.Result.ID); got != model.CurrencyCurrent {
-		t.Fatalf("the child's result at the child's own head = %q, want current", got)
+	if got := currencyOf(t, read, "k1", fromChild.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the child's result at the child's own head = %q, want older", got)
 	}
-	if got := currencyOf(t, read, "k1", fromParent.Result.ID); got != model.CurrencyOlder {
-		t.Fatalf("the parent's own result at the child's head = %q, want older", got)
+	if got := currencyOf(t, read, "k1", fromParent.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("the parent's own result at the parent's own head = %q, want current", got)
 	}
 }
 
-// A child whose repository is not its parent's, proving the parent's check: the read-through
-// must ask GitHub about the repository the recording issue resolves to as well as the check
-// issue's, or the child's own pull request is never learned and its result reads older until a
-// pull_request envelope reaches the intake. GitHub names the pull request in the child's
-// repository alone here, and names none in the parent's.
-func TestRecordingAResultReadsThroughTheRecordingIssuesOwnRepository(t *testing.T) {
+// The same rule where the child has a repository of its own. The read-through asks GitHub about
+// the repository the check's issue resolves to and no other, so the child's own pull request is
+// never learned, and the child's result reads older on the parent's tab although GitHub would
+// name a pull request for that commit in the child's repository.
+func TestChildsResultInItsOwnRepositoryIsOlderOnTheParentsTab(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate fixture key: %v", err)
@@ -528,14 +592,20 @@ func TestRecordingAResultReadsThroughTheRecordingIssuesOwnRepository(t *testing.
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(w, `{"token":"ghs_fake_77","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
 	})
+	// Both repositories read, so a commit heading no pull request Dispatch knows is older there
+	// rather than unknown.
+	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"full_name":%q,"default_branch":"main"}`, r.PathValue("owner")+"/"+r.PathValue("repo"))
+	})
 	var childKey string
-	var askedParent bool
+	var askedParent, askedChild bool
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("repo") != "gadgets" {
 			askedParent = true
 			fmt.Fprint(w, `[]`)
 			return
 		}
+		askedChild = true
 		fmt.Fprintf(w, `[{"number":31,"title":%q,"body":"","html_url":"https://github.com/acme/gadgets/pull/31",
 			"state":"open","merged":false,"updated_at":"2026-01-01T00:00:00Z",
 			"head":{"ref":"legion/child","sha":%q},"base":{"ref":"main"}}]`, childKey+" work", headCommit)
@@ -564,19 +634,22 @@ func TestRecordingAResultReadsThroughTheRecordingIssuesOwnRepository(t *testing.
 
 	recorded := decodeBody[recordedResult](t, recordResult(t, handler, child.Key, resultBody("k1", "pass", headCommit, nil)))
 
-	var storedIssue *string
-	if err := database.Pool.QueryRow(context.Background(), `
-		select issue_key from pull_request_heads where repo = 'acme/gadgets' and number = 31
-	`).Scan(&storedIssue); err != nil {
-		t.Fatalf("read the pull request the read-through stored for the child's repository: %v", err)
-	}
-	if storedIssue == nil || *storedIssue != child.Key {
-		t.Fatalf("the read-through stored issue=%v, want %s", storedIssue, child.Key)
-	}
 	if !askedParent {
-		t.Fatalf("the read-through never asked the parent's repository, which it must still do")
+		t.Fatalf("the read-through never asked the repository the check's issue resolves to")
 	}
-	if got := currencyOf(t, readResults(t, handler, parent.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
-		t.Fatalf("the child's result at its own repository's head = %q, want current", got)
+	if askedChild {
+		t.Fatalf("the read-through asked the recording issue's own repository, which R4 rules out")
+	}
+	var stored int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from pull_request_heads where repo = 'acme/gadgets'
+	`).Scan(&stored); err != nil {
+		t.Fatalf("count the pull requests stored for the child's repository: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("the read-through stored %d pull requests of the child's repository, want none", stored)
+	}
+	if got := currencyOf(t, readResults(t, handler, parent.Key), "k1", recorded.Result.ID); got != model.CurrencyOlder {
+		t.Fatalf("the child's result at its own repository's head = %q, want older", got)
 	}
 }

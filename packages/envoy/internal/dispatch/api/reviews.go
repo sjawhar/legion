@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -111,7 +112,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 		id        string
 		author    model.Actor
 		waitingOn string
-		documents []model.ArtifactApprovalDocument
+		documents []model.AskApprovalDocument
 	}
 	requests := map[string]openRequest{}
 	// One row per document of each open request naming one of these documents, so a request that
@@ -148,11 +149,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 		// One document is the document being read, which the chip already names; two or more are
 		// what it must spell out.
 		if len(named) > 1 {
-			for _, document := range named {
-				request.documents = append(request.documents, model.ArtifactApprovalDocument{
-					ArtifactID: document.ArtifactID, Name: document.Name, Version: document.Version,
-				})
-			}
+			request.documents = named
 		}
 		requests[artifactID] = request
 	}
@@ -420,10 +417,15 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A coverage read that fails does not fail the request: the request still goes through, as
+	// it did before the answer carried any coverage at all, and the answer says the coverage
+	// was not read rather than naming gaps it could not count.
 	coverage, err := s.coverageOfSpec(r.Context(), pool, requested)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	coverageUnread := err != nil
+	if coverageUnread {
+		slog.Warn("dispatch: read the coverage an approval request reports",
+			"artifact", requested.ID, "error", err)
+		coverage = []string{}
 	}
 
 	tx, err := s.begin(r.Context())
@@ -441,9 +443,18 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "only documents can be approved")
 		return
 	}
-	if artifact.Role == model.ArtifactRolePlan {
+	if documentPlays(artifact, model.ArtifactRolePlan) {
 		writeError(w, "PLAN_APPROVED_BY_REVIEW", http.StatusConflict,
 			"a plan is approved by its plan review, not by a person: record it with dispatch plan-approve (POST /api/v1/artifacts/{id}/plan-reviews)")
+		return
+	}
+	// include_verification asks the human to approve the issue's spec and its Verification
+	// document in one card, so it is refused on any other document: on the Verification
+	// document itself it would name that document twice, and the one answer would write two
+	// reviews and two artifact.approved events on it.
+	if input.IncludeVerification && (artifact.IssueKey == nil || !artifact.Primary) {
+		writeError(w, "NOT_SPEC_DOCUMENT", http.StatusConflict,
+			"include_verification asks for the issue's spec and its Verification document together, and this document is not the issue's spec: request approval of it alone")
 		return
 	}
 	owner := ownerForArtifact(artifact)
@@ -487,6 +498,9 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		// approval, and empty for any document that is not an issue's spec. A gap refuses
 		// nothing: the request is recorded as it always was.
 		Coverage []string `json:"coverage"`
+		// CoverageUnread says the spec's coverage could not be read, so the empty Coverage is
+		// no answer about it. The request is recorded either way.
+		CoverageUnread bool `json:"coverage_unread,omitempty"`
 	}
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
@@ -501,7 +515,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if settled {
-		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval, Coverage: coverage})
+		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version,
+			Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 		return
 	}
 	// The open request is found by any document this one names, not by the named document
@@ -548,7 +563,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval, Coverage: coverage})
+	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version,
+		Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 }
 
 // openApprovalAsk inserts the approval request naming documents, asking question, and appends
@@ -570,7 +586,6 @@ func (s *server) openApprovalAsk(
 		return nil, model.Event{}, err
 	}
 	approval := &model.AskApproval{Documents: documents}
-	approval.Lead()
 	approved, err := docs.LatestApprovedReview(ctx, tx, artifact.ID)
 	if err != nil {
 		return nil, model.Event{}, err
@@ -735,7 +750,6 @@ func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, ask *model.
 	for index := range ask.Approval.Documents {
 		ask.Approval.Documents[index].RequestedVersion = ask.Approval.Documents[index].Version
 	}
-	ask.Approval.Lead()
 	approval, err := docs.EncodeApproval(ask.Approval)
 	if err != nil {
 		return model.Event{}, err
@@ -848,7 +862,7 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		s.writeHandlerError(w, err)
 		return
 	}
-	if artifact.Role != model.ArtifactRolePlan {
+	if !documentPlays(artifact, model.ArtifactRolePlan) {
 		writeError(w, "NOT_PLAN_DOCUMENT", http.StatusConflict,
 			"only an issue's plan document (plan.md) is approved by a plan review")
 		return

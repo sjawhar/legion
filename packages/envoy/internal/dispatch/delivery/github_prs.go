@@ -53,8 +53,11 @@ type githubUser struct {
 	Login string `json:"login"`
 }
 
-// pullRequestPayload is GET /repos/{owner}/{repo}/pulls/{number}'s answer, limited to the fields
-// FetchPullRequest and the pull request head reader (pull_request_heads.go) read.
+// pullRequestPayload is a pull request as GitHub's REST API answers it, limited to the fields
+// FetchPullRequest and the pull request head reader (pull_request_heads.go) read:
+// GET /repos/{owner}/{repo}/pulls/{number}, and each element of
+// GET /repos/{owner}/{repo}/commits/{sha}/pulls, which is the same object in its list form (it
+// carries merged_at but no merged, so a merge is read from whichever of the two GitHub sent).
 type pullRequestPayload struct {
 	Number         int           `json:"number"`
 	Title          string        `json:"title"`
@@ -73,6 +76,12 @@ type pullRequestPayload struct {
 	Head           struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
+		// Repo is the repository the head branch lives in, which the attribution holds a pull
+		// request's currency to (headInOwnRepository): a fork's head is another repository, and
+		// GitHub sends null for it once a fork is deleted.
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
@@ -150,8 +159,11 @@ func FetchPullRequest(ctx context.Context, client *githubapp.Client, owner, repo
 }
 
 // fetchPullRequestPayload is GET /repos/{owner}/{repo}/pulls/{number} under token, through
-// readGitHubPage's bounded retry: a 404 or 410 is ErrPullRequestNotFound, any other failure is
-// wrapped naming the pull request.
+// readGitHubPage's bounded retry: a 404 or 410 is ErrPullRequestNotFound — the pull request or
+// its repository is gone — and every other failure is githubapp.CheckRepositoryResponse's,
+// wrapped naming the pull request, so a 403 the installation is refused is
+// githubapp.ErrRepositoryUnreadable, which a caller stamps the row for rather than retrying it
+// every pass (RefreshPullRequestHead).
 func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, token, owner, repo string, number int) (pullRequestPayload, error) {
 	pullPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), number)
 	body, status, header, err := readGitHubPage(ctx, client, token, pullPath)
@@ -161,7 +173,7 @@ func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, toke
 	if status == http.StatusNotFound || status == http.StatusGone {
 		return pullRequestPayload{}, fmt.Errorf("fetch %s/%s PR #%d: %w (status %d)", owner, repo, number, ErrPullRequestNotFound, status)
 	}
-	if err := githubapp.CheckResponse(status, header, body); err != nil {
+	if err := githubapp.CheckRepositoryResponse(status, header, body, owner+"/"+repo, pullPath); err != nil {
 		return pullRequestPayload{}, fmt.Errorf("fetch %s/%s PR #%d: %w", owner, repo, number, err)
 	}
 	var payload pullRequestPayload
@@ -169,6 +181,37 @@ func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, toke
 		return pullRequestPayload{}, fmt.Errorf("decode %s/%s PR #%d: %w", owner, repo, number, err)
 	}
 	return payload, nil
+}
+
+// fetchCommitPullPayloads is every pull request GitHub associates with one commit
+// (`GET /repos/{owner}/{repo}/commits/{sha}/pulls`) under token, through readGitHubPage's
+// bounded retry, decoded as the same pullRequestPayload the single-pull-request read answers, so
+// both of the head row's GitHub readers build it from one type. Dispatch reads this when a
+// result names a commit that is the head of no pull request it has an event for, so a pull
+// request opened while Dispatch was not listening is known at once.
+//
+// A commit the repository does not have answers an empty list, as GitHub's own 422 for it does;
+// every other answer is githubapp.CheckRepositoryResponse's, so a 403 or 404 is
+// githubapp.ErrRepositoryUnreadable, which the currency read takes as "unknown", never as
+// "older".
+func fetchCommitPullPayloads(ctx context.Context, client *githubapp.Client, token, owner, repo, sha string) ([]pullRequestPayload, error) {
+	pullsPath := fmt.Sprintf("/repos/%s/%s/commits/%s/pulls", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
+	body, status, header, err := readGitHubPage(ctx, client, token, pullsPath)
+	if err != nil {
+		return nil, fmt.Errorf("fetch the pull requests of %s/%s@%s: %w", owner, repo, sha, err)
+	}
+	repoFull := owner + "/" + repo
+	if err := githubapp.CheckRepositoryResponse(status, header, body, repoFull, pullsPath, http.StatusUnprocessableEntity); err != nil {
+		return nil, fmt.Errorf("fetch the pull requests of %s@%s: %w", repoFull, sha, err)
+	}
+	if status == http.StatusUnprocessableEntity {
+		return nil, nil
+	}
+	var payloads []pullRequestPayload
+	if err := json.Unmarshal(body, &payloads); err != nil {
+		return nil, fmt.Errorf("decode the pull requests of %s@%s: %w", repoFull, sha, err)
+	}
+	return payloads, nil
 }
 
 // fetchAttributionFacts reads what the issue attribution needs of a pull request already stored

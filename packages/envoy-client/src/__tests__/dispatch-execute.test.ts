@@ -2886,9 +2886,17 @@ describe("executeDispatchTool", () => {
     expect(failed).toContain("the coverage read failed");
   });
 
-  test("dispatch_doc_read --blocks prints a typed block's serves and needs", async () => {
-    const markdown =
+  test("dispatch_doc_read --blocks prints a typed block's pointers, and not a value that reads like one", async () => {
+    const task =
       ':::plan_task{#t2 serves="dispatch://DSP-8/spec#b-r1" needs="dispatch://DSP-8/artifact/plan-md#b-t1"}\nSort the asks.\n:::';
+    // A check's run is the command a tester types, which may quote a reference. The schema
+    // declares it a string, so the listing reads it as text: only what the schema declares
+    // block[] is a pointer.
+    const check =
+      ':::check{#k1 serves="dispatch://DSP-8/spec#b-r1" run="dispatch read --ref dispatch://DSP-8/spec#b-r1"}\nThe spec is read.\n:::';
+    const markdown = `${task}\n\n${check}`;
+    const taskBytes = new TextEncoder().encode(task).length;
+    const documentBytes = new TextEncoder().encode(markdown).length;
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       if (pathname === "/api/v1/issues/DSP-8") {
@@ -2923,12 +2931,32 @@ describe("executeDispatchTool", () => {
             id: "t2",
             type: "plan_task",
             from: 0,
-            to: new TextEncoder().encode(markdown).length,
+            to: taskBytes,
             token: "sha256:t2",
             references: { comments: 0, asks: 0 },
             attributes: [
-              { name: "serves", value: "dispatch://DSP-8/spec#b-r1" },
-              { name: "needs", value: "dispatch://DSP-8/artifact/plan-md#b-t1" },
+              { name: "serves", value: "dispatch://DSP-8/spec#b-r1", kind: "block[]" },
+              {
+                name: "needs",
+                value: "dispatch://DSP-8/artifact/plan-md#b-t1",
+                kind: "block[]",
+              },
+            ],
+          },
+          {
+            id: "k1",
+            type: "check",
+            from: taskBytes + 2,
+            to: documentBytes,
+            token: "sha256:k1",
+            references: { comments: 0, asks: 0 },
+            attributes: [
+              { name: "serves", value: "dispatch://DSP-8/spec#b-r1", kind: "block[]" },
+              {
+                name: "run",
+                value: "dispatch read --ref dispatch://DSP-8/spec#b-r1",
+                kind: "string",
+              },
             ],
           },
         ]);
@@ -2953,6 +2981,18 @@ describe("executeDispatchTool", () => {
         "  needs: dispatch://DSP-8/artifact/plan-md#b-t1",
       ].join("\n")
     );
+    // The check's own pointer is printed, and nothing else of it: the line after its serves is
+    // the listing's trailer, so the run went unprinted rather than reading as a second pointer.
+    expect(result.text).toContain(
+      [
+        'k1 check (sha256:k1; 0 comments, 0 asks): :::check{#k1 serves="dispatch://DSP-8/spec#b-r1" run="dispat…',
+        "  serves: dispatch://DSP-8/spec#b-r1",
+        "",
+        "Document token: sha256:doc",
+      ].join("\n")
+    );
+    expect(result.text).not.toContain("run:");
+    expect(result.text).not.toContain("dispatch read --ref");
   });
 
   // Every Dispatch the hosts reach pages the listing (sjawhar/legion#1612), so an array answered to
@@ -7200,6 +7240,45 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# Right document");
   });
 
+  // The server answers verification_artifact_id "" for an issue that has no Verification
+  // document, never null, so an empty list of checks there is "no document", not "a document
+  // with no check blocks": the two send the reader to different work.
+  test("dispatch_results tells an issue with no Verification document to write one", async () => {
+    const results = async (verificationArtifactID: string) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42/results") {
+          return response({
+            issue: "DSP-42",
+            verification_artifact_id: verificationArtifactID,
+            checks: [],
+          });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      return await executeDispatchTool({
+        tool: "dispatch_results",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    };
+
+    const none = await results("");
+    expect(none.text).toBe(
+      "DSP-42 has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved."
+    );
+    expect(none.details).toMatchObject({ issue: "DSP-42", checks: 0 });
+    // A Verification document that holds no check block is the other sentence.
+    expect((await results("artifact-9")).text).toBe(
+      "DSP-42's Verification document holds no check blocks."
+    );
+  });
+
   test("dispatch_request_approval sends its summary and reports the question the Inbox shows", async () => {
     const posts: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -7273,8 +7352,8 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
   });
 
-  test("dispatch_request_approval prints the spec's coverage, and nothing for a covered spec", async () => {
-    const request = async (coverage: readonly string[]) => {
+  test("dispatch_request_approval prints the spec's coverage, nothing for a covered spec, and says when it was not read", async () => {
+    const request = async (coverage: readonly string[], unread = false) => {
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
         if (target.pathname === "/api/v1/issues/DSP-42") {
@@ -7309,6 +7388,7 @@ describe("executeDispatchTool", () => {
               artifact_id: "artifact-42",
               version: 3,
               coverage,
+              ...(unread ? { coverage_unread: true } : {}),
             },
             201
           );
@@ -7339,6 +7419,13 @@ describe("executeDispatchTool", () => {
     expect(unmarked).toEndWith(`\nCoverage of spec.md: the spec marks no requirements. ${advice}`);
     // The negative control: every requirement has a check, so there is no coverage line at all.
     expect(await request([])).not.toContain("Coverage of spec.md");
+    // A coverage the server could not read is not silence: an empty coverage alone would read
+    // exactly like a spec every requirement of which has a check.
+    const unread = await request([], true);
+    expect(unread).toStartWith("Approval requested for spec.md");
+    expect(unread).toEndWith(
+      "\nCoverage of spec.md: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts."
+    );
   });
 
   // A call that finds the open request already waiting on the human (Dispatch's 200) changed

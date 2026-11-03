@@ -62,8 +62,8 @@ test("renders each approval state's label", () => {
       // One request covering a spec and its issue's Verification document names both.
       {
         documents: [
-          { artifact_id: "artifact-1", name: "spec.md", version: 3 },
-          { artifact_id: "artifact-2", name: "verification.md", version: 2 },
+          { artifact_id: "artifact-1", name: "spec.md", requested_version: 3, version: 3 },
+          { artifact_id: "artifact-2", name: "verification.md", requested_version: 2, version: 2 },
         ],
         latest_version: 3,
         state: "awaiting",

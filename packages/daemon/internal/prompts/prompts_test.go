@@ -53,7 +53,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
 			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro's `docs/solutions/` commits may land above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
+			"Retro commits nothing, so nothing of retro's sits above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The packet limit the merger is told is the one the handoff route enforces.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
 			"that GitHub's compare lists as removed", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
@@ -242,6 +242,38 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 		for _, phrase := range retired {
 			if strings.Contains(text, phrase) {
 				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
+			}
+		}
+	}
+}
+
+// An issue with no Verification document, or with one holding no `before_merge` check, has no
+// gate: every gate counts the `check` blocks that exist, so nothing refuses an issue that has
+// none, which is every issue in flight when this ships. The tester fails the phase, the reviewer
+// requests changes, and the architect writes the checks, so each of those composed prompts names
+// the empty case and the answer its role gives it. Each is also told what a child proves: a
+// child's own check whose `serves` names the root's requirement, never a result against the
+// root's own check.
+func TestTheComposedPromptsRefuseAnIssueWithNoBeforeMergeCheck(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const empty = "no Verification document, or with one that holds no `before_merge` check"
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+		answer string
+	}{
+		{claim.RoleTester, false, "that too is a test failure"},
+		{claim.RoleReviewer, false, "submit `REQUEST_CHANGES` saying which of the two it is"},
+		{claim.RoleArchitect, false, "write the checks yourself"},
+		{claim.RoleArchitect, true, "write the checks yourself"},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		for _, want := range []string{empty, tc.answer, "`serves` names"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, want)
 			}
 		}
 	}

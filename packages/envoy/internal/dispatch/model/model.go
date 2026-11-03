@@ -718,15 +718,10 @@ type ArtifactApproval struct {
 	// rather than a person's; empty while no review stands.
 	Kind string `json:"kind,omitempty"`
 	// Documents names every document the open request covers when it covers more than this
-	// one, each at the version the request names, this document included; empty otherwise.
-	Documents []ArtifactApprovalDocument `json:"documents,omitempty"`
-}
-
-// ArtifactApprovalDocument is one document an open approval request covers.
-type ArtifactApprovalDocument struct {
-	ArtifactID string `json:"artifact_id"`
-	Name       string `json:"name"`
-	Version    int    `json:"version"`
+	// one, each at the version the request names, this document included; empty otherwise. It
+	// is the request's own list (AskApprovalDocument), carried to the reader of a document
+	// rather than copied into a shape of its own.
+	Documents []AskApprovalDocument `json:"documents,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -879,11 +874,15 @@ type ArtifactBlock struct {
 }
 
 // BlockAttributeValue is one attribute a typed block carries: the name its type declares it
-// under, and the value the block holds, as its opening line writes it with no escape and no
-// quotes (pmdoc.TypedBlockAttributes).
+// under, the value the block holds, as its opening line writes it with no escape and no quotes
+// (pmdoc.TypedBlockAttributes), and the kind the block schema declares that attribute
+// (pmdoc.BlockAttributeSchema.Kind). A reader follows a block[] attribute's value as the block
+// references it holds and reads every other kind as text, rather than taking a value for a
+// pointer because it reads like one: a check's run may quote a dispatch:// URL.
 type BlockAttributeValue struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+	Kind  string `json:"kind"`
 }
 
 // BlockTable is a table block's rows in child order, the header row first, as GET
@@ -1066,8 +1065,9 @@ type AskBlockArtifact struct {
 // ArtifactID, Name, Version and RequestedVersion repeat Documents[0], the document the request
 // was opened on: the stored JSON stays the one-document shape the release before this one reads,
 // and asks.approval's check constraint, its indexes and every join that resolves an approval
-// ask's document go on finding that first document. Lead keeps them in step; nothing else writes
-// them.
+// ask's document go on finding that first document. MarshalJSON writes them from Documents[0]
+// on every encode, so no writer can store a lead that disagrees with the list; nothing else
+// writes them.
 type AskApproval struct {
 	ArtifactID       string                `json:"artifact_id"`
 	Name             string                `json:"name"`
@@ -1085,31 +1085,21 @@ type AskApprovalDocument struct {
 	RequestedVersion int    `json:"requested_version"`
 }
 
-// Lead copies Documents[0] into the four fields that repeat it. Every writer of Documents calls
-// it before the approval is encoded.
-func (approval *AskApproval) Lead() {
-	if len(approval.Documents) == 0 {
-		return
-	}
-	lead := approval.Documents[0]
-	approval.ArtifactID = lead.ArtifactID
-	approval.Name = lead.Name
-	approval.Version = lead.Version
-	approval.RequestedVersion = lead.RequestedVersion
-}
-
-// FromLead fills Documents with the one document the four lead fields name, when a decoded
-// approval carries none: the shape the release before the documents list stored.
-func (approval *AskApproval) FromLead() {
+// MarshalJSON writes the approval with its four lead fields taken from Documents[0], whatever
+// the struct in hand carries: every writer changes Documents alone, and the stored row's lead
+// follows it. An approval naming no document is written as it stands, which
+// asks_approval_kind_check refuses — a request names at least one document.
+func (approval AskApproval) MarshalJSON() ([]byte, error) {
+	type encoded AskApproval
+	shape := encoded(approval)
 	if len(approval.Documents) > 0 {
-		return
+		lead := approval.Documents[0]
+		shape.ArtifactID = lead.ArtifactID
+		shape.Name = lead.Name
+		shape.Version = lead.Version
+		shape.RequestedVersion = lead.RequestedVersion
 	}
-	approval.Documents = []AskApprovalDocument{{
-		ArtifactID:       approval.ArtifactID,
-		Name:             approval.Name,
-		Version:          approval.Version,
-		RequestedVersion: approval.RequestedVersion,
-	}}
+	return json.Marshal(shape)
 }
 
 // Document is the entry naming artifactID, or nil when the request does not name that document.

@@ -2125,9 +2125,11 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
 
 /** What `dispatch results` prints: each check of the issue's Verification document with its
  *  latest result and whether that result is current. A check with no result says so, and an
- *  issue with no Verification document says that instead of printing an empty list. */
+ *  issue with no Verification document says that instead of printing an empty list: Dispatch
+ *  answers `verification_artifact_id` "" for such an issue, never null, so that is what is
+ *  compared. */
 function formatCheckResults(results: IssueCheckResults): string {
-  if (results.verification_artifact_id === null) {
+  if (results.verification_artifact_id === "") {
     return `${results.issue} has no Verification document, so it has no checks. Write one (verification.md) with a check block per thing that must be proved.`;
   }
   if (results.checks.length === 0) {
@@ -3046,9 +3048,11 @@ async function listDocumentBlocks(
     );
     // Every pointer a typed block holds, in the order its type declares them: a reader follows
     // these between documents, and a `block[]` attribute a type declares later must not go
-    // silently unprinted. Every attribute of a block is in `dispatch read` of its reference.
+    // silently unprinted. A pointer is what the schema declares `block[]`, never what reads like
+    // one: a check's `run` may quote a `dispatch://` URL, and it is a command, not a pointer.
+    // Every attribute of a block is in `dispatch read` of its reference.
     for (const attribute of block.attributes ?? []) {
-      if (attribute.value !== "" && attribute.value.includes("dispatch://")) {
+      if (attribute.kind === "block[]" && attribute.value !== "") {
         lines.push(`${indent}  ${attribute.name}: ${attribute.value}`);
       }
     }
@@ -4732,10 +4736,14 @@ export async function executeDispatchTool(
       // One line per requirement of the spec with no check, or the one line saying the spec
       // marks none, as Dispatch names them; never a missing plan task, since the plan comes
       // after the approval. A gap refuses nothing: the request is recorded, and a spec every
-      // requirement of which has a check carries no line at all.
+      // requirement of which has a check carries no line at all. A coverage the server could
+      // not read says so, because silence here reads exactly like a spec with no gaps.
       const gaps = result.coverage ?? [];
-      const coverageLines =
-        gaps.length === 0
+      const coverageLines = result.coverage_unread
+        ? [
+            `Coverage of ${resolved.artifact.name}: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+          ]
+        : gaps.length === 0
           ? []
           : [
               `Coverage of ${resolved.artifact.name}: ${gaps.map((gap) => `${gap}.`).join(" ")} Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,

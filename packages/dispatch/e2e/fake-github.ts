@@ -20,6 +20,11 @@ interface FakePull {
   readonly title: string;
   readonly body?: string;
   readonly head_ref?: string;
+  /** The repository the head branch lives in, as GitHub's `head.repo.full_name`; the pull
+   *  request's own repository when unset. Dispatch attributes a result's currency to a pull
+   *  request only when the two are the same, so a fork's name here is how a fixture describes
+   *  a pull request that attributes nobody. */
+  readonly head_repo?: string;
   readonly base_ref?: string;
   readonly updated_at?: string;
 }
@@ -207,7 +212,10 @@ const server = Bun.serve({
         return Response.json({ message: "fixture has no pull request" }, { status: 500 });
       }
       return Response.json({
-        head: { sha: seeded.head_sha },
+        head: {
+          repo: { full_name: seeded.head_repo ?? `${pull[1]}/${pull[2]}` },
+          sha: seeded.head_sha,
+        },
         merged: seeded.merged ?? false,
         number: Number(pull[3]),
         state: seeded.state,
@@ -252,7 +260,11 @@ const server = Bun.serve({
             {
               base: { ref: seeded.base_ref ?? "main" },
               body: seeded.body ?? "",
-              head: { ref: seeded.head_ref ?? `branch-${number}`, sha: seeded.head_sha },
+              head: {
+                ref: seeded.head_ref ?? `branch-${number}`,
+                repo: { full_name: seeded.head_repo ?? `${commitPulls[1]}/${commitPulls[2]}` },
+                sha: seeded.head_sha,
+              },
               html_url: `https://github.com/${commitPulls[1]}/${commitPulls[2]}/pull/${number}`,
               merged: seeded.merged ?? false,
               number,

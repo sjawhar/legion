@@ -2533,8 +2533,11 @@ Each item below names a path with its method and identity, then its purpose.
 
   GET lists the `check` blocks of the issue's Verification document in document order:
   `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
-  Each result carries `currency`: `current`, `older`, or `unknown` when the check's issue resolves to no repository or Dispatch's GitHub App cannot read it.
-  A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the issue the result was recorded on or to the check's issue, and the check's words are the ones it proved; a child proving its parent's check records the result on the child, so the child's own pull request makes it current, while a result the parent recorded for itself at that commit stays older.
+  Each result carries `currency`: `current`, `older`, or `unknown`.
+  It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
+  a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
+  A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue, and the check's words are the ones it proved.
+  The issue a result was recorded on is read for nothing here, so a child's pull request never makes a result against a check above it current.
   An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
   Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
   An issue with no Verification document answers no checks.
@@ -2670,6 +2673,7 @@ Each item below names a path with its method and identity, then its purpose.
   Ask a human to approve a document's latest settled version.
   With `include_verification` it asks for the issue's Verification document (`role` `verification`) in the same request, each document at its own current settled version, and the answer records the human's review on each;
   an issue with no Verification document is `409 NO_VERIFICATION_DOCUMENT`, and one whose Verification document has no settled version is `409 NO_VERSION`.
+  The flag is for the issue's spec alone: on any other document it is `409 NOT_SPEC_DOCUMENT`.
   A document whose role is `plan` is `409 PLAN_APPROVED_BY_REVIEW`: a plan is approved by its plan review, never by a person.
   The question is `Approve <name> (version <N>)?`, or `Approve <name> (version <N>) and <name> (version <N>)?` for a request naming two documents, followed by the optional `summary` (blank is `400 SUMMARY_INPUT`;
   past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`).
@@ -2685,16 +2689,15 @@ Each item below names a path with its method and identity, then its purpose.
   an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was.
   While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading.
   It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting).
-  Every answer carries `coverage`, one line per requirement of the issue's spec with no check, or the single line `the spec marks no requirements` for a spec that marks none (`GET /api/v1/issues/{key}/coverage`), and no line at all for a spec every requirement of which has a check; it is empty for a document that is not a spec.
+  Every answer carries `coverage`, one line per requirement of the issue's spec with no check, or the single line `the spec marks no requirements` for a spec that marks none (`GET /api/v1/issues/{key}/coverage`), and no line at all for a covered spec; it is empty for a document that is not a spec.
 
-  It never names a missing plan task, since the plan comes after the approval, and it refuses nothing:
-  a spec with gaps still opens the request.
+  It never names a missing plan task, since the plan comes after the approval; a spec with gaps still opens the request, and a coverage read that failed answers `coverage_unread: true` with no lines.
 
 - `/api/v1/artifacts/{id}/plan-reviews` (POST; cookie, trusted header, or bearer)
 
   Record a plan review's approval of a plan version: `{version}`, the version the review read.
   It writes an `approved` review of kind `plan_review` and emits `artifact.approved`, so every read of the document shows it approved and a later version makes it stale, as a spec's approval goes stale.
-  It is `409 NOT_PLAN_DOCUMENT` on any document whose `role` is not `plan`, the issue's spec included, `409 NO_VERSION` on a plan with no settled version, and `400 INVALID_REVIEW` for a version the plan does not have.
+  It is `409 NOT_PLAN_DOCUMENT` on any document that is not the issue's plan, the issue's spec included — a document whose `role` is `plan`, or one a rolling deploy left with no role whose slug is `plan-md`, is the plan — `409 NO_VERSION` on a plan with no settled version, and `400 INVALID_REVIEW` for a version the plan does not have.
   No person is ever asked to approve a plan, which is why `/api/v1/artifacts/{id}/approval-requests` refuses one.
 
 - `/api/v1/artifacts/{id}/asks?state=` (GET, POST; cookie, trusted header, or bearer)

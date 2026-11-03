@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +57,9 @@ func readHead(t *testing.T, ctx context.Context, pool *store.Pool, repo string, 
 }
 
 // The reconcile re-reads an open pull request nobody has sent an event for in five minutes and
-// writes the head GitHub reports, with the issue the attribution picks.
+// writes the head GitHub reports, with the issue the attribution picks. A pull request its
+// title already attributes costs no commits read: the commit messages are the last of the five
+// sources, and the event path skips them in the same case.
 func TestReconcileRereadsAStalePullRequestHead(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
@@ -67,11 +71,16 @@ func TestReconcileRereadsAStalePullRequestHead(t *testing.T) {
 		mustEncode(t, w, map[string]any{
 			"number": 42, "title": "HEAD-1 the work", "body": "", "html_url": "https://github.com/acme/widgets/pull/42",
 			"state": "open", "merged": false, "updated_at": "2026-02-01T00:00:00Z",
-			"head": map[string]any{"ref": "legion/HEAD-1", "sha": "2222222222222222222222222222222222222222"},
+			"head": map[string]any{
+				"ref": "legion/HEAD-1", "sha": "2222222222222222222222222222222222222222",
+				"repo": map[string]any{"full_name": "acme/widgets"},
+			},
 			"base": map[string]any{"ref": "main"},
 		})
 	})
+	var commitReads atomic.Int32
 	fake.handle("GET /repos/acme/widgets/pulls/42/commits", func(w http.ResponseWriter, _ *http.Request) {
+		commitReads.Add(1)
 		mustEncode(t, w, []any{})
 	})
 	client := fake.newTestClient()
@@ -114,6 +123,9 @@ func TestReconcileRereadsAStalePullRequestHead(t *testing.T) {
 	if head.CheckedAt == nil || head.CheckedAt.Before(stale.Add(time.Minute)) {
 		t.Fatalf("the re-read head's checked_at = %v, want it moved forward", head.CheckedAt)
 	}
+	if reads := commitReads.Load(); reads != 0 {
+		t.Fatalf("the re-read paged the commit messages %d times, want none: its title already attributes it", reads)
+	}
 	// The pass is idempotent: nothing is stale a second time.
 	again, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, time.Now())
 	if err != nil {
@@ -138,16 +150,27 @@ func TestReadThroughCommitPullsStoresEveryPullRequestNamedForACommit(t *testing.
 			map[string]any{
 				"number": 7, "title": "HEAD-2 the work", "body": "", "html_url": "https://github.com/acme/widgets/pull/7",
 				"state": "open", "merged": false, "updated_at": "2026-02-01T00:00:00Z",
-				"head": map[string]any{"ref": "legion/HEAD-2", "sha": "5555555555555555555555555555555555555555"},
+				"head": map[string]any{
+					"ref": "legion/HEAD-2", "sha": "5555555555555555555555555555555555555555",
+					"repo": map[string]any{"full_name": "acme/widgets"},
+				},
 				"base": map[string]any{"ref": "main"},
 			},
 			map[string]any{
 				"number": 8, "title": "An unrelated change", "body": "", "html_url": "https://github.com/acme/widgets/pull/8",
 				"state": "closed", "merged_at": "2026-02-02T00:00:00Z", "updated_at": "2026-02-02T00:00:00Z",
-				"head": map[string]any{"ref": "fix", "sha": "5555555555555555555555555555555555555555"},
+				"head": map[string]any{
+					"ref": "fix", "sha": "5555555555555555555555555555555555555555",
+					"repo": map[string]any{"full_name": "acme/widgets"},
+				},
 				"base": map[string]any{"ref": "main"},
 			},
 		})
+	})
+	// Nothing in #8's title, body or branch names an issue, so the read-through reads its commit
+	// messages, the fifth source; they name none either.
+	fake.handle("GET /repos/acme/widgets/pulls/8/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "fix: a typo"}}})
 	})
 	written, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
 		"5555555555555555555555555555555555555555", time.Now())
@@ -189,9 +212,15 @@ func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing
 		mustEncode(t, w, []any{map[string]any{
 			"number": 11, "title": "HEAD-3 the work", "body": "", "html_url": "https://github.com/acme/other/pull/11",
 			"state": "open", "merged": false, "updated_at": "2026-02-01T00:00:00Z",
-			"head": map[string]any{"ref": "legion/HEAD-3", "sha": "7777777777777777777777777777777777777777"},
+			"head": map[string]any{
+				"ref": "legion/HEAD-3", "sha": "7777777777777777777777777777777777777777",
+				"repo": map[string]any{"full_name": "acme/other"},
+			},
 			"base": map[string]any{"ref": "main"},
 		}})
+	})
+	fake.handle("GET /repos/acme/other/pulls/11/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "work"}}})
 	})
 	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/other",
 		"7777777777777777777777777777777777777777", time.Now()); err != nil {
@@ -207,10 +236,13 @@ func TestAPullRequestNamingAnIssueOfAnotherRepositoryAttributesNobody(t *testing
 	}
 }
 
-// The App's two new reads, against this package's REST fake: the pull requests of a commit, and
-// whether a commit is on a branch. A repository the installation cannot read is
-// ErrRepositoryUnreadable, which the currency read takes as unknown rather than as older.
+// The three reads a result's currency turns on, against this package's REST fake: the pull
+// requests GitHub names for a commit (delivery's own, through readGitHubPage's bounded retry),
+// whether a commit is on a branch, and the default branch. A repository the installation cannot
+// read is ErrRepositoryUnreadable whichever read asks, which the currency read takes as unknown
+// rather than as older.
 func TestCommitPullsAndCommitOnBranchReadThroughTheApp(t *testing.T) {
+	fastPageRetries(t)
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/commits/{sha}/pulls", func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("sha") == "0000000000000000000000000000000000000000" {
@@ -239,6 +271,10 @@ func TestCommitPullsAndCommitOnBranchReadThroughTheApp(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, `{"message":"Not Found"}`)
 	})
+	fake.handle("GET /repos/acme/hidden/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
+	})
 	fake.handle("GET /repos/acme/widgets", func(w http.ResponseWriter, _ *http.Request) {
 		mustEncode(t, w, map[string]any{"full_name": "acme/widgets", "default_branch": "main"})
 	})
@@ -249,15 +285,18 @@ func TestCommitPullsAndCommitOnBranchReadThroughTheApp(t *testing.T) {
 		t.Fatalf("mint a token: %v", err)
 	}
 
-	pulls, err := client.CommitPulls(ctx, token, "acme", "widgets", "6666666666666666666666666666666666666666")
+	pulls, err := fetchCommitPullPayloads(ctx, client, token, "acme", "widgets", "6666666666666666666666666666666666666666")
 	if err != nil {
-		t.Fatalf("CommitPulls: %v", err)
+		t.Fatalf("fetch the pull requests of a commit: %v", err)
 	}
-	if len(pulls) != 1 || pulls[0].Number != 3 || !pulls[0].Merged || pulls[0].BaseRef != "main" {
-		t.Fatalf("CommitPulls = %+v, want one merged pull request #3 onto main", pulls)
+	if len(pulls) != 1 || pulls[0].Number != 3 || pulls[0].MergedAt == nil || pulls[0].Base.Ref != "main" {
+		t.Fatalf("the pull requests of a commit = %+v, want one merged pull request #3 onto main", pulls)
 	}
-	if none, err := client.CommitPulls(ctx, token, "acme", "widgets", "0000000000000000000000000000000000000000"); err != nil || len(none) != 0 {
-		t.Fatalf("CommitPulls for a commit the repository lacks = %+v, %v; want none and no error", none, err)
+	if none, err := fetchCommitPullPayloads(ctx, client, token, "acme", "widgets", "0000000000000000000000000000000000000000"); err != nil || len(none) != 0 {
+		t.Fatalf("the pull requests of a commit the repository lacks = %+v, %v; want none and no error", none, err)
+	}
+	if _, err := fetchCommitPullPayloads(ctx, client, token, "acme", "hidden", "6666666666666666666666666666666666666666"); !errors.Is(err, githubapp.ErrRepositoryUnreadable) {
+		t.Fatalf("the pull requests of a commit of an unreadable repository = %v, want ErrRepositoryUnreadable", err)
 	}
 
 	for sha, want := range map[string]bool{
@@ -278,5 +317,198 @@ func TestCommitPullsAndCommitOnBranchReadThroughTheApp(t *testing.T) {
 	}
 	if _, err := client.CommitOnBranch(ctx, token, "acme", "hidden", "main", "6666666666666666666666666666666666666666"); !errors.Is(err, githubapp.ErrRepositoryUnreadable) {
 		t.Fatalf("CommitOnBranch on an unreadable repository = %v, want ErrRepositoryUnreadable", err)
+	}
+}
+
+// Security, the read-through path: anyone may open a pull request from a fork of a public
+// repository, at any commit of their choosing, with any title. A fork's head is another
+// repository's, so the row is written but attributed to nobody, and a result recorded at that
+// commit is never made current by it.
+func TestAForkPullRequestNamedForACommitMakesNoResultCurrent(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedHeadIssue(t, ctx, pool, 4)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{
+			"number": 21, "title": "HEAD-4 the work", "body": "Fixes HEAD-4",
+			"html_url": "https://github.com/acme/widgets/pull/21",
+			"state":    "open", "merged": false, "updated_at": "2026-02-03T00:00:00Z",
+			"head": map[string]any{
+				"ref": "legion/HEAD-4", "sha": "9999999999999999999999999999999999999999",
+				"repo": map[string]any{"full_name": "stranger/widgets"},
+			},
+			"base": map[string]any{"ref": "main"},
+		}})
+	})
+	fake.handle("GET /repos/acme/widgets/pulls/21/commits", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("the read-through paged a fork's commit messages; a fork attributes nobody whatever they say")
+		mustEncode(t, w, []any{})
+	})
+	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
+		"9999999999999999999999999999999999999999", time.Now()); err != nil {
+		t.Fatalf("read through the commit's pull requests: %v", err)
+	}
+	head := readHead(t, ctx, pool, "acme/widgets", 21)
+	if head.IssueKey != nil || head.AttributionSource != "none" {
+		t.Fatalf("#21 = %+v, want a row attributed to nobody: its head is a fork's", head)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-4", "9999999999999999999999999999999999999999")
+	if err != nil || attributed {
+		t.Fatalf("HeadAttributedTo(HEAD-4) = %v, %v; want false", attributed, err)
+	}
+}
+
+// Security, the envelope path: the same fork, reported by a `pull_request` event. An envelope
+// that names no head repository at all — one an older publisher made — attributes nobody
+// either, and leaves the row unstamped for the reconcile to settle from GitHub's own answer.
+func TestAForkPullRequestEnvelopeMakesNoResultCurrent(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedHeadIssue(t, ctx, pool, 5)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/pulls/{number}/commits", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("an envelope whose head is not this repository's paged its commit messages; it attributes nobody whatever they say")
+		mustEncode(t, w, []any{})
+	})
+	intake := newIntake(nil, pool, nil, fake.newTestClient(), nil, nil)
+	envelope := func(number int, fields map[string]string) map[string]string {
+		payload := map[string]string{
+			"kind": "pr", "action": "opened", "repo": "acme/widgets", "number": strconv.Itoa(number),
+			"title": "HEAD-5 the work", "body": "", "head_ref": "legion/HEAD-5",
+			"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_ref": "main",
+			"merged": "false", "url": "https://github.com/acme/widgets/pull/" + strconv.Itoa(number),
+			"updated_at": "2026-02-04T00:00:00Z",
+		}
+		for key, value := range fields {
+			payload[key] = value
+		}
+		return payload
+	}
+	if _, err := intake.recordPullRequestHead(ctx, envelope(22, map[string]string{"head_repo": "stranger/widgets"}), 22); err != nil {
+		t.Fatalf("record the fork's head: %v", err)
+	}
+	if _, err := intake.recordPullRequestHead(ctx, envelope(23, nil), 23); err != nil {
+		t.Fatalf("record the head of an envelope naming no head repository: %v", err)
+	}
+
+	fork := readHead(t, ctx, pool, "acme/widgets", 22)
+	if fork.IssueKey != nil || fork.AttributionSource != "none" {
+		t.Fatalf("#22 = %+v, want a row attributed to nobody: its head is a fork's", fork)
+	}
+	unsaid := readHead(t, ctx, pool, "acme/widgets", 23)
+	if unsaid.IssueKey != nil || unsaid.AttributionSource != "none" {
+		t.Fatalf("#23 = %+v, want a row attributed to nobody: the envelope names no head repository", unsaid)
+	}
+	if unsaid.CheckedAt != nil {
+		t.Fatalf("#23's checked_at = %v, want it unstamped so the reconcile reads the head repository itself", unsaid.CheckedAt)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-5", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil || attributed {
+		t.Fatalf("HeadAttributedTo(HEAD-5) = %v, %v; want false", attributed, err)
+	}
+
+	// The same pull request from a branch of this repository is attributed, so the refusal is
+	// the head's repository and nothing else.
+	if _, err := intake.recordPullRequestHead(ctx, envelope(24, map[string]string{"head_repo": "Acme/Widgets"}), 24); err != nil {
+		t.Fatalf("record the head of a branch of this repository: %v", err)
+	}
+	own := readHead(t, ctx, pool, "acme/widgets", 24)
+	if own.IssueKey == nil || *own.IssueKey != "HEAD-5" || own.AttributionSource != "title_body" {
+		t.Fatalf("#24 = %+v, want HEAD-5 from its title: its head is a branch of this repository", own)
+	}
+}
+
+// An attribution the read-through cannot make from a title, body or branch is not deleted by
+// it. The read-through reads the commit messages, the fifth source, exactly as the event path
+// does, so a merged row attributed by them — which the reconcile never revisits — keeps its
+// issue when another result's read-through lists it again.
+func TestAReadThroughKeepsAnAttributionOnlyTheCommitMessagesName(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedHeadIssue(t, ctx, pool, 6)
+
+	merged := time.Date(2026, 2, 5, 0, 0, 0, 0, time.UTC)
+	issue := "HEAD-6"
+	if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+		Repo: "acme/widgets", Number: 31, HeadSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		HeadRef: "topic", BaseRef: "main", State: "merged", IssueKey: &issue,
+		AttributionSource: string(sourceCommitMessage), EventAt: &merged, CheckedAt: &merged,
+	}); err != nil {
+		t.Fatalf("store the merged head attributed by its commit messages: %v", err)
+	}
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/commits/{sha}/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{
+			"number": 31, "title": "Tidy the walk", "body": "", "html_url": "https://github.com/acme/widgets/pull/31",
+			"state": "closed", "merged_at": "2026-02-05T00:00:00Z", "updated_at": "2026-02-05T00:00:00Z",
+			"head": map[string]any{
+				"ref": "topic", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"repo": map[string]any{"full_name": "acme/widgets"},
+			},
+			"base": map[string]any{"ref": "main"},
+		}})
+	})
+	fake.handle("GET /repos/acme/widgets/pulls/31/commits", func(w http.ResponseWriter, _ *http.Request) {
+		mustEncode(t, w, []any{map[string]any{"commit": map[string]any{"message": "HEAD-6: tidy the walk"}}})
+	})
+	if _, err := ReadThroughCommitPulls(ctx, pool, fake.newTestClient(), "acme/widgets",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", time.Now()); err != nil {
+		t.Fatalf("read through the commit's pull requests: %v", err)
+	}
+	head := readHead(t, ctx, pool, "acme/widgets", 31)
+	if head.IssueKey == nil || *head.IssueKey != "HEAD-6" || head.AttributionSource != string(sourceCommitMessage) {
+		t.Fatalf("#31 = %+v, want HEAD-6 kept from its commit messages", head)
+	}
+	attributed, err := HeadAttributedTo(ctx, pool, "HEAD-6", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if err != nil || !attributed {
+		t.Fatalf("HeadAttributedTo(HEAD-6) = %v, %v; want true: the merged head still answers for the issue", attributed, err)
+	}
+}
+
+// A row whose repository the App cannot read is stamped, not warned about forever: the reconcile
+// orders the never-read first, so an unstamped row holds the front of every batch.
+func TestAnUnreadableRepositoryStampsThePullRequestHead(t *testing.T) {
+	fastPageRetries(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/hidden/installation", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"message":"Not Found"}`)
+	})
+	fake.handle("GET /repos/acme/walled/pulls/51", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"Resource not accessible by integration"}`)
+	})
+	for _, repo := range []string{"acme/hidden", "acme/walled"} {
+		if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
+			Repo: repo, Number: 51, HeadSHA: "cccccccccccccccccccccccccccccccccccccccc",
+			HeadRef: "topic", BaseRef: "main", State: "open",
+		}); err != nil {
+			t.Fatalf("store %s's never-read head: %v", repo, err)
+		}
+	}
+
+	now := time.Now()
+	reconcile := NewReconcile(pool, fake.newTestClient(), nil)
+	if err := reconcile.reconcilePullRequestHeads(ctx, now); err != nil {
+		t.Fatalf("reconcile the pull request heads: %v", err)
+	}
+	for _, repo := range []string{"acme/hidden", "acme/walled"} {
+		if head := readHead(t, ctx, pool, repo, 51); head.CheckedAt == nil {
+			t.Fatalf("%s#51 = %+v, want it stamped read so it leaves the front of the batch", repo, head)
+		}
+	}
+	stale, err := ListStalePullRequestHeads(ctx, pool, PullRequestHeadBatch, now)
+	if err != nil {
+		t.Fatalf("list the stale heads: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("the next pass would re-read %+v, want nothing within the stale window", stale)
 	}
 }

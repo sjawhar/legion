@@ -129,6 +129,15 @@ it; a parent's waits
 for its last round, `skill://legion-architect`, section 4), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). Your acceptance comment names each check with its result.
+The gate is the `before_merge` checks of the issue's own Verification document, read at the
+issue's own head: a result a child recorded against one of the root's checks proves nothing for
+the root, and a child that carries part of a root requirement proves that part with a check on
+the child's own Verification document whose `serves` names the requirement, which clears the
+root's coverage flag for it. The root's own checks are proven at the root's own head, or on the
+default branch for an `after_merge` check, in the root's last round.
+An issue with no Verification document, or with one that holds no `before_merge` check, is
+proved by nothing: send it back and write the checks yourself, which closes no design gate while
+dispatch://INFRA-175 has not shipped.
 A tester completion that rejects the implementer's results goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not

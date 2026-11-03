@@ -137,6 +137,44 @@ func TestApprovalRequestWithTheVerificationDocumentRefusesAnIssueThatHasNone(t *
 	}
 }
 
+// include_verification asks for the issue's spec and its Verification document together, so it
+// is refused on any other document. On the Verification document itself it would name that
+// document twice, and the human's one answer would write two reviews and two artifact.approved
+// events on it.
+func TestApprovalRequestWithTheVerificationDocumentRefusesEveryDocumentButTheSpec(t *testing.T) {
+	handler, _, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "VER", "Only the spec", "A spec\n")
+	owner := "/api/v1/issues/" + issue.Key
+	verification := uploadDocument(t, handler, owner, "verification.md", "# Verification\n\nOne.\n")
+	notes := uploadDocument(t, handler, owner, "notes.md", "# Notes\n\nOne.\n")
+
+	for _, artifactID := range []string{verification.Artifact.ID, notes.Artifact.ID} {
+		refused := sessionRequest(t, handler, http.MethodPost,
+			"/api/v1/artifacts/"+artifactID+"/approval-requests",
+			map[string]any{"actor": sessionActor(), "include_verification": true})
+		code, _ := refusalOf(t, refused)
+		if refused.Code != http.StatusConflict || code != "NOT_SPEC_DOCUMENT" {
+			t.Fatalf("request with include_verification on %s: status=%d code=%s body=%s",
+				artifactID, refused.Code, code, refused.Body.String())
+		}
+		if read := readApproval(t, handler, artifactID); read.Approval.State != "draft" {
+			t.Fatalf("%s after the refusal = %#v, want draft with nothing opened", artifactID, read.Approval)
+		}
+	}
+
+	// Without the flag the Verification document is requested on its own, as it always was.
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+verification.Artifact.ID+"/approval-requests", map[string]any{"actor": sessionActor()})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval of the Verification document alone: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	request := decodeBody[approvalRequestAsk](t, requested)
+	if request.Ask == nil || len(request.Ask.Approval.Documents) != 1 ||
+		request.Ask.Approval.Documents[0].ArtifactID != verification.Artifact.ID {
+		t.Fatalf("approval ask = %#v, want the Verification document alone", request.Ask)
+	}
+}
+
 // A new settled version of either document moves the one request, as a new spec version moves a
 // request on the spec alone: the card names the new version and waits on the agent again.
 func TestANewVerificationVersionMovesTheRequestThatNamesBoth(t *testing.T) {

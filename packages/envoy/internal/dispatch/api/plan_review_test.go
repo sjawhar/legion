@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -86,5 +87,30 @@ func TestPlanReviewRefusesAVersionThePlanDoesNotHave(t *testing.T) {
 		if refused.Code != http.StatusBadRequest || code != "INVALID_REVIEW" {
 			t.Fatalf("plan review of version %d: status=%d code=%s body=%s", version, refused.Code, code, refused.Body.String())
 		}
+	}
+}
+
+// A plan row a rolling deploy left with no role is still the issue's plan: its slug says so, as
+// it does for every other reader of a document's role (documentPlays). The plan review takes it,
+// and an approval request for a person is still refused on it.
+func TestPlanReviewTakesAPlanRowThatCarriesNoRole(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "PLANR", "Role-less plan", "A spec\n")
+	plan := uploadDocument(t, handler, "/api/v1/issues/"+issue.Key, "plan.md", "# Plan\n\nOne.\n")
+	if _, err := database.Pool.Exec(context.Background(),
+		`update artifacts set role = null where id = $1::uuid`, plan.Artifact.ID); err != nil {
+		t.Fatalf("clear the plan's role: %v", err)
+	}
+
+	recorded := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+plan.Artifact.ID+"/plan-reviews", map[string]any{"actor": sessionActor(), "version": 1})
+	if recorded.Code != http.StatusCreated {
+		t.Fatalf("record the plan review of a role-less plan: status=%d body=%s", recorded.Code, recorded.Body.String())
+	}
+	refused := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+plan.Artifact.ID+"/approval-requests", map[string]any{"actor": sessionActor()})
+	code, _ := refusalOf(t, refused)
+	if refused.Code != http.StatusConflict || code != "PLAN_APPROVED_BY_REVIEW" {
+		t.Fatalf("approval request on a role-less plan: status=%d code=%s body=%s", refused.Code, code, refused.Body.String())
 	}
 }

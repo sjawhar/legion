@@ -86,7 +86,9 @@ func (s *server) issueCoverage(ctx context.Context, q queryer, issueKey string) 
 	}
 	coverage.Requirements = make([]model.RequirementCoverage, len(requirements))
 	for index, requirement := range requirements {
-		requirement.Ref = "dispatch://" + issueKey + "/spec#b-" + text.EncodeBlockID(requirement.BlockID)
+		requirement.Ref, _ = text.FormatBlockRef(text.Ref{
+			Kind: "block", IssueKey: issueKey, ID: "spec", Block: requirement.BlockID,
+		})
 		counts := served[requirement.BlockID]
 		requirement.Checks, requirement.PlanTasks = counts.checks, counts.planTasks
 		requirement.Gaps = []string{}

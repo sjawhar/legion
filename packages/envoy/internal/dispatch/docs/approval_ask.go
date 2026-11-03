@@ -111,7 +111,6 @@ func RewriteApprovalAsk(
 	quiet := approvalMoves(ask.Approval.Documents, documents) && approvalAwaitsHandBack(ask.Approval.Documents)
 	ask.Question = ApprovalQuestion(documents, summary)
 	ask.Approval.Documents = documents
-	ask.Approval.Lead()
 	approval, err := EncodeApproval(ask.Approval)
 	if err != nil {
 		return model.Event{}, err

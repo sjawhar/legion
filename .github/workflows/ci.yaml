@@ -798,7 +798,7 @@ jobs:
               # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
               # and sources, renders pmdoc's generated block schema from
               # schemas/block-schema.schema.json, and checks the daemon's generated copy too
-              # (gen-go.ts:871-892, the files the generator owns).
+              # (its outputs list, the files the generator owns).
               - 'packages/contracts/scripts/gen-go.ts'
               - 'packages/contracts/schemas/**'
               - 'packages/contracts/src/**'
@@ -836,6 +836,10 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/dispatch/githubapp/**'
+              # delivery/pull_request_heads.go imports internal/dispatch/refs, which imports
+              # internal/dispatch/text, so the natslive run compiles that package and the check
+              # counts its testdata among what this job reads.
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and

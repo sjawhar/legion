@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
@@ -483,6 +485,37 @@ func TestTypedBlockNamesItsUndeclaredAttributesSorted(t *testing.T) {
 		if err := tree.Validate(); err == nil || err.Error() != want {
 			t.Fatalf("Validate() = %v, want %q", err, want)
 		}
+	}
+}
+
+// Every attribute the block list carries (GET /api/v1/artifacts/{id}/blocks) says the kind its
+// type declares it, so a reader follows a block[] value as the pointers it holds and reads every
+// other kind as text: a check's run is a command, which may quote a dispatch:// reference, and
+// no reader may take it for a pointer because of that.
+func TestTypedBlockAttributeValuesCarryTheKindTheSchemaDeclares(t *testing.T) {
+	const markdown = ":::check{#k1 serves=\"dispatch://CORE-1/spec#b-r1\" surface=\"cli\" run=\"dispatch read --ref dispatch://CORE-1/spec#b-r1\" when=\"before_merge\"}\nThe spec is read.\n:::\n"
+	tree, err := Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse check: %v", err)
+	}
+	_, offsets, err := RenderWithBlockOffsets(tree)
+	if err != nil {
+		t.Fatalf("render check: %v", err)
+	}
+	var attributes []model.BlockAttributeValue
+	for _, offset := range offsets {
+		if offset.ID == "k1" {
+			attributes = offset.Attributes
+		}
+	}
+	want := []model.BlockAttributeValue{
+		{Name: "serves", Value: "dispatch://CORE-1/spec#b-r1", Kind: "block[]"},
+		{Name: "surface", Value: "cli", Kind: "enum"},
+		{Name: "run", Value: "dispatch read --ref dispatch://CORE-1/spec#b-r1", Kind: "string"},
+		{Name: "when", Value: "before_merge", Kind: "enum"},
+	}
+	if !reflect.DeepEqual(attributes, want) {
+		t.Fatalf("the check's attributes = %+v, want %+v", attributes, want)
 	}
 }
 

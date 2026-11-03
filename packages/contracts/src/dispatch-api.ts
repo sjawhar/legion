@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentStreamResponder } from "./agent-stream";
+import type { BlockAttributeKind } from "./block-schema.generated";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -666,15 +667,10 @@ export interface ArtifactApproval {
    *  person's; absent while no review stands, and from a Dispatch older than review kinds. */
   readonly kind?: ArtifactReviewKind;
   /** Every document the open request covers, each at the version the request names, this one
-   *  included; absent when it covers this document alone. */
-  readonly documents?: ArtifactApprovalDocument[];
-}
-
-/** One document an open approval request covers. */
-export interface ArtifactApprovalDocument {
-  readonly artifact_id: string;
-  readonly name: string;
-  readonly version: number;
+   *  included; absent when it covers this document alone. It is the request's own list
+   *  (`AskApprovalDocument`), so each entry carries the `requested_version` the request records
+   *  as well as the version it names. */
+  readonly documents?: AskApprovalDocument[];
 }
 
 /** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
@@ -691,6 +687,9 @@ export interface ApprovalRequestResponse {
    *  not a spec, and never a missing plan task, since the plan comes after the approval. Absent
    *  from a Dispatch older than requirement coverage. */
   readonly coverage?: readonly string[];
+  /** True when the spec's coverage could not be read, so the empty `coverage` is no answer about
+   *  it. The request is recorded either way: a coverage read refuses nothing. Absent otherwise. */
+  readonly coverage_unread?: boolean;
 }
 
 /** What each requirement of an issue's spec lacks, from `GET /api/v1/issues/{key}/coverage`. A
@@ -745,11 +744,16 @@ export interface ArtifactBlock {
   readonly table?: BlockTable;
 }
 
-/** One attribute a typed block carries: the name its type declares it under and the value the
- *  block holds. */
+/** One attribute a typed block carries: the name its type declares it under, the value the
+ *  block holds, and the kind the block schema declares that attribute (`BlockAttributeSchema`).
+ *  A reader follows a `block[]` attribute's value as the block references it holds and reads
+ *  every other kind as text, rather than taking a value for a pointer because it reads like
+ *  one: a `check`'s `run` may quote a `dispatch://` URL. Absent from a Dispatch server older
+ *  than the kinds, whose attributes say nothing about what they hold. */
 export interface BlockAttributeValue {
   readonly name: string;
   readonly value: string;
+  readonly kind?: BlockAttributeKind;
 }
 
 /** A table block's rows in child order, the header row first, each row and cell placed as

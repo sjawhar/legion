@@ -52,6 +52,7 @@ const commits = {
   diverged: "6".repeat(40),
   mainHead: "7".repeat(40),
   hidden: "8".repeat(40),
+  fork: "9".repeat(40),
 };
 
 type Json = Record<string, unknown>;
@@ -402,6 +403,7 @@ A result stands while its commit is the pull request's head.
     base_ref: "main",
     body: `Proves ${a4Issue}.`,
     head_ref: `legion/${a4Issue}`,
+    head_repo: repo,
     head_sha: commits.headOne,
     kind: "pr",
     merged: "false",
@@ -428,6 +430,7 @@ A result stands while its commit is the pull request's head.
     base_ref: "main",
     body: `Proves ${a4Issue}.`,
     head_ref: `legion/${a4Issue}`,
+    head_repo: repo,
     head_sha: commits.headTwo,
     kind: "pr",
     merged: "false",
@@ -452,6 +455,71 @@ A result stands while its commit is the pull request's head.
   const atNewHead = await awaitCurrency(a4Issue, "a4", commits.headTwo, "current");
   note(`the result at the new head ${commits.headTwo.slice(0, 12)} reads ${atNewHead}`);
   return atNewHead === "current" ? undefined : `the result at the new head reads ${atNewHead}`;
+});
+
+// A fork's pull request makes no result current. Anyone may open one against a public
+// repository, at any commit and with any title, so the head a result is measured against is only
+// a pull request whose head branch lives in this repository. The same pull request reported with
+// its head here, which is the only difference between the two envelopes, does make it current.
+await runCase("a-fork-pull-request-makes-no-result-current", async () => {
+  const forkIssue = await seedIssue(
+    "VRF",
+    "A fork's pull request makes no result current",
+    `:::check{#fork serves="dispatch://%KEY%/spec#b-r1" surface="cli" run="bash scripts/e2e/verification-results.sh"}
+A result stands while its commit is the head of a pull request of this repository.
+:::
+`
+  );
+  const forked = await publishPullRequest({
+    action: "opened",
+    base_ref: "main",
+    body: `Proves ${forkIssue}.`,
+    head_ref: `legion/${forkIssue}`,
+    head_repo: `stranger/${String(repo.split("/")[1])}`,
+    head_sha: commits.fork,
+    kind: "pr",
+    merged: "false",
+    number: "9",
+    repo,
+    title: `${forkIssue} the stranger's pull request`,
+    updated_at: new Date(Date.now() - 60_000).toISOString(),
+    url: `https://github.com/${repo}/pull/9`,
+  });
+  note(`published the fork's envelope on ${forked}`);
+  await record(forkIssue, {
+    check: "fork",
+    commit: commits.fork,
+    observed: "recorded at the commit the fork's pull request heads",
+    run: "bash scripts/e2e/verification-results.sh",
+    surface: "cli",
+  });
+  const atFork = await awaitCurrency(forkIssue, "fork", commits.fork, "current");
+  note(`the result at the fork's head ${commits.fork.slice(0, 12)} reads ${atFork}`);
+  if (atFork === "current") return "a fork's pull request made the result current";
+
+  // The same pull request, now reported with its head in this repository, does make it current:
+  // the refusal above is the head's repository and nothing else.
+  const owned = await publishPullRequest({
+    action: "synchronize",
+    base_ref: "main",
+    body: `Proves ${forkIssue}.`,
+    head_ref: `legion/${forkIssue}`,
+    head_repo: repo,
+    head_sha: commits.fork,
+    kind: "pr",
+    merged: "false",
+    number: "9",
+    repo,
+    title: `${forkIssue} the stranger's pull request`,
+    updated_at: new Date().toISOString(),
+    url: `https://github.com/${repo}/pull/9`,
+  });
+  note(`published the same pull request with its head in ${repo} on ${owned}`);
+  const atOwnHead = await awaitCurrency(forkIssue, "fork", commits.fork, "current");
+  note(`the same result now reads ${atOwnHead}`);
+  return atOwnHead === "current"
+    ? undefined
+    : `the result at this repository's head reads ${atOwnHead}`;
 });
 
 // A5. The one write a closed issue takes.
@@ -537,13 +605,20 @@ The default branch holds the commit this check ran at.
   return apart === "current" ? `the result at the diverged commit reads ${apart}` : undefined;
 });
 
-// The unreadable repository: Dispatch cannot say, so it marks the result neither way.
+// The unreadable repository: Dispatch cannot say, so it marks the result neither way — for a
+// `before_merge` check as well as a `default_branch` one. Nothing can teach Dispatch the pull
+// request heads of a repository it cannot read, so "this commit heads none I know" is no
+// evidence that the work has moved on, and an unmarked pass is what the reviewer reads.
 await runCase("an-unreadable-repository-leaves-the-result-unmarked", async () => {
   const hiddenIssue = await seedIssue(
     "VRH",
     "A result on a repository Dispatch cannot read",
     `:::check{#hidden when="default_branch" surface="api" run="curl the production route"}
 Dispatch cannot see the repository this check's issue resolves to.
+:::
+
+:::check{#hidden-pre surface="cli" run="bash scripts/e2e/verification-results.sh"}
+The pre-merge check of the same unreadable repository.
 :::
 `
   );
@@ -556,8 +631,21 @@ Dispatch cannot see the repository this check's issue resolves to.
   });
   const unknown = await currencyAt(hiddenIssue, "hidden", commits.hidden);
   note(`${hiddenIssue} resolves to ${hiddenRepo}, which the installation lookup does not find`);
-  note(`the result at ${commits.hidden.slice(0, 12)} reads ${unknown}`);
-  return unknown === "unknown" ? undefined : `the result reads ${unknown}, want unknown`;
+  note(`the default_branch result at ${commits.hidden.slice(0, 12)} reads ${unknown}`);
+  if (unknown !== "unknown") return `the default_branch result reads ${unknown}, want unknown`;
+
+  await record(hiddenIssue, {
+    check: "hidden-pre",
+    commit: commits.hidden,
+    observed: "the pre-merge run passed",
+    run: "bash scripts/e2e/verification-results.sh",
+    surface: "cli",
+  });
+  const beforeMerge = await currencyAt(hiddenIssue, "hidden-pre", commits.hidden);
+  note(`the before_merge result at ${commits.hidden.slice(0, 12)} reads ${beforeMerge}`);
+  return beforeMerge === "unknown"
+    ? undefined
+    : `the before_merge result reads ${beforeMerge}, want unknown`;
 });
 
 summarise();

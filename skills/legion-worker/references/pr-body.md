@@ -108,6 +108,20 @@ recorded again at the new head. `dispatch results --issue <issue>` prints each c
 latest result and whether that result is current, and `dispatch read --issue <issue>` names each
 requirement of the spec no check serves.
 
+**An issue is proved by its own checks.** Its approval is gated by the `before_merge` checks of
+its own Verification document, read at its own head, so a child's pull request never makes a
+root check's result current and a child never records the result that proves a root's check. A
+child that carries part of a root's requirement proves it with a check on the child's own
+Verification document whose `serves` names that requirement. A root's own checks are proven at
+the root's own head, or on the default branch for an `after_merge` check, in the root's last
+round.
+
+**An issue with no `before_merge` check has no gate.** An issue with no Verification document,
+or with one that holds no `before_merge` check, passes the tester, the reviewer and the
+architect on no evidence at all. The tester records that as a failure, the reviewer as a
+`REQUEST_CHANGES` that says which of the two it is, and both tell the architect, who writes the
+checks.
+
 ## The rules every phase's evidence follows
 
 - **The implementer records a result for every `before_merge` check before its phase completes,

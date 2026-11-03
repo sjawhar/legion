@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // parseIssueRepo decodes the tri-state `repo` field of an issue write. Absent → (nil, false): leave
@@ -47,38 +49,13 @@ func checkIssueRepoMapped(ctx context.Context, tx pgx.Tx, repo, project string) 
 	return err
 }
 
-// issueRepoLateral resolves the repository of the issue aliased `i` in the enclosing query: the
-// nearest issue on its parent chain (itself first) whose own `repo` is set, else the project's
-// default mapping, else null. Joined `left join lateral (...) repo on true`, it yields one row per
-// issue. The walk climbs one link per step, keeping only a depth counter, and stops at the first
-// issue that names a repository or at parentDepthCap links up, which writes never let a chain pass
-// (refuseParentTooDeep): at most parentDepthCap+1 steps per issue. A walk that reaches the cap with
-// links still above it sets `too_deep`, and repoScan.resolve refuses it rather than answer with the
-// default. Such a chain is a loop, or one a direct database write made, or one an earlier release's
-// API built: migration 0113 refuses to apply while one exists, but an earlier release left serving
-// after it, against the rollout rule (cmd/dispatch/README.md), can build one again.
-var issueRepoLateral = `
-	left join lateral (
-		with recursive chain as (
-			select i.parent_key, i.repo, 0 as depth
-			union all
-			select p.parent_key, p.repo, c.depth + 1
-			from issues p join chain c on p.key = c.parent_key
-			where c.repo is null and c.depth < ` + parentDepthCapSQL + `
-		)
-		select
-			coalesce(
-				(select c.repo from chain c where c.repo is not null order by c.depth limit 1),
-				(select d.repo from repo_projects d where d.project = i.project_key and d.is_default)
-			) as resolved,
-			exists (
-				select 1 from chain c
-				where c.depth = ` + parentDepthCapSQL + ` and c.repo is null and c.parent_key is not null
-			) as too_deep
-	) repo on true`
+// issueRepoLateral and issueRepoColumns are refs' repository-resolution rule, the one every read
+// that resolves an issue's repository is built on: the issue reads here, the currency mark and
+// the pull-request head attribution (refs.IssueRepository). They are named here, as
+// parentDepthCap names refs.IssueDepthCap, so this package's queries read as its own text.
+var issueRepoLateral = refs.IssueRepoLateral
 
-// issueRepoColumns are the repository columns every issue read scans, in repoScan's order.
-const issueRepoColumns = `i.repo, repo.resolved, repo.too_deep`
+const issueRepoColumns = refs.IssueRepoColumns
 
 // repoScan receives issueRepoColumns for one issue.
 type repoScan struct {

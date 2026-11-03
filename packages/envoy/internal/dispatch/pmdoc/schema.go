@@ -425,8 +425,9 @@ func TypedBlockAttributes(node *Node) []model.BlockAttributeValue {
 	return values
 }
 
-// typedAttributeValues is a typed block's declared attributes and their written values, in
-// declaration order, leaving out one the block does not hold and one the markdown never carries.
+// typedAttributeValues is a typed block's declared attributes, their written values and the kind
+// its type declares each under, in declaration order, leaving out one the block does not hold and
+// one the markdown never carries.
 func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]model.BlockAttributeValue, error) {
 	values := make([]model.BlockAttributeValue, 0, len(typ.Attributes))
 	for _, attribute := range typ.Attributes {
@@ -445,7 +446,9 @@ func typedAttributeValues(n *Node, typ BlockTypeSchema) ([]model.BlockAttributeV
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, model.BlockAttributeValue{Name: name, Value: encoded})
+		values = append(values, model.BlockAttributeValue{
+			Name: name, Value: encoded, Kind: string(definition.Kind),
+		})
 	}
 	if len(values) == 0 {
 		return nil, nil

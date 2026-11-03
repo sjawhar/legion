@@ -1667,27 +1667,63 @@ func artifactSlug(name string) string {
 	return result
 }
 
+// roleSlugs pairs each role a document plays with the slug that names it: the one place the two
+// spellings are written. Everything that asks what part a document plays is built from it —
+// documentRole, which writes the role on a new row, the SQL predicates that hold a row to a role
+// (documentRolePredicate), and documentPlays, which asks the same of a row already read.
+var roleSlugs = map[string]string{
+	model.ArtifactRoleVerification: "verification-md",
+	model.ArtifactRolePlan:         "plan-md",
+}
+
 // documentRole is the role a document takes when its row is created: an issue's markdown
-// document slugged verification-md plays "verification" and one slugged plan-md plays "plan";
-// every other new artifact plays none. The slug decides, not the name, because the slug is the
-// unique key the upload already took within the owner (nextArtifactSlug), so a second document
-// whose name gives a slug already in use - verification-md-2 - plays no role rather than
-// colliding with the one that holds it. The role is written once, as is_primary is: a later
-// upload of the same name is that document's next version, under the row this made, and the
-// only write that ever sets it afterwards is the repair of a row the rolling deploy left with
-// none (storeArtifact).
+// document whose slug roleSlugs names plays that role; every other new artifact plays none. The
+// slug decides, not the name, because the slug is the unique key the upload already took within
+// the owner (nextArtifactSlug), so a second document whose name gives a slug already in use -
+// verification-md-2 - plays no role rather than colliding with the one that holds it. The role
+// is written once, as is_primary is: a later upload of the same name is that document's next
+// version, under the row this made, and the only write that ever sets it afterwards is the
+// repair of a row the rolling deploy left with none (storeArtifact).
 func documentRole(target artifactTarget, kind, slug string) *string {
 	if target.IssueKey == nil || kind != "doc" {
 		return nil
 	}
-	switch slug {
-	case "verification-md":
-		return new(model.ArtifactRoleVerification)
-	case "plan-md":
-		return new(model.ArtifactRolePlan)
+	for role, named := range roleSlugs {
+		if named == slug {
+			return &role
+		}
 	}
 	return nil
 }
+
+// documentPlays reports whether an artifact already read plays role: it carries that role, or it
+// carries none and its slug is the role's, for a row a rolling deploy left with no role because
+// the build that created it did not know the column. It is documentRolePredicate's answer about
+// one row, so every reader — the queries that find a document by its role and the routes that
+// judge the document in hand — agrees about the same row.
+func documentPlays(artifact model.Artifact, role string) bool {
+	return artifact.Role == role || (artifact.Role == "" && artifact.Slug == roleSlugs[role])
+}
+
+// documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
+// document of one role: the role itself, or the slug a document of that name carries, for a row
+// a rolling deploy left with no role. `alias` is empty where the query names no alias.
+func documentRolePredicate(alias, role string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return `(` + alias + `role = '` + role + `' or (` + alias + `role is null and ` + alias + `slug = '` + roleSlugs[role] + `'))`
+}
+
+// verificationRolePredicate is documentRolePredicate for the Verification document of a query
+// that names no alias, since the queries that hold a row to it are written as string literals.
+var verificationRolePredicate = documentRolePredicate("", model.ArtifactRoleVerification)
+
+// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
+// artifacts table is aliased `a`: the issue read, the coverage read and the check resolver all
+// join it that way.
+var aliasedVerificationRole = documentRolePredicate("a", model.ArtifactRoleVerification)
+var aliasedPlanRole = documentRolePredicate("a", model.ArtifactRolePlan)
 
 // artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
 // artifact, the one the name or slug finds, whose kind is another.

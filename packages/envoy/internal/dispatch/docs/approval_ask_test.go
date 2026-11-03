@@ -30,7 +30,6 @@ func TestApprovalAskSummaryRoundTripsATwoDocumentQuestion(t *testing.T) {
 		t.Fatalf("two-document question = %q", question)
 	}
 	ask := model.Ask{ID: "approval-2", Question: question, Approval: &model.AskApproval{Documents: documents}}
-	ask.Approval.Lead()
 	if summary, err := ApprovalAskSummary(ask); err != nil || summary != "Both describe the live sync." {
 		t.Fatalf("two-document summary = %q, %v", summary, err)
 	}

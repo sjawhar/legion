@@ -222,8 +222,8 @@ Each item below names a task and where its code is, then notes on it.
   `POST /api/v1/issues/{key}/results` records one result against a `check` block of the issue's Verification document or of an ancestor's, as `check_results`, keeping the block's `changed_version` and `text_sha256` with it, and answers the pull-request body line it implies;
   `GET` lists each check of the issue's Verification document with every result recorded against it.
   A result's currency is computed at the read, never written by a push:
-  a `before_merge` result is `current` while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the issue the result was recorded on or to the check's issue (`pull_request_heads`, which the GitHub intake and the reconcile keep), and the check's words are the ones it proved;
-  a child proving its parent's check records the result on the child, so the child's own pull request makes it current, while a result the parent recorded for itself at that same commit stays `older`;
+  a `before_merge` result is `current` while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue (`pull_request_heads`, which the GitHub intake and the reconcile keep), and the check's words are the ones it proved;
+  the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;
   an `after_merge` or `default_branch` result while the repository's default branch carries its commit (`default_branch_commits`, the App's answer cached: a yes for good, a no for five minutes);
   `unknown` when the check's issue resolves to no repository or the App cannot read it.
   `GET /api/v1/issues/{key}/coverage` answers what each `requirement` block of the issue's spec lacks, counting the `check` and `plan_task` blocks of the issue and of its descendants;

@@ -8,16 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -27,13 +24,13 @@ import (
 // results.go records and reads the results of an issue's checks. A check is a `check` block of
 // a Verification document; a result says one run of it passed or failed, at one commit. The
 // record route takes a result for a check of the recording issue or of any issue above it
-// (refs.IssueAncestors), since a child proves its parent's checks, and appends `result.recorded`
-// on the check's own issue. The read route lists the checks of one issue's Verification
+// (refs.IssueAncestors) and appends `result.recorded` on the check's own issue. The read route
+// lists the checks of one issue's Verification
 // document with every result recorded against each, from any issue, newest first, and says
-// whether each still speaks for the work as it stands (currency, below): a `before_merge`
-// result is current at the head of a pull request attributed to the issue it was recorded on or
-// to the check's issue, so a child's pull request makes the child's own result current without
-// making its parent's.
+// whether each still speaks for the work as it stands: a `before_merge` result is current at
+// the head of a pull request attributed to the check's own issue, so a child's pull request
+// never makes a result against its parent's check current. Currency itself is answered in
+// results_currency.go.
 
 // checkResultRole bounds the role a result names: the word the pull-request body line prints.
 var checkResultRole = regexp.MustCompile(`^[a-z-]{1,32}$`)
@@ -91,9 +88,10 @@ type checkResultInput struct {
 // POST /api/v1/issues/{key}/results  (any authenticated actor)
 //
 // Records one result against one check. {key} is the recording issue, which need not be the
-// check's: a child records a result for a check of its parent's Verification document, and the
-// event goes on the parent. The answer carries the stored row and the pull-request body line it
-// implies, so every writer writes one grammar.
+// check's: a result against a check of an issue above it is taken, and the event goes on that
+// issue. Such a result is no proof of the check, since it reads current only at a head of a
+// pull request of the check's own issue (currencyReader). The answer carries the stored row and
+// the pull-request body line it implies, so every writer writes one grammar.
 func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	var input checkResultInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -135,24 +133,26 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	// The recording issue's row is locked whether or not it is open: a result for an after-merge
-	// check is taken on a closed issue, and the lock still stops it closing or reopening under
-	// the write.
-	recordingOpen, err := lockIssueForResult(r.Context(), tx, issueKey)
+	// Both rows are locked in one key order, whether or not either is open: a result for an
+	// after-merge check is taken on a closed issue, and the lock still stops it closing or
+	// reopening under the write. The check's issue is usually the recording issue's ancestor,
+	// so locking them in call order would let one transaction hold the child while waiting for
+	// the parent and another hold the parent while waiting for the child; lockIssueRows is the
+	// one key order every writer of two issue rows takes.
+	if _, err := lockIssueRows(r.Context(), tx, issueKey, check.IssueKey); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	recordingOpen, checkOpen, err := issuesOpenForResult(r.Context(), tx, issueKey, check.IssueKey)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	checkOpen := recordingOpen
-	if check.IssueKey != issueKey {
-		if checkOpen, err = lockIssueForResult(r.Context(), tx, check.IssueKey); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	// The version and digest the row records are the block's as this transaction sees them, read
-	// again under the locks: a document version that landed between the resolve and the lock
-	// would otherwise have the result recorded against the words it replaced.
+	// The version, digest and `when` the row is judged by are the block's as this transaction
+	// sees them, read again under the locks: a document version that landed between the resolve
+	// and the lock would otherwise have the result recorded against the words it replaced, and
+	// a check reworded from before_merge to after_merge would be judged by the `when` it carried
+	// before the lock.
 	if err := s.refreshResolvedCheck(r.Context(), tx, &check, input.Check); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -200,8 +200,11 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The read-through runs before the event: the Verification tab refetches on
+	// result.recorded, and no later event refreshes it, so a tab that read the results before
+	// the pull request row landed would show this result older until something else happened.
+	s.readThroughPullRequests(r.Context(), check.IssueKey, result.CommitSHA)
 	s.publish(event)
-	s.readThroughPullRequests(r.Context(), result.IssueKey, check.IssueKey, result.CommitSHA)
 	WriteJSON(w, http.StatusCreated, map[string]any{
 		"result": result,
 		"line":   checkResultLine(check, result),
@@ -285,19 +288,39 @@ func (input checkResultInput) refusal() error {
 	return nil
 }
 
-// lockIssueForResult takes the issue's row lock and answers whether it is open, without the
-// refusal requireOpenIssue makes: the results route decides for itself, since a closed issue
-// takes a result for an after-merge check.
-func lockIssueForResult(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
-	var open bool
-	err := tx.QueryRow(ctx, `select closed_at is null from issues where key = $1 for no key update`, key).Scan(&open)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, errorf(http.StatusNotFound, "NOT_FOUND", "issue not found")
-	}
+// issuesOpenForResult answers whether the recording issue and the check's issue are open, in
+// one query over the rows the caller has already locked (lockIssueRows). It makes no refusal of
+// its own for a closed issue, as requireOpenIssue does: the results route decides for itself,
+// since a closed issue takes a result for an after-merge check. An issue with no row is the
+// route's 404, which is the lock's answer too: lockIssueRows skips a key nothing holds.
+func issuesOpenForResult(ctx context.Context, tx pgx.Tx, issueKey, checkIssueKey string) (bool, bool, error) {
+	open := map[string]bool{}
+	rows, err := tx.Query(ctx, `select key, closed_at is null from issues where key = any($1)`,
+		[]string{issueKey, checkIssueKey})
 	if err != nil {
-		return false, fmt.Errorf("lock issue %s: %w", key, err)
+		return false, false, fmt.Errorf("read whether %s and %s are open: %w", issueKey, checkIssueKey, err)
 	}
-	return open, nil
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var isOpen bool
+		if err := rows.Scan(&key, &isOpen); err != nil {
+			return false, false, fmt.Errorf("read whether %s and %s are open: %w", issueKey, checkIssueKey, err)
+		}
+		open[key] = isOpen
+	}
+	if err := rows.Err(); err != nil {
+		return false, false, fmt.Errorf("read whether %s and %s are open: %w", issueKey, checkIssueKey, err)
+	}
+	recording, held := open[issueKey]
+	if !held {
+		return false, false, errorf(http.StatusNotFound, "NOT_FOUND", "issue not found")
+	}
+	check, held := open[checkIssueKey]
+	if !held {
+		return false, false, errorf(http.StatusNotFound, "NOT_FOUND", "issue not found")
+	}
+	return recording, check, nil
 }
 
 // requireIssueExists is the read route's 404 for an issue nobody has.
@@ -338,27 +361,6 @@ func (s *server) verificationDocument(ctx context.Context, q queryer, issueKey, 
 	return artifact, true, nil
 }
 
-// documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
-// document of one role: the role itself, or the slug a document of that name carries, for a row
-// a rolling deploy left with no role because the build that created it did not know the column.
-// documentRole writes the role on every document created since, and storeArtifact repairs an
-// older one on its next version. `alias` is empty where the query names no alias.
-func documentRolePredicate(alias, role, slug string) string {
-	if alias != "" {
-		alias += "."
-	}
-	return `(` + alias + `role = '` + role + `' or (` + alias + `role is null and ` + alias + `slug = '` + slug + `'))`
-}
-
-// verificationRolePredicate is documentRolePredicate for the Verification document of a query
-// that names no alias, since the queries that hold a row to it are written as string literals.
-var verificationRolePredicate = documentRolePredicate("", "verification", "verification-md")
-
-// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
-// artifacts table is aliased `a`: the issue read and the coverage read both join it that way.
-var aliasedVerificationRole = documentRolePredicate("a", "verification", "verification-md")
-var aliasedPlanRole = documentRolePredicate("a", "plan", "plan-md")
-
 // resolveCheck finds the check a result names among the Verification documents of the recording
 // issue and of every issue above it. The value is a block id, or the canonical block reference
 // (`dispatch://KEY/artifact/verification-md#b-<id>`) that names one document when a block id is
@@ -391,7 +393,7 @@ func (s *server) resolveCheck(ctx context.Context, q queryer, issueKey, value st
 	}
 
 	rows, err := q.Query(ctx, `
-		select a.issue_key, d.artifact_id::text, d.changed_version, d.text_sha256
+		select a.issue_key, a.slug, d.artifact_id::text, d.changed_version, d.text_sha256
 		from document_blocks d
 		join artifacts a on a.id = d.artifact_id
 		where `+aliasedVerificationRole+`
@@ -404,12 +406,19 @@ func (s *server) resolveCheck(ctx context.Context, q queryer, issueKey, value st
 	}
 	defer rows.Close()
 	var found []resolvedCheck
+	var references []string
 	for rows.Next() {
 		check := resolvedCheck{BlockID: blockID}
-		if err := rows.Scan(&check.IssueKey, &check.ArtifactID, &check.Version, &check.SHA256); err != nil {
+		var slug string
+		if err := rows.Scan(&check.IssueKey, &slug, &check.ArtifactID, &check.Version, &check.SHA256); err != nil {
 			return resolvedCheck{}, fmt.Errorf("resolve check %q of %s: %w", value, issueKey, err)
 		}
 		found = append(found, check)
+		if reference, ok := text.FormatBlockRef(text.Ref{
+			Kind: "block", IssueKey: check.IssueKey, ID: slug, Block: blockID,
+		}); ok {
+			references = append(references, reference)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return resolvedCheck{}, fmt.Errorf("resolve check %q of %s: %w", value, issueKey, err)
@@ -423,8 +432,8 @@ func (s *server) resolveCheck(ctx context.Context, q queryer, issueKey, value st
 			issues[index] = check.IssueKey
 		}
 		return resolvedCheck{}, errorf(http.StatusConflict, "CHECK_AMBIGUOUS",
-			"check %s is a check of the Verification document of %s: name one with its reference, dispatch://<KEY>/artifact/verification-md#b-%s",
-			blockID, strings.Join(issues, " and "), blockID)
+			"check %s is a check of the Verification document of %s: name one with its reference, %s",
+			blockID, strings.Join(issues, " and "), strings.Join(references, " or "))
 	}
 	check := found[0]
 	if check.When, check.Text, err = s.checkBlockWords(ctx, check.ArtifactID, check.BlockID); err != nil {
@@ -440,7 +449,11 @@ func unknownCheck(value string) error {
 
 // refreshResolvedCheck re-reads, under the locks the transaction holds, the indexed version and
 // digest of a check resolved before it opened (recordCheckResult), so the row records the block
-// as it stands at the commit. A block the index no longer holds is no check any more.
+// as it stands at the commit, and its `when` with them: the refusal a closed issue earns turns
+// on `when`, which was read before the lock, and a version landing in between can have reworded
+// it. A block the index no longer holds is no check any more. The live document the `when`
+// comes from was folded by the resolve a moment ago, so this second read of it is the cached
+// one (docs/read_cache.go).
 func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *resolvedCheck, named string) error {
 	err := q.QueryRow(ctx, `
 		select changed_version, text_sha256 from document_blocks
@@ -452,7 +465,8 @@ func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *res
 	if err != nil {
 		return fmt.Errorf("read the check %s of document %s: %w", check.BlockID, check.ArtifactID, err)
 	}
-	return nil
+	check.When, check.Text, err = s.checkBlockWords(ctx, check.ArtifactID, check.BlockID)
+	return err
 }
 
 // checkBlockWords reads one check block's `when` and its words out of the live document. The
@@ -567,8 +581,9 @@ func (s *server) checkBlocksOf(ctx context.Context, q queryer, artifact model.Ar
 	}
 	for index := range checks {
 		checks[index].IssueKey = issueKey
-		checks[index].Ref = fmt.Sprintf("dispatch://%s/artifact/%s#b-%s",
-			issueKey, artifact.Slug, text.EncodeBlockID(checks[index].BlockID))
+		checks[index].Ref, _ = text.FormatBlockRef(text.Ref{
+			Kind: "block", IssueKey: issueKey, ID: artifact.Slug, Block: checks[index].BlockID,
+		})
 		if block, ok := indexed[checks[index].BlockID]; ok {
 			checks[index].Version, checks[index].SHA256 = block.Version, block.SHA256
 		}
@@ -724,263 +739,31 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 }
 
 // readThroughPullRequests teaches Dispatch the pull requests GitHub names for a result's commit
-// when that commit is the head of none it already knows, so a result recorded at the head of a
-// pull request no event has reached Dispatch for is current at once.
-//
-// It asks about the same two issues currencyReader.headOf asks about — the issue the result was
-// recorded on and the check's issue — and reads through the repository each of them resolves to.
-// A child proving its parent's check is the case that needs both: the child's own pull request
-// carries the work, and a child whose repository is not its parent's would otherwise be read for
-// in the parent's repository, where GitHub names no pull request for that commit, and the result
-// would read older until the delivery intake took the child's pull_request envelope off the bus.
+// when that commit is the head of none it already knows for the check's issue, so a result
+// recorded at the head of a pull request no event has reached Dispatch for is current at once.
+// It asks about the check's own issue and reads through the one repository that issue resolves
+// to, the pair currencyReader.headOf answers from.
 //
 // It never fails the record: the row is written, and a currency Dispatch could not establish
 // reads as it would have without the call.
-func (s *server) readThroughPullRequests(ctx context.Context, issueKey, checkIssueKey, sha string) {
+func (s *server) readThroughPullRequests(ctx context.Context, checkIssueKey, sha string) {
 	if s.deps.GitHub == nil || s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
-	keys := []string{issueKey}
-	if checkIssueKey != "" && checkIssueKey != issueKey {
-		keys = append(keys, checkIssueKey)
-	}
-	repos := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if key == "" {
-			continue
-		}
-		known, err := delivery.HeadAttributedTo(ctx, s.deps.Store.Pool, key, sha)
-		if err != nil {
-			slog.Warn("dispatch: read the pull request heads of a recorded result", "issue", key, "error", err)
-			return
-		}
-		if known {
-			return
-		}
-		repo, err := s.resolvedIssueRepo(ctx, key)
-		if err != nil || repo == nil {
-			continue
-		}
-		if !slices.Contains(repos, *repo) {
-			repos = append(repos, *repo)
-		}
-	}
-	for _, repo := range repos {
-		if _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, repo, sha, time.Now()); err != nil {
-			slog.Info("dispatch: GitHub named no pull request for a recorded result's commit",
-				"repo", repo, "commit", sha, "error", err)
-		}
-	}
-}
-
-// resolvedIssueRepo is the repository an issue resolves to: its own, the nearest one above it,
-// or its project's default (refs.IssueRepository); nil when none resolves.
-func (s *server) resolvedIssueRepo(ctx context.Context, issueKey string) (*string, error) {
-	return refs.IssueRepository(ctx, s.deps.Store.Pool, issueKey)
-}
-
-// currencyReader answers whether each result still speaks for the work as it stands, over one
-// read of one issue's results. A `before_merge` result is current while its commit is the head
-// of an open pull request, or the final head of a merged one, attributed to the issue the
-// result was recorded on or to the check's issue, and the check's words have not changed since:
-// a push that moves the head makes it older with no write of Dispatch's, and rewording the
-// check makes its own results older and no other's. The recording issue counts because a child
-// proving its parent's check records the result on the child, and the child's pull request is
-// what carries that work; the parent's own result at that same head is not made current by it,
-// since that result was recorded on the parent and no pull request of the parent's holds the
-// commit. An `after_merge` or `default_branch` result is current while its commit is on the
-// default branch of the check's issue's resolved repository and the words match. Where the
-// issue resolves to no repository, or the App cannot read it, the answer is unknown: the commit
-// is shown with neither mark, as it is when Dispatch's own read fails.
-//
-// The repository, its default branch, the pull request heads of each issue-and-commit pair and
-// GitHub's answer about each commit are each read once per read of the results; the default
-// branch is held across reads for DefaultBranchCommitStaleAfter (server.defaultBranches), a yes
-// about a commit is kept for good and a no re-read after five minutes
-// (default_branch_commits).
-type currencyReader struct {
-	server   *server
-	repos    map[string]*string
-	branches map[string]string
-	heads    map[[2]string]bool
-	commits  map[[2]string]bool
-}
-
-func newCurrencyReader(s *server) *currencyReader {
-	return &currencyReader{
-		server: s, repos: map[string]*string{}, branches: map[string]string{},
-		heads: map[[2]string]bool{}, commits: map[[2]string]bool{},
-	}
-}
-
-func (c *currencyReader) of(ctx context.Context, check model.CheckBlock, result model.CheckResult) string {
-	if check.When == checkWhenBeforeMerge {
-		atHead, known := c.headOf(ctx, result)
-		if !known {
-			return model.CurrencyUnknown
-		}
-		if atHead && check.SHA256 == result.CheckSHA256 {
-			return model.CurrencyCurrent
-		}
-		return model.CurrencyOlder
-	}
-	branch, repo := c.defaultBranch(ctx, result.CheckIssueKey)
-	if branch == "" {
-		return model.CurrencyUnknown
-	}
-	onDefault, known := c.onDefaultBranch(ctx, repo, branch, result.CommitSHA)
-	if !known {
-		return model.CurrencyUnknown
-	}
-	if onDefault && check.SHA256 == result.CheckSHA256 {
-		return model.CurrencyCurrent
-	}
-	return model.CurrencyOlder
-}
-
-// headOf reports whether a result's commit is the head of a pull request attributed to the
-// issue the result was recorded on or to the check's issue, and whether Dispatch could say at
-// all: a read that fails is the unknown answer, as every other failed read is, never "older" —
-// a database hiccup must not make a reviewer refuse an approval.
-func (c *currencyReader) headOf(ctx context.Context, result model.CheckResult) (bool, bool) {
-	for _, issueKey := range []string{result.IssueKey, result.CheckIssueKey} {
-		key := [2]string{issueKey, result.CommitSHA}
-		atHead, memoized := c.heads[key]
-		if !memoized {
-			read, err := delivery.HeadAttributedTo(ctx, c.server.deps.Store.Pool, issueKey, result.CommitSHA)
-			if err != nil {
-				slog.Warn("dispatch: read a result's pull request head", "issue", issueKey, "error", err)
-				return false, false
-			}
-			atHead = read
-			c.heads[key] = atHead
-		}
-		if atHead {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-// defaultBranch is the default branch of the check's issue's resolved repository, and that
-// repository; an empty branch means Dispatch cannot say, which is the unknown answer. The
-// branch is held on the server between reads, so the Verification tab refetching on every
-// result.recorded does not spend a GET /repos/{owner}/{repo} each time.
-func (c *currencyReader) defaultBranch(ctx context.Context, issueKey string) (string, string) {
-	repo, cached := c.repos[issueKey]
-	if !cached {
-		resolved, err := c.server.resolvedIssueRepo(ctx, issueKey)
-		if err != nil {
-			slog.Warn("dispatch: resolve the repository of a check's issue", "issue", issueKey, "error", err)
-		}
-		repo = resolved
-		c.repos[issueKey] = repo
-	}
-	if repo == nil {
-		return "", ""
-	}
-	branch, read := c.branches[*repo]
-	if read {
-		return branch, *repo
-	}
-	now := time.Now()
-	if held, fresh := c.server.defaultBranches.get(*repo, now); fresh {
-		c.branches[*repo] = held
-		return held, *repo
-	}
-	if c.server.deps.GitHub == nil {
-		c.branches[*repo] = ""
-		return "", *repo
-	}
-	branch, err := delivery.RepositoryDefaultBranch(ctx, c.server.deps.GitHub, *repo)
+	known, err := delivery.HeadAttributedTo(ctx, s.deps.Store.Pool, checkIssueKey, sha)
 	if err != nil {
-		if !unreadableRepository(err) {
-			slog.Warn("dispatch: read the default branch of a check's repository", "repo", *repo, "error", err)
-		}
-		branch = ""
+		slog.Warn("dispatch: read the pull request heads of a recorded result", "issue", checkIssueKey, "error", err)
+		return
 	}
-	c.branches[*repo] = branch
-	c.server.defaultBranches.put(*repo, branch, now)
-	return branch, *repo
-}
-
-// onDefaultBranch is GitHub's answer about one commit, from the memo this read already holds,
-// else from default_branch_commits when that answer still stands, and read through the App
-// otherwise. The second value is false when Dispatch could not get an answer at all. Results of
-// one issue overwhelmingly name a handful of commits, so the memo is what keeps a tab listing
-// twenty results to a few round trips.
-func (c *currencyReader) onDefaultBranch(ctx context.Context, repo, branch, sha string) (bool, bool) {
-	memo := [2]string{repo, sha}
-	if onDefault, answered := c.commits[memo]; answered {
-		return onDefault, true
+	if known {
+		return
 	}
-	pool := c.server.deps.Store.Pool
-	stored, found, err := delivery.ReadDefaultBranchCommit(ctx, pool, repo, sha)
-	if err != nil {
-		slog.Warn("dispatch: read a commit's default-branch answer", "repo", repo, "commit", sha, "error", err)
+	repo, err := refs.IssueRepository(ctx, s.deps.Store.Pool, checkIssueKey)
+	if err != nil || repo == nil {
+		return
 	}
-	now := time.Now()
-	if found && (stored.OnDefault || now.Sub(stored.CheckedAt) < delivery.DefaultBranchCommitStaleAfter) {
-		c.commits[memo] = stored.OnDefault
-		return stored.OnDefault, true
+	if _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, *repo, sha, time.Now()); err != nil {
+		slog.Info("dispatch: GitHub named no pull request for a recorded result's commit",
+			"repo", *repo, "commit", sha, "error", err)
 	}
-	onDefault, err := delivery.CommitOnDefaultBranch(ctx, c.server.deps.GitHub, repo, branch, sha)
-	if err != nil {
-		if !unreadableRepository(err) {
-			slog.Warn("dispatch: ask whether a commit is on the default branch", "repo", repo, "commit", sha, "error", err)
-		}
-		return false, false
-	}
-	if err := delivery.WriteDefaultBranchCommit(ctx, pool, repo, sha, onDefault, now); err != nil {
-		slog.Warn("dispatch: record a commit's default-branch answer", "repo", repo, "commit", sha, "error", err)
-	}
-	c.commits[memo] = onDefault
-	return onDefault, true
-}
-
-// unreadableRepository reports the App answers that mean "Dispatch cannot see this repository",
-// which are the unknown currency rather than a fault worth logging.
-func unreadableRepository(err error) bool {
-	return errors.Is(err, githubapp.ErrRepositoryUnreadable) ||
-		errors.Is(err, githubapp.ErrNoInstallation) ||
-		errors.Is(err, githubapp.ErrNoAppKey)
-}
-
-// branchCache holds each repository's default branch across reads of the results. The
-// Verification tab refetches the results on every result.recorded, and a read holding an
-// `after_merge` or `default_branch` check otherwise spends a GET /repos/{owner}/{repo} each
-// time. An answer is believed for DefaultBranchCommitStaleAfter, the same five minutes a "no"
-// about a commit is believed for; the empty branch — Dispatch cannot say — is held for that
-// span too, so an unreadable repository is not asked again on every read. Its zero value is an
-// empty cache.
-type branchCache struct {
-	mu    sync.Mutex
-	known map[string]cachedBranch
-}
-
-// cachedBranch is one repository's default branch and when it was read.
-type cachedBranch struct {
-	branch string
-	readAt time.Time
-}
-
-// get is the branch held for repo and whether that answer still stands at now.
-func (c *branchCache) get(repo string, now time.Time) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	held, found := c.known[repo]
-	if !found || now.Sub(held.readAt) >= delivery.DefaultBranchCommitStaleAfter {
-		return "", false
-	}
-	return held.branch, true
-}
-
-// put records what GitHub said about repo's default branch at now.
-func (c *branchCache) put(repo, branch string, now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.known == nil {
-		c.known = map[string]cachedBranch{}
-	}
-	c.known[repo] = cachedBranch{branch: branch, readAt: now}
 }

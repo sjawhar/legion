@@ -2,7 +2,11 @@ package refs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // IssueDepthCap is the most links an issue may sit below its root: a create or reparent that
@@ -13,6 +17,9 @@ import (
 // ever commits a cycle. api's parentDepthCap is this number, and the walks it builds as SQL text
 // splice it in.
 const IssueDepthCap = 32
+
+// issueDepthCapSQL is IssueDepthCap spliced into the walks built as SQL text.
+var issueDepthCapSQL = strconv.Itoa(IssueDepthCap)
 
 // IssueAncestors is the parent chain of the issue key, parent first up to the root, read through
 // q: the issues above it on `child_of`, which is issues.parent_key (the graph_edges view's
@@ -68,14 +75,52 @@ func IssueDescendants(ctx context.Context, q Queryer, key string) ([]string, err
 	return descendants, nil
 }
 
+// IssueRepoLateral resolves the repository of the issue aliased `i` in the enclosing query: the
+// nearest issue on its parent chain (itself first) whose own `repo` is set, else the project's
+// default mapping, else null. Joined `left join lateral (...) repo on true`, it yields one row
+// per issue. The walk climbs one link per step, keeping only a depth counter, and stops at the
+// first issue that names a repository or at IssueDepthCap links up, which writes never let a
+// chain pass (api's refuseParentTooDeep): at most IssueDepthCap+1 steps per issue. A walk that
+// reaches the cap with links still above it sets `too_deep`, and the read refuses it rather than
+// answer with the default (api's repoScan.resolve, IssueRepository below). Such a chain is a
+// loop, or one a direct database write made, or one an earlier release's API built: migration
+// 0113 refuses to apply while one exists, but an earlier release left serving after it, against
+// the rollout rule (cmd/dispatch/README.md), can build one again.
+//
+// This is the server's one repository-resolution rule. The issue page resolves many issues at
+// once through it (api's issue reads), and IssueRepository resolves one through it, so the
+// currency mark and the pull-request head attribution can never disagree with the issue page.
+var IssueRepoLateral = `
+	left join lateral (
+		with recursive chain as (
+			select i.parent_key, i.repo, 0 as depth
+			union all
+			select p.parent_key, p.repo, c.depth + 1
+			from issues p join chain c on p.key = c.parent_key
+			where c.repo is null and c.depth < ` + issueDepthCapSQL + `
+		)
+		select
+			coalesce(
+				(select c.repo from chain c where c.repo is not null order by c.depth limit 1),
+				(select d.repo from repo_projects d where d.project = i.project_key and d.is_default)
+			) as resolved,
+			exists (
+				select 1 from chain c
+				where c.depth = ` + issueDepthCapSQL + ` and c.repo is null and c.parent_key is not null
+			) as too_deep
+	) repo on true`
+
+// IssueRepoColumns are the repository columns an issue read scans, in api's repoScan order: the
+// issue's own repository, the one IssueRepoLateral resolves, and whether the walk ran out of
+// links.
+const IssueRepoColumns = `i.repo, repo.resolved, repo.too_deep`
+
 // IssueRepository is the repository the issue key resolves to, read through q: its own, the
 // nearest one above it on `child_of`, or its project's default mapping; nil when none resolves,
-// and nil for an issue no row has and for the empty key. The walk climbs one link per step and
-// stops at the first issue naming a repository or at IssueDepthCap links up, which writes never
-// let a chain pass (api's refuseParentTooDeep); a chain still unfinished at the cap is an error
-// rather than the project's default, which would be a wrong answer. api's issueRepoLateral is
-// this same rule for a read resolving many issues at once; this is the one-issue read, which
-// the results route and the pull-request head attribution both make.
+// and nil for an issue no row has and for the empty key. It is IssueRepoLateral for one issue,
+// so it answers exactly what the issue page shows; a chain the walk could not finish is an error
+// rather than the project's default, which would be a wrong answer. The results route and the
+// pull-request head attribution both make this read.
 func IssueRepository(ctx context.Context, q Queryer, key string) (*string, error) {
 	if key == "" {
 		return nil, nil
@@ -83,24 +128,13 @@ func IssueRepository(ctx context.Context, q Queryer, key string) (*string, error
 	var resolved *string
 	var tooDeep bool
 	if err := q.QueryRow(ctx, `
-		with recursive chain as (
-			select i.parent_key, i.repo, i.project_key, 0 as depth from issues i where i.key = $1
-			union all
-			select p.parent_key, p.repo, c.project_key, c.depth + 1
-			from issues p join chain c on p.key = c.parent_key
-			where c.repo is null and c.depth < $2
-		)
-		select
-			coalesce(
-				(select c.repo from chain c where c.repo is not null order by c.depth limit 1),
-				(select d.repo from repo_projects d
-				 where d.project = (select c.project_key from chain c where c.depth = 0) and d.is_default)
-			),
-			exists (
-				select 1 from chain c
-				where c.depth = $2 and c.repo is null and c.parent_key is not null
-			)
-	`, key, IssueDepthCap).Scan(&resolved, &tooDeep); err != nil {
+		select repo.resolved, repo.too_deep
+		from issues i`+IssueRepoLateral+`
+		where i.key = $1
+	`, key).Scan(&resolved, &tooDeep); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("resolve the repository of %s: %w", key, err)
 	}
 	if tooDeep {

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -17,13 +15,13 @@ import (
 
 // A pull request's head is what a recorded check result is measured against: a `before_merge`
 // result is current while its commit is the head of an open pull request, or the final head of
-// a merged one, attributed to the issue the result was recorded on or to the check's issue.
-// pull_request_heads holds that head for every pull request Dispatch has seen an event for, in
-// any repository and by any author — not the merged population delivery_pull_requests keeps —
-// and the issue Dispatch's own attribution picks for it (attribution.go), held to the
-// repository the pull request is in (headAttribution). A child's pull request is attributed to
-// the child, so it makes the child's own result against its parent's check current — the child
-// is what carries that work — and never a result the parent recorded for itself.
+// a merged one, attributed to the check's own issue. pull_request_heads holds that head for
+// every pull request Dispatch has seen an event for, in any repository and by any author — not
+// the merged population delivery_pull_requests keeps — and the issue Dispatch's own attribution
+// picks for it (attribution.go), held to the repository the pull request is in and to a head
+// branch in that same repository, never a fork's (headAttribution). A child's pull request is
+// attributed to the child, so it answers for the child's own checks alone and never for a check
+// of an issue above it.
 //
 // Three writers keep it: the `pull_request` envelope (intake.go, every action), the read-through
 // a recorded result makes when its commit is no head Dispatch knows (ReadThroughCommitPulls),
@@ -63,11 +61,14 @@ func PullRequestHeadState(action string, merged bool) string {
 
 // UpsertPullRequestHead writes one pull request's head row. An event older than the one the row
 // already holds changes nothing: GitHub redelivers and the reconcile reads concurrently, so the
-// row keeps the newest `updated_at` either has seen rather than whichever write landed last. A
-// write carrying no event time (the read-through, which reads no updated_at) always applies, as
-// does one landing on a row that has none. A write carrying no read time leaves the row's
-// checked_at as it was: nulling it would hand a row the reconcile has just read back to the
-// next batch (ListStalePullRequestHeads orders the never-read first).
+// row keeps the newest `updated_at` either has seen rather than whichever write landed last.
+// Every writer carries one — the envelope its own, the reconcile and the read-through the
+// pull request's `updated_at` as GitHub answered it — so a write with no event time is only one
+// whose envelope carried none; it always applies, as does one landing on a row that has none.
+// Each writer attributes the row through all five sources (attributeHead), so an attribution a
+// later write cannot make is not a weaker one it may overwrite. A write carrying no read time
+// leaves the row's checked_at as it was: nulling it would hand a row the reconcile has just
+// read back to the next batch (ListStalePullRequestHeads orders the never-read first).
 func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullRequestHead) error {
 	_, err := pool.Exec(ctx, `
 		insert into pull_request_heads (
@@ -102,9 +103,9 @@ func UpsertPullRequestHead(ctx context.Context, pool *store.Pool, head PullReque
 // HeadAttributedTo reports whether sha is the head of a pull request attributed to issueKey that
 // is open or merged: the currency test a `before_merge` result's commit passes. A closed-unmerged
 // pull request's head proves nothing. A pull request attributed to another issue never answers
-// for this one; the results read asks this about both the issue a result was recorded on and
-// the check's issue, so a child proving its parent's check is answered by the child's own pull
-// request and the parent's own result at that commit is not (api/results.go's currencyReader).
+// for this one; the results read asks this about the check's own issue, so a child's pull
+// request never makes a result against a check above it current (api/results.go's
+// currencyReader).
 func HeadAttributedTo(ctx context.Context, pool *store.Pool, issueKey, sha string) (bool, error) {
 	var found bool
 	if err := pool.QueryRow(ctx, `
@@ -164,24 +165,41 @@ func MarkPullRequestHeadChecked(ctx context.Context, pool *store.Pool, repoFull 
 	return nil
 }
 
+// headInOwnRepository reports whether a pull request's head branch lives in the repository the
+// pull request is in, which is what GitHub's `head.repo.full_name` names. A head outside it is a
+// fork's, and an answer that names no head repository at all — GitHub's null for a fork whose
+// repository was deleted, or a `pull_request` envelope published before Dispatch carried the
+// field — does not say that it is this repository, so neither one is.
+func headInOwnRepository(repoFull, headRepo string) bool {
+	return headRepo != "" && strings.EqualFold(headRepo, repoFull)
+}
+
 // headAttribution resolves the issue a pull request belongs to from what GitHub said about it,
 // through the same five ranked sources every other attribution uses (resolveIssueKey), and then
-// holds that issue to the repository the pull request is in.
+// holds that issue to the repository the pull request is in and its head to that repository too.
 //
-// The holding is what keeps the currency mark honest. A pull request's title, body and branch
+// Both holdings are what keep the currency mark honest. A pull request's title, body and branch
 // are text any account that can open one writes, this row is written for any author and any
 // repository the App watches, and an attributed row is exactly what makes a `before_merge`
 // result read current (HeadAttributedTo), which is the reviewer's approval condition. So an
-// issue that resolves to another repository, or to none, attributes nothing: the row is still
-// written, since the reconcile and the head itself are wanted either way, but with no issue and
-// the source "none".
-func headAttribution(ctx context.Context, pool *store.Pool, facts attributionFacts) (*string, string, error) {
+// issue that resolves to another repository, or to none, attributes nothing; and neither does a
+// pull request whose head is not in this repository, since on a public repository anyone may
+// open one from a fork at any commit of their choosing — including an earlier one that already
+// carries a recorded pass — and title it after an issue, which would make that older result
+// current again. Either way the row is still written, since the reconcile and the head itself
+// are wanted either way, but with no issue and the source "none".
+func headAttribution(ctx context.Context, pool *store.Pool, facts attributionFacts, headRepo string) (*string, string, error) {
 	issueKey, source, err := resolveIssueKey(ctx, pool, facts)
 	if err != nil {
 		return nil, string(sourceNone), err
 	}
 	if issueKey == nil {
 		return nil, string(source), nil
+	}
+	if !headInOwnRepository(facts.Repo, headRepo) {
+		slog.Info("dispatch delivery: a pull request whose head is in another repository names an issue",
+			"repo", facts.Repo, "head_repo", headRepo, "issue", *issueKey, "source", string(source))
+		return nil, string(sourceNone), nil
 	}
 	resolved, err := refs.IssueRepository(ctx, pool, *issueKey)
 	if err != nil {
@@ -195,10 +213,69 @@ func headAttribution(ctx context.Context, pool *store.Pool, facts attributionFac
 	return issueKey, string(source), nil
 }
 
+// attributeHead is headAttribution plus the one source the caller's facts cannot carry: the
+// commit messages, rank 5, which are read — one GitHub call, or one per page of 100 commits —
+// only when the title, body, branch and links leave the pull request unattributed, as every
+// source after the first is read only when the earlier ones name nobody (attribution.go). A
+// fork's pull request is not read at all: it attributes nobody whatever its commits say.
+//
+// It answers the issue, its source, the messages it read (nil when it read none) and whether
+// every source was consulted. A read the App refuses leaves the attribution weaker than it could
+// be, which a caller records by leaving the row unstamped for the reconcile to read again; a
+// rate limit is returned rather than swallowed, so no caller persists a weaker attribution and
+// then stamps the row read.
+func attributeHead(ctx context.Context, pool *store.Pool, client *githubapp.Client, token func() (string, error), facts attributionFacts, headRepo string, number int) (issueKey *string, source string, messages []string, complete bool, err error) {
+	issueKey, source, err = headAttribution(ctx, pool, facts, headRepo)
+	if err != nil || issueKey != nil || !headInOwnRepository(facts.Repo, headRepo) {
+		return issueKey, source, nil, true, err
+	}
+	owner, repo, err := splitRepo(facts.Repo)
+	if err != nil {
+		return nil, string(sourceNone), nil, false, err
+	}
+	read, _, readErr := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
+	if readErr != nil {
+		if limited, ok := githubapp.AsRateLimit(readErr); ok {
+			return nil, string(sourceNone), nil, false, limited
+		}
+		slog.Debug("dispatch delivery: a pull request head is attributed without its commit messages",
+			"repo", facts.Repo, "number", number, "error", readErr)
+		return issueKey, source, nil, false, nil
+	}
+	facts.CommitMessages = read
+	issueKey, source, err = headAttribution(ctx, pool, facts, headRepo)
+	return issueKey, source, read, true, err
+}
+
+// headRow is the row one pull request GitHub answered makes, with the issue the attribution
+// picked: the one builder both GitHub readers below write through, so the two cannot drift. The
+// list form of a pull request carries merged_at but not merged, so a merge is read from
+// whichever of the two GitHub sent.
+func headRow(repoFull string, payload pullRequestPayload, issueKey *string, source string, checkedAt *time.Time) PullRequestHead {
+	return PullRequestHead{
+		Repo: repoFull, Number: payload.Number, HeadSHA: payload.Head.SHA, HeadRef: payload.Head.Ref,
+		BaseRef: payload.Base.Ref, State: PullRequestHeadState(payload.State, payload.Merged || payload.MergedAt != nil),
+		IssueKey: issueKey, AttributionSource: source, Title: payload.Title, URL: payload.HTMLURL,
+		EventAt: payload.UpdatedAt, CheckedAt: checkedAt,
+	}
+}
+
+// headRepositoryOf is the repository a pull request's head branch lives in, as GitHub's answer
+// names it, and "" when it names none (a deleted fork).
+func headRepositoryOf(payload pullRequestPayload) string {
+	if payload.Head.Repo == nil {
+		return ""
+	}
+	return payload.Head.Repo.FullName
+}
+
 // RefreshPullRequestHead reads one pull request through the App and writes its head row: the
-// reconcile's per-row step, and the read-through's completion for a pull request GitHub named
-// for a commit. A pull request GitHub cannot find leaves the row as it is, stamped so the batch
-// moves on; a rate limit comes back as the *githubapp.RateLimitError, which stops the batch.
+// reconcile's per-row step. A pull request GitHub cannot find, and a repository the App cannot
+// read (no installation, or a repository or resource its token is refused), leave the row as it
+// is, stamped so the batch moves on and does not warn about the same row every pass; a rate
+// limit comes back as the *githubapp.RateLimitError, which stops the batch. The row is stamped
+// even when the commit messages could not be read: this pass is itself the retry, so the next
+// one reads it again in PullRequestHeadStaleAfter rather than holding the front of every batch.
 func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull string, number int, now time.Time) error {
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
@@ -206,37 +283,37 @@ func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githu
 	}
 	token, err := client.RepositoryToken(ctx, owner, repo)
 	if err != nil {
+		if repositoryUnreadable(err) {
+			return MarkPullRequestHeadChecked(ctx, pool, repoFull, number, now)
+		}
 		return fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
 	}
 	payload, err := fetchPullRequestPayload(ctx, client, token, owner, repo, number)
 	if err != nil {
-		if errors.Is(err, ErrPullRequestNotFound) {
+		if errors.Is(err, ErrPullRequestNotFound) || repositoryUnreadable(err) {
 			return MarkPullRequestHeadChecked(ctx, pool, repoFull, number, now)
 		}
 		return err
 	}
-	messages, _, err := fetchCommitMessagesWithToken(ctx, client, func() (string, error) { return token, nil }, owner, repo, number)
-	if err != nil {
-		if limited, ok := githubapp.AsRateLimit(err); ok {
-			return limited
-		}
-		// The title, body and branch still name an issue; the commit messages are the last of
-		// the five sources and the read is retried on the next pass.
-		slog.Warn("dispatch delivery: read the commit messages of a pull request head", "repo", repoFull, "number", number, "error", err)
-	}
-	issueKey, source, err := headAttribution(ctx, pool, attributionFacts{
-		Repo: repoFull, URL: payload.HTMLURL, Title: payload.Title, Body: payload.Body,
-		HeadRef: payload.Head.Ref, CommitMessages: messages,
-	})
+	issueKey, source, _, _, err := attributeHead(ctx, pool, client,
+		func() (string, error) { return token, nil },
+		attributionFacts{
+			Repo: repoFull, URL: payload.HTMLURL, Title: payload.Title, Body: payload.Body,
+			HeadRef: payload.Head.Ref,
+		}, headRepositoryOf(payload), number)
 	if err != nil {
 		return err
 	}
-	return UpsertPullRequestHead(ctx, pool, PullRequestHead{
-		Repo: repoFull, Number: payload.Number, HeadSHA: payload.Head.SHA, HeadRef: payload.Head.Ref,
-		BaseRef: payload.Base.Ref, State: PullRequestHeadState(payload.State, payload.Merged),
-		IssueKey: issueKey, AttributionSource: source, Title: payload.Title, URL: payload.HTMLURL,
-		EventAt: payload.UpdatedAt, CheckedAt: &now,
-	})
+	return UpsertPullRequestHead(ctx, pool, headRow(repoFull, payload, issueKey, source, &now))
+}
+
+// repositoryUnreadable reports whether err is the App saying it cannot read a repository: it is
+// installed on none that covers it (githubapp.ErrNoInstallation), or its token is refused the
+// repository or the resource (githubapp.ErrRepositoryUnreadable). Neither is this row's own
+// problem and neither mends itself within a pass, so the row is stamped read rather than warned
+// about and left at the front of every batch.
+func repositoryUnreadable(err error) bool {
+	return errors.Is(err, githubapp.ErrNoInstallation) || errors.Is(err, githubapp.ErrRepositoryUnreadable)
 }
 
 // ReadThroughCommitPulls teaches Dispatch the pull requests GitHub names for one commit
@@ -244,6 +321,15 @@ func RefreshPullRequestHead(ctx context.Context, pool *store.Pool, client *githu
 // recorded at the head of a pull request no event has reached Dispatch for is current at once.
 // It answers how many rows it wrote. A repository the App cannot read writes nothing and is no
 // error: the result is recorded either way, and its currency is unknown.
+//
+// Each row is attributed through all five sources, the commit messages included (attributeHead),
+// exactly as the envelope writer attributes one. Attributing from fewer would delete an
+// attribution this read-through cannot make: the write carries the pull request's own
+// updated_at, so it lands on a row a `pull_request` event or the reconcile attributed by its
+// commit messages and overwrites that issue with none — permanently for a merged row, which the
+// reconcile never revisits, leaving that issue's results at the merged head reading `older` for
+// good. A row whose commit messages could not be read is written unstamped instead, so the
+// reconcile reads it again rather than it standing as this read-through's last word.
 func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githubapp.Client, repoFull, sha string, now time.Time) (int, error) {
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
@@ -253,25 +339,26 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 	if err != nil {
 		return 0, fmt.Errorf("mint installation token for %s: %w", repoFull, err)
 	}
-	pulls, err := client.CommitPulls(ctx, token, owner, repo, sha)
+	pulls, err := fetchCommitPullPayloads(ctx, client, token, owner, repo, sha)
 	if err != nil {
-		return 0, fmt.Errorf("read the pull requests of %s@%s: %w", repoFull, sha, err)
+		return 0, err
 	}
 	written := 0
 	for _, pull := range pulls {
-		issueKey, source, err := headAttribution(ctx, pool, attributionFacts{
-			Repo: repoFull, URL: pull.URL, Title: pull.Title, Body: pull.Body, HeadRef: pull.HeadRef,
-		})
+		issueKey, source, _, complete, err := attributeHead(ctx, pool, client,
+			func() (string, error) { return token, nil },
+			attributionFacts{
+				Repo: repoFull, URL: pull.HTMLURL, Title: pull.Title, Body: pull.Body,
+				HeadRef: pull.Head.Ref,
+			}, headRepositoryOf(pull), pull.Number)
 		if err != nil {
 			return written, err
 		}
-		updated := pull.UpdatedAt
-		if err := UpsertPullRequestHead(ctx, pool, PullRequestHead{
-			Repo: repoFull, Number: pull.Number, HeadSHA: pull.HeadSHA, HeadRef: pull.HeadRef,
-			BaseRef: pull.BaseRef, State: PullRequestHeadState(pull.State, pull.Merged),
-			IssueKey: issueKey, AttributionSource: source, Title: pull.Title, URL: pull.URL,
-			EventAt: updated, CheckedAt: &now,
-		}); err != nil {
+		var checkedAt *time.Time
+		if complete {
+			checkedAt = &now
+		}
+		if err := UpsertPullRequestHead(ctx, pool, headRow(repoFull, pull, issueKey, source, checkedAt)); err != nil {
 			return written, err
 		}
 		written++
@@ -286,50 +373,40 @@ func ReadThroughCommitPulls(ctx context.Context, pool *store.Pool, client *githu
 // moves the head a check result is measured against.
 //
 // The envelope carries the title, body, branch and head commit, which are four of the
-// attribution's five sources and outrank the fifth. The commit messages, rank 4, can only
-// decide a pull request the other four leave unattributed, so they are read — the one GitHub
-// call this path can make — only then, and a merge that follows reuses what was read rather
-// than paging the same commits again (completePullRequest). A read the App refuses attributes
-// the row from the envelope alone; a rate limit is returned, as the reconcile's own refresh
-// returns it, so the caller does not persist a weaker attribution and then stamp the row read.
+// attribution's five sources and outrank the fifth; the fifth, the commit messages, is read only
+// when those four name nobody (attributeHead), and a merge that follows reuses what was read
+// rather than paging the same commits again (completePullRequest). A read the App refuses
+// attributes the row from the envelope alone; a rate limit is returned, as the reconcile's own
+// refresh returns it, so the caller does not persist a weaker attribution and then stamp the row
+// read.
+//
+// The envelope also carries the head's own repository (`head_repo`), which the attribution holds
+// the currency to. An envelope that does not name it — one a publisher older than this field
+// made — attributes nobody and leaves the row unstamped, so the reconcile's own read of GitHub,
+// which always names it, attributes the row on its next pass: a head that cannot be shown to be
+// this repository's is not taken for it, since that is what a fork's pull request would be.
 func (in *Intake) recordPullRequestHead(ctx context.Context, payload map[string]string, number int) ([]string, error) {
 	repoFull := payload["repo"]
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
 		return nil, err
 	}
-	facts := attributionFacts{
-		Repo: repoFull, URL: payload["url"], Title: payload["title"], Body: payload["body"],
-		HeadRef: payload["head_ref"],
-	}
-	issueKey, source, err := headAttribution(ctx, in.pool, facts)
+	headRepo := payload["head_repo"]
+	issueKey, source, messages, complete, err := attributeHead(ctx, in.pool, in.github,
+		func() (string, error) { return in.github.RepositoryToken(ctx, owner, repo) },
+		attributionFacts{
+			Repo: repoFull, URL: payload["url"], Title: payload["title"], Body: payload["body"],
+			HeadRef: payload["head_ref"],
+		}, headRepo, number)
 	if err != nil {
 		return nil, err
 	}
-	var messages []string
-	complete := true
-	if issueKey == nil {
-		read, readErr := fetchCommitMessages(ctx, in.github, owner, repo, number)
-		if readErr != nil {
-			if limited, ok := githubapp.AsRateLimit(readErr); ok {
-				return nil, limited
-			}
-			complete = false
-			slog.Debug("dispatch delivery: a pull request head is attributed without its commit messages",
-				"repo", repoFull, "number", number, "error", readErr)
-		} else {
-			messages = read
-			facts.CommitMessages = messages
-			if issueKey, source, err = headAttribution(ctx, in.pool, facts); err != nil {
-				return nil, err
-			}
-		}
-	}
 	// The envelope is itself a fresh read of the head, so the row is stamped read and the
 	// reconcile does not spend three GitHub calls re-reading what the event just delivered —
-	// unless the commit messages were wanted and could not be had, which the next pass retries.
+	// unless the commit messages were wanted and could not be had, or the envelope named no head
+	// repository, which the next pass settles either way.
 	var checkedAt *time.Time
-	if complete {
+	if complete && headRepo != "" {
 		now := time.Now()
 		checkedAt = &now
 	}
@@ -352,70 +429,4 @@ func envelopeTime(value string) *time.Time {
 		return nil
 	}
 	return &at
-}
-
-// DefaultBranchCommit is what Dispatch last learned about one commit of one repository:
-// whether it sits on the default branch, and when that was read.
-type DefaultBranchCommit struct {
-	OnDefault bool
-	CheckedAt time.Time
-}
-
-// DefaultBranchCommitStaleAfter is how long a "no" is believed. A "yes" is kept for good: a
-// commit on the default branch never leaves it.
-const DefaultBranchCommitStaleAfter = 5 * time.Minute
-
-// ReadDefaultBranchCommit is what default_branch_commits holds for one commit, and whether it
-// holds anything at all.
-func ReadDefaultBranchCommit(ctx context.Context, pool *store.Pool, repoFull, sha string) (DefaultBranchCommit, bool, error) {
-	var answer DefaultBranchCommit
-	err := pool.QueryRow(ctx, `
-		select on_default, checked_at from default_branch_commits where repo = $1 and sha = $2
-	`, repoFull, sha).Scan(&answer.OnDefault, &answer.CheckedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return DefaultBranchCommit{}, false, nil
-	}
-	if err != nil {
-		return DefaultBranchCommit{}, false, fmt.Errorf("read whether %s@%s is on the default branch: %w", repoFull, sha, err)
-	}
-	return answer, true, nil
-}
-
-// WriteDefaultBranchCommit records GitHub's answer about one commit.
-func WriteDefaultBranchCommit(ctx context.Context, pool *store.Pool, repoFull, sha string, onDefault bool, now time.Time) error {
-	_, err := pool.Exec(ctx, `
-		insert into default_branch_commits (repo, sha, on_default, checked_at)
-		values ($1, $2, $3, $4)
-		on conflict (repo, sha) do update set on_default = excluded.on_default, checked_at = excluded.checked_at
-	`, repoFull, sha, onDefault, now)
-	if err != nil {
-		return fmt.Errorf("record whether %s@%s is on the default branch: %w", repoFull, sha, err)
-	}
-	return nil
-}
-
-// RepositoryDefaultBranch is the name of repoFull's default branch, read through the App.
-func RepositoryDefaultBranch(ctx context.Context, client *githubapp.Client, repoFull string) (string, error) {
-	owner, repo, err := splitRepo(repoFull)
-	if err != nil {
-		return "", err
-	}
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return "", fmt.Errorf("mint installation token for %s: %w", repoFull, err)
-	}
-	return client.DefaultBranch(ctx, token, owner, repo)
-}
-
-// CommitOnDefaultBranch asks the App whether sha is on repoFull's default branch.
-func CommitOnDefaultBranch(ctx context.Context, client *githubapp.Client, repoFull, branch, sha string) (bool, error) {
-	owner, repo, err := splitRepo(repoFull)
-	if err != nil {
-		return false, err
-	}
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return false, fmt.Errorf("mint installation token for %s: %w", repoFull, err)
-	}
-	return client.CommitOnBranch(ctx, token, owner, repo, branch, sha)
 }

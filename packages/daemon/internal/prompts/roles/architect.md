@@ -76,6 +76,13 @@ by SHA
 (the daemon lets no child hold it; a parent's waits for its last round,
 `skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
+The gate is the `before_merge` checks of the issue's own Verification document, read at the
+issue's own head: a result one of its children recorded against one of its checks proves nothing
+for it, and a child that carries part of its requirement proves that part with a check on the
+child's own Verification document whose `serves` names the requirement.
+An issue with no Verification document, or with one that holds no `before_merge` check, is
+proved by nothing: send it back and write the checks yourself, which closes no design gate while
+dispatch://INFRA-175 has not shipped.
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
