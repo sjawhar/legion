@@ -15,11 +15,15 @@
 // the release before migration 20261101182419 ran, which each package already holds as its
 // equality oracle.
 //
+// Report is that same two-sided reading with no bound, for a statement whose gain is real but
+// smaller than the run-to-run spread of the parts it shares a statement with: the gate then
+// belongs on the piece whose text differs, and the pair over that piece is what fails.
+//
 // A statement whose gain needs an index or a table this change adds has no such pair: no one
-// schema holds both sides of it. Head measures the after side of those alone, and their before
-// side is the same measurement run against a database migrated from the release before this one,
-// which holds none of this change's migrations, 20261101182419 to 20261101182522; that is
-// protocol 2.
+// schema holds both sides of it. Before and After measure one side of such a statement alone,
+// each line naming the side it read, the after side on this release's schema and the before
+// side on a database migrated from the release before this one, which holds none of this
+// change's migrations, 20261101182419 to 20261101182522; that is protocol 2.
 //
 // It is an ordinary package rather than a _test.go file because all three statement-owning
 // packages (api, refs, docs) run it and Go cannot share test-only code across packages, which is
@@ -134,18 +138,7 @@ const (
 func (r *Runner) Pair(t *testing.T, name string, before, after Statement) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
-		beforeRuns := make([]reading, 0, runs)
-		afterRuns := make([]reading, 0, runs)
-		for range runs {
-			beforeRuns = append(beforeRuns, r.explain(t, beforeSide, before))
-			afterRuns = append(afterRuns, r.explain(t, afterSide, after))
-		}
-		beforeMedian := median(beforeRuns[discarded:])
-		afterMedian := median(afterRuns[discarded:])
-		t.Logf("%s: %s, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
-			name, beforeSide, beforeMedian.took, discarded+1, runs, beforeMedian.plan)
-		t.Logf("%s: %s, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
-			name, afterSide, afterMedian.took, discarded+1, runs, afterMedian.plan)
+		beforeMedian, afterMedian := r.bothSides(t, name, before, after)
 		if afterMedian.took >= beforeMedian.took {
 			t.Errorf("%s: the after text's median is %v, not below the before text's %v; "+
 				"both plans are logged above this line, under %q and %q",
@@ -155,22 +148,67 @@ func (r *Runner) Pair(t *testing.T, name string, before, after Statement) {
 	})
 }
 
-// Head measures the head side of a statement that has no protocol 1 pair, because its gain needs
-// an index or a table this change adds and one schema cannot hold both sides of that. It sets no
-// bound: the before side of such a statement is this same measurement, run against a database
-// migrated from the release before this one, which holds none of this change's migrations, and
-// seam 7's two-commit run is what puts the two together.
-func (r *Runner) Head(t *testing.T, name string, head Statement) {
+// Report measures the same two sides as Pair and bounds neither, for a statement whose gain is
+// real but smaller than the run-to-run spread of the parts it shares a statement with: the gate
+// belongs on the piece that differs, and the two end-to-end numbers are still what a reader of
+// that gate asks for next.
+func (r *Runner) Report(t *testing.T, name string, before, after Statement) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		r.bothSides(t, name, before, after)
+	})
+}
+
+// bothSides runs the two texts alternately and answers their medians, each logged beside the name
+// of the side it was read from.
+func (r *Runner) bothSides(t *testing.T, name string, before, after Statement) (reading, reading) {
+	t.Helper()
+	beforeRuns := make([]reading, 0, runs)
+	afterRuns := make([]reading, 0, runs)
+	for range runs {
+		beforeRuns = append(beforeRuns, r.explain(t, beforeSide, before))
+		afterRuns = append(afterRuns, r.explain(t, afterSide, after))
+	}
+	beforeMedian := median(beforeRuns[discarded:])
+	afterMedian := median(afterRuns[discarded:])
+	logSide(t, name, beforeSide, beforeMedian)
+	logSide(t, name, afterSide, afterMedian)
+	return beforeMedian, afterMedian
+}
+
+// Before and After measure one side of a statement whose two sides no one schema holds, because
+// its gain needs an index or a table a migration of this release adds: the after text runs only
+// on this release's schema and the before text only on a database migrated from the release
+// before it. Neither sets a bound, since the two readings come from two runs and putting them
+// together is the caller's; each names the side it measured, so neither can be read as the
+// other's.
+func (r *Runner) Before(t *testing.T, name string, before Statement) {
+	t.Helper()
+	r.oneSide(t, name, beforeSide, before)
+}
+
+func (r *Runner) After(t *testing.T, name string, after Statement) {
+	t.Helper()
+	r.oneSide(t, name, afterSide, after)
+}
+
+func (r *Runner) oneSide(t *testing.T, name, side string, statement Statement) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		readings := make([]reading, 0, runs)
 		for range runs {
-			readings = append(readings, r.explain(t, "the head's text", head))
+			readings = append(readings, r.explain(t, side, statement))
 		}
-		taken := median(readings[discarded:])
-		t.Logf("%s: planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
-			name, taken.took, discarded+1, runs, taken.plan)
+		logSide(t, name, side, median(readings[discarded:]))
 	})
+}
+
+// logSide is the one line every measurement is reported in, so that a reading can never reach a
+// log without the side it was read from.
+func logSide(t *testing.T, name, side string, taken reading) {
+	t.Helper()
+	t.Logf("%s: %s, planning plus execution %v (median of runs %d to %d), its median run's plan:\n%s",
+		name, side, taken.took, discarded+1, runs, taken.plan)
 }
 
 // reading is one EXPLAIN (ANALYZE, BUFFERS) run: planning plus execution as that run's own

@@ -63,8 +63,8 @@ const (
 // (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
 // every spelling of an artifact_id Postgres casts names.
 //
-// The document arm is a named piece of its own (searchDocumentKeywordLeg), since it is the one
-// arm this change rewrote.
+// The document arm is a named piece of its own (searchDocumentKeywordLeg), so that it can be
+// ranked, read and measured apart from the four arms beside it.
 func searchKeywordLegs(rank func(searchColumn string) string) string {
 	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
@@ -102,22 +102,22 @@ func searchKeywordLegs(rank func(searchColumn string) string) string {
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
 }
 
-// searchDocumentKeywordLeg is searchKeywordLegs' document arm, the one arm this change rewrote,
-// written apart from the four it leaves alone so that it can be ranked, read and timed on its
-// own: of the statements that union it, it is a fraction of a second of some ten, and what it
-// saves is under the run-to-run spread of the rest.
+// searchDocumentKeywordLeg is searchKeywordLegs' document arm, written apart from the four arms
+// beside it so that it can be ranked, read and measured on its own: it is a small part of the
+// cost of every statement that unions it, and a cost that small is legible only when the arm is
+// read apart from theirs.
 //
 // It reads document_search (migration 20261101182447), one row per document holding its latest
-// version's vector under a GIN index, rather than the lateral over artifact_versions it read
-// before: that table's search column has no index and can have none (0010 left it out, and its
-// 5.2 GiB is above what the pre-deploy census lets a migration touch), so the arm tested every
-// document's latest version in turn. The rows are the same ones - 20261101182454's trigger holds
+// version's vector under a GIN index, rather than a lateral over artifact_versions: that table's
+// search column has no index and can have none (0010 left it out, and its 5.2 GiB is above what
+// the pre-deploy census lets a migration touch), so an arm reading it tests every document's
+// latest version in turn. The rows are the same ones - 20261101182454's trigger holds
 // document_search at each document's latest version with markdown - and the join to artifacts
-// still decides the arm's project, kind and issue.
+// decides the arm's project, kind and issue.
 //
 // The text carries no newline of its own at either end: searchKeywordLegs joins it to its
-// neighbours with the union the arms are separated by, and the measurement wraps it in a select
-// of its own.
+// neighbours with the union the arms are separated by, and a caller running the arm by itself
+// wraps it in a select of its own.
 func searchDocumentKeywordLeg(rank func(searchColumn string) string) string {
 	return `  select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
          i.title, i.status, p.key, a.slug, a.name,

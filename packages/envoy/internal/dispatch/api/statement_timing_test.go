@@ -35,30 +35,34 @@ const (
 //
 // Which protocol each statement is under, and why:
 //
-//   - Protocol 1 pairs, whose gain is SQL text alone and whose two sides therefore run on one
-//     schema: the issue list unpaged and paged, the project list, agentLastActivity and the
-//     issue's children read. None of them reaches an index or a table this change adds - the
-//     listing and the project list add no migration, agentLastActivity reads
-//     events_session_actor_created_at_idx, which migration 0026 built, and the children read
-//     walks issues_parent_key - so the before text and the after text are both measurable here,
-//     and the pair is the committed regression check.
+//   - Protocol 1 pairs, whose two sides one schema runs: the issue list unpaged and paged, the
+//     project list, agentLastActivity, the issue's children, and the five statements of
+//     search's document arm - searchQuery, searchQueryMeaning, relatedKeywordQuery,
+//     relatedMeaningQuery and relatedProbeSQL. The listing and the project list add no
+//     migration, agentLastActivity reads events_session_actor_created_at_idx, which migration
+//     0026 built, the children read walks issues_parent_key, and the document arm's older text
+//     reads artifact_versions, a table this release's schema still holds; so on a database at
+//     this release's schema both texts of each are measurable, and the pair is the committed
+//     regression check. The two related statements are gated on the document arm they share
+//     and reported whole beside it, for the reason given where that pair is measured.
 //
-//   - Protocol 2, head text alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
+//   - Protocol 2, one side alone: listIssueAsksQueryAll, listIssueRootMessagesQuery and
 //     listArtifactAsksQueryOpen, whose texts this change does not edit at all - their gain is
 //     asks_issue_key (20261101182426) and messages_issue_roots (20261101182433), and for the
 //     artifact list the drop of asks_open_artifact (20261101182440), whose before side needs
-//     that index present. And the five statements of search's document arm - searchQuery,
-//     searchQueryMeaning, relatedKeywordQuery, relatedMeaningQuery and relatedProbeSQL - whose
-//     head text reads document_search (20261101182447), a table that must be absent for the
-//     before side and present for the after. One database cannot be both, so each of these is
-//     measured here as its head side, with its plan, and seam 7's two-commit run takes the
-//     before side by running this same measurement against a database migrated from the release
-//     before this change, which holds none of this change's migrations.
+//     that index present. No one schema holds both sides of those, so each is measured here as
+//     its after side, with its plan, and seam 7's two-commit run takes the before side by
+//     running this same measurement against a database migrated from the release before this
+//     change, which holds none of this change's migrations. That database also has no
+//     document_search (20261101182447), so this release's text of the five document-arm
+//     statements cannot run on it: there each of the five is measured as its before text
+//     alone, under the name its pair carries here.
 //
-// Every pair's before text is the text that release runs, which this package already holds as an
-// oracle - issue_list_equality_test.go, agent_activity_test.go and issue_children_test.go - read
-// from there rather than copied a second time: two copies of one statement drift apart, and
-// those oracles are what the package's equality tests are held to.
+// Every before text is the text the release before this change runs, which this package already
+// holds as an oracle - issue_list_equality_test.go, agent_activity_test.go,
+// issue_children_test.go and document_search_oracle_test.go - read from there rather than
+// copied a second time: two copies of one statement drift apart, and those oracles are what the
+// package's equality tests are held to.
 func TestStatementTimings(t *testing.T) {
 	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()
@@ -90,11 +94,11 @@ func TestStatementTimings(t *testing.T) {
 		benchtime.Statement{SQL: mainIssueChildrenQuery, Args: []any{subjects.Issue}},
 		benchtime.Statement{SQL: issueChildrenQuery, Args: []any{subjects.Issue}})
 
-	runner.Head(t, "listIssueAsksQueryAll",
+	runner.After(t, "listIssueAsksQueryAll",
 		benchtime.Statement{SQL: listIssueAsksQueryAll, Args: []any{subjects.Issue}})
-	runner.Head(t, "listIssueRootMessagesQuery",
+	runner.After(t, "listIssueRootMessagesQuery",
 		benchtime.Statement{SQL: listIssueRootMessagesQuery, Args: []any{subjects.Issue}})
-	runner.Head(t, "listArtifactAsksQueryOpen",
+	runner.After(t, "listArtifactAsksQueryOpen",
 		benchtime.Statement{SQL: listArtifactAsksQueryOpen, Args: []any{subjects.AnchoredDocument}})
 
 	// Search is measured on the middling word: a word in a handful of items ranks almost
@@ -116,83 +120,13 @@ func TestStatementTimings(t *testing.T) {
 	relatedArguments := []any{lexemeQuery, subjects.Project, suggestionSearchDepth,
 		subjects.RareWord, headlineOptions, 0, contracts.SearchKindDepth, searchFusionK}
 
-	// The five statements of search's document arm are protocol 2: their head text reads
-	// document_search and their before text reads the lateral over artifact_versions, and one
-	// database cannot hold both. documentArmSide takes whichever the database it is pointed at
-	// can run, and names the side it read, so the two-commit run is this one test against two
-	// databases rather than a second harness.
-	side, label := documentArmSide(t, runner)
-	// Every one of the five reads artifact_versions in the release before this change's text,
-	// and this release's schema still holds that table, so on the after side both texts run on
-	// one database, alternately, which the runner fails when the after median is not below the
-	// before. Three of the five are gated on the whole statement and the related-item check's
-	// two on the one arm this change rewrote, for the reason given where they are measured. On
-	// a database migrated from that release there is no after text to run, so each is measured
-	// alone there, which is protocol 2's before side and the reading a two-commit run compares.
+	// The check raises hnsw.ef_search for its own transaction, so a measurement of its meaning
+	// query without it would be of a statement production never runs (relatedEFSearch).
 	meaningSetup := []string{relatedEFSearch}
-	if side.searchQuery != searchQuery {
-		runner.Head(t, "searchQuery, keywords only"+label,
-			benchtime.Statement{SQL: side.searchQuery, Args: searchArguments})
-		runner.Head(t, "searchQueryMeaning"+label,
-			benchtime.Statement{SQL: side.searchQueryMeaning, Args: slices.Concat(searchArguments, meaning)})
-		runner.Head(t, "relatedKeywordQuery"+label,
-			benchtime.Statement{SQL: side.relatedKeywordQuery, Args: slices.Concat(relatedArguments, []any{lexemes, weights})})
-		// The check raises hnsw.ef_search for its own transaction, so a measurement without it
-		// would be of a statement production never runs (relatedEFSearch).
-		runner.Head(t, "relatedMeaningQuery"+label, benchtime.Statement{
-			SQL:   side.relatedMeaningQuery,
-			Args:  slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
-			Setup: meaningSetup,
-		})
-		runner.Head(t, "relatedProbeSQL"+label,
-			benchtime.Statement{SQL: side.relatedProbeSQL, Args: []any{subjects.Project, lexemes, subjects.Issue, (*string)(nil)}})
-		return
-	}
-
-	searchPair := slices.Concat(searchArguments, meaning)
-	relatedKeywordPair := slices.Concat(relatedArguments, []any{lexemes, weights})
-	relatedMeaningPair := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
-	runner.Pair(t, "searchQuery, keywords only",
-		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
-		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
-	runner.Pair(t, "searchQueryMeaning",
-		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchPair},
-		benchtime.Statement{SQL: searchQueryMeaning, Args: searchPair})
-	// relatedKeywordQuery and relatedMeaningQuery are gated on their document arm rather than on
-	// the whole statement. The arm is what this change rewrote, and it is a fraction of a second
-	// of a statement of about ten, whose other four arms, fusion, page and snippet this change
-	// does not touch: what the arm saves sits inside the run-to-run spread of that untouched
-	// remainder, and readings of the whole statement have come out both ways round - on this
-	// database the after text read 10.9 s against the before text's 10.7 s while its document
-	// arm read 160 ms against 287 ms. A pair over the whole statement would therefore pass or
-	// fail on which way the machine drifted and would gate nothing, so what is gated is the arm
-	// itself, both texts measured with the same subject on this database in the smallest
-	// statement that runs one, and each whole statement is reported beside it as one reading per
-	// text, which is the end-to-end number a reader of the two asks for.
-	//
-	// The two statements are built from the same keyword legs, so their arm is one text, gated
-	// once under each statement's name: a statement named in no pair would have no gate.
-	documentLegArguments := []any{lexemeQuery, subjects.Project, lexemes, weights}
-	beforeDocumentLeg := benchtime.Statement{
-		SQL:  documentLegStatement(mainRelatedDocumentKeywordLeg, mainRelatedTermWeights),
-		Args: documentLegArguments,
-	}
-	afterDocumentLeg := benchtime.Statement{
-		SQL:  documentLegStatement(relatedDocumentKeywordLeg, relatedTermWeights),
-		Args: documentLegArguments,
-	}
-	runner.Pair(t, "relatedKeywordQuery's document arm", beforeDocumentLeg, afterDocumentLeg)
-	runner.Head(t, "relatedKeywordQuery, the whole statement, the before text",
-		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordPair})
-	runner.Head(t, "relatedKeywordQuery, the whole statement, the after text",
-		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordPair})
-	runner.Pair(t, "relatedMeaningQuery's document arm", beforeDocumentLeg, afterDocumentLeg)
-	runner.Head(t, "relatedMeaningQuery, the whole statement, the before text",
-		benchtime.Statement{SQL: mainRelatedMeaningQuery, Args: relatedMeaningPair, Setup: meaningSetup})
-	runner.Head(t, "relatedMeaningQuery, the whole statement, the after text",
-		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningPair, Setup: meaningSetup})
-
-	// The probe's pair takes a subject of its own, subjects.ProbeLexemes, the project's twenty
+	searchMeaningArguments := slices.Concat(searchArguments, meaning)
+	relatedKeywordArguments := slices.Concat(relatedArguments, []any{lexemes, weights})
+	relatedMeaningArguments := slices.Concat(relatedArguments, meaning, []any{lexemes, weights})
+	// The probe is measured on a subject of its own, subjects.ProbeLexemes, the project's twenty
 	// rarest words rather than the three the other statements are measured on. Twenty is the
 	// list a question of a paragraph or two hands the picker, and rare is what it hands it: of
 	// the text's words the picker probes live only those its statistics do not hold, the noise
@@ -206,10 +140,77 @@ func TestStatementTimings(t *testing.T) {
 	// Every write that runs the check excludes its own owner (relatedExclusion), so the probe is
 	// measured with the subject issue excluded: with nothing excluded each arm's exists stops at
 	// the first row it meets, which is not the statement production runs.
-	pairArguments := []any{subjects.Project, subjects.ProbeLexemes, subjects.Issue, (*string)(nil)}
+	probeArguments := []any{subjects.Project, subjects.ProbeLexemes, subjects.Issue, (*string)(nil)}
+
+	// The five statements of search's document arm are measured as pairs on a database at this
+	// release's schema: this release's text of the arm reads document_search, the release
+	// before's reads a lateral over artifact_versions, and that schema holds both, so the two
+	// texts run alternately on one connection and the runner fails a pair whose after median is
+	// not below its before. A database migrated from the release before holds no
+	// document_search (migration 20261101182447), so this release's text cannot run there at
+	// all: each before text is measured alone instead, under the name its pair carries here,
+	// which is the reading seam 7's two-commit run sets beside that pair's own before side. The
+	// two-commit run is therefore this one test against two databases rather than a second
+	// harness.
+	if !databaseHoldsDocumentSearch(t, runner) {
+		runner.Before(t, "searchQuery, keywords only",
+			benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments})
+		runner.Before(t, "searchQueryMeaning",
+			benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchMeaningArguments})
+		runner.Before(t, "relatedKeywordQuery, the whole statement",
+			benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordArguments})
+		runner.Before(t, "relatedMeaningQuery, the whole statement", benchtime.Statement{
+			SQL:   mainRelatedMeaningQuery,
+			Args:  relatedMeaningArguments,
+			Setup: meaningSetup,
+		})
+		runner.Before(t, "relatedProbeSQL",
+			benchtime.Statement{SQL: mainRelatedProbeSQL, Args: probeArguments})
+		return
+	}
+
+	runner.Pair(t, "searchQuery, keywords only",
+		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
+		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
+	runner.Pair(t, "searchQueryMeaning",
+		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchMeaningArguments},
+		benchtime.Statement{SQL: searchQueryMeaning, Args: searchMeaningArguments})
+	// relatedKeywordQuery and relatedMeaningQuery are gated on the document arm they share
+	// rather than on either whole statement. The arm is the piece whose text differs, and it is
+	// a fraction of a second of a statement of about ten, whose other four arms, fusion, page
+	// and snippet are the same text on both sides: what the arm saves sits inside the run-to-run
+	// spread of that unchanged remainder, and readings of the whole statement have come out both
+	// ways round - on this database the after text read 10.9 s against the before text's 10.7 s
+	// while its document arm read 160 ms against 287 ms. A pair over the whole statement would
+	// therefore pass or fail on which way the machine drifted and would gate nothing, so what is
+	// gated is the arm itself, both texts measured with the same subject on this database in the
+	// smallest statement that runs one.
+	//
+	// The two statements are built from the same keyword legs, so that arm is one text and one
+	// reading, measured once under a name that says whose it is: two gates over one text would
+	// double the run and could disagree under the very spread above. Each whole statement is
+	// reported beside it, both texts and no bound, which is the end-to-end number a reader of
+	// the gate asks for next.
+	documentLegArguments := []any{lexemeQuery, subjects.Project, lexemes, weights}
+	runner.Pair(t, "the document arm relatedKeywordQuery and relatedMeaningQuery share",
+		benchtime.Statement{
+			SQL:  documentLegStatement(mainRelatedDocumentKeywordLeg, mainRelatedTermWeights),
+			Args: documentLegArguments,
+		},
+		benchtime.Statement{
+			SQL:  documentLegStatement(relatedDocumentKeywordLeg, relatedTermWeights),
+			Args: documentLegArguments,
+		})
+	runner.Report(t, "relatedKeywordQuery, the whole statement",
+		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordArguments},
+		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordArguments})
+	runner.Report(t, "relatedMeaningQuery, the whole statement",
+		benchtime.Statement{SQL: mainRelatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup},
+		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup})
+
 	runner.Pair(t, "relatedProbeSQL",
-		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: pairArguments},
-		benchtime.Statement{SQL: relatedProbeSQL, Args: pairArguments})
+		benchtime.Statement{SQL: mainRelatedProbeSQL, Args: probeArguments},
+		benchtime.Statement{SQL: relatedProbeSQL, Args: probeArguments})
 }
 
 // documentLegStatement is the smallest statement that runs one keyword document arm and nothing
@@ -243,23 +244,20 @@ with q as materialized (select $1::tsquery as tsq, ''::text as term, ''::text as
 select count(*) from document_arm`
 }
 
-// documentArmStatements are the five statements whose document arm this change moved onto
-// document_search, in the one spelling the database under measurement can run.
-type documentArmStatements struct {
-	searchQuery         string
-	searchQueryMeaning  string
-	relatedKeywordQuery string
-	relatedMeaningQuery string
-	relatedProbeSQL     string
-}
+// relatedDocumentKeywordLeg is the document arm of the related-item check's keyword legs alone:
+// searchDocumentKeywordLeg under relatedCoordinationRank, the rank relatedKeywordQuery and
+// relatedMeaningQuery rank their arms by, which makes it the after side of that arm's pair. It
+// is built here rather than beside those two statements because this measurement is its only
+// reader, and a server would otherwise build it at start for nothing.
+var relatedDocumentKeywordLeg = searchDocumentKeywordLeg(relatedCoordinationRank)
 
-// documentArmSide answers the five statements this database can run, and the label that names
-// the side they are. A database migrated from the release before this change has no
-// document_search (migration 20261101182447), so it can run only that release's text, which is
-// protocol 2's before side; a database at this release's schema runs the after text. The table
-// is read from the catalogue rather than from a caught error, so a statement that fails for its
-// own reason still fails the run.
-func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStatements, string) {
+// databaseHoldsDocumentSearch answers whether the database under measurement holds
+// document_search (migration 20261101182447), which is what decides how the five document-arm
+// statements are measured: a database migrated from the release before this change runs only
+// that release's text of them, and a database at this release's schema runs both texts. The
+// table is read from the catalogue rather than from a caught error, so a statement that fails
+// for its own reason still fails the run.
+func databaseHoldsDocumentSearch(t *testing.T, runner *benchtime.Runner) bool {
 	t.Helper()
 	var present bool
 	if err := runner.Conn().QueryRow(context.Background(), `
@@ -270,22 +268,7 @@ func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStateme
 	`).Scan(&present); err != nil {
 		t.Fatalf("read whether this database holds document_search: %v", err)
 	}
-	if !present {
-		return documentArmStatements{
-			searchQuery:         mainSearchQuery,
-			searchQueryMeaning:  mainSearchQueryMeaning,
-			relatedKeywordQuery: mainRelatedKeywordQuery,
-			relatedMeaningQuery: mainRelatedMeaningQuery,
-			relatedProbeSQL:     mainRelatedProbeSQL,
-		}, " (the before text, the release before this change)"
-	}
-	return documentArmStatements{
-		searchQuery:         searchQuery,
-		searchQueryMeaning:  searchQueryMeaning,
-		relatedKeywordQuery: relatedKeywordQuery,
-		relatedMeaningQuery: relatedMeaningQuery,
-		relatedProbeSQL:     relatedProbeSQL,
-	}, " (the after text, this release)"
+	return present
 }
 
 // TestRelatedTermsRefreshTiming is protocol 3, the refresh's own, and it is a Go test rather
