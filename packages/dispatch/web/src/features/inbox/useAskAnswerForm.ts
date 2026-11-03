@@ -303,7 +303,7 @@ export function useAskAnswerForm({
   const startChanging = () => {
     if (!canChangeAnswer || recordedAsk?.answer === null || recordedAsk === null) return;
     const current = recordedAsk.answer;
-    const realSelected = current.selected.filter((label) =>
+    const realSelected = (current.selected ?? []).filter((label) =>
       recordedAsk.options.some((option) => option.label === label)
     );
     replacing.current = current;

@@ -1182,7 +1182,10 @@ export interface AskAnswer {
    *  written by a caller; a superseded answer, which no part of the ask holds, carries none. */
   readonly id?: string;
   readonly user: string;
-  readonly selected: string[];
+  /** The options the answer picked, as their labels. The wire schema is a nullish array: a server
+   *  from before the fix that writes `[]` sends `null` for an answer that picked none, and an
+   *  older one sends no field at all, so every reader treats both as no option picked. */
+  readonly selected?: string[] | null;
   readonly text: string | null;
   readonly at: string;
 }

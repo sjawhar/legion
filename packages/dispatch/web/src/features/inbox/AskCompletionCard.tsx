@@ -81,7 +81,9 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
         <div className="mt-2 space-y-3">
           {earlier.map((previous) => (
             <div key={previous.at}>
-              {previous.selected.length === 0 ? null : <p>{previous.selected.join(", ")}</p>}
+              {(previous.selected ?? []).length === 0 ? null : (
+                <p>{(previous.selected ?? []).join(", ")}</p>
+              )}
               {previous.text === null || previous.text === "" ? null : (
                 <MarkdownBody markdown={previous.text} />
               )}
@@ -152,7 +154,9 @@ function AnsweredAsk({
   // unlabeled addendum. An ask with no options at all has no Other row to have chosen, so its
   // free text is always the plain answer instead.
   const otherText =
-    ask.options.length > 0 && answer !== null && answer.selected.length === 0 ? answer.text : null;
+    ask.options.length > 0 && answer !== null && (answer.selected ?? []).length === 0
+      ? answer.text
+      : null;
   return (
     <article
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}

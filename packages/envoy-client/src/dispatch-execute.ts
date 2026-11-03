@@ -2508,6 +2508,8 @@ function askSummary(
   outgoing: GraphReferences | string
 ): string {
   const answer = ask.answer;
+  // A server from before the fix sends `null` for an answer that picked no option.
+  const selected = answer?.selected ?? [];
   const earlierAnswers = answers.slice(0, -1);
   const parts = askPartEdges(ask, incoming);
   const partRef = (id: string) => `${askRef}#b-${encodeBlockId(id)}`;
@@ -2533,7 +2535,7 @@ function askSummary(
       ? ["- none"]
       : [
           `- By: ${answer.user}`,
-          `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
+          `- Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
           ...partReferenceLines(parts.at, answer.id),

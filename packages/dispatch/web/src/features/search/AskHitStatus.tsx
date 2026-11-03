@@ -49,9 +49,9 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
             className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
           >
             {answer.user} · <Timestamp at={answer.at} /> ·{" "}
-            {answer.selected.length === 0
+            {(answer.selected ?? []).length === 0
               ? "No option chosen"
-              : `Chose ${answer.selected.join(", ")}`}
+              : `Chose ${(answer.selected ?? []).join(", ")}`}
           </span>
         )}
       </div>

@@ -170,7 +170,7 @@ function sourceAsk(ask: Ask): SourceAsk {
       ask.answer === null
         ? null
         : {
-            selected: ask.answer.selected,
+            selected: ask.answer.selected ?? [],
             text: ask.answer.text,
             user: ask.answer.user,
             at: ask.answer.at,

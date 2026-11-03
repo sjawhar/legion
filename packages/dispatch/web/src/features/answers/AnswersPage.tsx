@@ -73,9 +73,9 @@ function AnswerRow({
       />
       {row.kind === "answer" && row.answer !== undefined ? (
         <div className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
-          {row.answer.selected.length === 0 ? null : (
+          {(row.answer.selected ?? []).length === 0 ? null : (
             <div className="flex flex-wrap gap-1.5">
-              {row.answer.selected.map((label) => (
+              {(row.answer.selected ?? []).map((label) => (
                 <LabelPill key={label} selected>
                   {label}
                 </LabelPill>

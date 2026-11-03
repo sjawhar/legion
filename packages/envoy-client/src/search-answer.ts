@@ -36,7 +36,8 @@ function indentedText(text: string): string {
 
 /** An answer's two lines under its hit: who gave it, when and the options chosen, then its text. */
 function answerLines(lead: string, answer: AskAnswer): string[] {
-  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const chosen = answer.selected ?? [];
+  const selected = chosen.length === 0 ? "none" : chosen.join(", ");
   const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
   return [
     `  ${lead} by ${answer.user} at ${answer.at} · options chosen: ${selected}`,

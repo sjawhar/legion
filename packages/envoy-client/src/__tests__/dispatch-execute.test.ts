@@ -9561,6 +9561,34 @@ describe("executeDispatchTool", () => {
         "- none",
       ]);
     });
+
+    // A server from before the server-side fix sends `selected: null` rather than an empty list:
+    // the read says no option was picked, and still prints the answer's text.
+    test("an answer whose selected is null reads as none, with its text", async () => {
+      expect(await readAsk({ ...askBody, answer: { ...askBody.answer, selected: null } })).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        `- JSON API — Use the HTTP API. (${askRef}#b-b2)`,
+        "  Referenced by:",
+        "  - mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z)",
+        `- MCP API (${askRef}#b-b3)`,
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: none",
+        "- Text: Ship JSON.",
+        `- Reference: ${askRef}#b-b4`,
+        "  Referenced by:",
+        "  - mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z)",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
   });
 
   test("posts a comment reply to an ask using reply_to_ask", async () => {
