@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/routing"
 )
 
 // RoleClaim is the durable ownership record for a role lane. Role claims are
@@ -27,6 +26,15 @@ type RoleClaim struct {
 	HolderSessionID   string `json:"holder_session_id"`
 	ClaimedAt         int64  `json:"claimed_at"`
 	PreviousSessionID string `json:"previous_session_id"`
+	// Revision is the role bucket revision the claim was read at, which roleClaim stamps on
+	// every claim it decodes and nothing stores: it belongs to the entry, not to the record,
+	// so it is never marshalled back into the bucket. Zero means no claim record was read -
+	// an unclaimed role, a claim built to be written, or the holder-only claim a watched copy
+	// of the bucket gives (roles.ResolveHolderFrom's firstHolder). It is what a conditional
+	// claim names as its precondition (SetRoleWithPrevious's ifClaimRevision) and what GET
+	// /v1/roles/<role> reports as claim_revision, so a caller can read a role and then claim
+	// it only while no other claim has landed.
+	Revision uint64 `json:"-"`
 }
 
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
@@ -55,17 +63,21 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
+	// index indexes the cache's topic patterns by subject token (subjectIndex), for Match. Every
+	// change to cache changes it too; nil until the first one.
+	index *subjectIndex
 	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
 	// with the bucket, and Match answers every "is this session subscribed?" question without
 	// falling through.
 	watcher *kvwatch.Watcher
 	// roleWatcher feeds holders from the role bucket, so a session's roles are read from the claims
 	// with no bucket call (RolesHeldBy), which answers only while its first scan is complete
-	// (kvwatch.Watcher.Complete). holdersMu guards holders, the session each role's claim names,
-	// holderRevisions, the latest revision applied for each role, delete markers included, which keeps
-	// a delayed watcher update from undoing a claim this registry wrote, and holderEpoch, which a
-	// recreated bucket's reset advances, so a claim write this registry made on the old bucket cannot
-	// land in the new bucket's view and fence out its lower revisions.
+	// (kvwatch.Watcher.Complete), and a role's holder is too (CachedRoleHolder). holdersMu guards
+	// holders, the session each role's claim names, holderRevisions, the latest revision applied for
+	// each role, delete markers included, which keeps a delayed watcher update from undoing a claim
+	// this registry wrote or read, and holderEpoch, which a recreated bucket's reset advances, so a
+	// claim write this registry made on the old bucket cannot land in the new bucket's view and fence
+	// out its lower revisions.
 	roleWatcher     *kvwatch.Watcher
 	holdersMu       sync.RWMutex
 	holders         map[string]string
@@ -260,6 +272,10 @@ func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision
 	}
 	r.cache[sessionID] = item
 	r.cacheRevisions[sessionID] = revision
+	if r.index == nil {
+		r.index = newSubjectIndex()
+	}
+	r.index.set(sessionID, item)
 }
 
 func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) {
@@ -267,6 +283,9 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 		return
 	}
 	delete(r.cache, sessionID)
+	if r.index != nil {
+		r.index.remove(sessionID)
+	}
 	if r.cacheRevisions == nil {
 		r.cacheRevisions = map[string]uint64{}
 	}
@@ -367,6 +386,7 @@ func (r *Registry) resetCache() {
 	r.mu.Lock()
 	r.cache = map[string]Interest{}
 	r.cacheRevisions = map[string]uint64{}
+	r.index = nil
 	r.mu.Unlock()
 }
 
@@ -416,13 +436,20 @@ func (r *Registry) roleHolderEpoch() uint64 {
 	return r.holderEpoch
 }
 
+// roleHolderRevision is the latest revision of role the holder view applied, 0 for none.
+func (r *Registry) roleHolderRevision(role string) uint64 {
+	r.holdersMu.RLock()
+	defer r.holdersMu.RUnlock()
+	return r.holderRevisions[role]
+}
+
 // applyRoleClaim applies one entry the role claim watcher delivered to the holder view. A claim
 // this build cannot decode (ErrMalformedRoleClaim) names no holder: it gives its role to nobody,
 // and the registry logs it at WARN once, as the interest watcher logs a value it cannot decode.
 func (r *Registry) applyRoleClaim(entry nats.KeyValueEntry) {
 	holder := ""
 	if entry.Operation() != nats.KeyValueDelete && entry.Operation() != nats.KeyValuePurge {
-		claim, err := decodeRoleClaim(entry.Value())
+		claim, err := DecodeRoleClaim(entry.Value())
 		if err != nil {
 			r.logger().Warn("role claim watcher found a claim it cannot read; it names no holder",
 				slog.String("role", entry.Key()),
@@ -683,7 +710,10 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // failed, and reading it again returns the same record; each error wrapping it names which.
 var ErrMalformedRoleClaim = errors.New("malformed role claim")
 
-func decodeRoleClaim(value []byte) (RoleClaim, error) {
+// DecodeRoleClaim reads a stored role claim record: a structured claim naming a holder, or a bare
+// session id an earlier build stored. Any other record is ErrMalformedRoleClaim. Dispatch's outbox
+// reads the role bucket through it too (roles.Buckets), so the two readers cannot drift.
+func DecodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
 	err := json.Unmarshal(value, &claim)
 	if err == nil {
@@ -714,23 +744,34 @@ func (r *Registry) putInterest(ctx context.Context, sessionID string, value []by
 	return revision, err
 }
 
-// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded).
+// roleClaim reads role's claim from the bucket, waiting no longer than ctx (bus.Bounded), and
+// refreshes the holder view with what it read: the claim's holder at its revision, or, for a role
+// the bucket no longer holds, its removal after the revision the view had applied. The claim it
+// returns carries the entry's revision (RoleClaim.Revision), which is what a conditional claim and
+// GET /v1/roles/<role> compare against; a role with no claim record returns a zero claim, so a
+// zero revision names a role no record claims.
 func (r *Registry) roleClaim(ctx context.Context, role string) (RoleClaim, nats.KeyValueEntry, error) {
+	epoch := r.roleHolderEpoch()
 	roles := r.roles()
 	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return roles.Get(role) })
 	if !answered {
 		return RoleClaim{}, nil, fmt.Errorf("read role %s's claim: %w", role, err)
 	}
 	if errors.Is(err, nats.ErrKeyNotFound) {
+		if revision := r.roleHolderRevision(role); revision > 0 {
+			r.forgetRoleHolder(role, revision, epoch)
+		}
 		return RoleClaim{}, nil, nil
 	}
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
-	claim, err := decodeRoleClaim(entry.Value())
+	claim, err := DecodeRoleClaim(entry.Value())
 	if err != nil {
 		return RoleClaim{}, nil, err
 	}
+	claim.Revision = entry.Revision()
+	r.setOwnRoleHolder(role, claim.HolderSessionID, claim.Revision, epoch)
 	return claim, entry, nil
 }
 
@@ -941,6 +982,26 @@ func (e *ErrRoleHeld) Error() string {
 	return fmt.Sprintf("role %s is held by %s", e.Role, e.Holder)
 }
 
+// ErrRoleClaimRevisionMismatch reports a conditional claim the role bucket did not hold the
+// revision for: the caller named the revision it had read the role's claim at
+// (SetRoleWithPrevious's ifClaimRevision) and the bucket holds another one, either when the claim
+// was read or by the time its conditional write reached the bucket. Expected is the revision the
+// caller named, Actual the revision the bucket holds as this call last read it - zero on either
+// side names no claim record at all - and Holder the session the stored claim names, empty when
+// there is none. No claim record was written: the role is left exactly as the claim that stands
+// left it, and a claim that lost the write's compare-and-swap rolled its own topic back unless
+// the winning claim names the claimant itself.
+type ErrRoleClaimRevisionMismatch struct {
+	Role     string
+	Expected uint64
+	Actual   uint64
+	Holder   string
+}
+
+func (e *ErrRoleClaimRevisionMismatch) Error() string {
+	return fmt.Sprintf("role %s's claim is at revision %d, not the %d this claim required", e.Role, e.Actual, e.Expected)
+}
+
 // SetRole makes sessionID the holder of role. A hard claim (soft=false) is
 // last-claim-wins: it takes the role from whoever holds it. A soft claim
 // succeeds only if the role is unheld, already held by sessionID, or held by
@@ -954,7 +1015,7 @@ func (e *ErrRoleHeld) Error() string {
 // recover a role its own earlier session held without ever taking one from a
 // live peer, or from a live session of another client instance.
 func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, supersedable ...string) (Interest, error) {
-	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, role, "", soft, supersedable...)
+	return r.SetRoleWithPrevious(context.Background(), sessionID, machineID, role, "", soft, nil, supersedable...)
 }
 
 // SetRoleWithPrevious records the session ID that a successful soft claim
@@ -975,11 +1036,35 @@ func (r *Registry) SetRole(sessionID, machineID, role string, soft bool, superse
 // holder's record once it did. A topic either leaves behind gives nobody the role. A claim that
 // landed is a success whatever its old holder's cleanup did: one that failed is logged at WARN, and
 // one ctx ended before it finished at INFO, since nothing failed there.
-func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, role, previousSessionID string, soft bool, supersedable ...string) (Interest, error) {
+//
+// ifClaimRevision, when it is not nil, is the revision the caller read the role's claim at, and
+// this call takes the role only while the bucket still holds that very revision: another one, a
+// record where the caller expected none (ifClaimRevision 0), or none where it expected one is
+// *ErrRoleClaimRevisionMismatch, and so is a claim that passed that check and then lost the
+// write's own compare-and-swap to a claim that landed in between. It writes no claim record
+// either way, so the role is left exactly as the claim that stands left it: the precondition is
+// weighed before the claimant's interest record is touched, and a claim that lost the
+// compare-and-swap rolls that record's topic back unless the winning claim names that same
+// session, whose record then keeps the lane topic of the role it now holds. It is the
+// precondition a scheduler needs that last-claim-wins and the soft rules cannot give it: a read of
+// the role and the claim that follows are one decision, and a claim that landed between them
+// refuses this one rather than being overwritten by it. A nil ifClaimRevision claims as before.
+func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID, role, previousSessionID string, soft bool, ifClaimRevision *uint64, supersedable ...string) (Interest, error) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	oldClaim, entry, err := r.roleClaim(ctx, role)
 	if err != nil {
 		return Interest{}, err
+	}
+	// Before the soft rules and before any write: the caller's own precondition, weighed on the
+	// read this call made itself, so the revision compared is the one its conditional write is
+	// conditional on.
+	if ifClaimRevision != nil && *ifClaimRevision != oldClaim.Revision {
+		return Interest{}, &ErrRoleClaimRevisionMismatch{
+			Role:     role,
+			Expected: *ifClaimRevision,
+			Actual:   oldClaim.Revision,
+			Holder:   oldClaim.HolderSessionID,
+		}
 	}
 
 	oldSessionID := oldClaim.HolderSessionID
@@ -1018,14 +1103,37 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 	if err != nil {
 		current, holderErr := r.RoleClaim(ctx, role)
 		holder := current.HolderSessionID
-		if holderErr == nil && holder == sessionID {
+		// A conditional claim that lost the write's own compare-and-swap (nats.ErrKeyExists)
+		// lost it to a claim that landed after the read this call weighed its precondition on:
+		// the precondition failing a moment later, not a storage failure, and the caller is
+		// told exactly that rather than reading an unexplained failure or another session's
+		// name. A winner naming the claimant itself is no exception here, where it is one for
+		// an unconditional claim just below: the revision the caller sequenced its decision on
+		// is gone either way, and the claim that stands is not the one it made.
+		heldByClaimant := holderErr == nil && holder == sessionID
+		conditionalLoss := ifClaimRevision != nil && holderErr == nil && errors.Is(err, nats.ErrKeyExists)
+		if heldByClaimant && !conditionalLoss {
 			return item, nil
 		}
-		if rollbackErr := r.removeInterestTopics(ctx, sessionID, []string{roleTopic}); rollbackErr != nil {
-			return Interest{}, errors.Join(err, holderErr, rollbackErr)
+		// The topic goes back only where the role did not end up with this session. A
+		// conditional claim refused because the claim that won named the claimant itself
+		// leaves that record alone: it carries the lane topic of the role that session now
+		// holds, and taking it out would stop the fan-out to the holder.
+		if !heldByClaimant {
+			if rollbackErr := r.removeInterestTopics(ctx, sessionID, []string{roleTopic}); rollbackErr != nil {
+				return Interest{}, errors.Join(err, holderErr, rollbackErr)
+			}
 		}
 		if holderErr != nil {
 			return Interest{}, errors.Join(err, holderErr)
+		}
+		if conditionalLoss {
+			return Interest{}, &ErrRoleClaimRevisionMismatch{
+				Role:     role,
+				Expected: *ifClaimRevision,
+				Actual:   current.Revision,
+				Holder:   holder,
+			}
 		}
 		// A soft claim that lost the CAS race lost to a concurrent claimant;
 		// report that as held rather than as a storage failure.
@@ -1075,16 +1183,34 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role, read with no deadline of its own. Only
-// tests call it, to read what a claim left behind; every route and the role lane read RoleClaim
-// within a deadline (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an
-// empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read from the bucket with no deadline
+// of its own, for a caller that answers no request: CachedRoleHolder on a miss, and tests reading
+// what a claim left behind. Every route and the role lane read RoleClaim within a deadline
+// (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an empty holder
+// without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
 		return "", err
 	}
 	return claim.HolderSessionID, nil
+}
+
+// CachedRoleHolder returns role's holder from the role claim watcher's view of the bucket, and on a
+// miss reads the bucket as RoleHolder does, which fills the view. The view holds every claim this
+// registry wrote, read or watched, so it answers without a round trip; a claim another listener
+// wrote reaches it through the watcher, a moment after the bucket. The listener's role lane resolves
+// each role message's holder through it, and reads the bucket itself (RoleHolder) when the holder
+// it found was superseded. An unclaimed role is a miss, which returns an empty holder without an
+// error.
+func (r *Registry) CachedRoleHolder(role string) (string, error) {
+	r.holdersMu.RLock()
+	holder, ok := r.holders[role]
+	r.holdersMu.RUnlock()
+	if ok {
+		return holder, nil
+	}
+	return r.RoleHolder(role)
 }
 
 // ErrMalformedInterest is an interest record the bucket holds and this build cannot decode. The bus
@@ -1128,39 +1254,55 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 	return fresh, nil
 }
 
-// Match returns the cached interests registered on machineID whose topics match topic: a
-// listener delivers live only to the sessions of its own machine.
+// CachedInterest returns sessionID's interest from the cache alone, and whether the cache holds
+// one; it never reads the bucket.
+func (r *Registry) CachedInterest(sessionID string) (Interest, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	item, ok := r.cache[sessionID]
+	return item, ok
+}
+
+// Match returns, once each, the cached interests of machineID with a topic pattern that matches
+// topic (routing.Match's rules), looked up in the subject index: a listener delivers live only to
+// the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
-	return r.match(topic, func(item Interest) bool { return item.MachineID == machineID })
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
 }
 
 // MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
 // SessionID for deterministic output: a sender that must confirm delivery to each subscribed
 // session needs them all, wherever each session registered.
 func (r *Registry) MatchAll(topic string) []Interest {
-	out := r.match(topic, func(Interest) bool { return true })
+	r.mu.RLock()
+	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
+	r.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].SessionID < out[j].SessionID
 	})
 	return out
 }
 
-// match returns the cached interests keep accepts that have a topic pattern matching topic.
-func (r *Registry) match(topic string, keep func(Interest) bool) []Interest {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+// matchLocked returns, once each, the cached interests of the keys walk visits over the subject
+// index; the index visits a key once per matching pattern. The caller holds r.mu.
+func (r *Registry) matchLocked(walk func(visit func(key string))) []Interest {
 	out := []Interest{}
-	for _, item := range r.cache {
-		if !keep(item) {
-			continue
-		}
-		for _, pattern := range item.Topics {
-			if routing.Match(pattern, topic) {
-				out = append(out, item)
-				break
-			}
-		}
+	if r.index == nil {
+		return out
 	}
+	var seen map[string]struct{}
+	walk(func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		if seen == nil {
+			seen = map[string]struct{}{}
+		}
+		seen[key] = struct{}{}
+		out = append(out, r.cache[key])
+	})
 	return out
 }
 

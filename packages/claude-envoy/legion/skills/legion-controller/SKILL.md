@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, held, worker-died), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
+description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, held, worker-died, update-stalled), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
 ---
 
 # Legion Controller
@@ -64,6 +64,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | `awaiting-person on <KEY>` | Nothing: do not park or re-admit it, and take nothing for the slot it returned |
 | `held on <KEY>` | Nothing, unless `reason: "escalated"`: then an escalation |
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
+| `update-stalled on <KEY>` | `skill://legion-controller/references/escalation.md#an-update-round-that-is-not-finishing-update-stalled` |
 | An architect's escalation | `skill://legion-controller/references/escalation.md` |
 | A finding ask's reference, or its answer | `skill://legion-controller/references/finding-asks.md` |
 | A clear defect a role sends | `skill://legion-controller/references/finding-asks.md#hand-over-a-clear-defect` |
@@ -95,6 +96,12 @@ person's label off, because it is their decision. Label an issue before you `set
 `skill://legion-controller/references/triage.md` "Label an issue for a person". Admission states:
 `skill://legion-controller/references/admission.md`.
 
+Two handovers are queued by the daemon, with no write of yours. A person's `legion` label on an
+unrecorded root in `triage` is queued by the daemon: it writes the root's `todo` through its
+outbox. A person's approval of the primary document of a parked (`backlog` or `icebox`) labelled
+root with no live tree is queued by the daemon the same way. You write `todo` only for the roots
+you label at a person's request or file yourself.
+
 ## Free slots
 
 A free slot is no reason to take an issue: a labelled root in `todo` takes the next slot through
@@ -105,7 +112,8 @@ it, and cite that request. The free slots are `admission.cap` minus the roots in
 a blocked root takes no slot until its blockers are done. Every move to `todo` you make is one of
 these:
 
-- a root a person handed over, or a root you filed for a clear defect no tree owns, at triage;
+- a root you labelled at a person's request or filed for a clear defect no tree owns, at triage (a
+  root a person labelled is queued by the daemon);
 - an issue a person asks you to start;
 - a tree you re-admit after its architect failed or after a hold, once you checked its cause is
   gone, or because a person asks;

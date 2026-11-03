@@ -122,8 +122,8 @@ func TestATokenWithoutAnEmailIsRefused(t *testing.T) {
 	delete(claims, "email")
 
 	_, err := verifier.VerifyVM(context.Background(), issuer.Mint(t, key, claims))
-	if !errors.Is(err, ErrVMEmailNotVerified) {
-		t.Fatalf("VerifyVM error = %v, want %v", err, ErrVMEmailNotVerified)
+	if !errors.Is(err, ErrVMNoEmail) {
+		t.Fatalf("VerifyVM error = %v, want %v", err, ErrVMNoEmail)
 	}
 }
 

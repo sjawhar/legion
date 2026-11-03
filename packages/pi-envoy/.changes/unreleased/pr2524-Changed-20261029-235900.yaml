@@ -1,5 +1,0 @@
-kind: Changed
-body: '`dispatch`, "References": a local path is not a reference, and outside Dispatch (a chat reply, Slack, a pull request, an email) neither is a `dispatch://` reference, which opens nothing there; give the `https://` link `dispatch` printed. To stay under the 2,000-word guard, "A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`" is cut: `dispatch-first` says it ("an ask block for a design question its document records, else `dispatch ask`").'
-time: 2026-10-29T23:59:00.000000000Z
-custom:
-    Issue: pr2524

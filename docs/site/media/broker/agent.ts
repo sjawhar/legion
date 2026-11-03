@@ -3,7 +3,7 @@
 // Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script, for the
 // screenshots: starts a machine login and a secret request on the agent machine, and hands back
 // what each prints that a person acts on (flow.ts's `printed`: the machine login's code, the
-// request's Dispatch record), so the browser side can approve it.
+// request's page on the broker), so the browser side can approve it.
 import { type ChildProcess, spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -63,13 +63,13 @@ export async function startMachineLogin(agentExec: string): Promise<Running & { 
 }
 
 /** A session registered with the agent machine's helper, as an agent's session is, asking for
- *  DEMO_API_KEY to run ./check-demo-key.sh: resolves once it names the Dispatch record a person
- *  decides. The session stays open after the command runs, as an agent's does, so its grant stays
- *  live (the helper ends a session's enrollment, and with it the grant, when its process exits);
- *  `end()` closes it. */
+ *  DEMO_API_KEY to run ./check-demo-key.sh: resolves once it names the request's page on the
+ *  broker, where a person decides it. The session stays open after the command runs, as an
+ *  agent's does, so its grant stays live (the helper ends a session's enrollment, and with it the
+ *  grant, when its process exits); `end()` closes it. */
 export async function startSecretRequest(
   agentExec: string
-): Promise<Running & { recordId: string; requestId: string; end: () => void }> {
+): Promise<Running & { approveUrl: string; recordId: string; requestId: string; end: () => void }> {
   const running = run(
     agentExec,
     [
@@ -88,11 +88,16 @@ export async function startSecretRequest(
     "pipe"
   );
   const request = await waitForOutput(running, printed.requestWaiting, "pending request");
-  const record = await waitForOutput(running, printed.recordLink, "credential record link");
+  const page = await waitForOutput(
+    running,
+    printed.approvePage,
+    "the request's page on the broker"
+  );
   return {
     ...running,
+    approveUrl: page[1],
     end: () => running.child.stdin?.end(),
-    recordId: record[1],
+    recordId: page[2],
     requestId: request[1],
   };
 }

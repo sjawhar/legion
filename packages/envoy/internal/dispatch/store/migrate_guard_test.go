@@ -56,29 +56,54 @@ func TestMigrateFromSeveralProcessesAtOnceOnAnEmptyDatabase(t *testing.T) {
 
 // A set in which two files share a version is refused whole, before the runner touches the
 // database. The runner records a migration by its version alone, so a set it accepted would apply
-// the first file numbered 2, pass over the second as already applied, and report success.
+// the first file of the pair, pass over the second as already applied, and report success. Two
+// timestamped files share a version only where one author's file carries the moment another's was
+// created rather than its own; the refusal is the same, since the runner reads the identifier and
+// not the name beside it.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	set := fstest.MapFS{
-		"migrations/0001_first.up.sql":  {Data: []byte("create table guard_first (id integer)")},
-		"migrations/0002_second.up.sql": {Data: []byte("create table guard_second (id integer)")},
-		"migrations/0002_third.up.sql":  {Data: []byte("create table guard_third (id integer)")},
-	}
+	for _, tc := range []struct {
+		name string
+		set  fstest.MapFS
+		want []string
+	}{
+		{
+			name: "two numbered migrations",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":  {Data: []byte("create table guard_first (id integer)")},
+				"migrations/0002_second.up.sql": {Data: []byte("create table guard_second (id integer)")},
+				"migrations/0002_third.up.sql":  {Data: []byte("create table guard_third (id integer)")},
+			},
+			want: []string{"0002_second.up.sql", "0002_third.up.sql", "version 2"},
+		},
+		{
+			name: "two timestamped migrations carrying one moment",
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":       {Data: []byte("create table guard_first (id integer)")},
+				"migrations/20261030120000_a.up.sql": {Data: []byte("create table guard_a (id integer)")},
+				"migrations/20261030120000_b.up.sql": {Data: []byte("create table guard_b (id integer)")},
+			},
+			want: []string{"20261030120000_a.up.sql", "20261030120000_b.up.sql", "version 20261030120000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEmptyTestStore(t)
 
-	err := store.migrate(ctx, set)
-	left := existingTables(t, store, "guard_first", "guard_second", "guard_third", "schema_migrations")
-	if err == nil {
-		t.Errorf("migrate accepted two migrations numbered 2 and reported success; the tables it left: %v", left)
-	} else {
-		for _, want := range []string{"0002_second.up.sql", "0002_third.up.sql", "version 2"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("migrate error = %q, want it to name %q", err, want)
+			err := store.migrate(ctx, tc.set)
+			left := existingTables(t, store, "guard_first", "guard_second", "guard_third", "guard_a", "guard_b", "schema_migrations")
+			if err == nil {
+				t.Errorf("migrate accepted two migrations sharing a version and reported success; the tables it left: %v", left)
+			} else {
+				for _, want := range tc.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("migrate error = %q, want it to name %q", err, want)
+					}
+				}
 			}
-		}
-	}
-	if len(left) != 0 {
-		t.Errorf("the refused set left %v behind; want nothing applied, not even the version table", left)
+			if len(left) != 0 {
+				t.Errorf("the refused set left %v behind; want nothing applied, not even the version table", left)
+			}
+		})
 	}
 }
 

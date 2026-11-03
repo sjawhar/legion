@@ -36283,6 +36283,11 @@ var IssueDeployedEventPayloadSchema = strictObject({
   run_id: number2().int().positive(),
   completed_at: exports_iso.datetime()
 });
+var HandoffRecordedPayloadSchema = strictObject({
+  handoff_id: string2(),
+  phase: string2(),
+  version: number2().int().positive()
+});
 var DispatchServerStartedPayloadSchema = strictObject({
   commit: string2().min(1),
   started_at: exports_iso.datetime()
@@ -36338,8 +36343,13 @@ var askEventPayloadFields = {
   opened_event_id: number2().int().positive(),
   kind: string2().optional(),
   question: string2().optional(),
-  options: array(object({ label: string2().optional() })).optional(),
-  answer: object({ selected: array(string2()).nullish(), text: string2().nullish() }).nullish(),
+  options: array(object({ id: string2().optional(), label: string2().optional() })).optional(),
+  revision: number2().int().positive().optional(),
+  answer: object({
+    id: string2().optional(),
+    selected: array(string2()).nullish(),
+    text: string2().nullish()
+  }).nullish(),
   previous_answer: object({
     user: string2().optional(),
     selected: array(string2()).nullish(),
@@ -36593,93 +36603,6 @@ function itemFromSearch(search) {
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
 }
 
-// ../contracts/src/dispatch-block-ref.ts
-var encoder = new TextEncoder;
-function encodeBlockId(id) {
-  let encoded = "";
-  for (const character of id) {
-    for (const byte of encoder.encode(character)) {
-      const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
-      encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-    }
-  }
-  return encoded;
-}
-function decodeBlockId(encoded) {
-  if (encoded === "" || encoded.includes("@")) {
-    return;
-  }
-  let id;
-  try {
-    id = decodeURIComponent(encoded);
-  } catch {
-    return;
-  }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
-}
-var MAX_BLOCK_PIN = 9223372036854775807n;
-function parseBlockFragment(encoded) {
-  const at = encoded.indexOf("@");
-  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
-  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
-    return;
-  }
-  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
-  if (block === undefined) {
-    return;
-  }
-  return pin === undefined ? { block } : { block, pin };
-}
-// ../contracts/src/dispatch-snippet.ts
-var HTML_ENTITIES = [
-  ["&lt;", "<"],
-  ["&gt;", ">"],
-  ["&#39;", "'"],
-  ["&#34;", '"'],
-  ["&amp;", "&"]
-];
-function decodeEntities(text) {
-  let decoded = text;
-  for (const [entity, character] of HTML_ENTITIES) {
-    decoded = decoded.replaceAll(entity, character);
-  }
-  return decoded;
-}
-function hasOnlyBalancedMarkers(snippet) {
-  let marked = false;
-  for (const marker of snippet.matchAll(/<mark>|<\/mark>/gu)) {
-    if (marker[0] === "<mark>") {
-      if (marked)
-        return false;
-      marked = true;
-    } else {
-      if (!marked)
-        return false;
-      marked = false;
-    }
-  }
-  return !marked;
-}
-function snippetSegments(snippet) {
-  if (!hasOnlyBalancedMarkers(snippet)) {
-    return snippet === "" ? [] : [{ text: decodeEntities(snippet), mark: false }];
-  }
-  let mark = false;
-  const segments = [];
-  for (const part of snippet.split(/(<mark>|<\/mark>)/u)) {
-    if (part === "<mark>") {
-      mark = true;
-    } else if (part === "</mark>") {
-      mark = false;
-    } else if (part !== "") {
-      segments.push({ text: decodeEntities(part), mark });
-    }
-  }
-  return segments;
-}
-function snippetText(snippet) {
-  return snippetSegments(snippet).map(({ text, mark }) => mark ? `**${text}**` : text).join("");
-}
 // ../contracts/src/dispatch-text-rules.ts
 var SESSION_ID_PATTERN = "[^/?#\\s\\p{Z}\\p{Cc}<>\"'`\\[\\]|]+";
 var sessionIdOnly = new RegExp(`^${SESSION_ID_PATTERN}$`, "u");
@@ -36695,6 +36618,7 @@ var PICTURE_TYPES = {
 function isPictureType(mime) {
   return PICTURE_TYPES[mime] === true;
 }
+
 // ../contracts/src/dispatch-tools.ts
 function dispatchToolSchema(spec, z, opts) {
   const shape = spec.arguments(z);
@@ -36720,6 +36644,25 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     },
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
+}
+var ARTIFACT_OWNER_AND_SOURCE_RULE = "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+var CONTENT_IS_MARKDOWN = "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
+var PATH_KEEPS_BYTES = "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
+var ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
+var NAME_EXTENSION = /\.([^\s.]+)$/u;
+var MARKDOWN_EXTENSION = /^(md|markdown)$/i;
+var artifactOwner = documentOwnerValidation(false);
+function artifactProblem(value) {
+  const input = value;
+  if (!artifactOwner.check(value) || typeof input.path === "string" === (typeof input.content === "string")) {
+    return ARTIFACT_OWNER_AND_SOURCE_RULE;
+  }
+  if (typeof input.content !== "string" || typeof input.name !== "string")
+    return;
+  const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
+  if (extension === undefined || MARKDOWN_EXTENSION.test(extension))
+    return;
+  return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
 }
 var documentEditOwner = documentOwnerValidation(true);
 var documentEditValidation = {
@@ -36768,7 +36711,7 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
-var readOwner = documentOwnerValidation(true);
+var readOwner = documentOwnerValidation(false);
 var readValidation = {
   check: (value) => {
     const input = value;
@@ -36776,7 +36719,7 @@ var readValidation = {
       return readOwner.check(value);
     return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
+  message: "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " + "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it."
 };
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z) {
@@ -36793,6 +36736,39 @@ function imagesArgument(z, owner, cap) {
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 2000;
 var DISPATCH_BODY_MAX = 32000;
+var DISPATCH_HANDOFF_BODY_MAX = 262144;
+var HANDOFF_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+var HANDOFF_PHASE_RULE_WORDS = "a lowercase letter, then up to 31 lowercase letters, digits or hyphens, such as implement";
+var HANDOFF_PHASE_RULE = `phase is not a handoff phase: ${HANDOFF_PHASE_RULE_WORDS}`;
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+function handoffProblem(value) {
+  const { phase, body } = value;
+  if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase))
+    return HANDOFF_PHASE_RULE;
+  if (typeof body !== "string")
+    return;
+  const bytes = new TextEncoder().encode(body).length;
+  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
+    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
+  }
+  if (!isJsonObjectText(body)) {
+    return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
+  }
+  return;
+}
+var HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+var handoffValidation = {
+  check: (value) => handoffProblem(value) === undefined,
+  message: HANDOFF_RULE,
+  refusal: (value) => handoffProblem(value) ?? HANDOFF_RULE
+};
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -37000,9 +36976,9 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
-      reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
-      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " + "with a reference to one of its parts, instead.").optional(),
+      reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. A block " + "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " + "option or the answer carries) threads under that ask and names the part the reply " + "answers. Mutually exclusive with reply_to.").optional(),
+      turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'. human does not " + "apply to an approval request a newer version moved: it stays with you until dispatch " + "request-approval hands it back at the current version.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
@@ -37048,7 +37024,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37108,27 +37084,25 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version, and so does uploading a document's slug (plan-md for plan.md). Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + `${ARTIFACT_CONTENT_NAME_RULE} ` + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
-      content: z.string().describe("Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
+      content: z.string().describe("Inline text to store as a Markdown document, under a name ending in .md or .markdown or with no extension; a CR LF or a lone carriage return in it is stored as a line feed.").optional(),
       summary: z.string().describe("Optional version summary.").optional()
     }),
     validation: {
-      check: (value) => {
-        const input = value;
-        return documentOwnerValidation(false).check(value) && typeof input.path === "string" !== (typeof input.content === "string");
-      },
-      message: "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document."
+      check: (value) => artifactProblem(value) === undefined,
+      message: `${ARTIFACT_OWNER_AND_SOURCE_RULE} ${ARTIFACT_CONTENT_NAME_RULE}`,
+      refusal: (value) => artifactProblem(value) ?? ARTIFACT_OWNER_AND_SOURCE_RULE
     }
   },
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` + "--events N lists the last N, and --all-events every one. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " + "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " + "reads `No block <id> in <document>.` " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37254,8 +37228,309 @@ var dispatchToolSpecs = [
     description: "Who Dispatch takes this session for: {session, owner, service, project}. session is the session Dispatch records your writes as. It is the session your credential proved, and the tool says so when that is not the session you run in. owner is the lowercase email of the person you act for, and is the first choice of assignee for issues you create. owner is null under the shared token. With a null owner, a create with no assignee falls back to the parent's assignee and then to the project's default assignee. service is the subject of the verified service-account token that authenticated you, or null. project is the one project key your credential may write, or null when it names none.",
     arguments: () => ({}),
     strict: true
+  },
+  {
+    name: "dispatch_handoff_write",
+    example: {
+      issue: "DSP-1",
+      phase: "implement",
+      body: '{"schemaVersion":1,"phase":"implement","issue":"DSP-1"}'
+    },
+    description: "Record this session's handoff for one phase of an issue: the body, one JSON object, is " + "stored on the issue exactly as sent, under this session, and read back byte for byte. Each " + "write is the next version (1, 2, ...) of that phase's handoff; earlier versions stay. Write " + "the body to a file outside your workspace and pass it with --body-file (- reads stdin). A " + "closed issue refuses it with 409 ISSUE_CLOSED, and a body over " + `${DISPATCH_HANDOFF_BODY_MAX} bytes with 413 CAP_EXCEEDED. Read it back with dispatch ` + `handoff-read. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The phase the handoff ends: a lowercase slug such as plan, implement, test or review."),
+      body: z.string({ min: 1 }).describe(`The handoff: one JSON object, at most ${DISPATCH_HANDOFF_BODY_MAX} bytes, stored and read back exactly as sent.`)
+    }),
+    validation: handoffValidation,
+    strict: true
+  },
+  {
+    name: "dispatch_handoff_read",
+    example: { issue: "DSP-1", phase: "implement" },
+    description: "Read the newest handoff recorded for one phase of an issue, or the version you name: one " + "line naming the phase, version, id, the session that wrote it and when, then the body " + "exactly as stored. A closed issue's handoffs read too. A phase with no handoff, or no " + `such version, is 404 HANDOFF_NOT_FOUND. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      phase: z.string().describe("The handoff's phase: a lowercase slug such as plan, implement, test or review."),
+      version: z.number({ int: true, min: 1 }).describe("The version to read, from 1; omit it to read the newest.").optional()
+    }),
+    validation: handoffValidation,
+    strict: true
   }
 ];
+
+// ../contracts/src/dispatch-block-ref.ts
+var encoder = new TextEncoder;
+function encodeBlockId(id) {
+  let encoded = "";
+  for (const character of id) {
+    for (const byte of encoder.encode(character)) {
+      const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
+      encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
+  }
+  return encoded;
+}
+var MAX_BLOCK_ID_BYTES = 256;
+function decodeBlockId(encoded) {
+  if (encoded === "" || encoded.includes("@")) {
+    return;
+  }
+  let id;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+var MAX_BLOCK_PIN = 9223372036854775807n;
+function parseBlockFragment(encoded) {
+  const at = encoded.indexOf("@");
+  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
+  if (at !== -1 && (pin === undefined || BigInt(pin) > MAX_BLOCK_PIN)) {
+    return;
+  }
+  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
+  if (block === undefined) {
+    return;
+  }
+  return pin === undefined ? { block } : { block, pin };
+}
+var PROJECT_KEY = PROJECT_KEY_PATTERN.source.slice(1, -1);
+var ISSUE_KEY = `${PROJECT_KEY}-[1-9][0-9]*`;
+var DOCUMENT_SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
+var ISSUE_KEY_ONLY = new RegExp(`^${ISSUE_KEY}$`);
+var BLOCK_REFERENCE = new RegExp(`^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`, "s");
+var ITEM_BLOCK_REFERENCE = new RegExp(`^dispatch://(?:${ISSUE_KEY}/(ask|comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(ask|comment))/([^/?#]+)#b-(.*)$`, "s");
+var atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;
+var DISPATCH_BLOCK_POINTER_VALUES = [
+  {
+    value: "dispatch://CORE-1/spec#b-x",
+    ok: true,
+    why: "a block of an issue's primary document"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md#b-x",
+    ok: true,
+    why: "a block of an issue's document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md#b-x",
+    ok: true,
+    why: "a block of a project's document"
+  },
+  {
+    value: "dispatch://CORE/artifact/spec#b-x",
+    ok: true,
+    why: "a project's document whose slug is spec"
+  },
+  { value: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1", ok: true, why: "a Unicode id" },
+  { value: "dispatch://CORE-1/spec#b-x@v2", ok: true, why: "a pinned block" },
+  { value: "dispatch://CORE-1/spec#b-x@v9223372036854775807", ok: true, why: "the largest pin" },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
+    ok: true,
+    why: "two references separated by one space"
+  },
+  { value: "", ok: true, why: "no pointers" },
+  { value: atIdBound, ok: true, why: "an id of exactly 256 bytes" },
+  {
+    value: "dispatch://CORE-1/artifact/spec#b-x",
+    ok: false,
+    why: "an issue's primary document is written /spec"
+  },
+  { value: "dispatch://CORE-1/spec", ok: false, why: "a document, not a block" },
+  {
+    value: "dispatch://agent/s1/artifact/x#b-y",
+    ok: false,
+    why: "an agent's document has no blocks to point at"
+  },
+  { value: "dispatch://CORE-1/spec#b-d%c3%a9", ok: false, why: "lower-case hex" },
+  { value: "dispatch://CORE-1/spec#b-%41", ok: false, why: "an over-encoded ASCII letter" },
+  { value: "dispatch://CORE-1/spec#b-x%2Dy", ok: false, why: "an over-encoded -" },
+  { value: "dispatch://CORE-1/spec#b-%FF", ok: false, why: "invalid UTF-8" },
+  { value: "dispatch://CORE-1/spec#b-%0A", ok: false, why: "a control character" },
+  { value: "dispatch://CORE-1/spec#x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#c-x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#b-", ok: false, why: "an empty id" },
+  { value: `${atIdBound}x`, ok: false, why: "an id over 256 bytes" },
+  { value: "dispatch://CORE-1/artifact/notes-md@v2#b-x", ok: false, why: "a versioned document" },
+  { value: "dispatch://CORE-1#b-x", ok: false, why: "an issue names no document" },
+  {
+    value: "dispatch://CORE-1/spec#b-x@v9223372036854775808",
+    ok: false,
+    why: "a pin past the largest"
+  },
+  { value: "dispatch://CORE-1/spec#b-x@v01", ok: false, why: "a pin with a leading zero" },
+  { value: "dispatch://CORE-1/spec#b-x@v0", ok: false, why: "a pin of zero" },
+  {
+    value: "https://dispatch.example/issues/CORE-1/spec#b-x",
+    ok: false,
+    why: "a dashboard URL of a block"
+  },
+  { value: "dispatch://CORE-1/spec#b-x.", ok: false, why: "trailing punctuation" },
+  { value: "dispatch://CORE-1/spec#b-x)", ok: false, why: "a trailing parenthesis" },
+  {
+    value: "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "references joined by a comma"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
+    ok: false,
+    why: "a repeated reference"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a doubled space"
+  },
+  { value: " dispatch://CORE-1/spec#b-x", ok: false, why: "a leading space" },
+  { value: "dispatch://CORE-1/spec#b-x ", ok: false, why: "a trailing space" },
+  {
+    value: "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a tab between references"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x\uFEFFdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "U+FEFF between references"
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+    ok: false,
+    why: "a block of an issue's comment",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
+    ok: false,
+    why: "a block of a revision of an issue's comment",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    ok: false,
+    why: "a block of a project document's comment",
+    problem: "is a block of a comment: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a block of an issue message",
+    problem: "is a block of a message: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2",
+    ok: false,
+    why: "a part of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b2@v1",
+    ok: false,
+    why: "a part of a revision of an issue's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2",
+    ok: false,
+    why: "a part of a project document's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999#b-b2@v1",
+    ok: false,
+    why: "a part of a revision of a project document's ask",
+    problem: "is a block of an ask: a block[] attribute points only at a block of a document"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/ask/a1#b-b2",
+    ok: false,
+    why: "an issue document's ask, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one"
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
+    ok: false,
+    why: "an issue document's comment, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one"
+  },
+  {
+    value: "dispatch://CORE-1/comment/%ZZ#b-x",
+    ok: false,
+    why: "a comment id that does not decode",
+    problem: "is not a block reference as Dispatch writes one"
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a document's block, then an issue message's",
+    problem: "is a block of a message: a block[] attribute points only at a block of a document"
+  }
+];
+var TYPED_BLOCK_ID_SHORTCUT_EXCLUDED = `	
+\r "#&'.<=>\`}`;
+function typedBlockIdAttribute(id) {
+  if (id !== "" && ![...TYPED_BLOCK_ID_SHORTCUT_EXCLUDED].some((stop) => id.includes(stop))) {
+    return `#${id}`;
+  }
+  const value = id.replaceAll("&", "&amp;").replaceAll('"', "&#x22;").replaceAll(`
+`, "&#xA;").replaceAll("\r", "&#xD;");
+  return `id="${value}"`;
+}
+// ../contracts/src/dispatch-snippet.ts
+var HTML_ENTITIES = [
+  ["&lt;", "<"],
+  ["&gt;", ">"],
+  ["&#39;", "'"],
+  ["&#34;", '"'],
+  ["&amp;", "&"]
+];
+function decodeEntities(text) {
+  let decoded = text;
+  for (const [entity, character] of HTML_ENTITIES) {
+    decoded = decoded.replaceAll(entity, character);
+  }
+  return decoded;
+}
+function hasOnlyBalancedMarkers(snippet) {
+  let marked = false;
+  for (const marker of snippet.matchAll(/<mark>|<\/mark>/gu)) {
+    if (marker[0] === "<mark>") {
+      if (marked)
+        return false;
+      marked = true;
+    } else {
+      if (!marked)
+        return false;
+      marked = false;
+    }
+  }
+  return !marked;
+}
+function snippetSegments(snippet) {
+  if (!hasOnlyBalancedMarkers(snippet)) {
+    return snippet === "" ? [] : [{ text: decodeEntities(snippet), mark: false }];
+  }
+  let mark = false;
+  const segments = [];
+  for (const part of snippet.split(/(<mark>|<\/mark>)/u)) {
+    if (part === "<mark>") {
+      mark = true;
+    } else if (part === "</mark>") {
+      mark = false;
+    } else if (part !== "") {
+      segments.push({ text: decodeEntities(part), mark });
+    }
+  }
+  return segments;
+}
+function snippetText(snippet) {
+  return snippetSegments(snippet).map(({ text, mark }) => mark ? `**${text}**` : text).join("");
+}
 // ../contracts/src/envelope.ts
 var isSubject = (value) => typeof value === "string" && value.length > 0;
 var EnvelopeSchema = object({
@@ -37325,6 +37600,7 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+var GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr.";
 
 // ../contracts/src/legion-roles.ts
 var LEGION_ROLES = [
@@ -38085,7 +38361,8 @@ function fieldKinds(spec) {
       nullable,
       required: required.has(field),
       ...description === undefined ? {} : { description },
-      ...values === undefined ? {} : { values }
+      ...values === undefined ? {} : { values },
+      shape: inner === undefined ? [] : shapeLines(inner, "")
     });
   }
   return fields;
@@ -38119,6 +38396,58 @@ function kindOf(field, node) {
     default:
       return "json";
   }
+}
+function withoutNull(node) {
+  const members = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+  return members.length === 1 ? members[0] : undefined;
+}
+function typeName(node) {
+  if (node.anyOf !== undefined)
+    return node.anyOf.map(typeName).join(" or ");
+  if (node.enum !== undefined)
+    return node.enum.map(String).join("|");
+  switch (node.type) {
+    case "string":
+      return "text";
+    case "integer":
+    case "number":
+    case "boolean":
+    case "null":
+      return node.type;
+    case "object":
+      return "object";
+    case "array":
+      return node.items === undefined ? "list" : `list of ${pluralTypeName(node.items)}`;
+    default:
+      return "any JSON";
+  }
+}
+function pluralTypeName(node) {
+  if (node.type === "object")
+    return "objects";
+  if (node.type === "integer")
+    return "integers";
+  if (node.type === "number")
+    return "numbers";
+  return typeName(node);
+}
+function shapeLines(node, indent) {
+  const item = node.type === "array" ? node.items : undefined;
+  const properties = (item ?? node).properties;
+  if (properties === undefined)
+    return [];
+  const required = new Set((item ?? node).required ?? []);
+  return [
+    `${indent}${item === undefined ? "Its keys:" : "Each item's keys:"}`,
+    ...Object.entries(properties).flatMap(([key, child]) => {
+      const about = [required.has(key) ? "required" : undefined, typeName(child)].filter((part) => part !== undefined).join("; ");
+      const inner = withoutNull(child);
+      return [
+        `${indent}  ${key} (${about})${child.description === undefined ? "" : `: ${child.description}`}`,
+        ...inner === undefined ? [] : shapeLines(inner, `${indent}    `)
+      ];
+    })
+  ];
 }
 function singular(field) {
   return field.endsWith("s") ? field.slice(0, -1) : field;
@@ -38167,10 +38496,17 @@ function flagTable(tool, fields) {
         field,
         action: "json",
         value: "<json>",
-        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
+        text: [`Every option as a JSON list, in place of --${singular(name)}.`, ...info.shape].join(`
+`)
       });
     } else if (kind === "json") {
-      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: [about, ...info.shape].filter((line) => line !== "").join(`
+`)
+      });
       add(`--${name}-json-file`, {
         field,
         action: "json-file",
@@ -38263,7 +38599,7 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (ISSUE_KEY.test(token) && surface.flags.has("--issue")) {
+      if (ISSUE_KEY2.test(token) && surface.flags.has("--issue")) {
         if (index === 0) {
           if (claim("issue", `the issue key ${token}`, false))
             args["issue"] = token;
@@ -38382,7 +38718,7 @@ function appendedItem(kind, flag, value, number) {
   const parsed = number(flag, value);
   return parsed === undefined ? undefined : { value: parsed };
 }
-var ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+var ISSUE_KEY2 = /^[A-Z][A-Z0-9]*-\d+$/;
 function quoteWord(value) {
   return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -38448,7 +38784,8 @@ function commandHelp(tool) {
     surface.spec.description,
     "",
     "Flags:",
-    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]),
+    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, ...row.text.split(`
+`).map((line) => `      ${line}`)]),
     "",
     `Example: ${commandLine(tool, surface.spec.example)}`,
     ""
@@ -38508,22 +38845,25 @@ class DispatchWriteUnsettledError extends Error {
   last;
   attempts;
   name = "DispatchWriteUnsettledError";
-  constructor(last, attempts, unanswered) {
+  constructor(last, attempts, unanswered, keyed = false) {
     let answer;
     let why = "an earlier attempt of the write may have reached Dispatch";
     if (last instanceof DispatchGatewayError) {
       answer = last.answer;
+    } else if (last instanceof DispatchServiceError && last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+      answer = last.code;
+      why = "Dispatch was still running an earlier attempt of the write";
     } else if (last instanceof DispatchServiceError) {
       answer = `${last.code}: ${last.message}`;
-      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
-        why = "Dispatch was still running an earlier attempt of the write";
-      }
     } else {
       answer = unanswered ?? last.message;
       why = "an attempt of the write may have reached Dispatch";
     }
     const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
-    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    const next = keyed ? ". Dispatch finishes an attempt it received whatever this command does, so read the " + "write back before you send it again: a new command sends it under a new key." : ": check whether it did before retrying it.";
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect${next}`, {
+      cause: last
+    });
     this.last = last;
     this.attempts = attempts;
   }
@@ -38558,7 +38898,9 @@ function requestSignal(signal) {
 var DISPATCH_WRITE_RETRY = {
   pausesMs: [1000, 2000, 4000, 8000],
   withinMs: 30000,
-  silenceMs: 20000
+  silenceMs: 20000,
+  inFlightPauseMs: 3000,
+  inFlightWithinMs: 55000
 };
 function pauseFor(ms, signal) {
   const { promise, resolve, reject } = Promise.withResolvers();
@@ -38588,6 +38930,35 @@ var KEYED_LAYER_MEMORY_MS = 5 * 60000;
 var KEYED_LAYER_SEEN = new Map;
 var KEYED_LAYER_PROBES = new Map;
 var KEY_LAYER_PROBE_MS = 5000;
+function keyedLayerMemory() {
+  const wall = Date.now();
+  const now = performance.now();
+  const kept = {};
+  for (const [origin, seen] of KEYED_LAYER_SEEN) {
+    const age = now - seen;
+    if (age >= 0 && age < KEYED_LAYER_MEMORY_MS) {
+      kept[origin] = new Date(wall - age).toISOString();
+    }
+  }
+  return kept;
+}
+function rememberKeyedLayer(saved) {
+  if (typeof saved !== "object" || saved === null)
+    return;
+  const wall = Date.now();
+  const now = performance.now();
+  for (const [origin, at] of Object.entries(saved)) {
+    if (typeof at !== "string")
+      continue;
+    const age = wall - Date.parse(at);
+    if (!(age >= 0 && age < KEYED_LAYER_MEMORY_MS))
+      continue;
+    const seen = now - age;
+    const known = KEYED_LAYER_SEEN.get(origin);
+    if (known === undefined || known < seen)
+      KEYED_LAYER_SEEN.set(origin, seen);
+  }
+}
 function keyEchoed(response, key) {
   const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
   return echoed.replace(/^"(.*)"$/, "$1") === key;
@@ -38624,7 +38995,7 @@ var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
 async function writeAnswer(response, key) {
   const echoed = keyEchoed(response, key);
   if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
-    return { response, again: false, reached: false, echoed, unjudged: false };
+    return { response, again: false, reached: false, running: false, echoed, unjudged: false };
   }
   const { status } = response;
   const text = await response.text();
@@ -38637,6 +39008,7 @@ async function writeAnswer(response, key) {
     }
   }
   const again = retriesUnderKey(status, shape.code);
+  const running = again && status === 409;
   return {
     response: new Response(text, {
       status,
@@ -38644,7 +39016,8 @@ async function writeAnswer(response, key) {
       headers: response.headers
     }),
     again,
-    reached: status >= 500 || again && status === 409,
+    reached: status >= 500 || running,
+    running,
     echoed,
     unjudged: !echoed && typeof shape.error === "string"
   };
@@ -38737,12 +39110,14 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
+  #madeAt;
   constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.writeRetry = writeRetry;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#madeAt = this.#now();
   }
   async issue(input) {
     const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
@@ -39054,6 +39429,26 @@ class DispatchClient {
   async getComments(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
+  async writeHandoff(issue, phase, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs", phase], input);
+  }
+  async listHandoffs(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "handoffs"]);
+  }
+  async latestHandoff(issue, phase) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "handoffs",
+      phase,
+      "latest"
+    ]);
+  }
+  async handoff(id) {
+    return this.#json("GET", ["api", "v1", "handoffs", id]);
+  }
   async getIssueReferences(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
   }
@@ -39126,10 +39521,16 @@ class DispatchClient {
     }
     const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
-    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const { pausesMs, withinMs, silenceMs, inFlightPauseMs, inFlightWithinMs } = this.writeRetry;
+    const pause = this.writeRetry.pause ?? pauseFor;
     const request = `${method} ${url}`;
     const started = this.#now();
+    const bodyBytes = body === undefined ? 0 : typeof body.content === "string" ? Buffer.byteLength(body.content) : body.content.byteLength;
+    const upload = bodyBytes >= STREAMED_BODY_MIN;
+    const lastAsk = this.#madeAt + inFlightWithinMs;
     let reached = false;
+    let running = false;
+    let sawKeyedLayer = false;
     for (let attempt = 1;; attempt++) {
       let answer;
       let thrown;
@@ -39140,33 +39541,42 @@ class DispatchClient {
         if (!answer.again)
           return answer.response;
         reached ||= answer.reached;
+        running ||= answer.running && !upload;
+        sawKeyedLayer ||= answer.echoed;
       } catch (error) {
         const name = error instanceof Error || error instanceof DOMException ? error.name : "";
         if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
-          throw this.#ended(error, request, attempt, true);
+          throw this.#ended(error, request, attempt, true, sawKeyedLayer);
         }
         thrown = error;
         reached = true;
+        running ||= error instanceof WriteAttemptSilent && !upload;
       }
-      const scheduled = pausesMs[attempt - 1];
+      const scheduled = running ? Math.min(pausesMs[attempt - 1] ?? inFlightPauseMs, inFlightPauseMs) : pausesMs[attempt - 1];
       const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
-      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
-      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+      const latest = Math.min(started + (running ? inFlightWithinMs : withinMs), lastAsk);
+      let again = scheduled !== undefined && this.#now() + wait <= latest;
+      if (again) {
+        again = answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false);
+        sawKeyedLayer ||= again;
+        again &&= this.#now() + wait <= latest;
+      }
+      if (again) {
+        try {
+          await pause(wait, this.#signal);
+        } catch (error) {
+          throw this.#ended(error, request, attempt, reached, sawKeyedLayer);
+        }
+        again = this.#now() <= latest;
+      }
+      if (!again) {
         if (answer !== undefined) {
-          return this.#unsettled(method, url, answer.response, reached, attempt);
+          return this.#unsettled(method, url, answer.response, reached, attempt, sawKeyedLayer);
         }
         if (thrown instanceof WriteAttemptSilent) {
-          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`, sawKeyedLayer);
         }
         throw thrown;
-      }
-      await answer?.response.body?.cancel().catch(() => {
-        return;
-      });
-      try {
-        await pause(wait, this.#signal);
-      } catch (error) {
-        throw this.#ended(error, request, attempt, reached);
       }
     }
   }
@@ -39199,12 +39609,12 @@ class DispatchClient {
       clearTimeout(timer);
     }
   }
-  #ended(error, request, attempts, mayHaveReached) {
+  #ended(error, request, attempts, mayHaveReached, keyed) {
     const reason = this.#signal.aborted ? this.#signal.reason : error;
     const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
     if (!timedOut || !mayHaveReached || !(error instanceof Error))
       return error;
-    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`, keyed);
   }
   async#runsKeyedLayer(unjudged) {
     const origin = this.#baseUrl;
@@ -39238,12 +39648,12 @@ class DispatchClient {
       return false;
     }
   }
-  async#unsettled(method, url, response, reached, attempts) {
+  async#unsettled(method, url, response, reached, attempts, keyed) {
     const refusal = await this.#response(method, url, response).catch((error) => error);
     if (reached && refusal instanceof DispatchServiceError) {
       const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
       if (!landedAlone)
-        throw new DispatchWriteUnsettledError(refusal, attempts);
+        throw new DispatchWriteUnsettledError(refusal, attempts, undefined, keyed);
     }
     throw refusal;
   }
@@ -39324,6 +39734,7 @@ function dispatchIssueRef(key) {
 function dispatchDocumentRef(owner, slug) {
   return `dispatch://${owner}/artifact/${slug}`;
 }
+var ITEM_KINDS = ["ask", "comment", "message"];
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
@@ -39335,7 +39746,7 @@ function parseBlockRef(holder, fragment) {
   }
   const pin = target.pin === undefined ? {} : { pin: target.pin };
   const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
-  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+  if (parsed.kind === "ask" || parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
     return {
       owner: parsed.owner,
       kind: "block",
@@ -40248,24 +40659,2239 @@ ${trailer}`,
   };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function followedAsk(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  if (typeof issue === "string" && issue !== "")
+    return { ask, owner: issueTopic(issue) };
+  if (typeof document !== "string")
+    return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope;
+  try {
+    envelope = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope !== "object" || envelope === null)
+    return;
+  const { source, payload } = envelope;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
+// ../envoy-client/src/stream-topics.ts
+var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
+var STREAM_SUBJECT_PREFIXES = [
+  AGENT_TOPIC_PREFIX,
+  DISPATCH_TOPIC_PREFIX,
+  "notifications.github.",
+  "notifications.slack.",
+  LEGION_NOTICE_TOPIC_PREFIX,
+  GHOSTWISPR_TOPIC_PREFIX,
+  "notifications.whatsapp.",
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}`
+];
+function streamStores(topic) {
+  return STREAM_SUBJECT_PREFIXES.some((prefix) => topic.length > prefix.length && topic.startsWith(prefix));
+}
+
+// ../envoy-client/src/envoy-config.ts
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync as readFileSync2,
+  readlinkSync,
+  rmSync,
+  statSync
+} from "fs";
+import { homedir, tmpdir } from "os";
+import * as path from "path";
+
+// ../envoy-client/src/json-position.ts
+function jsonErrorPosition(text) {
+  let at = 0;
+  const fail = () => {
+    throw new RangeError("not JSON");
+  };
+  const space = () => {
+    while (at < text.length && ` 	
+\r`.includes(text.charAt(at)))
+      at += 1;
+  };
+  const expect = (char) => {
+    if (text.charAt(at) !== char)
+      fail();
+    at += 1;
+  };
+  const string = () => {
+    expect('"');
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '"') {
+        at += 1;
+        return;
+      }
+      if (char < " ")
+        fail();
+      at += char === "\\" ? 2 : 1;
+    }
+    fail();
+  };
+  const value = () => {
+    space();
+    const char = text.charAt(at);
+    if (char === "{" || char === "[") {
+      const close = char === "{" ? "}" : "]";
+      at += 1;
+      space();
+      if (text.charAt(at) === close) {
+        at += 1;
+        return;
+      }
+      for (;; ) {
+        if (close === "}") {
+          space();
+          string();
+          space();
+          expect(":");
+        }
+        value();
+        space();
+        if (text.charAt(at) === ",") {
+          at += 1;
+          continue;
+        }
+        expect(close);
+        return;
+      }
+    }
+    if (char === '"') {
+      string();
+      return;
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    const number = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
+    if (number === null)
+      fail();
+    at += number?.[0].length ?? 0;
+  };
+  try {
+    value();
+    space();
+    if (at < text.length)
+      fail();
+    return;
+  } catch {
+    const before = text.slice(0, at).split(`
+`);
+    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
+  }
+}
+
+// ../envoy-client/src/secret-file.ts
+import { readFileSync } from "fs";
+function sendable(value) {
+  return !/[\s\p{Cc}]/u.test(value);
+}
+function readSecretFile(variable, filePath) {
+  let contents;
+  try {
+    contents = readFileSync(filePath, "utf8");
+  } catch (error) {
+    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
+  }
+  const value = contents.trim();
+  if (value.length === 0)
+    throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (!sendable(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
+  return value;
+}
+
+// ../envoy-client/src/envoy-config.ts
+var COMMAND_TIMEOUT_MS = 1e4;
+function nonEmpty(value) {
+  return value === undefined || value === "" ? undefined : value;
+}
+function absolute(name, value) {
+  if (value !== undefined && !path.isAbsolute(value)) {
+    throw new Error(`${name} is ${value}, which is not an absolute path`);
+  }
+  return value;
+}
+function neutralConfig(env) {
+  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
+  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
+  }
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
+}
+var HARNESS_DIRECTORY_VARIABLE = {
+  omp: "PI_CODING_AGENT_DIR",
+  claude: "CLAUDE_CONFIG_DIR"
+};
+var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
+function namedDirectory(harness, env) {
+  if (harness === "omp") {
+    const profile = nonEmpty(env.OMP_PROFILE);
+    if (profile === undefined || profile === "default")
+      return;
+  }
+  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
+}
+function harnessDirectory(harness, env) {
+  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
+      continue;
+    }
+    const directory = namedDirectory(plugin, env);
+    if (directory !== undefined)
+      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
+  }
+  return;
+}
+function handedConfigPath(env) {
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+}
+function envoyConfigPath(harness, env) {
+  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
+  if (handedFirst !== undefined)
+    return handedFirst;
+  const directory = harnessDirectory(harness, env);
+  if (directory !== undefined)
+    return path.resolve(directory, "envoy.json");
+  const handed = handedConfigPath(env);
+  if (handed !== undefined)
+    return handed;
+  const neutral = neutralConfig(env);
+  if ("error" in neutral)
+    throw new Error(neutral.error);
+  return neutral.path;
+}
+var httpUrlSchema = url({ protocol: /^https?$/, error: "must be an http or https URL" });
+var DispatchSectionSchema = strictObject({
+  enabled: boolean2().optional(),
+  serverUrl: httpUrlSchema.optional(),
+  token: string2().optional()
+});
+var EnvoySectionSchema = strictObject({
+  enabled: boolean2().optional(),
+  url: httpUrlSchema.optional(),
+  natsUrls: array(string2().trim().min(1, "must not be empty")).optional(),
+  token: string2().optional(),
+  natsSeed: string2().optional()
+});
+var EnvoyFileSchema = looseObject({
+  $schema: string2().optional(),
+  dispatch: DispatchSectionSchema.optional(),
+  envoy: EnvoySectionSchema.optional()
+});
+var CheckoutFileSchema = looseObject({
+  $schema: string2().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
+var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
+function offWithNotice(notice) {
+  return { enabled: false, notice, error: null };
+}
+function offWithError(error) {
+  return { enabled: false, notice: null, error };
+}
+function httpUrl2(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return;
+  }
+  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
+}
+function describeSchemaIssue(filePath, error) {
+  const issue = error.issues[0];
+  if (!issue)
+    return `${filePath}: invalid envoy.json`;
+  if (issue.code === "unrecognized_keys") {
+    const section = issue.path.join(".");
+    const keys = issue.keys.map((key) => `${section}.${key}`).join(", ");
+    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
+  }
+  return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
+}
+function danglingLink(filePath) {
+  try {
+    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function parseFile(filePath, schema, checkout) {
+  let raw;
+  try {
+    raw = readFileSync2(filePath, "utf-8");
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
+      return { kind: "absent", link: danglingLink(filePath) };
+    }
+    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error)})` };
+  }
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    return {
+      kind: "invalid",
+      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
+    };
+  }
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+    return {
+      kind: "invalid",
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+    };
+  }
+  const parsed = schema.safeParse(parsedJson);
+  if (!parsed.success) {
+    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
+  }
+  return { kind: "valid", settings: parsed.data };
+}
+var FAILURE_KEPT_MS = 60000;
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
+var processGlobal = globalThis;
+var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
+processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+function runCommand(command, env, cwd) {
+  const childEnv = {};
+  for (const [name, variable] of Object.entries(env)) {
+    if (variable !== undefined)
+      childEnv[name] = variable;
+  }
+  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
+  try {
+    chmodSync(directory, 448);
+    const output = path.join(directory, "stdout");
+    const fd = openSync(output, "wx", 384);
+    let result;
+    try {
+      result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        cwd,
+        env: childEnv,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: "ignore",
+        timeout: COMMAND_TIMEOUT_MS,
+        detached: true
+      });
+    } catch (error) {
+      return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
+    if (result.exitedDueToTimeout) {
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true
+      };
+    }
+    if (!result.success) {
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false
+      };
+    }
+    const value = readFileSync2(output, "utf-8").trim();
+    if (value.length === 0)
+      return { failure: "printed nothing", timedOut: false };
+    if (!sendable(value)) {
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false
+      };
+    }
+    return { value };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+function fileValue(value, field, filePath, env, commands = "run") {
+  if (!value.startsWith("!")) {
+    if (!sendable(value)) {
+      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
+    }
+    return value;
+  }
+  const command = value.slice(1);
+  const cwd = path.dirname(path.resolve(filePath));
+  const key = JSON.stringify([command, filePath, cwd]);
+  let outcome = commandOutcomes.get(key);
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
+    commandOutcomes.set(key, outcome);
+  }
+  if ("failure" in outcome)
+    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
+}
+function statDevice(directory) {
+  try {
+    return statSync(directory).dev;
+  } catch {
+    return;
+  }
+}
+function moveNotice(oldFile, newFile, move, deviceOf) {
+  const oldDevice = deviceOf(path.dirname(oldFile));
+  let ancestor = path.dirname(newFile);
+  let newDevice = deviceOf(ancestor);
+  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+    newDevice = deviceOf(ancestor);
+  }
+  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
+    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
+  }
+  return `${oldFile} is not read: ${move}`;
+}
+function oldUserFileNotice(filePath, env, deviceOf) {
+  const home = nonEmpty(env.HOME) ?? homedir();
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return;
+  const selected = path.resolve(filePath);
+  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
+  if (selected === userFile) {
+    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
+  }
+  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
+  if (profileFile) {
+    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
+  }
+  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
+  const neutral = neutralConfig(env);
+  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
+    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
+  }
+  return;
+}
+function missingConfigNotice(filePath, missing, off) {
+  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
+  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
+}
+function readEnvoyConfig(filePath, env, options) {
+  const deviceOf = options.deviceOf ?? statDevice;
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  if (chosen.kind === "invalid")
+    return { kind: "failed", path: filePath, error: chosen.reason };
+  const resolvedChosen = path.resolve(filePath);
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own = chosen.kind === "valid" ? chosen.settings : {};
+  let checkout = null;
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
+    checkout = {
+      kind: "valid",
+      path: checkoutPath,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
+    };
+  }
+  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
+    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
+  ] : [];
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
+  return {
+    kind: "read",
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout,
+    missing: chosen.kind === "absent" ? {
+      link: chosen.link,
+      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
+    } : null,
+    warnings
+  };
+}
+
+// ../envoy-client/src/bearer.ts
+function bearerSource(env, section, written) {
+  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
+  if (pointer !== undefined) {
+    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
+  }
+  const plain = nonEmpty(env[`${section}_TOKEN`]);
+  if (plain !== undefined) {
+    if (!sendable(plain)) {
+      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
+    }
+    return { kind: "variable", token: plain };
+  }
+  const bearer = written();
+  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
+}
+function fileBearer(bearer, url, section, env, commands = "run") {
+  const named = httpUrl2(url)?.origin;
+  const paired = httpUrl2(bearer.server)?.origin;
+  if (named !== paired) {
+    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
+  }
+  if (bearer.checkout && bearer.token.startsWith("!")) {
+    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
+  }
+  if (bearer.token === "") {
+    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
+  }
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
+}
+
+// ../envoy-client/src/envoy-settings.ts
+var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+function natsSeedFromEnvironment(env) {
+  const { NATS_NKEY_SEED_FILE: file, NATS_NKEY_SEED: plain } = env;
+  if (file !== undefined) {
+    if (file === "")
+      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
+    return {
+      value: readSecretFile("NATS_NKEY_SEED_FILE", file),
+      source: `NATS_NKEY_SEED_FILE (${file})`
+    };
+  }
+  if (plain === undefined)
+    return;
+  const value = plain.trim();
+  if (value.length === 0)
+    throw new Error("NATS_NKEY_SEED is set but empty");
+  return { value, source: "NATS_NKEY_SEED" };
+}
+var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+var NO_NATS_CONNECTION = "this session opens no NATS connection";
+function natsServerKey(url) {
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url);
+  if (match === null)
+    return url;
+  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
+  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
+}
+function natsCredential(env, section, namedNatsUrls, filePath) {
+  const fromEnvironment = natsSeedFromEnvironment(env);
+  if (fromEnvironment !== undefined || section.natsSeed === undefined)
+    return fromEnvironment;
+  if (namedNatsUrls.length > 0) {
+    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
+    const named = new Set(namedNatsUrls.map(natsServerKey));
+    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
+      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
+    }
+  }
+  return {
+    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
+    source: `envoy.natsSeed in ${filePath}`
+  };
+}
+function envoySettings(env, config, options = {}) {
+  if (config.kind === "failed")
+    return offWithError(config.error);
+  const section = config.envoy;
+  if (section.enabled === false) {
+    return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
+  }
+  const namedUrl = nonEmpty(env.ENVOY_URL);
+  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url) => url.trim()).filter((url) => url.length > 0);
+  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
+  if (!addressed) {
+    return offWithNotice(config.missing === null ? `${config.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config.path, config.missing, "Envoy is off"));
+  }
+  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
+    return offWithError("ENVOY_URL must be an http or https URL");
+  }
+  const listener = section.url ?? DEFAULT_ENVOY_URL;
+  const url = namedUrl ?? listener;
+  let token;
+  try {
+    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
+      token: section.token,
+      field: "envoy.token",
+      path: config.path,
+      server: listener,
+      checkout: false
+    });
+    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let inbound;
+  if (options.nats === false)
+    inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0)
+    inbound = { off: NO_NATS_SERVER };
+  else {
+    try {
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config.path) };
+    } catch (error) {
+      inbound = { off: messageFor(error) };
+    }
+  }
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url),
+    token,
+    inbound,
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
+  };
+}
+function normalizeEnvoyUrl(value) {
+  return value.replace(/\/+$/, "");
+}
+
+// ../envoy-client/src/machine.ts
+import { hostname as hostname3 } from "os";
+function machineID() {
+  return process.env["ENVOY_MACHINE_ID"] || hostname3();
+}
+
+// ../envoy-client/src/transport.ts
+var DEFAULT_TIMEOUT_MS = 5000;
+var RETRY_DELAY_MS = 250;
+var REPLAY_TIMEOUT_MS = 1e4;
+var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+var InterestWireSchema = object({
+  session_id: string2(),
+  machine_id: string2(),
+  dir: string2(),
+  topics: array(string2()),
+  updated_at: number2().int().optional(),
+  warnings: array(string2()).optional()
+});
+var DeliveryAnswerWireSchema = discriminatedUnion("mode", [
+  object({
+    mode: literal("consumer"),
+    subject: string2().min(1),
+    stream_id: string2(),
+    gap: boolean2()
+  }),
+  object({ mode: literal("core"), reason: string2() })
+]);
+var SessionWireSchema = object({
+  session_id: string2(),
+  machine_id: string2(),
+  host: string2().optional(),
+  dir: string2(),
+  port: number2().int(),
+  title: string2(),
+  topics: array(string2()),
+  roles: array(string2()).optional(),
+  capabilities: array(string2()).optional(),
+  self_subscribed: boolean2(),
+  last_seen: number2().int().optional(),
+  plugin: string2().optional(),
+  plugin_version: string2().optional()
+});
+var RoleWireSchema = object({
+  role: string2(),
+  holder: string2(),
+  host: string2().optional(),
+  last_seen: number2().int()
+});
+var RoleHeldWireSchema = object({
+  error: string2(),
+  role: string2(),
+  holder: string2()
+});
+var ErrorWireSchema = object({
+  error: string2(),
+  code: string2().optional(),
+  expected: array(string2()).optional()
+});
+var EnvelopeResponseSchema = EnvelopeSchema.extend({
+  recipient: string2().optional(),
+  holder: string2().optional(),
+  duplicate: boolean2().optional()
+});
+var ReplayWireSchema = object({
+  stream: object({
+    id: string2().min(1).optional(),
+    created: string2(),
+    first_seq: number2().int().nonnegative(),
+    last_seq: number2().int().nonnegative()
+  }),
+  subjects: array(object({
+    subject: string2(),
+    messages: array(object({
+      seq: number2().int().positive(),
+      subject: string2(),
+      time: string2(),
+      data: string2()
+    })),
+    next_after: number2().int().nonnegative(),
+    more: boolean2(),
+    refused: string2().optional()
+  }))
+});
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
+function mergeInterestSources(registryTopics, liveTopics) {
+  const interests = new Map;
+  for (const topic of registryTopics) {
+    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
+  }
+  for (const topic of liveTopics) {
+    if (!interests.has(topic))
+      interests.set(topic, "live");
+  }
+  return interests;
+}
+function newClientInstanceID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function expandSubscriptionTopics(topics) {
+  const expanded = new Set;
+  for (const topic of topics) {
+    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
+    if (base === undefined || base.includes("*") || base.includes(">")) {
+      expanded.add(topic);
+      continue;
+    }
+    const segments = base.split(".");
+    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
+      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
+    }
+    expanded.add(base);
+    expanded.add(topic);
+  }
+  return [...expanded];
+}
+
+class EnvoyApiError extends Error {
+  details;
+  name = "EnvoyApiError";
+  expected;
+  code;
+  constructor(details) {
+    let parsed;
+    try {
+      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
+      if (result.success)
+        parsed = result.data;
+    } catch {}
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    this.details = details;
+    this.expected = parsed?.expected;
+    this.code = parsed?.code;
+  }
+}
+var mintedDedupeKey2 = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+
+class EnvoySendUnconfirmedError extends Error {
+  targetSessionID;
+  idempotencyKey;
+  attempts;
+  last;
+  name = "EnvoySendUnconfirmedError";
+  resendSafe;
+  constructor(targetSessionID, idempotencyKey, attempts, last) {
+    const got = last instanceof EnvoyApiError ? `the listener answered ${last.details.status} (${last.message})` : `the listener did not answer (${last instanceof Error ? last.message : String(last)})`;
+    const tried = attempts === 1 ? "on its only attempt" : `on the last of ${attempts} attempts`;
+    const resendSafe = mintedDedupeKey2.test(`agent.${targetSessionID.trim()}.${idempotencyKey}`);
+    const resend = resendSafe ? `Sending it again with idempotency_key ${idempotencyKey} within ` + `${DELIVERY_DUPLICATE_WINDOW_MS / 3600000} hours is the safe resend: Envoy drops it as ` + "a repeat if the first copy arrived (a recipient that restarted in between can rarely " + "see it twice)." : `Envoy cannot recognise a resend under idempotency_key ${idempotencyKey} as a repeat ` + "(the key is not a lower-case UUID, or the session id holds a dot): ask the recipient " + "whether it arrived before sending it again.";
+    super(`The send to ${targetSessionID} is not confirmed delivered: ${got} ${tried}. It may or may ` + `not have arrived. ${resend}`, { cause: last });
+    this.targetSessionID = targetSessionID;
+    this.idempotencyKey = idempotencyKey;
+    this.attempts = attempts;
+    this.last = last;
+    this.resendSafe = resendSafe;
+  }
+}
+function createEnvoyClient(config) {
+  const baseUrl = normalizeEnvoyUrl(config.baseUrl);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const apiToken = config.token;
+  const attempts = config.retry === false ? 1 : 2;
+  const attemptOnce = async (url, init, deadlineMs) => {
+    const headers = new Headers(init.headers);
+    if (apiToken)
+      headers.set("Authorization", `Bearer ${apiToken}`);
+    let response;
+    try {
+      response = await config.fetch(url, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(deadlineMs)
+      });
+    } catch (error) {
+      return { unanswered: error };
+    }
+    try {
+      return { response, body: await response.text() };
+    } catch (error) {
+      if (response.status >= 400 && response.status < 500) {
+        return { response, body: `(its body did not arrive: ${String(error)})` };
+      }
+      return { unanswered: error };
+    }
+  };
+  const request = async (path, init, options = {}) => {
+    const url = `${baseUrl}${path}`;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
+      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      if ("unanswered" in outcome) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
+        throw outcome.unanswered;
+      }
+      const { response, body } = outcome;
+      if (response.ok)
+        return body;
+      const error = new EnvoyApiError({
+        method: init.method ?? "GET",
+        url,
+        status: response.status,
+        responseBody: body
+      });
+      if (response.status >= 500) {
+        options.onUnanswered?.();
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
+      }
+      throw error;
+    }
+    throw new Error("Envoy request exhausted retries");
+  };
+  const post = (path, body, options) => request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, options);
+  return {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
+      session_id: input.sessionID,
+      dir: input.directory,
+      topics: expandSubscriptionTopics(input.topics),
+      port: input.port,
+      title: input.title,
+      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
+      driving: input.driving,
+      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
+      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
+    }))),
+    unsubscribe: async (input) => {
+      await post("/v1/interests/unsubscribe", {
+        session_id: input.sessionID,
+        topics: expandSubscriptionTopics(input.topics)
+      });
+    },
+    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
+    send: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      let unanswered = false;
+      let response;
+      try {
+        const answer = await post("/v1/messages/send", {
+          source: input.source ?? "agent",
+          ...sourceSession(input.sourceSessionID),
+          target_session: input.targetSessionID,
+          message: input.message,
+          idempotency_key: idempotencyKey,
+          ...messageMetadata(input)
+        }, {
+          onUnanswered: () => {
+            unanswered = true;
+          }
+        });
+        response = EnvelopeResponseSchema.parse(JSON.parse(answer));
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status < 500 && !unanswered) {
+          throw error;
+        }
+        throw new EnvoySendUnconfirmedError(input.targetSessionID, idempotencyKey, attempts, error);
+      }
+      return {
+        envelope: response,
+        recipient: response.recipient ?? input.targetSessionID,
+        confirmed: response.recipient !== undefined,
+        duplicate: response.duplicate === true
+      };
+    },
+    publish: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        topic: input.topic,
+        message: input.message,
+        ...input.payload === undefined ? {} : { payload: input.payload },
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        ...response.holder === undefined ? {} : { holder: response.holder }
+      };
+    },
+    unregisterSession: async (input) => {
+      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE"
+      });
+    },
+    setRole: async (input) => {
+      const soft = input.soft === true;
+      const previous = soft ? input.previousSessionID ?? "" : "";
+      const body = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...soft ? { soft: true } : {},
+        ...previous === "" ? {} : { previous_session_id: previous }
+      };
+      let raw;
+      try {
+        raw = await post("/v1/roles/set", body);
+      } catch (error) {
+        if (error instanceof EnvoyApiError && error.details.status === 409) {
+          let answer;
+          try {
+            answer = JSON.parse(error.details.responseBody);
+          } catch {
+            throw error;
+          }
+          const held = RoleHeldWireSchema.safeParse(answer);
+          if (held.success)
+            return { claimed: false, holder: held.data.holder };
+        }
+        throw error;
+      }
+      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
+    },
+    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
+    listSessions: async (input = {}) => {
+      const search = new URLSearchParams;
+      if (input.directory !== undefined)
+        search.set("dir", input.directory);
+      if (input.title !== undefined)
+        search.set("title", input.title);
+      const query = search.size === 0 ? "" : `?${search.toString()}`;
+      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    },
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+      session_id: input.sessionID,
+      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
+      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
+  };
+}
+function waitForRetry() {
+  const { promise, resolve } = Promise.withResolvers();
+  setTimeout(resolve, RETRY_DELAY_MS);
+  return promise;
+}
+function messageMetadata(input) {
+  return {
+    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
+    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
+    ...input.urgency === undefined ? {} : { urgency: input.urgency },
+    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
+    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
+  };
+}
+function sourceSession(sessionID) {
+  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
+}
+
+// ../envoy-client/src/replay.ts
+var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
+var REPLAY_LEDGER_LIMIT = 20000;
+var REPLAY_PAGES_PER_SWEEP = 20;
+var REPLAY_FAILURES_BEFORE_NOTICE = 3;
+var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
+var REPLAY_MAX_SUBJECTS = 32;
+var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
+var ReplayLedgerEntrySchema = object({
+  event_id: string2().min(1).optional(),
+  dedupe_key: string2().min(1).optional(),
+  at: number2()
+});
+var ReplayCursorSchema = object({
+  since: number2().int().nonnegative().optional(),
+  after: number2().int().nonnegative().optional()
+});
+var ReplayPendingNoticeSchema = _enum2([
+  "retention_gap",
+  "stream_moved_back",
+  "stream_recreated"
+]);
+var PENDING_NOTICE_MESSAGES = {
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
+  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
+};
+var ReplayStateSchema = object({
+  stream_id: string2().optional(),
+  stream_created: string2().optional(),
+  subjects: record(string2(), ReplayCursorSchema),
+  notices: array(string2()).optional()
+});
+var ReplaySnapshotSchema = object({
+  state: ReplayStateSchema.optional(),
+  ledger: array(ReplayLedgerEntrySchema)
+});
+function createReplayEngine(options) {
+  const { host, transport, dedupe } = options;
+  const now = options.now ?? Date.now;
+  const ledger = createLedger(now);
+  const cursors = new Map;
+  const cursorStarts = new Map;
+  let streamID;
+  let streamCreated;
+  const pending = new Set;
+  const failures = new Map;
+  let unwritten = [];
+  let writtenState;
+  let writtenShape;
+  let writtenAt;
+  let writes = Promise.resolve();
+  let epoch = 0;
+  let listenerNoticed;
+  const answered = new Set;
+  let running;
+  let rerun;
+  let consumerMode = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error) {
+      try {
+        host.log(`replay: ${what} failed`, error);
+      } catch {}
+    }
+  };
+  const log = (message, error) => safely("log", () => host.log(message, error));
+  const notify = (notice) => safely("notice", () => host.notify(notice));
+  const tell = (kind) => {
+    pending.delete(kind);
+    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
+  };
+  const sessionRead = (read) => () => {
+    try {
+      return read();
+    } catch {
+      return;
+    }
+  };
+  const currentSession = sessionRead(() => host.sessionID());
+  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
+  const bindTo = (sessionID, read) => {
+    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
+      return;
+    const bound = epoch;
+    return { sessionID, alive: () => bound === epoch && read() === sessionID };
+  };
+  const bind = () => bindTo(currentSession(), currentSession);
+  const stateJSON = (afters = true) => {
+    const subjects = {};
+    for (const subject of [...cursors.keys()].sort()) {
+      const cursor = cursors.get(subject) ?? {};
+      subjects[subject] = {
+        ...cursor.since === undefined ? {} : { since: cursor.since },
+        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
+      };
+    }
+    return JSON.stringify({
+      ...streamID === undefined ? {} : { stream_id: streamID },
+      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
+      subjects,
+      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
+    });
+  };
+  const record2 = (identity) => {
+    const entry = ledger.record(identity);
+    if (entry !== undefined)
+      unwritten.push(entry);
+  };
+  const flush = (alive, atOnce = false) => {
+    writes = writes.then(async () => {
+      if (!alive())
+        return;
+      const json = stateJSON();
+      const delivered = unwritten;
+      if (json === writtenState && delivered.length === 0)
+        return;
+      const shape = stateJSON(false);
+      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
+        return;
+      }
+      unwritten = [];
+      const state = json === writtenState ? undefined : JSON.parse(json);
+      try {
+        await host.write({
+          delivered,
+          state,
+          snapshot: () => ({ state: JSON.parse(json), ledger: ledger.list() })
+        });
+        if (state !== undefined) {
+          writtenState = json;
+          writtenShape = shape;
+          writtenAt = now();
+        }
+      } catch (error) {
+        unwritten = [...delivered, ...unwritten];
+        log("replay: could not persist the replay state; the next write carries it", error);
+      }
+    });
+    return writes;
+  };
+  const syncFollowed = () => {
+    const followed = new Set(host.followedSubjects());
+    for (const subject of [...cursors.keys()]) {
+      if (!followed.has(subject)) {
+        cursors.delete(subject);
+        cursorStarts.delete(subject);
+      }
+    }
+    for (const subject of followed) {
+      if (!cursors.has(subject))
+        cursors.set(subject, {});
+    }
+  };
+  const failureNotice = (envelope, publishedAt, error, subject) => ({
+    eventId: envelope.event_id ?? "unknown",
+    sender: senderLabel(envelope),
+    summary: envelope.payload_summary ?? "unknown",
+    publishedAt,
+    error,
+    readWith: envelope.source === "dispatch" ? "dispatch read" : "envoy_inbox",
+    ...subject === undefined ? {} : { subject },
+    envelope
+  });
+  const showFailureNotice = async (notice, alive) => {
+    let queued;
+    try {
+      queued = await host.showFailureNotice(notice) === "queued";
+    } catch (error) {
+      if (!alive())
+        return "stopped";
+      safely("failure notice warning", () => host.failureNoticeFailed(notice, error));
+      return "hole";
+    }
+    if (!alive())
+      return "stopped";
+    if (queued)
+      return "hole";
+    record2(replayLedgerIdentity(notice.envelope));
+    await flush(alive);
+    return "done";
+  };
+  const handle = async (seq, buffered, alive) => {
+    const { message } = buffered;
+    const envelope = parseEnvelope(message.data);
+    if (envelope === undefined) {
+      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
+      return "done";
+    }
+    if (isRoleForward(envelope))
+      return "done";
+    const identity = replayLedgerIdentity(envelope);
+    if (ledger.has(identity)) {
+      failures.delete(seq);
+      return "done";
+    }
+    if (dedupe?.pending(envelope) === true)
+      return "hole";
+    if (!alive())
+      return "stopped";
+    const giveUp = async (error) => {
+      const handled = await showFailureNotice(failureNotice(envelope, message.time, error, message.subject), alive);
+      if (handled === "done")
+        failures.delete(seq);
+      return handled;
+    };
+    const failure = failures.get(seq);
+    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
+      return giveUp(failure.error);
+    }
+    const followed = buffered.subjects[0] ?? message.subject;
+    let outcome;
+    let error = "the host could not show it";
+    try {
+      outcome = await host.deliver({
+        envelope,
+        data: message.data,
+        seq,
+        subject: message.subject,
+        followed,
+        time: message.time,
+        since: cursors.get(followed)?.since
+      });
+    } catch (thrown) {
+      outcome = "failed";
+      error = messageFor(thrown);
+    }
+    if (!alive())
+      return "stopped";
+    if (outcome === "shown") {
+      failures.delete(seq);
+      record2(identity);
+      await flush(alive);
+      return "done";
+    }
+    if (outcome === "suppressed") {
+      failures.delete(seq);
+      return "done";
+    }
+    if (outcome === "queued") {
+      failures.delete(seq);
+      return "hole";
+    }
+    const count = (failure?.count ?? 0) + 1;
+    failures.set(seq, { count, error });
+    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
+      return giveUp(error);
+    log(`replay: could not show stored message ${seq} (${envelope.event_id}): ${error}`);
+    return "hole";
+  };
+  const listenerFailed = (error) => {
+    if (error instanceof EnvoyApiError) {
+      const status = error.details.status;
+      if (status === 404) {
+        if (listenerNoticed === "not_served")
+          return;
+        listenerNoticed = "not_served";
+        notify({
+          kind: "not_served",
+          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
+        });
+        return;
+      }
+      if (status === 503 && error.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
+        const key = `unavailable:${status}:${error.message}`;
+        if (listenerNoticed === key)
+          return;
+        listenerNoticed = key;
+        notify({
+          kind: "unavailable",
+          status,
+          error: error.message,
+          message: `Envoy replay is unavailable (${status}: ${error.message}), so messages published while this session's connection is down are not recovered until it answers.`
+        });
+        return;
+      }
+    }
+    log("replay: the listener's replay failed; the next trigger tries again", error);
+  };
+  const streamReplaced = (stream) => {
+    if (stream.id === undefined) {
+      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
+    }
+    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
+  };
+  const streamMovedBack = (stream) => {
+    for (const cursor of cursors.values()) {
+      if (cursor.after !== undefined && cursor.after > stream.last_seq)
+        return true;
+    }
+    return false;
+  };
+  const sweepOnce = async () => {
+    const binding = bind();
+    if (binding === undefined)
+      return;
+    const { sessionID, alive } = binding;
+    syncFollowed();
+    const readings = new Map;
+    for (const [subject, cursor] of cursors) {
+      readings.set(subject, { read: cursor.after, more: true });
+    }
+    const buffer = new Map;
+    const holes = new Map;
+    let gapNoticed = false;
+    if (pending.size > 0) {
+      for (const kind of [...pending].sort()) {
+        if (kind === "retention_gap")
+          gapNoticed = true;
+        tell(kind);
+      }
+      await flush(alive);
+      if (!alive())
+        return;
+    }
+    if (consumerMode)
+      return;
+    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
+      let handledAny = false;
+      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
+      if (asking.length === 0)
+        break;
+      let response;
+      try {
+        response = await transport.replay({
+          sessionID,
+          subjects: asking.map(([subject, reading]) => reading.read === undefined ? { subject } : { subject, after: reading.read }),
+          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
+        });
+      } catch (error) {
+        if (alive()) {
+          answered.clear();
+          listenerFailed(error);
+        }
+        return;
+      }
+      if (!alive())
+        return;
+      listenerNoticed = undefined;
+      for (const result of response.subjects) {
+        if (result.refused === undefined)
+          answered.add(result.subject);
+        else
+          answered.delete(result.subject);
+      }
+      const { stream } = response;
+      const replaced = streamReplaced(stream);
+      streamID = stream.id ?? (replaced ? undefined : streamID);
+      streamCreated = stream.created;
+      if (replaced) {
+        const at = now();
+        for (const subject of cursors.keys()) {
+          cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
+          cursorStarts.set(subject, at);
+        }
+        failures.clear();
+        pending.add("stream_recreated");
+        await flush(alive);
+        if (!alive())
+          return;
+        tell("stream_recreated");
+        await flush(alive);
+        return;
+      }
+      if (streamMovedBack(stream)) {
+        const from = Math.max(0, stream.first_seq - 1);
+        for (const [subject, cursor] of cursors) {
+          if (cursor.after === undefined)
+            continue;
+          cursors.set(subject, { ...cursor, after: from });
+          const reading = readings.get(subject);
+          if (reading !== undefined) {
+            reading.read = from;
+            reading.more = true;
+          }
+        }
+        buffer.clear();
+        holes.clear();
+        failures.clear();
+        pending.add("stream_moved_back");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        tell("stream_moved_back");
+        await flush(alive);
+        if (!alive())
+          return;
+        continue;
+      }
+      for (const [, reading] of asking)
+        reading.more = false;
+      let gapped = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading?.read === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read >= stream.first_seq - 1)
+          continue;
+        gapped = true;
+        reading.read = stream.first_seq - 1;
+        const cursor = cursors.get(result.subject);
+        if (cursor?.after !== undefined && cursor.after < reading.read) {
+          cursors.set(result.subject, { ...cursor, after: reading.read });
+        }
+      }
+      if (gapped) {
+        if (!gapNoticed)
+          pending.add("retention_gap");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        if (pending.has("retention_gap")) {
+          gapNoticed = true;
+          tell("retention_gap");
+          await flush(alive);
+        }
+      }
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read === undefined) {
+          const cursor = cursors.get(result.subject);
+          if (cursor !== undefined && cursor.after === undefined) {
+            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+            cursorStarts.set(result.subject, now());
+          }
+          reading.read = result.next_after;
+          continue;
+        }
+        for (const message of result.messages) {
+          if (message.seq <= reading.read)
+            continue;
+          const buffered = buffer.get(message.seq);
+          if (buffered === undefined) {
+            buffer.set(message.seq, { message, subjects: [result.subject] });
+          } else if (!buffered.subjects.includes(result.subject)) {
+            buffered.subjects.push(result.subject);
+          }
+        }
+        reading.read = Math.max(reading.read, result.next_after);
+        reading.more = result.more;
+      }
+      let bound = Number.POSITIVE_INFINITY;
+      for (const reading of readings.values()) {
+        if (reading.more && reading.read !== undefined)
+          bound = Math.min(bound, reading.read);
+      }
+      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
+      for (const seq of ready) {
+        const buffered = buffer.get(seq);
+        if (buffered === undefined)
+          continue;
+        buffer.delete(seq);
+        if (!buffered.subjects.some((subject) => cursors.has(subject)))
+          continue;
+        const handled = await handle(seq, buffered, alive);
+        if (handled === "stopped")
+          return;
+        if (handled === "done")
+          handledAny = true;
+        if (handled === "hole") {
+          for (const subject of buffered.subjects) {
+            if (!holes.has(subject))
+              holes.set(subject, seq);
+          }
+        }
+      }
+      if (!alive())
+        return;
+      for (const [subject, reading] of readings) {
+        const cursor = cursors.get(subject);
+        if (cursor?.after === undefined || reading.read === undefined)
+          continue;
+        let after = Math.min(reading.read, bound);
+        const hole = holes.get(subject);
+        if (hole !== undefined)
+          after = Math.min(after, hole - 1);
+        if (after > cursor.after)
+          cursors.set(subject, { ...cursor, after });
+      }
+      await flush(alive, handledAny);
+      if (![...readings.values()].some((reading) => reading.more))
+        break;
+    }
+  };
+  const runSweep = async () => {
+    try {
+      await sweepOnce();
+    } catch (error) {
+      log("replay: a sweep failed", error);
+    }
+  };
+  const sweep = () => {
+    if (running === undefined) {
+      running = runSweep().finally(() => {
+        running = undefined;
+      });
+      return running;
+    }
+    rerun ??= running.then(() => {
+      rerun = undefined;
+      return sweep();
+    });
+    return rerun;
+  };
+  return {
+    sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
+    async followedChanged() {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        syncFollowed();
+        await flush(alive);
+      } catch (error) {
+        log("replay: could not take the followed subjects", error);
+      }
+    },
+    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
+    async recordDelivered(frame) {
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async recordDeliveredFor(sessionID, frame) {
+      const alive = bindTo(sessionID, writeSession)?.alive;
+      if (alive === undefined)
+        return;
+      record2(replayLedgerIdentity(frame));
+      await flush(alive);
+    },
+    async liveFailed(followed, envelope, error, receivedAt) {
+      const started = cursorStarts.get(followed);
+      if (!isRoleForward(envelope) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
+        return;
+      }
+      const alive = bind()?.alive;
+      if (alive === undefined)
+        return;
+      try {
+        await showFailureNotice(failureNotice(envelope, inboundTimestamp(envelope.issued_at), messageFor(error)), alive);
+      } catch (thrown) {
+        log("replay: could not report a failed live frame", thrown);
+      }
+    },
+    followedBefore: (topic, seq) => {
+      const since = cursors.get(topic)?.since;
+      return since !== undefined && seq > since;
+    },
+    restore(snapshot) {
+      epoch += 1;
+      ledger.restore(snapshot.ledger);
+      cursors.clear();
+      cursorStarts.clear();
+      streamID = snapshot.state?.stream_id;
+      streamCreated = snapshot.state?.stream_created;
+      pending.clear();
+      for (const kind of snapshot.state?.notices ?? []) {
+        const known = ReplayPendingNoticeSchema.safeParse(kind);
+        if (known.success)
+          pending.add(known.data);
+      }
+      for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
+        cursors.set(subject, { ...cursor });
+      }
+      writtenState = snapshot.state === undefined ? undefined : stateJSON();
+      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
+      writtenAt = undefined;
+      unwritten = [];
+      failures.clear();
+      listenerNoticed = undefined;
+      answered.clear();
+    },
+    state: () => JSON.parse(stateJSON())
+  };
+}
+function replaySuppressed(rendered) {
+  return rendered.skip || rendered.malformedDelivery === true;
+}
+var REPLAYED_SUFFIX = "while this session's connection was down.";
+function replayedText(content, publishedAt) {
+  return `${content}
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
+}
+function failureNoticeFields(notice) {
+  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
+  return {
+    notice: "message not shown",
+    event_id: notice.eventId,
+    from: notice.sender,
+    summary: notice.summary,
+    published_at: notice.publishedAt,
+    ...notice.subject === undefined ? {} : { subject: notice.subject },
+    error: notice.error,
+    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
+  };
+}
+var REPLAY_NOTICE_NAMES = {
+  stream_recreated: "stream recreated",
+  stream_moved_back: "stream moved back"
+};
+function replayNoticeFields(notice) {
+  return {
+    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
+    detail: notice.message
+  };
+}
+function envoyNoticeText(fields) {
+  return encode3({ envoy: fields });
+}
+var PRIVATE_STREAM_SUBJECTS = [
+  `${AGENT_TOPIC_PREFIX}>`,
+  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
+  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
+];
+function subjectsOverlap(a, b) {
+  const aTokens = a.split(".");
+  const bTokens = b.split(".");
+  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
+    const aToken = aTokens[index];
+    const bToken = bTokens[index];
+    if (aToken === ">" || bToken === ">")
+      return true;
+    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
+      return false;
+  }
+  return aTokens.length === bTokens.length;
+}
+function reachesPrivateStreamSubject(ownAgentSubject, topic) {
+  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject)))
+    return false;
+  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
+}
+function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
+  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
+  return [...new Set([ownAgentSubject, ...followed])];
+}
+function rememberedTopics(state) {
+  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
+}
+async function closeReplayedRemoval(frame, host) {
+  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
+  if (closed.length === 0)
+    return closed;
+  const unregistering = host.unregister(closed);
+  await host.followedChanged();
+  await unregistering;
+  return closed;
+}
+function routeReplayNotice(notice, routes) {
+  if (notice.kind === "not_served" || notice.kind === "unavailable") {
+    routes.warn(notice.message);
+    return;
+  }
+  routes.card(envoyNoticeText(replayNoticeFields(notice)));
+}
+function isRoleForward(envelope) {
+  return envelope.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
+}
+function replayLedgerIdentity(frame) {
+  return {
+    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
+    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
+  };
+}
+function parseEnvelope(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const result = EnvelopeSchema.safeParse(parsed);
+  return result.success ? result.data : undefined;
+}
+function createLedger(now) {
+  let entries = new Set;
+  const byEvent = new Map;
+  const byKey = new Map;
+  const drop = (entry) => {
+    entries.delete(entry);
+    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
+      byEvent.delete(entry.event_id);
+    }
+    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
+      byKey.delete(entry.dedupe_key);
+    }
+  };
+  const add = (entry) => {
+    if (entries.size >= REPLAY_LEDGER_LIMIT) {
+      const oldest = entries.values().next();
+      if (oldest.done !== true)
+        drop(oldest.value);
+    }
+    entries.add(entry);
+    if (entry.event_id !== undefined)
+      byEvent.set(entry.event_id, entry);
+    if (entry.dedupe_key !== undefined)
+      byKey.set(entry.dedupe_key, entry);
+  };
+  const expire = () => {
+    const at = now();
+    for (const entry of entries) {
+      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
+        break;
+      drop(entry);
+    }
+  };
+  const has = (identity) => {
+    expire();
+    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
+  };
+  return {
+    has,
+    record(identity) {
+      if (identity.event_id === undefined && identity.dedupe_key === undefined)
+        return;
+      if (has(identity))
+        return;
+      const entry = { ...identity, at: now() };
+      add(entry);
+      return entry;
+    },
+    restore(restored) {
+      entries = new Set;
+      byEvent.clear();
+      byKey.clear();
+      const at = now();
+      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
+      for (const entry of kept)
+        add({ ...entry });
+    },
+    list() {
+      expire();
+      return [...entries];
+    }
+  };
+}
+
+// ../envoy-client/src/consumer-delivery.ts
+var DELIVER_SUBJECT_PREFIX = "notifications.envoy.deliver.";
+function deliverSubject(sessionID) {
+  return `${DELIVER_SUBJECT_PREFIX}${sessionID}`;
+}
+var RelayHeader = {
+  subject: "Envoy-Subject",
+  streamSeq: "Envoy-Stream-Seq",
+  streamID: "Envoy-Stream-Id",
+  delivered: "Envoy-Delivered",
+  storedAt: "Envoy-Stored-At",
+  gap: "Envoy-Gap"
+};
+var RELAY_PROGRESS_INTERVAL_MS = 20000;
+var FOLLOW_CLOCK_ALLOWANCE_MS = 2000;
+var RELAY_ATTEMPTS_BEFORE_FAILED = 3;
+var decoder = new TextDecoder;
+var DECIMAL = /^[0-9]+$/;
+var RFC3339 = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+function positiveInteger(text) {
+  if (text === null || text === undefined || !DECIMAL.test(text))
+    return;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function parseStoredAt(text) {
+  const match = RFC3339.exec(text);
+  if (match === null)
+    return;
+  const fraction = (match[2] ?? "").padEnd(3, "0").slice(0, 3);
+  const ms = Date.parse(`${match[1]}.${fraction}${match[3]}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+function decodeRelayFrame(message) {
+  const reply = message.reply ?? "";
+  if (reply === "")
+    return { error: "no reply subject" };
+  const headers = message.headers;
+  if (headers === undefined)
+    return { error: "no headers" };
+  const subject = headers.get(RelayHeader.subject) ?? "";
+  if (subject === "")
+    return { error: `no ${RelayHeader.subject}` };
+  const streamSeq = positiveInteger(headers.get(RelayHeader.streamSeq));
+  if (streamSeq === undefined)
+    return { error: `bad ${RelayHeader.streamSeq}` };
+  const streamID = headers.get(RelayHeader.streamID) ?? "";
+  if (streamID === "")
+    return { error: `no ${RelayHeader.streamID}` };
+  const delivered = positiveInteger(headers.get(RelayHeader.delivered));
+  if (delivered === undefined)
+    return { error: `bad ${RelayHeader.delivered}` };
+  const storedAt = headers.get(RelayHeader.storedAt) ?? "";
+  const storedAtMs = parseStoredAt(storedAt);
+  if (storedAtMs === undefined)
+    return { error: `bad ${RelayHeader.storedAt}` };
+  return {
+    frame: {
+      subject,
+      streamSeq,
+      streamID,
+      delivered,
+      storedAt,
+      storedAtMs,
+      gap: headers.get(RelayHeader.gap) === "true",
+      data: typeof message.data === "string" ? message.data : decoder.decode(message.data),
+      reply
+    }
+  };
+}
+function newEpoch() {
+  return crypto.randomUUID();
+}
+var GAP_MESSAGES = {
+  retention_gap: "The notification stream no longer holds some messages published to this session while it was away: messages older than 72 hours may be missing.",
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session before that may be lost."
+};
+var ConsumerDeliverySnapshotSchema = object({
+  resume: object({ stream_id: string2().min(1), seq: number2().int().nonnegative() }).optional(),
+  follows: record(string2(), number2()).default({})
+});
+function parseIdentity(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const identity = DedupeIdentitySchema.safeParse(parsed);
+  if (!identity.success)
+    return;
+  const { event_id, dedupe_key } = identity.data;
+  return event_id === undefined && dedupe_key === undefined ? undefined : identity.data;
+}
+function reaches(topic, subject) {
+  return expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject));
+}
+function every(ms, callback) {
+  const timer = setInterval(callback, ms);
+  return () => clearInterval(timer);
+}
+function createConsumerDelivery(options) {
+  const { host, ledger, sessionID } = options;
+  const now = options.now ?? Date.now;
+  const repeat = options.every ?? every;
+  const ownSubject = agentSubject(sessionID);
+  let currentEpoch = { id: newEpoch(), startedAt: now() };
+  let follows = new Map;
+  let streamID;
+  let held = new Set;
+  let written;
+  let registeredResume;
+  let gapTold = false;
+  let closed = false;
+  let relayed;
+  let persisted = JSON.stringify({ follows: {} });
+  const entries = new Map;
+  const queue = [];
+  let blocking;
+  let pumping = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error) {
+      try {
+        host.log(`consumer delivery: ${what} failed`, error);
+      } catch {}
+    }
+  };
+  const log = (message, error) => safely("log", () => host.log(`consumer delivery: ${message}`, error));
+  const send = (reply, body) => safely(`reply ${body}`, () => options.publish(reply, body));
+  const tellGap = (kind) => safely("gap notice", () => host.gap({ kind, message: GAP_MESSAGES[kind] }));
+  const switchStream = (id) => {
+    if (streamID === id)
+      return;
+    streamID = id;
+    held = new Set;
+    written = undefined;
+  };
+  const tellReplacedResume = (id) => {
+    const asked = resumePoint() ?? registeredResume;
+    if (asked === undefined || asked.stream_id === id)
+      return;
+    registeredResume = undefined;
+    tellGap("stream_recreated");
+  };
+  const followedAt = (subject) => {
+    if (subject === ownSubject)
+      return Number.NEGATIVE_INFINITY;
+    let earliest;
+    for (const [topic, at] of follows) {
+      if (!reaches(topic, subject))
+        continue;
+      if (earliest === undefined || at < earliest)
+        earliest = at;
+    }
+    return earliest;
+  };
+  const followedOnCorePath = (frame) => {
+    const state = ledger.state();
+    if (state.stream_id !== frame.streamID)
+      return false;
+    for (const [topic, cursor] of Object.entries(state.subjects)) {
+      if (cursor.since === undefined || frame.streamSeq <= cursor.since)
+        continue;
+      if (reaches(topic, frame.subject))
+        return true;
+    }
+    return false;
+  };
+  const settle = (entry, body) => {
+    if (entry.settled)
+      return;
+    entry.settled = true;
+    entry.stopProgress();
+    entries.delete(entry.key);
+    for (const reply of entry.replies)
+      send(reply, body);
+    if (body === "done" && entry.frame.streamID === streamID) {
+      held.delete(entry.frame.streamSeq);
+      written = Math.max(written ?? 0, entry.frame.streamSeq);
+    }
+    release(entry);
+  };
+  const release = (entry) => {
+    if (blocking !== entry)
+      return;
+    blocking = undefined;
+    pump();
+  };
+  const alreadyWritten = (identity) => identity !== undefined && ledger.delivered(identity);
+  const failed = (entry, error) => {
+    if (entry.settled)
+      return;
+    if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
+      log(`frame ${entry.frame.streamSeq} failed; it comes again`, error);
+      settle(entry, "nak");
+      return;
+    }
+    safely("failure notice", () => {
+      const { subject, data } = entry.frame;
+      const { envelope } = renderInbound(data, sessionID, subject);
+      if (envelope !== undefined)
+        ledger.liveFailed(subject, envelope, error, now());
+    });
+    settle(entry, "done");
+  };
+  const handOff = (entry) => {
+    const handle = {
+      ...entry.frame,
+      late: entry.late,
+      done: () => settle(entry, "done"),
+      nak: () => settle(entry, "nak"),
+      release: () => release(entry)
+    };
+    blocking = entry;
+    let result;
+    try {
+      result = host.deliver(handle);
+    } catch (error) {
+      failed(entry, error);
+      release(entry);
+      return;
+    }
+    if (!(result instanceof Promise)) {
+      release(entry);
+      return;
+    }
+    result.then(() => release(entry), (error) => {
+      failed(entry, error);
+      release(entry);
+    });
+  };
+  function pump() {
+    if (pumping)
+      return;
+    pumping = true;
+    try {
+      while (blocking === undefined && !closed) {
+        const entry = queue.shift();
+        if (entry === undefined)
+          return;
+        if (entry.settled)
+          continue;
+        if (alreadyWritten(entry.identity)) {
+          settle(entry, "done");
+          continue;
+        }
+        handOff(entry);
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+  const receive = (message) => {
+    const decoded = decodeRelayFrame(message);
+    if ("error" in decoded) {
+      log(`dropping an undecodable relay frame: ${decoded.error}`);
+      if (message.reply !== undefined && message.reply !== "")
+        send(message.reply, "done");
+      return;
+    }
+    const { frame } = decoded;
+    if (closed) {
+      send(frame.reply, "nak");
+      return;
+    }
+    send(frame.reply, "received");
+    if (frame.gap && !gapTold)
+      tellGap("retention_gap");
+    gapTold = false;
+    if (frame.streamID !== streamID) {
+      if (streamID !== undefined && (written !== undefined || held.size > 0)) {
+        tellGap("stream_recreated");
+      } else if (streamID === undefined) {
+        tellReplacedResume(frame.streamID);
+      }
+      switchStream(frame.streamID);
+    }
+    const key = `${frame.streamID}:${frame.streamSeq}`;
+    const first = entries.get(key);
+    if (first !== undefined) {
+      first.replies.push(frame.reply);
+      return;
+    }
+    const since = followedAt(frame.subject);
+    const unfollowed = (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS) && !followedOnCorePath(frame);
+    const identity = unfollowed ? undefined : parseIdentity(frame.data);
+    if (unfollowed || alreadyWritten(identity)) {
+      send(frame.reply, "done");
+      written = Math.max(written ?? 0, frame.streamSeq);
+      return;
+    }
+    held.add(frame.streamSeq);
+    const entry = {
+      frame,
+      identity,
+      late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
+      replies: [frame.reply],
+      key,
+      stopProgress: () => {
+        return;
+      },
+      settled: false
+    };
+    entry.stopProgress = repeat(RELAY_PROGRESS_INTERVAL_MS, () => {
+      if (entry.settled)
+        return;
+      for (const reply of entry.replies)
+        send(reply, "progress");
+    });
+    entries.set(key, entry);
+    queue.push(entry);
+    pump();
+  };
+  const resumePoint = () => {
+    if (streamID === undefined)
+      return;
+    if (held.size > 0)
+      return { stream_id: streamID, seq: Math.min(...held) - 1 };
+    return written === undefined ? undefined : { stream_id: streamID, seq: written };
+  };
+  const seededResume = () => {
+    const state = ledger.state();
+    const stream = state.stream_id;
+    if (stream === undefined)
+      return;
+    let lowest;
+    for (const [subject, cursor] of Object.entries(state.subjects)) {
+      if (cursor.after === undefined || !streamStores(subject))
+        continue;
+      if (lowest === undefined || cursor.after < lowest)
+        lowest = cursor.after;
+    }
+    return lowest === undefined ? undefined : { stream_id: stream, seq: lowest };
+  };
+  const snapshot = () => {
+    const resume = resumePoint();
+    return {
+      ...resume === undefined ? {} : { resume },
+      follows: Object.fromEntries(follows)
+    };
+  };
+  const persist = () => {
+    const current = snapshot();
+    const serialized = JSON.stringify(current);
+    if (serialized === persisted)
+      return;
+    if (!options.persist(current))
+      return;
+    persisted = serialized;
+  };
+  return {
+    subject: deliverSubject(sessionID),
+    receive,
+    epoch: () => currentEpoch,
+    beginEpoch() {
+      currentEpoch = { id: newEpoch(), startedAt: now() };
+      return currentEpoch;
+    },
+    registration() {
+      const resume = resumePoint() ?? seededResume();
+      registeredResume = resume;
+      return {
+        consumer: true,
+        epoch: currentEpoch.id,
+        ...resume === undefined ? {} : { resume }
+      };
+    },
+    answered(answer, topics) {
+      if (answer.mode === "consumer") {
+        if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+          tellReplacedResume(answer.stream_id);
+          switchStream(answer.stream_id);
+        }
+        if (answer.gap) {
+          tellGap("retention_gap");
+          gapTold = true;
+        }
+        relayed = new Set([...topics].filter(streamStores));
+      } else {
+        relayed = undefined;
+      }
+      ledger.setConsumerMode(relayed !== undefined);
+      persist();
+      return answer.mode;
+    },
+    relays: (topic) => relayed?.has(topic) === true,
+    relaying: () => relayed !== undefined,
+    setFollowed(topics) {
+      const at = now();
+      const next = new Map;
+      for (const topic of topics) {
+        if (topic === ownSubject)
+          continue;
+        next.set(topic, follows.get(topic) ?? at);
+      }
+      follows = next;
+      persist();
+    },
+    persist,
+    resumePoint,
+    snapshot,
+    restore(restored) {
+      const merged = new Map(Object.entries(restored.follows));
+      for (const [topic, at] of follows)
+        if (!merged.has(topic))
+          merged.set(topic, at);
+      follows = merged;
+      streamID = restored.resume?.stream_id;
+      held = new Set;
+      written = restored.resume?.seq;
+      persisted = JSON.stringify(snapshot());
+    },
+    close() {
+      closed = true;
+      relayed = undefined;
+      ledger.setConsumerMode(false);
+      queue.length = 0;
+      for (const entry of [...entries.values()])
+        settle(entry, "nak");
+      blocking = undefined;
+    }
+  };
+}
+
 // ../envoy-client/src/dispatch-session-directory.ts
 import { randomUUID } from "crypto";
-import { renameSync, rmSync, writeFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { renameSync, rmSync as rmSync2, writeFileSync } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join2 } from "path";
 var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 var PRIVATE_FILE = 384;
 function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir2(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function writeAtomically(path, text) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -40273,7 +42899,7 @@ function writeAtomically(path, text) {
     writeFileSync(temporary, text, { mode: PRIVATE_FILE });
     renameSync(temporary, path);
   } catch (error) {
-    rmSync(temporary, { force: true });
+    rmSync2(temporary, { force: true });
     throw error;
   }
 }
@@ -40282,35 +42908,35 @@ function writeAtomically(path, text) {
 import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
-  closeSync as closeSync2,
+  closeSync as closeSync3,
   fstatSync,
   mkdirSync as mkdirSync3,
-  openSync as openSync2,
+  openSync as openSync3,
   readdirSync as readdirSync2,
-  readFileSync as readFileSync3,
+  readFileSync as readFileSync5,
   readSync,
-  rmSync as rmSync3,
-  statSync as statSync2,
+  rmSync as rmSync4,
+  statSync as statSync3,
   writeFileSync as writeFileSync3
 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
 import {
-  closeSync,
+  closeSync as closeSync2,
   constants,
   mkdirSync,
-  openSync,
+  openSync as openSync2,
   readdirSync,
-  readFileSync,
+  readFileSync as readFileSync3,
   renameSync as renameSync2,
-  rmSync as rmSync2,
-  statSync,
+  rmSync as rmSync3,
+  statSync as statSync2,
   unlinkSync,
   writeFileSync as writeFileSync2
 } from "fs";
-import { isAbsolute, join as join2, resolve } from "path";
+import { isAbsolute as isAbsolute2, join as join3, resolve as resolve2 } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
 var MARKERS = "markers";
@@ -40363,15 +42989,15 @@ function fileOperands(argv) {
 }
 function operandPath(cwd, file) {
   if (file.flag === "--path")
-    return resolve(cwd, file.operand);
-  return isAbsolute(file.operand) ? file.operand : `${cwd}/${file.operand}`;
+    return resolve2(cwd, file.operand);
+  return isAbsolute2(file.operand) ? file.operand : `${cwd}/${file.operand}`;
 }
 function bytesDigest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 function processStart(pid) {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const stat = readFileSync3(`/proc/${pid}/stat`, "utf-8");
     return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
   } catch {
     return null;
@@ -40411,9 +43037,9 @@ function parseOwner(text) {
 var OWNER_FILE = ".json";
 var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
 function storeTouched(store) {
-  const own = statSync(store).mtimeMs;
+  const own = statSync2(store).mtimeMs;
   try {
-    return Math.max(own, statSync(join2(store, MARKERS)).mtimeMs);
+    return Math.max(own, statSync2(join3(store, MARKERS)).mtimeMs);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return own;
@@ -40421,7 +43047,7 @@ function storeTouched(store) {
   }
 }
 function sweepStores(root, now) {
-  const parent = join2(root, "askgate");
+  const parent = join3(root, "askgate");
   let names;
   try {
     names = readdirSync(parent);
@@ -40432,18 +43058,18 @@ function sweepStores(root, now) {
     const match = STORE_NAME.exec(name);
     if (match === null)
       continue;
-    const store = join2(parent, name);
+    const store = join3(parent, name);
     try {
       if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
         continue;
       if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
         continue;
-      rmSync2(store, { recursive: true, force: true });
+      rmSync3(store, { recursive: true, force: true });
     } catch {}
   }
 }
 function askgateState(dir) {
-  const record = join2(dir, ASKGATE_RECORD);
+  const record = join3(dir, ASKGATE_RECORD);
   let names;
   try {
     names = readdirSync(record);
@@ -40456,10 +43082,10 @@ function askgateState(dir) {
   for (const name of names) {
     if (!name.endsWith(OWNER_FILE))
       continue;
-    const file = join2(record, name);
+    const file = join3(record, name);
     let text;
     try {
-      text = readFileSync(file, "utf-8");
+      text = readFileSync3(file, "utf-8");
     } catch (error) {
       if (hasErrnoCode(error, "ENOENT"))
         continue;
@@ -40475,7 +43101,7 @@ function askgateState(dir) {
     return { kind: "off" };
   for (const { file, store } of live) {
     try {
-      if (!statSync(join2(store, MARKERS)).isDirectory())
+      if (!statSync2(join3(store, MARKERS)).isDirectory())
         throw new Error("not a directory");
     } catch (error) {
       return {
@@ -40494,11 +43120,11 @@ var isFileDigest = (value) => typeof value === "object" && value !== null && typ
 function readMarker(file) {
   let text;
   try {
-    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const fd = openSync2(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      text = readFileSync(fd, "utf-8");
+      text = readFileSync3(fd, "utf-8");
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
   } catch {
     return;
@@ -40527,17 +43153,17 @@ function consumeMarker(stores, argv, args, files, now) {
   let expired = false;
   const usable = [];
   for (const store of stores) {
-    const dir = join2(store, MARKERS);
+    const dir = join3(store, MARKERS);
     for (const name of readdirSync(dir)) {
       if (!name.startsWith(`${key}.`))
         continue;
-      const file = join2(dir, name);
+      const file = join3(dir, name);
       const marker = readMarker(file);
       if (marker === undefined || marker.argv !== key)
         continue;
       if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
         expired = true;
-        rmSync2(file, { force: true });
+        rmSync3(file, { force: true });
         continue;
       }
       if (marker.args !== null) {
@@ -40567,7 +43193,7 @@ function consumeMarker(stores, argv, args, files, now) {
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed
     };
   return {
@@ -40591,14 +43217,6 @@ function actorText(actor) {
 // ../envoy-client/src/dispatch-cwd.ts
 import { execFile } from "child_process";
 import { promisify } from "util";
-
-// ../envoy-client/src/machine.ts
-import { hostname as hostname3 } from "os";
-function machineID() {
-  return process.env["ENVOY_MACHINE_ID"] || hostname3();
-}
-
-// ../envoy-client/src/dispatch-cwd.ts
 var execFileAsync = promisify(execFile);
 var defaultExec = (file, args, { cwd, signal }) => {
   const call = execFileAsync(file, args, { cwd, signal });
@@ -40899,7 +43517,9 @@ async function textWithPictures(tool, text, pictures, limit, owner, upload, acto
       uploaded = await upload({ name: picture.name, file: picture.file, actor });
     } catch (error) {
       const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
-      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error)}. Nothing was posted${earlier}.`);
+      const refused = error instanceof DispatchGatewayError ? !error.mayHaveReachedDispatch : error instanceof DispatchServiceError && error.status < 500;
+      const outcome = refused ? "was not uploaded" : "may or may not have been uploaded";
+      throw new Error(`images: ${picture.path} ${outcome}: ${messageFor(error).replace(/\.$/, "")}. Nothing ` + `was posted${earlier}.`);
     }
     const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
     addresses.push(address);
@@ -41077,71 +43697,6 @@ async function readPictures(client, addresses, shown) {
     }
   }
   return { lines, images, shown: showing };
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function followedAsk(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  if (typeof issue === "string" && issue !== "")
-    return { ask, owner: issueTopic(issue) };
-  if (typeof document !== "string")
-    return null;
-  const [project, slug] = document.split("/", 2);
-  if (!project || !slug)
-    return null;
-  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
-}
-function followNoticeText({ ask, owner }, topics) {
-  const subscribe = ownerSubscribeLine(owner, topics);
-  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
-}
-function ownerSubscribeLine(owner, topics) {
-  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
-    return null;
-  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
-}
-function subscriptionCovers(topic, owner) {
-  const base = owner.topic.slice(0, -".>".length).split(".");
-  for (const [index, part] of topic.split(".").entries()) {
-    if (part === ">")
-      return true;
-    if (index >= base.length || part !== "*" && part !== base[index])
-      return false;
-  }
-  return false;
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope;
-  try {
-    envelope = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope !== "object" || envelope === null)
-    return;
-  const { source, payload } = envelope;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
 }
 
 // ../envoy-client/src/search-answer.ts
@@ -41360,8 +43915,8 @@ function notMadeLine(reason, context, searchQuery) {
 }
 
 // ../envoy-client/src/session-answers.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
-import { join as join3 } from "path";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync4 } from "fs";
+import { join as join4 } from "path";
 var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
 var SESSION_ANSWERS_MAX_CHARS = 8000;
 var SESSION_ANSWERS_DEADLINE_MS = 800;
@@ -41409,15 +43964,26 @@ function withinWindow(items, now) {
   const start = now - SESSION_ANSWERS_WINDOW_MS;
   return items.filter((item) => Date.parse(item.at) >= start);
 }
+function sessionAnswersWords(items) {
+  return items.map((item) => JSON.stringify([
+    item.kind,
+    item.id,
+    item.author.id,
+    item.at,
+    item.edited_at ?? null,
+    item.selected ?? null,
+    item.text
+  ]));
+}
 var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
 function leftOutLine(count, namesCommand) {
   const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
   return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
 }
-function renderSessionAnswers(items, options) {
-  const shown = withinWindow(items, Number(options.now));
-  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
-  const count = shown.length + unsent;
+function renderShown(items, options) {
+  const inWindow = withinWindow(items, Number(options.now));
+  const unsent = inWindow.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = inWindow.length + unsent;
   if (count === 0)
     return;
   const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
@@ -41425,7 +43991,7 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
   const namesCommand = options.withoutCommand !== true;
   const blocks = [];
   let length = header.length;
-  for (const item of shown) {
+  for (const item of inWindow) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
@@ -41435,9 +44001,14 @@ As read at ${options.cached.readAt}; this read failed: ${failureSentence(options
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
+  const text = [
+    header,
+    ...blocks,
+    ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]
+  ].join(`
 
 `);
+  return { text, shown: inWindow.slice(0, blocks.length) };
 }
 function renderSessionAnswersList(items, options) {
   const shown = withinWindow(items, Number(options.now));
@@ -41458,16 +44029,16 @@ function sessionAnswersFailureLine(reason) {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
 var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v3");
-var processGlobal = globalThis;
-var state = processGlobal[STATE_KEY] ?? {
+var processGlobal2 = globalThis;
+var state = processGlobal2[STATE_KEY] ?? {
   sessions: new Map,
   noRouteUntil: new Map
 };
-processGlobal[STATE_KEY] = state;
+processGlobal2[STATE_KEY] = state;
 var CACHE_FILE = "answers.json";
 function readCacheFile(directory, url) {
   try {
-    const value = JSON.parse(readFileSync2(join3(directory, CACHE_FILE), "utf-8"));
+    const value = JSON.parse(readFileSync4(join4(directory, CACHE_FILE), "utf-8"));
     if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
       return {
         dispatch_url: value.dispatch_url,
@@ -41510,18 +44081,24 @@ async function readSessionAnswers(options) {
   const entries = state.sessions.get(session) ?? new Map;
   state.sessions.set(session, entries);
   const carry = (cache, reason, noRoute = false) => {
-    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+    const rendered = cache === undefined ? undefined : renderShown(cache.items, {
       now: now(),
       total: cache.total,
       cached: { readAt: cache.read_at, reason },
       withoutCommand: noRoute
     });
-    if (cache === undefined || text === undefined) {
+    if (cache === undefined || rendered === undefined) {
       if (noRoute)
         return { text: undefined, source: "unavailable", reason };
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
-    return { text, source: "cache", readAt: cache.read_at, reason };
+    return {
+      text: rendered.text,
+      source: "cache",
+      readAt: cache.read_at,
+      words: sessionAnswersWords(rendered.shown),
+      reason
+    };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
@@ -41577,7 +44154,7 @@ async function readSessionAnswers(options) {
       if (directory !== undefined) {
         try {
           mkdirSync2(directory, { recursive: true, mode: 448 });
-          writeAtomically(join3(directory, CACHE_FILE), JSON.stringify(cache));
+          writeAtomically(join4(directory, CACHE_FILE), JSON.stringify(cache));
         } catch {}
       }
       return { cache };
@@ -41611,13 +44188,12 @@ async function readSessionAnswers(options) {
     return noRoute();
   if ("failure" in outcome)
     return carry(current.cache, outcome.failure);
+  const rendered = renderShown(outcome.cache.items, { now: now(), total: outcome.cache.total });
   return {
-    text: renderSessionAnswers(outcome.cache.items, {
-      now: now(),
-      total: outcome.cache.total
-    }),
+    text: rendered?.text,
     source: "fresh",
-    readAt: outcome.cache.read_at
+    readAt: outcome.cache.read_at,
+    words: sessionAnswersWords(rendered?.shown ?? [])
   };
 }
 async function sessionAnswersSettled(session) {
@@ -41906,18 +44482,23 @@ function itemBlockOf(value) {
   const ref = parseDispatchRef(value);
   return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
 }
+function article(kind) {
+  return kind === "ask" ? "an ask" : `a ${kind}`;
+}
 function replyBlockProblem(field, kind, value) {
   if (!/^dispatch:\/\/[^#]*#b-/.test(value))
     return;
   const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
   const ref = parseDispatchRef(value);
   if (ref?.kind !== "block") {
-    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+    return `${field} ${value} names no block; a block of ${article(kind)} reads ${form}`;
   }
   const other = ref.item?.kind;
   if (other !== kind) {
-    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
-    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : other === "ask" ? `; answer it with ${commandLine("dispatch_comment", { reply_to_ask: value })}` : "";
+    const named = other === undefined ? "a document" : article(other);
+    const answers = kind === "ask" ? "reply_to_ask answers a part of the ask it names" : `${article(kind)} reply answers a block of ${article(kind)}`;
+    return `${field} ${value} names a block of ${named}, but ${answers} (${form})${answer}`;
   }
   if (ref.pin !== undefined) {
     return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
@@ -42041,8 +44622,8 @@ function messageInReplyTo(args) {
   const id = messageIdOf(block?.item.id ?? inReplyTo);
   return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
 }
-function commentReplyTo(args) {
-  const replyTo = optionalString(args, "reply_to");
+function itemReplyTo(args, field) {
+  const replyTo = optionalString(args, field);
   if (replyTo === undefined)
     return;
   const block = itemBlockOf(replyTo);
@@ -42082,12 +44663,17 @@ function argumentProblems(tool, args) {
         problems.push("artifact is required when quote is supplied");
       }
       const replyTo = optionalString(args, "reply_to");
-      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyToAsk = optionalString(args, "reply_to_ask");
+      if (replyTo !== undefined && replyToAsk !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
-      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
-      if (replyBlock !== undefined)
-        problems.push(replyBlock);
+      for (const problem of [
+        replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo),
+        replyToAsk === undefined ? undefined : replyBlockProblem("reply_to_ask", "ask", replyToAsk)
+      ]) {
+        if (problem !== undefined)
+          problems.push(problem);
+      }
       break;
     }
     case "dispatch_message": {
@@ -42199,7 +44785,7 @@ function dispatchRefFromUrl(value, serverUrl) {
       return `dispatch://${key}/artifact/${slug}${version}${blockOf("v")}`;
     }
     if (ask !== undefined)
-      return `dispatch://${key}/ask/${ask}`;
+      return `dispatch://${key}/ask/${ask}${blockOf()}`;
     if (comment !== undefined)
       return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
@@ -42226,7 +44812,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " + "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " + "one of its options or its answer, optionally pinned to a revision of the ask's parts with " + "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -42238,8 +44824,9 @@ function innerRefProblem(tool, ref, refText) {
   const itemKind = ref.item?.kind ?? ref.kind;
   const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
+  const partRef = ref.pin === undefined ? refText : refText.slice(0, -`@v${ref.pin}`.length);
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.item === undefined ? ref.id : partRef} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of ${article(ref.item.kind)}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -42444,16 +45031,11 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const byId = artifacts.find((candidate) => candidate.id === artifactReference);
   if (byId !== undefined)
     return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
+  if (bySlug !== undefined)
     return bySlug;
-  }
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -42477,7 +45059,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     const artifacts = routed === undefined ? unlinked : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
     return {
       owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical)
+      artifact: artifactByReference(artifacts, artifactReference, owner, canonical)
     };
   }
   const issue = await client.getIssue(owner.issue);
@@ -42485,10 +45067,13 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
   if (artifactReference === undefined || artifactReference === "spec") {
     artifact = issue.artifacts.find((candidate) => candidate.primary || candidate.id === issue.primary_artifact_id);
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
+    artifact = artifactByReference(issue.artifacts, artifactReference, { kind: "issue", issue: issue.key }, canonical);
   }
   if (!artifact) {
-    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, {
+      kind: "issue",
+      issue: issue.key
+    }));
   }
   return { owner, issue, artifact };
 }
@@ -42508,15 +45093,85 @@ async function documentTargets(client, resolution) {
   };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
+  const scope = owner.kind;
+  const busy = !ambiguous && documents.length > documentHintLimit;
+  const hints = (busy ? documentsNearest(reference, documents) : documents).slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
+  if (busy) {
+    const read = owner.kind === "issue" ? `dispatch read --issue ${owner.issue}` : `dispatch read --project ${owner.project}`;
+    const counted = documents.every((document) => (document.kind ?? "doc") === "doc") ? "documents" : "documents and files";
+    return `document "${reference}" not found by slug; this ${scope}'s ${documents.length} ${counted} include: ${list}; ${read} lists them all`;
+  }
+  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${scope}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${scope}'s documents: ${list}`;
+}
+function documentsNearest(reference, documents) {
+  return documents.map((document, index) => ({
+    document,
+    index,
+    ...documentCloseness(reference, document.slug, document.name)
+  })).sort((a, b) => {
+    if (a.near !== b.near)
+      return a.near ? -1 : 1;
+    if (a.near && a.distance !== b.distance)
+      return a.distance - b.distance;
+    return b.index - a.index;
+  }).map(({ document }) => document);
+}
+function documentListLines(documents) {
+  return documents.length === 0 ? ["- none"] : documents.map((document) => `- ${document.slug} (${document.name}, ${document.kind})`);
+}
+function documentCloseness(reference, slug, name) {
+  const wanted = [...reference.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+  const limit = Math.max(2, Math.floor(wanted.length / 3));
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of [slug, name]) {
+    const label = [...candidate.replace(/[A-Z]/g, (letter) => letter.toLowerCase())];
+    let edits = boundedEditDistance(wanted, label, limit);
+    if (wanted.length >= 4 && label.join("").includes(wanted.join("")) || label.length >= 4 && wanted.join("").includes(label.join(""))) {
+      edits = Math.abs(label.length - wanted.length);
+    } else if (edits > limit) {
+      continue;
+    }
+    distance = Math.min(distance, edits);
+  }
+  return distance === Number.POSITIVE_INFINITY ? { distance: limit + 1, near: false } : { distance, near: true };
+}
+function boundedEditDistance(a, b, limit) {
+  if (Math.abs(a.length - b.length) > limit)
+    return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array(b.length + 1).fill(0);
+  for (let i = 1;i <= a.length; i++) {
+    current[0] = i;
+    let smallest = i;
+    for (let j = 1;j <= b.length; j++) {
+      const substitution = previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, substitution);
+      smallest = Math.min(smallest, current[j]);
+    }
+    if (smallest > limit)
+      return limit + 1;
+    [previous, current] = [current, previous];
+  }
+  return Math.min(previous[b.length], limit + 1);
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
   const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
   return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+async function movedApprovalLine(client, askID) {
+  const ask = (await client.getAsk(askID).catch(() => {
+    return;
+  }))?.ask;
+  const approval = ask?.approval;
+  if (ask?.kind !== "approval" || approval === undefined)
+    return;
+  if (approval.requested_version >= approval.version)
+    return;
+  const owner = ask.issue_key === null ? `--project ${ask.approval_artifact?.project ?? "<project>"} --artifact ${approval.artifact_id}` : ask.approval_artifact?.primary === true ? `--issue ${ask.issue_key}` : `--issue ${ask.issue_key} --artifact ${approval.artifact_id}`;
+  return `The reply did not hand the ask to the human: it is the approval request for ${approval.name} ` + `at version ${approval.requested_version}, and ${approval.name} is now version ${approval.version}. ` + "No reply hands a moved approval request back. Once the human has agreed to every point in " + `version ${approval.version}, run: dispatch request-approval ${owner} --summary ` + `'<what changed since version ${approval.requested_version}>'`;
 }
 async function invalidReplyToAskProblem(client, owner, resolved) {
   if (owner.kind === "issue") {
@@ -42674,6 +45329,8 @@ function issueSummary(issue, events, references, graph, linkBase, titles) {
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
     "External links:",
     ...issue.external_links.length === 0 ? ["- none"] : issue.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
+    "Documents:",
+    ...documentListLines(issue.artifacts ?? []),
     "Open asks:",
     ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
     "References:",
@@ -42690,14 +45347,19 @@ function referenceLines(read) {
     return [`- ${read}`];
   if (read.edges.length === 0)
     return ["- none"];
-  return read.edges.map((edge) => {
-    const { node } = edge;
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
-    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
-    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
-  });
+  return read.edges.map(edgeLine);
+}
+function isItemKind(kind) {
+  return ITEM_KINDS.some((item) => item === kind);
+}
+function edgeLine(edge) {
+  const { node } = edge;
+  const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
+  const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+  const parent = node.parent ?? undefined;
+  const item = node.kind === "block" && node.document === undefined && isItemKind(parent?.kind) ? parent : undefined;
+  const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+  return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
 }
 function unavailableReason(error) {
   return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
@@ -42739,12 +45401,12 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${isItemKind(parent.kind) ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
-function blockLines(node, ref) {
+function blockLines(node, ref, noun = "Block") {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head = ref.item === undefined ? [
@@ -42753,7 +45415,7 @@ function blockLines(node, ref) {
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
   ] : [
-    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    `${noun} ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
     ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
@@ -42767,6 +45429,14 @@ function blockLines(node, ref) {
     `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
+}
+function askPartNoun(ask, node, blockID) {
+  if (ask.answer?.id === blockID)
+    return "Answer";
+  if (ask.options.some((option) => option.id === blockID))
+    return "Option";
+  const placed = (ask.revision ?? 0) > 0 && ask.options.every((option) => option.id !== undefined) && (ask.answer === null || ask.answer.id !== undefined);
+  return placed && node.pin?.state !== "removed" ? "Question" : "Part";
 }
 function logSummary(issue, events) {
   return [
@@ -42832,9 +45502,11 @@ function childrenSummary(issue) {
   ].join(`
 `);
 }
-function askSummary({ ask, replies, answers }, graph) {
+function askSummary({ ask, replies, answers }, askRef, pictures, incoming, outgoing) {
   const answer = ask.answer;
   const earlierAnswers = answers.slice(0, -1);
+  const parts = askPartEdges(ask, incoming);
+  const partRef = (id) => `${askRef}#b-${encodeBlockId(id)}`;
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     `Body: ${reply.body}`
@@ -42843,14 +45515,19 @@ function askSummary({ ask, replies, answers }, graph) {
     `Question: ${ask.question}`,
     ...anchorLines(ask),
     "Options:",
-    ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
+    ...ask.options.length === 0 ? ["- none"] : ask.options.flatMap((option) => [
+      `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}${option.id === undefined ? "" : ` (${partRef(option.id)})`}`,
+      ...partReferenceLines(parts.at, option.id)
+    ]),
     `State: ${ask.state}`,
     `Ask id: ${ask.id}`,
     "Answer:",
     ...answer === null ? ["- none"] : [
       `- By: ${answer.user}`,
       `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
-      ...answer.text === null ? [] : [`- Text: ${answer.text}`]
+      ...answer.text === null ? [] : [`- Text: ${answer.text}`],
+      ...answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`],
+      ...partReferenceLines(parts.at, answer.id)
     ],
     ...earlierAnswers.length === 0 ? [] : [
       "Earlier answers:",
@@ -42864,9 +45541,37 @@ function askSummary({ ask, replies, answers }, graph) {
     ],
     "Replies:",
     ...chain.length === 0 ? ["- none"] : chain,
-    ...graph
+    ...pictures,
+    ...graphSectionLines(parts.rest, outgoing)
   ].join(`
 `);
+}
+function askPartEdges(ask, incoming) {
+  const ids = new Set([...ask.options.map((option) => option.id), ask.answer?.id].filter((id) => id !== undefined));
+  const at = new Map;
+  if (typeof incoming === "string" || ids.size === 0)
+    return { at, rest: incoming };
+  const rest = [];
+  for (const edge of incoming.edges) {
+    const part = edge.block?.block_id;
+    if (part === undefined || !ids.has(part)) {
+      rest.push(edge);
+      continue;
+    }
+    const { block: _block, ...atPart } = edge;
+    const held = at.get(part);
+    if (held === undefined)
+      at.set(part, [atPart]);
+    else
+      held.push(atPart);
+  }
+  return { at, rest: { node: incoming.node, edges: rest } };
+}
+function partReferenceLines(at, id) {
+  const edges = id === undefined ? undefined : at.get(id);
+  if (edges === undefined || edges.length === 0)
+    return [];
+  return ["  Referenced by:", ...edges.map((edge) => `  ${edgeLine(edge)}`)];
 }
 function openAskAge(ageSeconds) {
   const seconds = Math.max(0, Math.floor(ageSeconds));
@@ -43150,7 +45855,8 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const stillOpen = (named, state) => state === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait for that version` : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
-    const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
+    const id = typedBlockIdAttribute(block.id);
+    const openers = lines.filter((line) => line.includes(`ask{${id} `) || line.includes(`ask{${id}}`));
     const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
     if (states.length === 0)
@@ -43840,14 +46546,15 @@ async function executeDispatchTool(input) {
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = commentReplyTo(args);
-      const replyToAskReference = optionalString(args, "reply_to_ask");
-      const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
-      if (replyToAskReference !== undefined && replyToAsk === undefined) {
+      const replyTo = itemReplyTo(args, "reply_to");
+      const replyToAskTarget = itemReplyTo(args, "reply_to_ask");
+      const replyToAsk = replyToAskTarget === undefined ? undefined : normalizeUUID(replyToAskTarget.id);
+      if (replyToAskTarget !== undefined && replyToAsk === undefined) {
         throw new ToolInputError(input.tool, [
           await invalidReplyToAskProblem(client, owner, resolved)
         ]);
       }
+      const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       const requestedTurn = optionalString(args, "turn");
       const body = await writePictures(resolved, stringArg(args, "body"), {
         cap: DISPATCH_BODY_MAX,
@@ -43858,7 +46565,7 @@ async function executeDispatchTool(input) {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
         ...replyTo === undefined ? {} : { reply_to: replyTo.id },
-        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
+        ...replyToBlock === undefined ? {} : { reply_to_block: replyToBlock },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -43872,9 +46579,11 @@ async function executeDispatchTool(input) {
       });
       if (replyToAsk !== undefined) {
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
+        const moved = requestedTurn !== "agent" && comment.ask_waiting_on === "agent" ? await movedApprovalLine(client, replyToAsk) : undefined;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
+            ...moved === undefined ? [] : [moved],
             ...adviceLines
           ].join(`
 `),
@@ -44179,6 +46888,61 @@ Document token: ${listed.token}`,
         details: await followedAskDetails(client, read.ask)
       };
     }
+    case "dispatch_handoff_write": {
+      if (!input.sessionId?.trim()) {
+        throw new Error("host session id is required for dispatch handoff-write");
+      }
+      let recorded;
+      try {
+        recorded = await client.writeHandoff(issue(), stringArg(args, "phase"), {
+          actor,
+          body: stringArg(args, "body")
+        });
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `Recorded the ${recorded.phase} handoff of ${recorded.issue_key}, version ${recorded.version} (id ${recorded.id})`,
+        details: {
+          issue: recorded.issue_key,
+          phase: recorded.phase,
+          version: recorded.version,
+          handoff: recorded.id
+        }
+      };
+    }
+    case "dispatch_handoff_read": {
+      const issueKey = issue();
+      const phase = stringArg(args, "phase");
+      const version = optionalNumber(args, "version");
+      let handoff;
+      try {
+        if (version === undefined) {
+          handoff = await client.latestHandoff(issueKey, phase);
+        } else {
+          const listed = await client.listHandoffs(issueKey);
+          const ofPhase = listed.filter((summary) => summary.phase === phase);
+          const match = ofPhase.find((summary) => summary.version === version);
+          if (match === undefined) {
+            const newest = Math.max(0, ...ofPhase.map((summary) => summary.version));
+            throw new Error(`HANDOFF_NOT_FOUND: issue ${issueKey} has no ${phase} handoff version ${version}; ${newest === 0 ? `it has no ${phase} handoff at all` : `its newest ${phase} handoff is version ${newest}`}`);
+          }
+          handoff = await client.handoff(match.id);
+        }
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      return {
+        text: `${handoff.issue_key} ${handoff.phase} handoff, version ${handoff.version} (id ${handoff.id}), written by ${actorText(handoff.author)} at ${handoff.created_at}
+${handoff.body}`,
+        details: {
+          issue: handoff.issue_key,
+          phase: handoff.phase,
+          version: handoff.version,
+          handoff: handoff.id
+        }
+      };
+    }
     case "dispatch_read": {
       const message = optionalString(args, "message");
       const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
@@ -44216,12 +46980,13 @@ Document token: ${listed.token}`,
         const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks(await documentIdOf(ref), "all"));
         await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () => documentIdOf(ref));
         const askRef = refTarget(ref, "ask", askRead.ask.id);
-        const [pictures, graph] = await Promise.all([
+        const [pictures, incoming, outgoing] = await Promise.all([
           picturesOf(askTexts(askRead)),
-          graphSections(client, askRef)
+          graphReferences(client, { to: askRef }),
+          graphReferences(client, { from: askRef })
         ]);
         return {
-          text: askSummary(askRead, [...pictures.lines, ...graph]),
+          text: askSummary(askRead, askRef, pictures.lines, incoming, outgoing),
           details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
           ...showImages(pictures)
         };
@@ -44262,22 +47027,44 @@ Document token: ${listed.token}`,
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
         const holder = blockRef.slice(0, blockRef.indexOf("#"));
-        const [incoming, outgoing] = await Promise.all([
+        const askOfPart = ref.item?.kind === "ask" ? client.getAsk(ref.item.id).catch(() => {
+          return;
+        }) : undefined;
+        const [incoming, outgoing, partOf] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
-          graphReferences(client, { from: blockRef })
+          graphReferences(client, { from: blockRef }),
+          askOfPart
         ]);
+        const blockID = incoming.node.block_id ?? ref.block ?? "";
+        const noun = ref.item?.kind !== "ask" ? undefined : partOf === undefined ? "Part" : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
-          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`
+          text: [
+            ...blockLines(incoming.node, ref, noun),
+            ...graphSectionLines(incoming, outgoing)
+          ].join(`
 `),
           details: {
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
             block: incoming.node.block_id ?? ref.block
           }
+        };
+      }
+      const projectOwner = documentOwner();
+      if (projectOwner.kind === "project" && optionalString(args, "artifact") === undefined) {
+        const documents = await client.listProjectArtifacts(projectOwner.project, true);
+        return {
+          text: [
+            `Project: ${projectOwner.project}`,
+            "Documents:",
+            ...documentListLines(documents)
+          ].join(`
+`),
+          details: { project: projectOwner.project }
         };
       }
       const documentReference = optionalString(args, "artifact");
@@ -44380,7 +47167,7 @@ function ensureDirectory(dir) {
 }
 function readIfPresent(path) {
   try {
-    return readFileSync3(path, "utf-8");
+    return readFileSync5(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
@@ -44391,7 +47178,7 @@ function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join4(dir, "state.json");
+  const path = join5(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -44407,15 +47194,17 @@ function loadSessionMemory(dir, sessionId) {
   const pictures = shownPictures(sessionId);
   for (const address of stringList(state.pictures))
     pictures.add(address);
+  rememberKeyedLayer(state.keyedLayer);
   return new Set(stringList(state.follows));
 }
 function writeMemory(dir, sessionId, follows) {
   const state = {
     advice: [...adviceMemory()],
     pictures: [...shownPictures(sessionId)],
-    follows: [...follows]
+    follows: [...follows],
+    keyedLayer: keyedLayerMemory()
   };
-  writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join5(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -44424,7 +47213,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join4(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join5(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE2 });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -44435,8 +47224,8 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join4(dir, "pictures");
-  const path = join4(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join5(dir, "pictures");
+  const path = join5(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
     writeFileSync3(path, bytes, { mode: PRIVATE_FILE2, flag: "wx" });
@@ -44447,29 +47236,29 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join4(dir, "out");
+  const out = join5(dir, "out");
   ensureDirectory(out);
-  const path = join4(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  const path = join5(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
   writeFileSync3(path, text, { mode: PRIVATE_FILE2 });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join4(dir, "title"), title);
+  writeAtomically(join5(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join4(dir, "title")) || undefined;
+  return readIfPresent(join5(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join4(root, PRUNED_STAMP);
+  const stamp = join5(root, PRUNED_STAMP);
   try {
-    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync3(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join4(root, "sessions");
+  const sessions = join5(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync2(sessions, { withFileTypes: true });
@@ -44480,10 +47269,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join4(sessions, entry.name);
+    const dir = join5(sessions, entry.name);
     try {
-      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
-        rmSync3(dir, { recursive: true, force: true });
+      if (now - statSync3(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
+        rmSync4(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
@@ -44527,1618 +47316,6 @@ function natsConnectionOptions(input) {
     reconnectTimeWait: 2000,
     pingInterval: NATS_PING_INTERVAL_MS,
     maxPingOut: NATS_MAX_PINGS_OUT
-  };
-}
-
-// ../envoy-client/src/envoy-config.ts
-import {
-  chmodSync,
-  closeSync as closeSync3,
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  openSync as openSync3,
-  readFileSync as readFileSync5,
-  readlinkSync,
-  rmSync as rmSync4,
-  statSync as statSync3
-} from "fs";
-import { homedir as homedir2, tmpdir } from "os";
-import * as path from "path";
-
-// ../envoy-client/src/json-position.ts
-function jsonErrorPosition(text) {
-  let at = 0;
-  const fail = () => {
-    throw new RangeError("not JSON");
-  };
-  const space = () => {
-    while (at < text.length && ` 	
-\r`.includes(text.charAt(at)))
-      at += 1;
-  };
-  const expect = (char) => {
-    if (text.charAt(at) !== char)
-      fail();
-    at += 1;
-  };
-  const string = () => {
-    expect('"');
-    while (at < text.length) {
-      const char = text.charAt(at);
-      if (char === '"') {
-        at += 1;
-        return;
-      }
-      if (char < " ")
-        fail();
-      at += char === "\\" ? 2 : 1;
-    }
-    fail();
-  };
-  const value = () => {
-    space();
-    const char = text.charAt(at);
-    if (char === "{" || char === "[") {
-      const close = char === "{" ? "}" : "]";
-      at += 1;
-      space();
-      if (text.charAt(at) === close) {
-        at += 1;
-        return;
-      }
-      for (;; ) {
-        if (close === "}") {
-          space();
-          string();
-          space();
-          expect(":");
-        }
-        value();
-        space();
-        if (text.charAt(at) === ",") {
-          at += 1;
-          continue;
-        }
-        expect(close);
-        return;
-      }
-    }
-    if (char === '"') {
-      string();
-      return;
-    }
-    for (const word of ["true", "false", "null"]) {
-      if (text.startsWith(word, at)) {
-        at += word.length;
-        return;
-      }
-    }
-    const number = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
-    if (number === null)
-      fail();
-    at += number?.[0].length ?? 0;
-  };
-  try {
-    value();
-    space();
-    if (at < text.length)
-      fail();
-    return;
-  } catch {
-    const before = text.slice(0, at).split(`
-`);
-    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
-  }
-}
-
-// ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync4 } from "fs";
-function sendable(value) {
-  return !/[\s\p{Cc}]/u.test(value);
-}
-function readSecretFile(variable, filePath) {
-  let contents;
-  try {
-    contents = readFileSync4(filePath, "utf8");
-  } catch (error) {
-    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
-  }
-  const value = contents.trim();
-  if (value.length === 0)
-    throw new Error(`${variable} names ${filePath}, which is empty`);
-  if (!sendable(value)) {
-    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
-  }
-  return value;
-}
-
-// ../envoy-client/src/envoy-config.ts
-var COMMAND_TIMEOUT_MS = 1e4;
-function nonEmpty(value) {
-  return value === undefined || value === "" ? undefined : value;
-}
-function absolute(name, value) {
-  if (value !== undefined && !path.isAbsolute(value)) {
-    throw new Error(`${name} is ${value}, which is not an absolute path`);
-  }
-  return value;
-}
-function neutralConfig(env) {
-  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
-  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
-  }
-  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir2(), ".config");
-  return { path: path.resolve(configHome, "legion", "envoy.json") };
-}
-var HARNESS_DIRECTORY_VARIABLE = {
-  omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
-};
-var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
-function namedDirectory(harness, env) {
-  if (harness === "omp") {
-    const profile = nonEmpty(env.OMP_PROFILE);
-    if (profile === undefined || profile === "default")
-      return;
-  }
-  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
-}
-function harnessDirectory(harness, env) {
-  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
-    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
-      continue;
-    }
-    const directory = namedDirectory(plugin, env);
-    if (directory !== undefined)
-      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
-  }
-  return;
-}
-function handedConfigPath(env) {
-  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
-  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
-}
-function envoyConfigPath(harness, env) {
-  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
-  if (handedFirst !== undefined)
-    return handedFirst;
-  const directory = harnessDirectory(harness, env);
-  if (directory !== undefined)
-    return path.resolve(directory, "envoy.json");
-  const handed = handedConfigPath(env);
-  if (handed !== undefined)
-    return handed;
-  const neutral = neutralConfig(env);
-  if ("error" in neutral)
-    throw new Error(neutral.error);
-  return neutral.path;
-}
-var httpUrlSchema = url({ protocol: /^https?$/, error: "must be an http or https URL" });
-var DispatchSectionSchema = strictObject({
-  enabled: boolean2().optional(),
-  serverUrl: httpUrlSchema.optional(),
-  token: string2().optional()
-});
-var EnvoySectionSchema = strictObject({
-  enabled: boolean2().optional(),
-  url: httpUrlSchema.optional(),
-  natsUrls: array(string2().trim().min(1, "must not be empty")).optional(),
-  token: string2().optional(),
-  natsSeed: string2().optional()
-});
-var EnvoyFileSchema = looseObject({
-  $schema: string2().optional(),
-  dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional()
-});
-var CheckoutFileSchema = looseObject({
-  $schema: string2().optional(),
-  dispatch: DispatchSectionSchema.optional()
-});
-var AskgateSectionSchema = strictObject({ enabled: boolean2().optional() });
-function offWithNotice(notice) {
-  return { enabled: false, notice, error: null };
-}
-function offWithError(error) {
-  return { enabled: false, notice: null, error };
-}
-function httpUrl2(value) {
-  let url2;
-  try {
-    url2 = new URL(value);
-  } catch {
-    return;
-  }
-  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
-}
-function describeSchemaIssue(filePath, error) {
-  const issue = error.issues[0];
-  if (!issue)
-    return `${filePath}: invalid envoy.json`;
-  if (issue.code === "unrecognized_keys") {
-    const section = issue.path.join(".");
-    const keys = issue.keys.map((key) => `${section}.${key}`).join(", ");
-    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
-}
-function danglingLink(filePath) {
-  try {
-    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
-  } catch {
-    return null;
-  }
-}
-function parseFile(filePath, schema, checkout) {
-  let raw;
-  try {
-    raw = readFileSync5(filePath, "utf-8");
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
-      return { kind: "absent", link: danglingLink(filePath) };
-    }
-    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error)})` };
-  }
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch {
-    const position = jsonErrorPosition(raw);
-    return {
-      kind: "invalid",
-      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
-    };
-  }
-  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
-    return {
-      kind: "invalid",
-      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
-    };
-  }
-  const parsed = schema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data };
-}
-var FAILURE_KEPT_MS = 60000;
-var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal2 = globalThis;
-var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
-processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
-function runCommand(command, env, cwd) {
-  const childEnv = {};
-  for (const [name, variable] of Object.entries(env)) {
-    if (variable !== undefined)
-      childEnv[name] = variable;
-  }
-  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
-  try {
-    chmodSync(directory, 448);
-    const output = path.join(directory, "stdout");
-    const fd = openSync3(output, "wx", 384);
-    let result;
-    try {
-      result = Bun.spawnSync(["/bin/sh", "-c", command], {
-        cwd,
-        env: childEnv,
-        stdin: "ignore",
-        stdout: fd,
-        stderr: "ignore",
-        timeout: COMMAND_TIMEOUT_MS,
-        detached: true
-      });
-    } catch (error) {
-      return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
-    } finally {
-      closeSync3(fd);
-    }
-    try {
-      process.kill(-result.pid, "SIGKILL");
-    } catch {}
-    if (result.exitedDueToTimeout) {
-      return {
-        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
-        timedOut: true
-      };
-    }
-    if (!result.success) {
-      return {
-        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
-        timedOut: false
-      };
-    }
-    const value = readFileSync5(output, "utf-8").trim();
-    if (value.length === 0)
-      return { failure: "printed nothing", timedOut: false };
-    if (!sendable(value)) {
-      return {
-        failure: "printed more than one line, or whitespace inside its value",
-        timedOut: false
-      };
-    }
-    return { value };
-  } finally {
-    rmSync4(directory, { recursive: true, force: true });
-  }
-}
-function fileValue(value, field, filePath, env, commands = "run") {
-  if (!value.startsWith("!")) {
-    if (!sendable(value)) {
-      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
-    }
-    return value;
-  }
-  const command = value.slice(1);
-  const cwd = path.dirname(path.resolve(filePath));
-  const key = JSON.stringify([command, filePath, cwd]);
-  let outcome = commandOutcomes.get(key);
-  if (commands === "kept") {
-    if (outcome === undefined) {
-      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
-    }
-  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
-    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
-    commandOutcomes.set(key, outcome);
-  }
-  if ("failure" in outcome)
-    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
-  return outcome.value;
-}
-function statDevice(directory) {
-  try {
-    return statSync3(directory).dev;
-  } catch {
-    return;
-  }
-}
-function moveNotice(oldFile, newFile, move, deviceOf) {
-  const oldDevice = deviceOf(path.dirname(oldFile));
-  let ancestor = path.dirname(newFile);
-  let newDevice = deviceOf(ancestor);
-  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
-    ancestor = path.dirname(ancestor);
-    newDevice = deviceOf(ancestor);
-  }
-  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
-    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
-  }
-  return `${oldFile} is not read: ${move}`;
-}
-function oldUserFileNotice(filePath, env, deviceOf) {
-  const home = nonEmpty(env.HOME) ?? homedir2();
-  const old = path.join(home, ".config", "opencode", "envoy.json");
-  if (!existsSync(old))
-    return;
-  const selected = path.resolve(filePath);
-  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
-  if (selected === userFile) {
-    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
-  }
-  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
-  if (profileFile) {
-    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
-  }
-  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
-  const neutral = neutralConfig(env);
-  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
-    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
-  }
-  return;
-}
-function missingConfigNotice(filePath, missing, off) {
-  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
-  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
-}
-function readEnvoyConfig(filePath, env, options) {
-  const deviceOf = options.deviceOf ?? statDevice;
-  const chosen = parseFile(filePath, EnvoyFileSchema, false);
-  if (chosen.kind === "invalid")
-    return { kind: "failed", path: filePath, error: chosen.reason };
-  const resolvedChosen = path.resolve(filePath);
-  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
-  const own = chosen.kind === "valid" ? chosen.settings : {};
-  let checkout = null;
-  if (checkoutFile.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
-  } else if (checkoutFile.kind === "valid") {
-    checkout = {
-      kind: "valid",
-      path: checkoutPath,
-      dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
-      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
-    };
-  }
-  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
-    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
-  ] : [];
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
-  return {
-    kind: "read",
-    path: filePath,
-    dispatch: own.dispatch ?? {},
-    envoy: own.envoy ?? {},
-    checkout,
-    missing: chosen.kind === "absent" ? {
-      link: chosen.link,
-      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
-    } : null,
-    warnings
-  };
-}
-
-// ../envoy-client/src/bearer.ts
-function bearerSource(env, section, written) {
-  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
-  if (pointer !== undefined) {
-    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
-  }
-  const plain = nonEmpty(env[`${section}_TOKEN`]);
-  if (plain !== undefined) {
-    if (!sendable(plain)) {
-      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
-    }
-    return { kind: "variable", token: plain };
-  }
-  const bearer = written();
-  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
-}
-function fileBearer(bearer, url, section, env, commands = "run") {
-  const named = httpUrl2(url)?.origin;
-  const paired = httpUrl2(bearer.server)?.origin;
-  if (named !== paired) {
-    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
-  }
-  if (bearer.checkout && bearer.token.startsWith("!")) {
-    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
-  }
-  if (bearer.token === "") {
-    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
-  }
-  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
-}
-
-// ../envoy-client/src/envoy-settings.ts
-var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
-var MIN_PASS_DEADLINE_MS = 30000;
-var MIN_INTERVAL_MS = 25;
-var MAX_INTERVAL_MS = 2147483647;
-function namedInterval(raw) {
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-function natsSeedFromEnvironment(env) {
-  const { NATS_NKEY_SEED_FILE: file, NATS_NKEY_SEED: plain } = env;
-  if (file !== undefined) {
-    if (file === "")
-      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
-    return {
-      value: readSecretFile("NATS_NKEY_SEED_FILE", file),
-      source: `NATS_NKEY_SEED_FILE (${file})`
-    };
-  }
-  if (plain === undefined)
-    return;
-  const value = plain.trim();
-  if (value.length === 0)
-    throw new Error("NATS_NKEY_SEED is set but empty");
-  return { value, source: "NATS_NKEY_SEED" };
-}
-var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
-var NO_NATS_CONNECTION = "this session opens no NATS connection";
-function natsServerKey(url) {
-  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url);
-  if (match === null)
-    return url;
-  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
-  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
-}
-function natsCredential(env, section, namedNatsUrls, filePath) {
-  const fromEnvironment = natsSeedFromEnvironment(env);
-  if (fromEnvironment !== undefined || section.natsSeed === undefined)
-    return fromEnvironment;
-  if (namedNatsUrls.length > 0) {
-    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
-    const named = new Set(namedNatsUrls.map(natsServerKey));
-    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
-      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
-    }
-  }
-  return {
-    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
-    source: `envoy.natsSeed in ${filePath}`
-  };
-}
-function envoySettings(env, config, options = {}) {
-  if (config.kind === "failed")
-    return offWithError(config.error);
-  const section = config.envoy;
-  if (section.enabled === false) {
-    return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
-  }
-  const namedUrl = nonEmpty(env.ENVOY_URL);
-  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url) => url.trim()).filter((url) => url.length > 0);
-  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
-  if (!addressed) {
-    return offWithNotice(config.missing === null ? `${config.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config.path, config.missing, "Envoy is off"));
-  }
-  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
-    return offWithError("ENVOY_URL must be an http or https URL");
-  }
-  const listener = section.url ?? DEFAULT_ENVOY_URL;
-  const url = namedUrl ?? listener;
-  let token;
-  try {
-    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
-      token: section.token,
-      field: "envoy.token",
-      path: config.path,
-      server: listener,
-      checkout: false
-    });
-    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url, "ENVOY", env);
-  } catch (error) {
-    return offWithError(messageFor(error));
-  }
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
-  let inbound;
-  if (options.nats === false)
-    inbound = { off: NO_NATS_CONNECTION };
-  else if (natsUrls.length === 0)
-    inbound = { off: NO_NATS_SERVER };
-  else {
-    try {
-      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config.path) };
-    } catch (error) {
-      inbound = { off: messageFor(error) };
-    }
-  }
-  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
-  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
-  return {
-    enabled: true,
-    url: normalizeEnvoyUrl(url),
-    token,
-    inbound,
-    heartbeatMs,
-    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
-    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
-  };
-}
-function normalizeEnvoyUrl(value) {
-  return value.replace(/\/+$/, "");
-}
-
-// ../envoy-client/src/transport.ts
-var DEFAULT_TIMEOUT_MS = 5000;
-var RETRY_DELAY_MS = 250;
-var REPLAY_TIMEOUT_MS = 1e4;
-var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
-var InterestWireSchema = object({
-  session_id: string2(),
-  machine_id: string2(),
-  dir: string2(),
-  topics: array(string2()),
-  updated_at: number2().int().optional(),
-  warnings: array(string2()).optional()
-});
-var SessionWireSchema = object({
-  session_id: string2(),
-  machine_id: string2(),
-  host: string2().optional(),
-  dir: string2(),
-  port: number2().int(),
-  title: string2(),
-  topics: array(string2()),
-  roles: array(string2()).optional(),
-  capabilities: array(string2()).optional(),
-  self_subscribed: boolean2(),
-  last_seen: number2().int().optional(),
-  plugin: string2().optional(),
-  plugin_version: string2().optional()
-});
-var RoleWireSchema = object({
-  role: string2(),
-  holder: string2(),
-  host: string2().optional(),
-  last_seen: number2().int()
-});
-var RoleHeldWireSchema = object({
-  error: string2(),
-  role: string2(),
-  holder: string2()
-});
-var ErrorWireSchema = object({
-  error: string2(),
-  code: string2().optional(),
-  expected: array(string2()).optional()
-});
-var EnvelopeResponseSchema = EnvelopeSchema.extend({
-  recipient: string2().optional(),
-  holder: string2().optional()
-});
-var ReplayWireSchema = object({
-  stream: object({
-    id: string2().min(1).optional(),
-    created: string2(),
-    first_seq: number2().int().nonnegative(),
-    last_seq: number2().int().nonnegative()
-  }),
-  subjects: array(object({
-    subject: string2(),
-    messages: array(object({
-      seq: number2().int().positive(),
-      subject: string2(),
-      time: string2(),
-      data: string2()
-    })),
-    next_after: number2().int().nonnegative(),
-    more: boolean2(),
-    refused: string2().optional()
-  }))
-});
-function mergeInterestSources(registryTopics, liveTopics) {
-  const interests = new Map;
-  for (const topic of registryTopics) {
-    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
-  }
-  for (const topic of liveTopics) {
-    if (!interests.has(topic))
-      interests.set(topic, "live");
-  }
-  return interests;
-}
-function newClientInstanceID() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-function expandSubscriptionTopics(topics) {
-  const expanded = new Set;
-  for (const topic of topics) {
-    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
-    if (base === undefined || base.includes("*") || base.includes(">")) {
-      expanded.add(topic);
-      continue;
-    }
-    const segments = base.split(".");
-    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
-      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
-    }
-    expanded.add(base);
-    expanded.add(topic);
-  }
-  return [...expanded];
-}
-
-class EnvoyApiError extends Error {
-  details;
-  name = "EnvoyApiError";
-  expected;
-  code;
-  constructor(details) {
-    let parsed;
-    try {
-      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
-      if (result.success)
-        parsed = result.data;
-    } catch {}
-    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
-    this.details = details;
-    this.expected = parsed?.expected;
-    this.code = parsed?.code;
-  }
-}
-function createEnvoyClient(config) {
-  const baseUrl = normalizeEnvoyUrl(config.baseUrl);
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config.token;
-  const request = async (path, init, options = {}) => {
-    const url = `${baseUrl}${path}`;
-    const attempts = config.retry === false ? 1 : 2;
-    const tries = options.retry === false ? 1 : attempts;
-    for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config.fetch(url, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error) {
-        if (attempt + 1 < tries) {
-          await waitForRetry();
-          continue;
-        }
-        throw error;
-      }
-      const responseBody = await response.text();
-      if (response.ok)
-        return responseBody;
-      const error = new EnvoyApiError({
-        method: init.method ?? "GET",
-        url,
-        status: response.status,
-        responseBody
-      });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
-      }
-      throw error;
-    }
-    throw new Error("Envoy request exhausted retries");
-  };
-  const post = (path, body, options) => request(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  }, options);
-  return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
-      session_id: input.sessionID,
-      dir: input.directory,
-      topics: expandSubscriptionTopics(input.topics),
-      port: input.port,
-      title: input.title,
-      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
-      driving: input.driving,
-      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
-      host: machineID(),
-      plugin: input.plugin.name,
-      plugin_version: input.plugin.version
-    }))),
-    unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics)
-      });
-    },
-    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
-    send: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
-      };
-    },
-    publish: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        topic: input.topic,
-        message: input.message,
-        ...input.payload === undefined ? {} : { payload: input.payload },
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        ...response.holder === undefined ? {} : { holder: response.holder }
-      };
-    },
-    unregisterSession: async (input) => {
-      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
-      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
-        method: "DELETE"
-      });
-    },
-    setRole: async (input) => {
-      const soft = input.soft === true;
-      const previous = soft ? input.previousSessionID ?? "" : "";
-      const body = {
-        session_id: input.sessionID,
-        role: input.role,
-        ...soft ? { soft: true } : {},
-        ...previous === "" ? {} : { previous_session_id: previous }
-      };
-      let raw;
-      try {
-        raw = await post("/v1/roles/set", body);
-      } catch (error) {
-        if (error instanceof EnvoyApiError && error.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error.details.responseBody));
-          if (held.success)
-            return { claimed: false, holder: held.data.holder };
-        }
-        throw error;
-      }
-      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
-    },
-    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
-    listSessions: async (input = {}) => {
-      const search = new URLSearchParams;
-      if (input.directory !== undefined)
-        search.set("dir", input.directory);
-      if (input.title !== undefined)
-        search.set("title", input.title);
-      const query = search.size === 0 ? "" : `?${search.toString()}`;
-      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    },
-    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
-      session_id: input.sessionID,
-      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
-      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
-  };
-}
-function waitForRetry() {
-  const { promise, resolve } = Promise.withResolvers();
-  setTimeout(resolve, RETRY_DELAY_MS);
-  return promise;
-}
-function messageMetadata(input) {
-  return {
-    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
-    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
-    ...input.urgency === undefined ? {} : { urgency: input.urgency },
-    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
-    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
-  };
-}
-function sourceSession(sessionID) {
-  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
-}
-
-// ../envoy-client/src/replay.ts
-var REPLAY_LEDGER_TTL_MS = DELIVERY_DUPLICATE_WINDOW_MS;
-var REPLAY_LEDGER_LIMIT = 20000;
-var REPLAY_PAGES_PER_SWEEP = 20;
-var REPLAY_FAILURES_BEFORE_NOTICE = 3;
-var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
-var REPLAY_MAX_SUBJECTS = 32;
-var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
-var ReplayLedgerEntrySchema = object({
-  event_id: string2().min(1).optional(),
-  dedupe_key: string2().min(1).optional(),
-  at: number2()
-});
-var ReplayCursorSchema = object({
-  since: number2().int().nonnegative().optional(),
-  after: number2().int().nonnegative().optional()
-});
-var ReplayPendingNoticeSchema = _enum2([
-  "retention_gap",
-  "stream_moved_back",
-  "stream_recreated"
-]);
-var PENDING_NOTICE_MESSAGES = {
-  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
-  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
-  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
-};
-var ReplayStateSchema = object({
-  stream_id: string2().optional(),
-  stream_created: string2().optional(),
-  subjects: record(string2(), ReplayCursorSchema),
-  notices: array(string2()).optional()
-});
-var ReplaySnapshotSchema = object({
-  state: ReplayStateSchema.optional(),
-  ledger: array(ReplayLedgerEntrySchema)
-});
-function createReplayEngine(options) {
-  const { host, transport, dedupe } = options;
-  const now = options.now ?? Date.now;
-  const ledger = createLedger(now);
-  const cursors = new Map;
-  const cursorStarts = new Map;
-  let streamID;
-  let streamCreated;
-  const pending = new Set;
-  const failures = new Map;
-  let unwritten = [];
-  let writtenState;
-  let writtenShape;
-  let writtenAt;
-  let writes = Promise.resolve();
-  let epoch = 0;
-  let listenerNoticed;
-  const answered = new Set;
-  let running;
-  let rerun;
-  const safely = (what, call) => {
-    try {
-      call();
-    } catch (error) {
-      try {
-        host.log(`replay: ${what} failed`, error);
-      } catch {}
-    }
-  };
-  const log = (message, error) => safely("log", () => host.log(message, error));
-  const notify = (notice) => safely("notice", () => host.notify(notice));
-  const tell = (kind) => {
-    pending.delete(kind);
-    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
-  };
-  const sessionRead = (read) => () => {
-    try {
-      return read();
-    } catch {
-      return;
-    }
-  };
-  const currentSession = sessionRead(() => host.sessionID());
-  const writeSession = sessionRead(() => host.writeSessionID === undefined ? host.sessionID() : host.writeSessionID());
-  const bindTo = (sessionID, read) => {
-    if (sessionID === undefined || sessionID === "" || read() !== sessionID)
-      return;
-    const bound = epoch;
-    return { sessionID, alive: () => bound === epoch && read() === sessionID };
-  };
-  const bind = () => bindTo(currentSession(), currentSession);
-  const stateJSON = (afters = true) => {
-    const subjects = {};
-    for (const subject of [...cursors.keys()].sort()) {
-      const cursor = cursors.get(subject) ?? {};
-      subjects[subject] = {
-        ...cursor.since === undefined ? {} : { since: cursor.since },
-        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
-      };
-    }
-    return JSON.stringify({
-      ...streamID === undefined ? {} : { stream_id: streamID },
-      ...streamCreated === undefined ? {} : { stream_created: streamCreated },
-      subjects,
-      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
-    });
-  };
-  const record2 = (identity) => {
-    const entry = ledger.record(identity);
-    if (entry !== undefined)
-      unwritten.push(entry);
-  };
-  const flush = (alive, atOnce = false) => {
-    writes = writes.then(async () => {
-      if (!alive())
-        return;
-      const json = stateJSON();
-      const delivered = unwritten;
-      if (json === writtenState && delivered.length === 0)
-        return;
-      const shape = stateJSON(false);
-      if (delivered.length === 0 && !atOnce && shape === writtenShape && writtenAt !== undefined && now() - writtenAt < REPLAY_STATE_REFRESH_MS) {
-        return;
-      }
-      unwritten = [];
-      const state = json === writtenState ? undefined : JSON.parse(json);
-      try {
-        await host.write({
-          delivered,
-          state,
-          snapshot: () => ({ state: JSON.parse(json), ledger: ledger.list() })
-        });
-        if (state !== undefined) {
-          writtenState = json;
-          writtenShape = shape;
-          writtenAt = now();
-        }
-      } catch (error) {
-        unwritten = [...delivered, ...unwritten];
-        log("replay: could not persist the replay state; the next write carries it", error);
-      }
-    });
-    return writes;
-  };
-  const syncFollowed = () => {
-    const followed = new Set(host.followedSubjects());
-    for (const subject of [...cursors.keys()]) {
-      if (!followed.has(subject)) {
-        cursors.delete(subject);
-        cursorStarts.delete(subject);
-      }
-    }
-    for (const subject of followed) {
-      if (!cursors.has(subject))
-        cursors.set(subject, {});
-    }
-  };
-  const failureNotice = (envelope, publishedAt, error, subject) => ({
-    eventId: envelope.event_id ?? "unknown",
-    sender: senderLabel(envelope),
-    summary: envelope.payload_summary ?? "unknown",
-    publishedAt,
-    error,
-    readWith: envelope.source === "dispatch" ? "dispatch read" : "envoy_inbox",
-    ...subject === undefined ? {} : { subject },
-    envelope
-  });
-  const showFailureNotice = async (notice, alive) => {
-    let queued;
-    try {
-      queued = await host.showFailureNotice(notice) === "queued";
-    } catch (error) {
-      if (!alive())
-        return "stopped";
-      safely("failure notice warning", () => host.failureNoticeFailed(notice, error));
-      return "hole";
-    }
-    if (!alive())
-      return "stopped";
-    if (queued)
-      return "hole";
-    record2(replayLedgerIdentity(notice.envelope));
-    await flush(alive);
-    return "done";
-  };
-  const handle = async (seq, buffered, alive) => {
-    const { message } = buffered;
-    const envelope = parseEnvelope(message.data);
-    if (envelope === undefined) {
-      log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
-      return "done";
-    }
-    if (isRoleForward(envelope))
-      return "done";
-    const identity = replayLedgerIdentity(envelope);
-    if (ledger.has(identity)) {
-      failures.delete(seq);
-      return "done";
-    }
-    if (dedupe?.pending(envelope) === true)
-      return "hole";
-    if (!alive())
-      return "stopped";
-    const giveUp = async (error) => {
-      const handled = await showFailureNotice(failureNotice(envelope, message.time, error, message.subject), alive);
-      if (handled === "done")
-        failures.delete(seq);
-      return handled;
-    };
-    const failure = failures.get(seq);
-    if (failure !== undefined && failure.count >= REPLAY_FAILURES_BEFORE_NOTICE) {
-      return giveUp(failure.error);
-    }
-    const followed = buffered.subjects[0] ?? message.subject;
-    let outcome;
-    let error = "the host could not show it";
-    try {
-      outcome = await host.deliver({
-        envelope,
-        data: message.data,
-        seq,
-        subject: message.subject,
-        followed,
-        time: message.time,
-        since: cursors.get(followed)?.since
-      });
-    } catch (thrown) {
-      outcome = "failed";
-      error = messageFor(thrown);
-    }
-    if (!alive())
-      return "stopped";
-    if (outcome === "shown") {
-      failures.delete(seq);
-      record2(identity);
-      await flush(alive);
-      return "done";
-    }
-    if (outcome === "suppressed") {
-      failures.delete(seq);
-      return "done";
-    }
-    if (outcome === "queued") {
-      failures.delete(seq);
-      return "hole";
-    }
-    const count = (failure?.count ?? 0) + 1;
-    failures.set(seq, { count, error });
-    if (count >= REPLAY_FAILURES_BEFORE_NOTICE)
-      return giveUp(error);
-    log(`replay: could not show stored message ${seq} (${envelope.event_id}): ${error}`);
-    return "hole";
-  };
-  const listenerFailed = (error) => {
-    if (error instanceof EnvoyApiError) {
-      const status = error.details.status;
-      if (status === 404) {
-        if (listenerNoticed === "not_served")
-          return;
-        listenerNoticed = "not_served";
-        notify({
-          kind: "not_served",
-          message: "This session's Envoy listener does not serve replay (POST /v1/replay answered 404), so messages published while its connection is down are not recovered."
-        });
-        return;
-      }
-      if (status === 503 && error.code === REPLAY_UNAVAILABLE_CODE || status === 401 || status === 403) {
-        const key = `unavailable:${status}:${error.message}`;
-        if (listenerNoticed === key)
-          return;
-        listenerNoticed = key;
-        notify({
-          kind: "unavailable",
-          status,
-          error: error.message,
-          message: `Envoy replay is unavailable (${status}: ${error.message}), so messages published while this session's connection is down are not recovered until it answers.`
-        });
-        return;
-      }
-    }
-    log("replay: the listener's replay failed; the next trigger tries again", error);
-  };
-  const streamReplaced = (stream) => {
-    if (stream.id === undefined) {
-      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
-    }
-    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
-  };
-  const streamMovedBack = (stream) => {
-    for (const cursor of cursors.values()) {
-      if (cursor.after !== undefined && cursor.after > stream.last_seq)
-        return true;
-    }
-    return false;
-  };
-  const sweepOnce = async () => {
-    const binding = bind();
-    if (binding === undefined)
-      return;
-    const { sessionID, alive } = binding;
-    syncFollowed();
-    const readings = new Map;
-    for (const [subject, cursor] of cursors) {
-      readings.set(subject, { read: cursor.after, more: true });
-    }
-    const buffer = new Map;
-    const holes = new Map;
-    let gapNoticed = false;
-    if (pending.size > 0) {
-      for (const kind of [...pending].sort()) {
-        if (kind === "retention_gap")
-          gapNoticed = true;
-        tell(kind);
-      }
-      await flush(alive);
-      if (!alive())
-        return;
-    }
-    for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
-      let handledAny = false;
-      const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
-      if (asking.length === 0)
-        break;
-      let response;
-      try {
-        response = await transport.replay({
-          sessionID,
-          subjects: asking.map(([subject, reading]) => reading.read === undefined ? { subject } : { subject, after: reading.read }),
-          ...options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }
-        });
-      } catch (error) {
-        if (alive()) {
-          answered.clear();
-          listenerFailed(error);
-        }
-        return;
-      }
-      if (!alive())
-        return;
-      listenerNoticed = undefined;
-      for (const result of response.subjects) {
-        if (result.refused === undefined)
-          answered.add(result.subject);
-        else
-          answered.delete(result.subject);
-      }
-      const { stream } = response;
-      const replaced = streamReplaced(stream);
-      streamID = stream.id ?? (replaced ? undefined : streamID);
-      streamCreated = stream.created;
-      if (replaced) {
-        const at = now();
-        for (const subject of cursors.keys()) {
-          cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
-          cursorStarts.set(subject, at);
-        }
-        failures.clear();
-        pending.add("stream_recreated");
-        await flush(alive);
-        if (!alive())
-          return;
-        tell("stream_recreated");
-        await flush(alive);
-        return;
-      }
-      if (streamMovedBack(stream)) {
-        const from = Math.max(0, stream.first_seq - 1);
-        for (const [subject, cursor] of cursors) {
-          if (cursor.after === undefined)
-            continue;
-          cursors.set(subject, { ...cursor, after: from });
-          const reading = readings.get(subject);
-          if (reading !== undefined) {
-            reading.read = from;
-            reading.more = true;
-          }
-        }
-        buffer.clear();
-        holes.clear();
-        failures.clear();
-        pending.add("stream_moved_back");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        tell("stream_moved_back");
-        await flush(alive);
-        if (!alive())
-          return;
-        continue;
-      }
-      for (const [, reading] of asking)
-        reading.more = false;
-      let gapped = false;
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading?.read === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read >= stream.first_seq - 1)
-          continue;
-        gapped = true;
-        reading.read = stream.first_seq - 1;
-        const cursor = cursors.get(result.subject);
-        if (cursor?.after !== undefined && cursor.after < reading.read) {
-          cursors.set(result.subject, { ...cursor, after: reading.read });
-        }
-      }
-      if (gapped) {
-        if (!gapNoticed)
-          pending.add("retention_gap");
-        await flush(alive, true);
-        if (!alive())
-          return;
-        if (pending.has("retention_gap")) {
-          gapNoticed = true;
-          tell("retention_gap");
-          await flush(alive);
-        }
-      }
-      for (const result of response.subjects) {
-        const reading = readings.get(result.subject);
-        if (reading === undefined || result.refused !== undefined)
-          continue;
-        if (reading.read === undefined) {
-          const cursor = cursors.get(result.subject);
-          if (cursor !== undefined && cursor.after === undefined) {
-            cursors.set(result.subject, { since: result.next_after, after: result.next_after });
-            cursorStarts.set(result.subject, now());
-          }
-          reading.read = result.next_after;
-          continue;
-        }
-        for (const message of result.messages) {
-          if (message.seq <= reading.read)
-            continue;
-          const buffered = buffer.get(message.seq);
-          if (buffered === undefined) {
-            buffer.set(message.seq, { message, subjects: [result.subject] });
-          } else if (!buffered.subjects.includes(result.subject)) {
-            buffered.subjects.push(result.subject);
-          }
-        }
-        reading.read = Math.max(reading.read, result.next_after);
-        reading.more = result.more;
-      }
-      let bound = Number.POSITIVE_INFINITY;
-      for (const reading of readings.values()) {
-        if (reading.more && reading.read !== undefined)
-          bound = Math.min(bound, reading.read);
-      }
-      const ready = [...buffer.keys()].filter((seq) => seq <= bound).sort((a, b) => a - b);
-      for (const seq of ready) {
-        const buffered = buffer.get(seq);
-        if (buffered === undefined)
-          continue;
-        buffer.delete(seq);
-        if (!buffered.subjects.some((subject) => cursors.has(subject)))
-          continue;
-        const handled = await handle(seq, buffered, alive);
-        if (handled === "stopped")
-          return;
-        if (handled === "done")
-          handledAny = true;
-        if (handled === "hole") {
-          for (const subject of buffered.subjects) {
-            if (!holes.has(subject))
-              holes.set(subject, seq);
-          }
-        }
-      }
-      if (!alive())
-        return;
-      for (const [subject, reading] of readings) {
-        const cursor = cursors.get(subject);
-        if (cursor?.after === undefined || reading.read === undefined)
-          continue;
-        let after = Math.min(reading.read, bound);
-        const hole = holes.get(subject);
-        if (hole !== undefined)
-          after = Math.min(after, hole - 1);
-        if (after > cursor.after)
-          cursors.set(subject, { ...cursor, after });
-      }
-      await flush(alive, handledAny);
-      if (![...readings.values()].some((reading) => reading.more))
-        break;
-    }
-  };
-  const runSweep = async () => {
-    try {
-      await sweepOnce();
-    } catch (error) {
-      log("replay: a sweep failed", error);
-    }
-  };
-  const sweep = () => {
-    if (running === undefined) {
-      running = runSweep().finally(() => {
-        running = undefined;
-      });
-      return running;
-    }
-    rerun ??= running.then(() => {
-      rerun = undefined;
-      return sweep();
-    });
-    return rerun;
-  };
-  return {
-    sweep,
-    async followedChanged() {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        syncFollowed();
-        await flush(alive);
-      } catch (error) {
-        log("replay: could not take the followed subjects", error);
-      }
-    },
-    delivered: (frame) => ledger.has(replayLedgerIdentity(frame)),
-    async recordDelivered(frame) {
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async recordDeliveredFor(sessionID, frame) {
-      const alive = bindTo(sessionID, writeSession)?.alive;
-      if (alive === undefined)
-        return;
-      record2(replayLedgerIdentity(frame));
-      await flush(alive);
-    },
-    async liveFailed(followed, envelope, error, receivedAt) {
-      const started = cursorStarts.get(followed);
-      if (!isRoleForward(envelope) && answered.has(followed) && cursors.get(followed)?.after !== undefined && (started === undefined || started <= receivedAt)) {
-        return;
-      }
-      const alive = bind()?.alive;
-      if (alive === undefined)
-        return;
-      try {
-        await showFailureNotice(failureNotice(envelope, inboundTimestamp(envelope.issued_at), messageFor(error)), alive);
-      } catch (thrown) {
-        log("replay: could not report a failed live frame", thrown);
-      }
-    },
-    followedBefore: (topic, seq) => {
-      const since = cursors.get(topic)?.since;
-      return since !== undefined && seq > since;
-    },
-    restore(snapshot) {
-      epoch += 1;
-      ledger.restore(snapshot.ledger);
-      cursors.clear();
-      cursorStarts.clear();
-      streamID = snapshot.state?.stream_id;
-      streamCreated = snapshot.state?.stream_created;
-      pending.clear();
-      for (const kind of snapshot.state?.notices ?? []) {
-        const known = ReplayPendingNoticeSchema.safeParse(kind);
-        if (known.success)
-          pending.add(known.data);
-      }
-      for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
-        cursors.set(subject, { ...cursor });
-      }
-      writtenState = snapshot.state === undefined ? undefined : stateJSON();
-      writtenShape = snapshot.state === undefined ? undefined : stateJSON(false);
-      writtenAt = undefined;
-      unwritten = [];
-      failures.clear();
-      listenerNoticed = undefined;
-      answered.clear();
-    },
-    state: () => JSON.parse(stateJSON())
-  };
-}
-function replaySuppressed(rendered) {
-  return rendered.skip || rendered.malformedDelivery === true;
-}
-var REPLAYED_SUFFIX = "while this session's connection was down.";
-function replayedText(content, publishedAt) {
-  return `${content}
-Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
-}
-function failureNoticeFields(notice) {
-  const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
-  return {
-    notice: "message not shown",
-    event_id: notice.eventId,
-    from: notice.sender,
-    summary: notice.summary,
-    published_at: notice.publishedAt,
-    ...notice.subject === undefined ? {} : { subject: notice.subject },
-    error: notice.error,
-    detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
-  };
-}
-var REPLAY_NOTICE_NAMES = {
-  stream_recreated: "stream recreated",
-  stream_moved_back: "stream moved back"
-};
-function replayNoticeFields(notice) {
-  return {
-    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
-    detail: notice.message
-  };
-}
-function envoyNoticeText(fields) {
-  return encode3({ envoy: fields });
-}
-var EXCEPTION_TOPIC_PREFIX = "notifications.envoy.exceptions.";
-var PRIVATE_STREAM_SUBJECTS = [
-  `${AGENT_TOPIC_PREFIX}>`,
-  `${LEGION_NOTICE_TOPIC_PREFIX}>`,
-  `${EXCEPTION_TOPIC_PREFIX}${AGENT_TOPIC_PREFIX}>`
-];
-function subjectsOverlap(a, b) {
-  const aTokens = a.split(".");
-  const bTokens = b.split(".");
-  for (let index = 0;index < aTokens.length && index < bTokens.length; index += 1) {
-    const aToken = aTokens[index];
-    const bToken = bTokens[index];
-    if (aToken === ">" || bToken === ">")
-      return true;
-    if (aToken !== "*" && bToken !== "*" && aToken !== bToken)
-      return false;
-  }
-  return aTokens.length === bTokens.length;
-}
-function reachesPrivateStreamSubject(ownAgentSubject, topic) {
-  if (!PRIVATE_STREAM_SUBJECTS.some((subject) => subjectsOverlap(topic, subject)))
-    return false;
-  return topic !== ownAgentSubject || /[*>]/.test(ownAgentSubject);
-}
-function replayFollowedSubjects(ownAgentSubject, topics, heldForRole = () => false) {
-  const followed = [...topics].filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !reachesPrivateStreamSubject(ownAgentSubject, topic) && !heldForRole(topic));
-  return [...new Set([ownAgentSubject, ...followed])];
-}
-function rememberedTopics(state) {
-  return Object.keys(state?.subjects ?? {}).filter((topic) => !topic.startsWith(AGENT_TOPIC_PREFIX) && !topic.startsWith(ROLE_TOPIC_PREFIX));
-}
-async function closeReplayedRemoval(frame, host) {
-  const closed = (subscriptionRemovedTopics(frame.data, host.sessionID) ?? []).filter((topic) => host.engine.followedBefore(topic, frame.seq) && host.close(topic));
-  if (closed.length === 0)
-    return closed;
-  const unregistering = host.unregister(closed);
-  await host.followedChanged();
-  await unregistering;
-  return closed;
-}
-function routeReplayNotice(notice, routes) {
-  if (notice.kind === "not_served" || notice.kind === "unavailable") {
-    routes.warn(notice.message);
-    return;
-  }
-  routes.card(envoyNoticeText(replayNoticeFields(notice)));
-}
-function isRoleForward(envelope) {
-  return envelope.dedupe_key?.startsWith(ROLE_FORWARD_KEY_PREFIX) === true || envelope.topic?.startsWith(ROLE_TOPIC_PREFIX) === true;
-}
-function replayLedgerIdentity(frame) {
-  return {
-    ...frame.event_id === undefined || frame.event_id === "" ? {} : { event_id: frame.event_id },
-    ...frame.dedupe_key === undefined || !dedupeKeyNamesItsEvent(frame) ? {} : { dedupe_key: frame.dedupe_key }
-  };
-}
-function parseEnvelope(data) {
-  let parsed;
-  try {
-    parsed = JSON.parse(data);
-  } catch {
-    return;
-  }
-  const result = EnvelopeSchema.safeParse(parsed);
-  return result.success ? result.data : undefined;
-}
-function createLedger(now) {
-  let entries = new Set;
-  const byEvent = new Map;
-  const byKey = new Map;
-  const drop = (entry) => {
-    entries.delete(entry);
-    if (entry.event_id !== undefined && byEvent.get(entry.event_id) === entry) {
-      byEvent.delete(entry.event_id);
-    }
-    if (entry.dedupe_key !== undefined && byKey.get(entry.dedupe_key) === entry) {
-      byKey.delete(entry.dedupe_key);
-    }
-  };
-  const add = (entry) => {
-    if (entries.size >= REPLAY_LEDGER_LIMIT) {
-      const oldest = entries.values().next();
-      if (oldest.done !== true)
-        drop(oldest.value);
-    }
-    entries.add(entry);
-    if (entry.event_id !== undefined)
-      byEvent.set(entry.event_id, entry);
-    if (entry.dedupe_key !== undefined)
-      byKey.set(entry.dedupe_key, entry);
-  };
-  const expire = () => {
-    const at = now();
-    for (const entry of entries) {
-      if (at - entry.at < REPLAY_LEDGER_TTL_MS)
-        break;
-      drop(entry);
-    }
-  };
-  const has = (identity) => {
-    expire();
-    return identity.event_id !== undefined && byEvent.has(identity.event_id) || identity.dedupe_key !== undefined && byKey.has(identity.dedupe_key);
-  };
-  return {
-    has,
-    record(identity) {
-      if (identity.event_id === undefined && identity.dedupe_key === undefined)
-        return;
-      if (has(identity))
-        return;
-      const entry = { ...identity, at: now() };
-      add(entry);
-      return entry;
-    },
-    restore(restored) {
-      entries = new Set;
-      byEvent.clear();
-      byKey.clear();
-      const at = now();
-      const kept = restored.filter((entry) => at - entry.at < REPLAY_LEDGER_TTL_MS && (entry.event_id !== undefined || entry.dedupe_key !== undefined)).sort((a, b) => a.at - b.at);
-      for (const entry of kept)
-        add({ ...entry });
-    },
-    list() {
-      expire();
-      return [...entries];
-    }
   };
 }
 
@@ -46637,6 +47814,7 @@ function allowedAPIURL(value) {
 
 // ../envoy-client/src/tool-contract.ts
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+var STORED_DELIVERY = "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " + "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " + "once from the durable consumer its listener relays to it, also one that was away or restarted. " + "Team and other ad-hoc topics are live only.";
 var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 var URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
 var EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
@@ -46644,7 +47822,7 @@ function messageMetadataShape(schema) {
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
-    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking").optional(),
+    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking: how soon the recipient should act, shown on its card. It does not deliver the message sooner or ahead of others.").optional(),
     expects_reply: schema.enum(EXPECTS_REPLY_VALUES).describe("none | optional | required").optional(),
     expires_at: schema.number({ int: true }).optional()
   };
@@ -46678,7 +47856,7 @@ var EnvoyToolOperation = {
 var envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to.")
     }),
@@ -46704,16 +47882,17 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema.string().describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
-      ...messageArguments(schema)
+      ...messageArguments(schema),
+      idempotency_key: schema.string().describe("Only to send again a message whose envoy_send was not confirmed delivered: the idempotency_key that error named. Omit it for a new message.").optional()
     }),
     operation: EnvoyToolOperation.send
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -46757,7 +47936,15 @@ var envoyToolSpecs = [
   }
 ];
 function sendConfirmationText(result) {
+  if (result.duplicate) {
+    return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
+  }
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+function sessionsOnMachine(sessions, machine) {
+  if (machine === undefined || machine === "")
+    return sessions;
+  return sessions.filter((session) => session.host === machine || session.machine_id === machine);
 }
 var envoyToolSchemas = new Map;
 
@@ -46838,11 +48025,18 @@ var legionClaimView = strictObject({
   state: _enum2(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
   capabilities: legionCapabilityReportView.optional(),
-  pluginContract: number2().int().nonnegative()
+  pluginContract: number2().int().nonnegative(),
+  updateRound: nonEmptyString.optional(),
+  updateHead: nonEmptyString.optional()
+});
+var legionHandoffRecordView = strictObject({
+  id: nonEmptyString,
+  version: number2().int().positive()
 });
 var legionPhaseView = strictObject({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
+  handoffRecord: legionHandoffRecordView.optional(),
   rounds: number2().int().nonnegative()
 });
 var legionPullRequestView = strictObject({
@@ -47049,6 +48243,14 @@ var LegionReadyRequest = strictObject({
   generation: number2().int().positive(),
   capabilities: LegionCapabilityReport.optional()
 });
+var LegionReadyForUpdateRequest = strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: number2().int().positive(),
+  round: nonEmptyString,
+  head: string2().optional()
+});
 var LegionControllerRegisterResponse = strictObject({
   claimToken: nonEmptyString,
   role: literal("controller"),
@@ -47103,7 +48305,9 @@ var LegionOperatorClaimResponse = strictObject({
   pending: legionDeliveryView.optional(),
   suspendedBy: _enum2(["unknown", "operator", "daemon", "exit"]).optional(),
   suspensionHeld: literal(true).optional(),
-  pluginContract: number2().int().nonnegative()
+  pluginContract: number2().int().nonnegative(),
+  updateRound: nonEmptyString.optional(),
+  updateHead: nonEmptyString.optional()
 });
 var LegionOperatorClaimsResponse = strictObject({
   claims: array(LegionOperatorClaimResponse)
@@ -47136,7 +48340,9 @@ var LegionHandoffCompleteRequest = strictObject({
   summary: nonEmptyString,
   verdict: string2(),
   ready: boolean2(),
-  commit: nonEmptyString.optional()
+  commit: nonEmptyString.optional(),
+  handoffId: nonEmptyString.optional(),
+  handoffVersion: number2().int().positive().optional()
 });
 var LegionIssueStatusRequest = strictObject({
   grantId: nonEmptyString,
@@ -47363,6 +48569,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) => post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
@@ -47379,7 +48586,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   };
 }
 
-// ../pi-shared/src/handoff-commit.ts
+// ../pi-shared/src/handoff-record.ts
 import { execFile as execFile2 } from "child_process";
 import { promisify as promisify2 } from "util";
 
@@ -47420,7 +48627,7 @@ async function staleGitLockNote(output, now = Date.now()) {
 `);
 }
 
-// ../pi-shared/src/handoff-commit.ts
+// ../pi-shared/src/handoff-record.ts
 var FILE_BACKED = {
   planning: { word: "plan", role: "planner" },
   implementing: { word: "implement", role: "implementer" },
@@ -47442,66 +48649,74 @@ var pathJj = async (args, cwd) => {
 ${note}`}`);
   }
 };
-function requiredVariable(env, name) {
+function paneLatestHandoff(file, env, cwd, fetchImpl = fetch) {
+  return async (issue, word) => {
+    const { dispatch } = sessionDispatchSettings(file, env, { cwd });
+    if (!dispatch.enabled) {
+      throw new Error(`Dispatch is off for this pane: ${dispatch.error ?? dispatch.notice}`);
+    }
+    return new DispatchClient(dispatch.url, dispatch.token, fetchImpl).latestHandoff(issue, word);
+  };
+}
+function paneHandoffReport(file, env, cwd) {
+  return (phase, role) => findHandoffReport({ phase, role, env, latestHandoff: paneLatestHandoff(file, env, cwd) });
+}
+function requiredVariable(env, name, purpose) {
   const value = env[name];
   if (value === undefined || value === "") {
-    throw new Error(`${name} is not set, so handoff_complete cannot find the commit to report`);
+    throw new Error(`${name} is not set, so ${purpose}`);
   }
   return value;
 }
-async function findHandoffCommit(input) {
-  const { phase, role, env } = input;
-  const jj = input.jj ?? pathJj;
-  const workspace = requiredVariable(env, "LEGION_WORKSPACE");
-  const handoff = FILE_BACKED[phase];
-  if (handoff === undefined || handoff.role !== role) {
-    return jj(["log", "-r", "@-", "--no-graph", "-T", "commit_id"], workspace);
-  }
-  const issue = requiredVariable(env, "LEGION_ISSUE");
+var FOR_HANDOFF = "handoff_complete cannot find what to report";
+function issueBranch(env, purpose) {
+  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
   if (!DISPATCH_KEY_PATTERN.test(issue)) {
     throw new Error(`LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`);
   }
-  const file = `.legion/${issue}/${handoff.word}.json`;
-  const fileset = `root:${JSON.stringify(file)}`;
-  if (await jj(["diff", "-r", "@", "--name-only", fileset], workspace) !== "") {
-    throw new Error(`${file} has changes in the working copy that are not committed: commit this phase's handoff before completing`);
+  return { issue, bookmark: `legion/${issue}` };
+}
+function pushedBranch(bookmark) {
+  return `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+}
+var STANDING = ["log", "-r", "@-", "--no-graph", "-T", "commit_id"];
+async function findPushedBranchHead(input) {
+  const { env } = input;
+  const jj = input.jj ?? pathJj;
+  const purpose = "ready_for_update cannot find the branch head to report";
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", purpose);
+  const { bookmark } = issueBranch(env, purpose);
+  return jj(["log", "-r", pushedBranch(bookmark), "--no-graph", "-T", "commit_id"], workspace);
+}
+async function findHandoffReport(input) {
+  const { phase, role, env } = input;
+  const jj = input.jj ?? pathJj;
+  const handoff = FILE_BACKED[phase];
+  if (handoff === undefined || handoff.role !== role) {
+    return { commit: await jj(STANDING, requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF)) };
   }
-  if (await jj(["file", "list", "-r", "@", fileset], workspace) === "") {
-    throw new Error(`${file} is missing from the workspace: write this phase's handoff, then commit and push it before completing`);
-  }
-  const carrying = await jj([
-    "log",
-    "-r",
-    `latest((::@- ~ ::trunk()) & files(${fileset}))`,
-    "--no-graph",
-    "-T",
-    "commit_id"
-  ], workspace);
-  if (carrying === "") {
-    throw new Error(`${file} is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff`);
-  }
-  const user = env["JJ_USER"];
-  if (user !== undefined && user !== "") {
-    const author = await jj(["log", "-r", carrying, "--no-graph", "-T", 'author.name() ++ "\\n" ++ author.email()'], workspace);
-    const [name = "", email = ""] = author.split(`
-`, 2);
-    if (name !== user || email !== (env["JJ_EMAIL"] ?? "")) {
-      throw new Error(`${file} is carried by commit ${carrying}, authored by ${name} <${email}>, not this pane's ${user}: run jj new, then write and commit this phase's handoff again`);
+  const { issue, bookmark } = issueBranch(env, FOR_HANDOFF);
+  let record;
+  try {
+    record = await input.latestHandoff(issue, handoff.word);
+  } catch (error) {
+    if (error instanceof DispatchServiceError && error.fromDispatch && error.code === "HANDOFF_NOT_FOUND") {
+      throw new Error(`${issue} has no ${handoff.word} handoff in Dispatch: write it with \`dispatch handoff-write --issue ${issue} --phase ${handoff.word} --body-file <file>\`, then complete again`);
     }
+    const answer = error instanceof DispatchServiceError && error.fromDispatch ? `${error.status} ${error.code}: ${error.message}` : messageFor(error);
+    throw new Error(`handoff_complete could not read ${issue}'s newest ${handoff.word} handoff from Dispatch: ${answer}; complete again once Dispatch answers`);
   }
-  const bookmark = `legion/${issue}`;
-  const pushed = await jj([
-    "log",
-    "-r",
-    `${carrying} & ::remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`,
-    "--no-graph",
-    "-T",
-    "commit_id"
-  ], workspace);
-  if (pushed === "") {
-    throw new Error(`${file} is carried by commit ${carrying}, which is not on ${bookmark}@origin: push the issue branch, then complete again`);
+  const report = { handoffId: record.id, handoffVersion: record.version };
+  if (role !== "implementer")
+    return report;
+  const workspace = requiredVariable(env, "LEGION_WORKSPACE", FOR_HANDOFF);
+  const remote = pushedBranch(bookmark);
+  const stands = await jj(STANDING, workspace);
+  const tip = await jj(["log", "-r", `${remote} & ${stands}::`, "--no-graph", "-T", "commit_id"], workspace);
+  if (tip === "") {
+    throw new Error(`the commit this workspace stands on, ${stands}, is not on ${bookmark}@origin: push it with \`jj bookmark set ${bookmark} -r @- && jj git push --bookmark ${bookmark}\`, then complete again`);
   }
-  return carrying;
+  return { commit: tip, ...report };
 }
 // ../../node_modules/.bun/@modelcontextprotocol+sdk@1.30.0/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
 function isZ4Schema(s) {
@@ -49862,7 +51077,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 44
+  daemonApiVersion: 46
 };
 
 // src/channel-forwarder.ts
@@ -49873,7 +51088,7 @@ var DeliveryIdentity = DedupeIdentitySchema.extend({
   source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
   topic: string2().min(1).optional().catch(undefined)
 });
-var decoder = new TextDecoder;
+var decoder2 = new TextDecoder;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -49896,9 +51111,9 @@ function createChannelForwarder(connection, options) {
   const deliver = async (topic, subscription) => {
     try {
       for await (const { message, receivedAt } of readArrivals(subscription)) {
-        const raw = decoder.decode(message.data);
+        const raw = decoder2.decode(message.data);
         const identity = deliveryIdentity(raw);
-        let claim = dedupe.claim(identity);
+        let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity);
         if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
           claim.settle();
           claim = undefined;
@@ -50705,6 +51920,8 @@ async function bootLegionClaim(host) {
     await host.afterRegister?.(claim);
     host.setCapability({
       sessionID: host.registration.sessionId,
+      claimToken: claim.claimToken,
+      generation: claim.generation,
       tree: claim.tree,
       issue: claim.issue,
       role: claim.role,
@@ -50926,6 +52143,8 @@ function stepPhaseStall(state, input) {
       return { state: { state: "open", count: 0 } };
     case "phase-closed":
       return { state: { state: "closed", count: 0 } };
+    case "update-answered":
+      return state.state === "closed" ? { state } : { state: { state: "awaiting-update", count: 0 } };
     case "inbound-event":
       return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
     case "tool-call":
@@ -50941,6 +52160,9 @@ function stepPhaseStall(state, input) {
       return { state, reminder: reminderText(input.lastAssistantText) };
     }
   }
+}
+function recordedPhaseStall(state) {
+  return state === "awaiting-update" ? "waiting" : state;
 }
 function phaseStallFrom(data) {
   if (!("state" in data) || typeof data.state !== "string")
@@ -51022,7 +52244,7 @@ function createPhaseReminder(deps) {
   let lastMessage = "";
   let recorded = "";
   const entryOf = () => ({
-    state: stall.state,
+    state: recordedPhaseStall(stall.state),
     count: stall.count,
     reported,
     ...reportKey === undefined ? {} : { reportKey },
@@ -51199,6 +52421,10 @@ function createPhaseReminder(deps) {
         lastAssistantText: text,
         backgroundWork: options?.backgroundWork
       });
+      if (stall.state === "awaiting-update") {
+        continued = false;
+        return;
+      }
       if (stall.state === "waiting") {
         continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
@@ -51267,7 +52493,7 @@ function workspaceRecreatedNotice(environment, issue) {
     return;
   return {
     id: crypto.randomUUID(),
-    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read your " + "last handoff."
+    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read the " + `last handoff recorded on ${issue} with \`dispatch handoff-read --issue ${issue} --phase <phase>\` ` + "(plan, implement, test or review); Dispatch keeps it, whatever the workspace lost."
   };
 }
 
@@ -51466,6 +52692,7 @@ function createPhaseHookEndpoint(deps) {
   return {
     deliveryWritten: noteWritten,
     phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    updateAnswered: () => reminder.apply({ kind: "update-answered" }),
     stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input);
@@ -51516,7 +52743,12 @@ function createPhaseHookEndpoint(deps) {
 }
 
 // ../pi-shared/src/legion-phase-ops.ts
-var PHASE_OPS = ["read_record", "handoff_complete", "request_backward_move"];
+var PHASE_OPS = [
+  "read_record",
+  "handoff_complete",
+  "request_backward_move",
+  "ready_for_update"
+];
 var requiredString = (op, field) => {
   const message = `${op} requires ${field}`;
   return string2({ error: message }).refine((value) => value.trim() !== "", { error: message });
@@ -51539,7 +52771,8 @@ var PhaseOpArguments = discriminatedUnion("op", [
       error: (issue) => typeof issue.input === "string" && issue.input.trim() !== "" ? `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}` : "request_backward_move requires to"
     }),
     reason: requiredString("request_backward_move", "reason")
-  })
+  }),
+  operation("ready_for_update", { round: requiredString("ready_for_update", "round") })
 ], {
   error: (issue) => issue.code === "invalid_union" ? `op is one of ${PHASE_OPS.join(", ")}` : undefined
 });
@@ -51572,7 +52805,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), " + "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " + "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " + "complete it with a handoff of its own, never this commit or verdict again), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " + "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " + "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " + "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " + "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " + "`legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " + "write this phase's handoff), " + "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " + "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " + "complete it with a handoff of its own, never this record or verdict again), the implementer's completion of implementing with no open " + "pull request on `legion/<issue>` and none recorded " + "merged (HANDOFF_NO_PULL_REQUEST: open it; one naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " + "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " + "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " + "daemon holds your next task until your process comes back on the new pod, in this same session. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -51627,6 +52860,26 @@ async function executePhaseOp(runtime, input) {
       });
       return {};
     }
+    case "ready_for_update": {
+      let head = "";
+      let failure;
+      try {
+        head = await runtime.branchHead();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      await daemon.readyForUpdate({
+        claimToken: claim.claimToken,
+        sessionId: claim.sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+        round: args.round,
+        ...head === "" ? {} : { head }
+      });
+      return failure === undefined ? {} : {
+        note: "The daemon has your ready_for_update signal. The signal reports no branch head, " + "because the branch-head lookup failed. The daemon checks no head, so your signal " + "counts without one. Repair what the lookup's message names before your next jj " + `command. The lookup said: ${failure}`
+      };
+    }
   }
 }
 async function completeHandoff(runtime, args) {
@@ -51651,13 +52904,13 @@ async function completeHandoff(runtime, args) {
   if (args.verdict === "pending") {
     throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
   }
-  const commit = await runtime.handoffCommit(record.phase, claim.role);
+  const report = await runtime.handoffReport(record.phase, claim.role);
   return daemon.handoffComplete({
     grantId: await mintClaimGrant(daemon, claim),
     summary: args.summary,
     verdict: args.verdict ?? "",
     ready: args.ready ?? false,
-    commit
+    ...report
   });
 }
 
@@ -51682,7 +52935,8 @@ async function executeLegionTool(runtime, input, signal) {
   return executePhaseOp({
     daemon: runtime.daemon,
     claim,
-    handoffCommit: runtime.handoffCommit,
+    handoffReport: runtime.handoffReport,
+    branchHead: runtime.branchHead,
     ...signal === undefined ? {} : { restart: { signal } }
   }, input);
 }
@@ -51690,6 +52944,9 @@ async function executeLegionTool(runtime, input, signal) {
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
 import { join as join11 } from "path";
+var ReplayStateFileSchema = ReplaySnapshotSchema.extend({
+  consumer: ConsumerDeliverySnapshotSchema.optional()
+});
 function replayStateFile(stateDirectory, sessionId) {
   return join11(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
@@ -51708,14 +52965,31 @@ async function readReplayState(file) {
   } catch {
     throw new Error(`${file} is not JSON`);
   }
-  const snapshot = ReplaySnapshotSchema.safeParse(parsed);
+  const snapshot = ReplayStateFileSchema.safeParse(parsed);
   if (!snapshot.success)
     throw new Error(`${file} holds no replay state`);
   return snapshot.data;
 }
-async function writeReplayState(file, snapshot) {
-  await writeAtomicStateFile(file, `${JSON.stringify(snapshot)}
+async function writeReplayState(file, state) {
+  await writeAtomicStateFile(file, `${JSON.stringify(state)}
 `);
+}
+function replayStateWriter(file, restored) {
+  let current = restored;
+  let writing = Promise.resolve();
+  const write = (next) => {
+    current = next;
+    const run = writing.then(() => writeReplayState(file, current));
+    writing = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+  return {
+    replay: (snapshot) => write(current.consumer === undefined ? snapshot : { ...snapshot, consumer: current.consumer }),
+    consumer: (snapshot) => write({ ...current, consumer: snapshot }),
+    idle: () => writing
+  };
 }
 
 // src/session-title.ts
@@ -51843,9 +53117,10 @@ async function sessionTitle(environment, directory, sources = {}) {
 
 // src/envoy-channel-server.ts
 var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
-var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
+var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is how soon the sender asks you to act (it does not change when or in what order deliveries arrive), from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
+var encoder2 = new TextEncoder;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var HANDOFF_POLL_MS = 250;
 var HANDOFF_FLUSH_TIMEOUT_MS = 1e4;
@@ -51957,8 +53232,15 @@ function createChannelDelivery(input) {
       }
     });
   };
+  const passOverBtw = (rendered, how) => {
+    if (rendered.delivery?.mode !== "btw")
+      return false;
+    process.stderr.write(`envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
+`);
+    return true;
+  };
   return {
-    enqueue({ subject, raw }) {
+    enqueue({ subject, raw, late }) {
       const rendered = renderInbound(raw, input.identity.id, subject);
       if (rendered.skip)
         return tail.then(() => false);
@@ -51979,17 +53261,16 @@ function createChannelDelivery(input) {
 `);
         return tail.then(() => false);
       }
+      if (late === true && passOverBtw(rendered, "late"))
+        return tail.then(() => false);
       return show(rendered, subject, rendered.content).then(() => true);
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject);
       if (replaySuppressed(rendered))
         return "suppressed";
-      if (rendered.delivery?.mode === "btw") {
-        process.stderr.write(`envoy-channel: passing over replayed BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
-`);
+      if (passOverBtw(rendered, "replayed"))
         return "suppressed";
-      }
       await show(rendered, frame.subject, replayedText(rendered.content, frame.time));
       return "shown";
     },
@@ -52039,15 +53320,43 @@ async function startChannelSession(options) {
   const dedupe = createDeliveryDedupe();
   let replayBound;
   const showReplayed = async (frame) => {
-    await closeReplayedRemoval(frame, {
-      sessionID: identity.id,
-      engine: replay,
-      close: (topic) => userTopics.delete(topic),
-      unregister: unfollowRemovedTopics,
-      followedChanged: () => replay.followedChanged()
-    });
-    return delivery.replay(frame);
+    const identityOf = deliveryIdentity(frame.data);
+    const claim = dedupe.claim(identityOf);
+    if (claim === undefined && identityOf !== undefined && dedupe.pending(identityOf)) {
+      return "queued";
+    }
+    try {
+      await closeReplayedRemoval(frame, {
+        sessionID: identity.id,
+        engine: replay,
+        close: (topic) => userTopics.delete(topic),
+        unregister: unfollowRemovedTopics,
+        followedChanged: () => replay.followedChanged()
+      });
+      const outcome = await delivery.replay(frame);
+      if (outcome === "shown")
+        claim?.settle();
+      else
+        claim?.release();
+      return outcome;
+    } catch (error) {
+      claim?.release();
+      throw error;
+    }
   };
+  const tellNotice = (notice) => {
+    routeReplayNotice(notice, {
+      warn: (message) => process.stderr.write(`envoy-channel: ${message}
+`),
+      card: (content) => {
+        delivery.notice(content).catch((error) => {
+          process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error)})
+`);
+        });
+      }
+    });
+  };
+  let stateWriter;
   const replay = createReplayEngine({
     host: {
       sessionID: () => shuttingDown || replayBound !== identity.id ? undefined : identity.id,
@@ -52058,35 +53367,27 @@ async function startChannelSession(options) {
         process.stderr.write(`envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it \u2014 ${messageFor(error)}
 `);
       },
-      notify: (notice) => {
-        routeReplayNotice(notice, {
-          warn: (message) => process.stderr.write(`envoy-channel: ${message}
-`),
-          card: (content) => {
-            delivery.notice(content).catch((error) => {
-              process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error)})
-`);
-            });
-          }
-        });
-      },
+      notify: tellNotice,
       log: (message, error) => {
         process.stderr.write(`envoy-channel: ${message}${error === undefined ? "" : ` \u2014 ${messageFor(error)}`}
 `);
       },
-      write: (change) => writeReplayState(replayStateFile(options.stateDirectory, identity.id), change.snapshot())
+      write: (change) => stateWriter?.replay(change.snapshot())
     },
     transport: options.client,
     dedupe
   });
   const restoreReplay = async () => {
     const sessionId = identity.id;
-    const snapshot = await readReplayState(replayStateFile(options.stateDirectory, sessionId)).catch((error) => {
+    const file = replayStateFile(options.stateDirectory, sessionId);
+    const snapshot = await readReplayState(file).catch((error) => {
       process.stderr.write(`envoy-channel: could not read the replay state (${messageFor(error)}); this session's replay starts over
 `);
       return { ledger: [] };
     });
     replay.restore(snapshot);
+    stateWriter = replayStateWriter(file, snapshot);
+    openRelay(sessionId, stateWriter, snapshot.consumer);
     replayBound = sessionId;
     return rememberedTopics(snapshot.state);
   };
@@ -52094,21 +53395,129 @@ async function startChannelSession(options) {
     if (!shuttingDown)
       replay.sweep();
   };
+  const takeRemovals = (raw) => {
+    const removedTopics = subscriptionRemovedTopics(raw, identity.id);
+    if (removedTopics !== undefined && removedTopics.length > 0) {
+      for (const topic of removedTopics)
+        userTopics.delete(topic);
+      dropRemovedTopics(removedTopics);
+    }
+  };
+  let relay;
+  const relaysCoreTopic = (topic) => relay?.sessionID === identity.id && relay.delivery.relays(topic);
+  const deliverRelayed = async (owner, frame) => {
+    if (shuttingDown || relay !== owner || owner.sessionID !== identity.id) {
+      frame.nak();
+      return;
+    }
+    takeRemovals(frame.data);
+    const identityOf = deliveryIdentity(frame.data);
+    const claim = dedupe.claim(identityOf);
+    if (claim === undefined) {
+      frame.done();
+      return;
+    }
+    let shown;
+    try {
+      const queued = delivery.enqueue({ subject: frame.subject, raw: frame.data, late: frame.late });
+      frame.release();
+      shown = await queued;
+    } catch (error) {
+      claim.release();
+      throw error;
+    }
+    if (!shown) {
+      claim.release();
+      frame.done();
+      return;
+    }
+    if (identityOf !== undefined)
+      await replay.recordDelivered(identityOf);
+    claim.settle();
+    frame.done();
+    owner.delivery.persist();
+  };
+  const openRelay = (sessionID, state, restored) => {
+    closeRelay();
+    const consumer = createConsumerDelivery({
+      sessionID,
+      ledger: replay,
+      host: {
+        deliver: (frame) => deliverRelayed(owner, frame),
+        gap: tellNotice,
+        log: (message, error) => {
+          process.stderr.write(`envoy-channel: ${message}${error === undefined ? "" : ` \u2014 ${messageFor(error)}`}
+`);
+        }
+      },
+      publish: (reply, body) => options.connection.publish(reply, encoder2.encode(body)),
+      persist: (snapshot) => {
+        if (relay !== owner)
+          return false;
+        state.consumer(snapshot).catch((error) => {
+          process.stderr.write(`envoy-channel: could not persist the consumer delivery state \u2014 ${messageFor(error)}
+`);
+        });
+        return true;
+      }
+    });
+    if (restored !== undefined)
+      consumer.restore(restored);
+    const owner = {
+      sessionID,
+      delivery: consumer,
+      state,
+      subscription: undefined
+    };
+    relay = owner;
+    const subscription = options.connection.subscribe(consumer.subject);
+    owner.subscription = subscription;
+    pumpRelay(owner, subscription);
+  };
+  const pumpRelay = async (owner, subscription) => {
+    try {
+      for await (const message of subscription) {
+        owner.delivery.receive(message);
+      }
+    } catch (error) {
+      process.stderr.write(`envoy-channel: the relay subscription of ${owner.sessionID} stopped \u2014 ${messageFor(error)}
+`);
+    }
+  };
+  function closeRelay() {
+    const owner = relay;
+    if (owner === undefined)
+      return;
+    relay = undefined;
+    owner.delivery.close();
+    owner.subscription?.unsubscribe();
+    owner.subscription = undefined;
+  }
+  const renewRelayEpoch = () => {
+    if (shuttingDown || relay === undefined)
+      return;
+    relay.delivery.beginEpoch();
+    serialized(register).catch((error) => {
+      process.stderr.write(`envoy-channel: could not register again after a reconnect (${messageFor(error)}); the next heartbeat retries
+`);
+    });
+  };
+  const takeDeliveryAnswer = (sessionID, topics, asked, result) => {
+    if (sessionID !== identity.id || relay !== asked)
+      return;
+    asked?.delivery.answered(result.delivery, topics);
+  };
   const forwarder = createChannelForwarder(options.connection, {
     dedupe,
     ledger: replay,
+    relayed: relaysCoreTopic,
     failed: (message, topic, error, receivedAt) => {
       const envelope = renderInbound(message.raw, identity.id, message.subject).envelope;
       if (envelope !== undefined)
         replay.liveFailed(topic, envelope, error, receivedAt);
     },
     deliver: async (message) => {
-      const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);
-      if (removedTopics !== undefined && removedTopics.length > 0) {
-        for (const topic of removedTopics)
-          userTopics.delete(topic);
-        dropRemovedTopics(removedTopics);
-      }
+      takeRemovals(message.raw);
       return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
@@ -52128,10 +53537,16 @@ async function startChannelSession(options) {
     });
   }
   function dropFromForwarderAndRegistry(topics) {
+    const dropping = forwarder.unfollow(topics);
+    if (relay?.sessionID === identity.id)
+      relay.delivery.setFollowed(registeredTopics());
     return {
-      dropping: forwarder.unfollow(topics),
+      dropping,
       unsubscribing: serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
     };
+  }
+  function registeredTopics() {
+    return forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic));
   }
   let stampedTitle;
   let stampFailureReported = false;
@@ -52150,18 +53565,24 @@ async function startChannelSession(options) {
         }
       }
     }
-    await options.client.subscribe({
-      sessionID: identity.id,
+    const sessionID = identity.id;
+    const topics = registeredTopics();
+    const asking = relay?.sessionID === identity.id ? relay : undefined;
+    asking?.delivery.setFollowed(topics);
+    const result = await options.client.subscribe({
+      sessionID,
       directory: identity.directory,
-      topics: forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic)),
+      topics,
       port: 0,
       title,
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
       clientInstanceID: options.clientInstanceID,
-      plugin: { name, version: options.pluginVersion }
+      plugin: { name, version: options.pluginVersion },
+      ...asking === undefined ? {} : { delivery: asking.delivery.registration() }
     });
+    takeDeliveryAnswer(sessionID, topics, asking, result);
   };
   const restoreRole = async (previousSessionID = identity.id) => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID);
@@ -52275,6 +53696,10 @@ async function startChannelSession(options) {
     forwarder.unfollow([previousSubject]);
     await restoreReplay();
     roleTransferFrom ??= previous;
+    await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS").catch((error) => {
+      process.stderr.write(`envoy-channel: could not confirm the relay subscription of ${next} \u2014 ${messageFor(error)}
+`);
+    });
     await register();
     await transferRole();
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered
@@ -52400,8 +53825,10 @@ async function startChannelSession(options) {
   (async () => {
     try {
       for await (const status of options.connection.status()) {
-        if (status.type === "reconnect")
-          triggerReplay();
+        if (status.type !== "reconnect")
+          continue;
+        renewRelayEpoch();
+        triggerReplay();
       }
     } catch (error) {
       process.stderr.write(`envoy-channel: the NATS connection's status reader failed \u2014 ${messageFor(error)}
@@ -52458,6 +53885,7 @@ async function startChannelSession(options) {
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
+      closeRelay();
       await forwarder.close();
       await serialized(() => options.client.unregisterSession({
         sessionID: identity.id,
@@ -52466,6 +53894,7 @@ async function startChannelSession(options) {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
+      await stateWriter?.idle();
     }
   };
 }
@@ -52482,6 +53911,7 @@ async function executeEnvoyTool(runtime, name, input) {
         sourceSessionID: identity.id,
         targetSessionID: args.session_id,
         message: args.message,
+        ...args.idempotency_key === undefined ? {} : { idempotencyKey: args.idempotency_key },
         ...toMessageMetadata(args)
       });
       return {
@@ -52529,7 +53959,7 @@ async function executeEnvoyTool(runtime, name, input) {
         ...args.dir === undefined ? {} : { directory: args.dir },
         ...args.title === undefined ? {} : { title: args.title }
       });
-      return args.machine ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine) : sessions;
+      return sessionsOnMachine(sessions, args.machine);
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input);
@@ -52667,12 +54097,15 @@ async function runEnvoyChannelServer() {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
-        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
+        handoffReport: paneHandoffReport(configFile, process.env, directory),
+        branchHead: () => findPushedBranchHead({ env: process.env })
       };
       const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal);
       const op = request.params.arguments?.["op"];
       if (op === "handoff_complete" || op === "request_backward_move")
         phaseHook?.phaseClosed();
+      else if (op === "ready_for_update")
+        phaseHook?.updateAnswered();
       return mcpResult(answer);
     }
     if (runtime === undefined)

@@ -23,6 +23,7 @@ import (
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -723,7 +724,7 @@ func TestResolveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", registered)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", roles.Registered)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, registered)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, roles.Registered)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}
@@ -1028,10 +1029,11 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		stallSessionReads(t, harness.sessions)
 		var forwards atomic.Int32
 		cfg := harness.config
-		cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		cfg.forwardRole = inlineForward(func(string, contracts.Envelope, string, time.Duration) error {
 			forwards.Add(1)
 			return nil
-		}
+		})
+		cfg = wireTestDeliveryWorkers(t, cfg)
 		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
 		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
 		if err != nil {
@@ -1043,7 +1045,9 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		}
 		started := time.Now()
 		coreNATSDeliveryHandler(cfg)(&nats.Msg{Data: marshalListenerEnvelope(t, item)})
-		if elapsed := time.Since(started); elapsed > bound || forwards.Load() != 0 {
+		elapsed := time.Since(started)
+		cfg.roleForwards.settled(t)
+		if elapsed > bound || forwards.Load() != 0 {
 			t.Fatalf("role delivery while the session bucket cannot be read took %s and forwarded %d times, want none within %s", elapsed, forwards.Load(), bound)
 		}
 		assertDeliveryException(t, probe, item, "delivery_failed")
@@ -1104,7 +1108,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("publish unheld role: %s", recorder.Body.String())
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 			t.Fatalf("body = %q", body)
 		}
 		assertNoMessage := func(name string, probe *nats.Subscription) {
@@ -1208,7 +1212,7 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\",\"claim_revision\":0}\n" {
 			t.Fatalf("body = %q", body)
 		}
 	})

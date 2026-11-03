@@ -88,10 +88,13 @@ test("follows the session id its Claude process hands off: new subject first, th
     const handoffCalls = calls.filter(
       (call) => call !== "subscribe ses_old [aside]" && call !== "getInterest",
     )
-    expect(handoffCalls.slice(0, 6)).toEqual([
+    expect(handoffCalls.slice(0, 8)).toEqual([
       "nats.subscribe notifications.agent.ses_new",
       "unregister ses_old",
       "nats.unsubscribe notifications.agent.ses_old",
+      // The old id's relay closes, and the new id's opens before its first registration.
+      "nats.unsubscribe notifications.envoy.deliver.ses_old",
+      "nats.subscribe notifications.envoy.deliver.ses_new",
       reregister,
       "setRole ses_new reviewer soft previous=ses_old",
       reregister,
@@ -100,7 +103,7 @@ test("follows the session id its Claude process hands off: new subject first, th
     // registration under the new id may carry the old id's direct subject.
     expect(newRegistrationTopics.flat()).not.toContain("notifications.agent.ses_old")
     // Whatever followed is a later tick doing nothing but re-registering.
-    expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
+    expect(handoffCalls.slice(8).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
     expect(
       await executeEnvoyTool(
@@ -117,6 +120,7 @@ test("follows the session id its Claude process hands off: new subject first, th
     calls.length = 0
     await session.shutdown()
     expect(calls.filter((call) => call !== reregister)).toEqual([
+      "nats.unsubscribe notifications.envoy.deliver.ses_new",
       "nats.unsubscribe notifications.agent.ses_new",
       "unregister ses_new",
     ])

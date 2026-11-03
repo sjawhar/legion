@@ -29,6 +29,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/session"
+	envoystore "github.com/sjawhar/envoy/internal/store"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -41,14 +43,19 @@ var commentColumns = []string{
 	"route_used", "claim_used", "route_source",
 }
 
-// recorder is the outbox's NATS boundary: it accepts every envelope and records each topic under
-// the event it carries, so a test can hold what the outbox sent against what it recorded.
+// recorder is the outbox's NATS boundary: it accepts every envelope, a role forward's included, and
+// records each topic under the event it carries, so a test can hold what the outbox sent against
+// what it recorded. It is always connected, so its connection never changes.
 type recorder struct {
 	mu     sync.Mutex
 	topics map[string][]string
 }
 
-func (r *recorder) Window() bus.Sender { return r }
+func (r *recorder) WindowUntil(func() time.Time) bus.Sender { return r }
+
+func (r *recorder) Connected() bool { return true }
+
+func (r *recorder) ConnectionChanged() <-chan struct{} { return nil }
 
 func (r *recorder) PublishAsync(item contracts.Envelope) <-chan error {
 	r.mu.Lock()
@@ -59,11 +66,42 @@ func (r *recorder) PublishAsync(item contracts.Envelope) <-chan error {
 	return accepted
 }
 
+// Request takes a role forward to the role's holder, recording the envelope, whose topic is still
+// the role's.
+func (r *recorder) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return r.PublishAsync(item)
+}
+
+func (r *recorder) Probe(time.Duration) error { return nil }
+
 func (r *recorder) sent(eventID string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return slices.Clone(r.topics[eventID])
 }
+
+// heldRoles is the role and session buckets the outbox resolves a role route's holder from
+// (outbox.Deps.RoleClaims and Sessions): every role is held by s-heard, a live self-subscribed
+// session, so a role route is forwarded to it with a Request the recorder takes.
+type heldRoles struct{}
+
+func (heldRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
+	return envoystore.RoleClaim{HolderSessionID: "s-heard"}, nil
+}
+
+func (heldRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+	return envoystore.ExpiredRoleClaimSuperseded, nil
+}
+
+func (heldRoles) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
+	if !live(entry) {
+		return session.SessionEntry{}, fmt.Errorf("s-heard is not live")
+	}
+	return entry, nil
+}
+
+func (heldRoles) TTL() time.Duration { return 5 * time.Minute }
 
 // heardEnvelope is the envelope id the stand-in listener mints for every send to s-heard.
 const heardEnvelope = "envelope-heard-1"
@@ -72,11 +110,10 @@ const heardEnvelope = "envelope-heard-1"
 // live sessions: s-mention, every send to which it refuses, and s-heard, every send to which it
 // accepts under heardEnvelope. s-heard holds the role lead.
 type rig struct {
-	handler   http.Handler
-	database  *store.Store
-	broker    *events.Broker
-	documents docs.API
-	sent      *recorder
+	handler  http.Handler
+	database *store.Store
+	broker   *events.Broker
+	sent     *recorder
 }
 
 func newRig(t *testing.T) *rig {
@@ -143,7 +180,7 @@ func newRig(t *testing.T) *rig {
 	// keyed handlers, detached deliveries, sockets and relay it started have ended, before the
 	// database closes under them.
 	t.Cleanup(api.Register(mux, t.Context(), deps).Wait)
-	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
+	return &rig{handler: mux, database: database, broker: broker, sent: &recorder{topics: map[string][]string{}}}
 }
 
 // call sends one request: as the person login names when it is not empty, else as the session actor
@@ -201,7 +238,10 @@ func (r *rig) publishAll(t *testing.T) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: r.database, Publisher: r.sent, Broker: r.broker, Docs: r.documents})
+		outbox.New(outbox.Deps{
+			Store: r.database, Publisher: r.sent, Broker: r.broker, Listen: r.database.Pool.Listener,
+			RoleClaims: heldRoles{}, Sessions: heldRoles{},
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()

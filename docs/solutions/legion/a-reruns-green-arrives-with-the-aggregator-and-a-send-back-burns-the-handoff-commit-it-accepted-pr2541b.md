@@ -26,27 +26,28 @@ costs.
   runner of its own after the job it sums finishes. Measured here: the `dispatch` job finished at
   20:31:04Z and `ci-ok` at 20:59:52Z, 29 minutes later, with nothing else of the attempt
   outstanding. Read the aggregator's conclusion, and name it when you report the re-run green.
-- **A red the daemon still holds is applied by your completion.** `HeadVerdict`
-  (`packages/daemon/internal/classify/required.go`) carries a code commit's settlement to every
-  `.legion/`-only head pushed above it, and `RedSendsBack`
+- **A red the daemon still holds is applied by your completion.** `RedSendsBack`
   (`internal/classify/decisions.go`) sends an issue in testing, reviewing, retro or merging back
-  to implementing on it. So a completion made while the previous attempt's red still stands is
-  not ignored: it is accepted and the round is sent straight back. Check the record's
-  `pullRequest.checksVerdict` (the `legion` tool's `read_record`) before completing, not only
-  GitHub's job list.
-- **That send-back burns the commit your completion reported.** `engine.go` sets
-  `row.LastHandoff = fact.Commit` on an accepted completion, so completing again at the same
-  commit when the round reopens is refused `HANDOFF_NOT_NEW` naming it. Write the handoff file
-  again — with whatever the round has since learnt — commit it and push it, even when no file of
-  the change moved. The round's second handoff commit is the expected outcome, not a sign that
-  something went wrong.
+  to implementing on the verdict `HeadVerdict`
+  (`packages/daemon/internal/classify/required.go`) gives the pull request's head. So a completion
+  made while the previous attempt's red still stands is not ignored: it is accepted and the round
+  is sent straight back. Check the record's `pullRequest.checksVerdict` (the `legion` tool's
+  `read_record`) before completing, not only GitHub's job list.
+- **That send-back burns the handoff your completion reported.** `engine.go` sets
+  `row.LastHandoff = fact.HandoffRecord` on an accepted completion, so completing again naming the
+  same record when the round reopens is refused `HANDOFF_NOT_NEW` naming it. Record the handoff
+  again — with whatever the round has since learnt — with `dispatch handoff-write`, which writes a
+  new version, even when no file of the change moved. The round's second handoff version is the
+  expected outcome, not a sign that something went wrong. While a handoff was a committed file
+  (before sjawhar/legion#2354) the burnt name was the commit, and the second handoff commit played
+  the same part.
 - **Nothing validates a handoff's shape, so a field you are no longer meant to write keeps being
   written.** Read your role's own instructions for the fields each round, not the previous
-  round's file: this branch's implement handoffs carried a `completed` timestamp, which the
-  worker prompt no longer asks for (a handoff's time is its commit's committer date), and carried
-  no `previousHandoff`, which is the one field that keeps two identical rounds from writing the
-  same bytes and earning `HANDOFF_NOT_NEW` for a different reason
-  (`docs/solutions/best-practices/a-field-no-reader-reads-can-be-load-bearing-through-its-bytes-INFRA-336.md`).
+  round's body: this branch's implement handoffs carried a `completed` timestamp, which the
+  worker prompt had stopped asking for, and carried no `previousHandoff`, which was then the one
+  field that kept two identical rounds from writing the same bytes. Both fields are gone since
+  sjawhar/legion#2354 — Dispatch records when each handoff was written and versions it — and the
+  rule they illustrate is not: nothing reads a handoff's shape for you.
 
 ## Evidence
 

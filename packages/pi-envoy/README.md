@@ -20,8 +20,10 @@ without one, and answers the sender with an error once four seconds pass without
 topic published straight onto NATS is forwarded once, and a miss is a `receipt_timeout` exception.
 The same route forwards a team or other ad-hoc topic's message to each session registered on the
 topic that holds its own NATS connection, as this one does, other than its sender, and the sender's
-error names each session that did not reply. Role messages are live only; they are not retained
-for a later claimant, and a session does not recover one it missed.
+error names each session that did not reply. The stream stores each forward on the recipient's
+agent subject, and when the listener supports consumer delivery that session takes the stored copy
+once, also after a restart or a dropped connection (below). A role message is not kept for a later
+claimant, and on the core path a session does not recover one it missed.
 
 This extension claims the role for the session the host has open, and every automatic claim is
 soft: it names the session it continues, which is a fork's or branch's parent, or the session
@@ -54,7 +56,20 @@ and `summary`) for recovery after an interrupt. `envoy_role_get` returns the cur
 last-seen timestamp for a role. `envoy_subscribe` reports listener warnings in both its text and
 details result, including subscriptions whose stream currently has no matching event.
 
-A message published while the session's NATS connection or one of its subscriptions was down is
+The session's messages come from a durable consumer the listener keeps for it on Envoy's
+notification stream and relays on `notifications.envoy.deliver.<session id>`, which
+the session subscribes before it registers: its own agent subject, the stored copies of role
+messages to a role it holds, and every followed topic the stream stores, in stream order. The
+session answers each frame `received` as it decodes and `done` once Oh My Pi wrote the card or
+turn to the session file, so a frame not written when the session stops, or published while it
+was down or disconnected, comes again and is shown once, for up to 72 hours. Team and other
+ad-hoc topics, which the stream does not store, stay live only on the session's own
+subscription. "Consumer delivery" in `AGENTS.md` has the rules, and
+`packages/envoy/AGENTS.md`, "Session consumers", states them once for every host.
+
+The core path is the rollout fallback dispatch://INFRA-771 removes, for a listener that answers
+`core` and for a plugin of an earlier release. There a message
+published while the session's NATS connection or one of its subscriptions was down is
 recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
 its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each
 topic it follows, after the place it last read to, and shows each missed message once, as a card
@@ -90,8 +105,8 @@ set -g set-clipboard on
 
 A session with Dispatch configured — a top-level session, a Legion pane or a `task` subagent —
 sends two extra user messages with every model request of its conversation. At the head, after
-any compaction summary, it sends the `dispatch-first` skill, whose text never changes. At the
-tail, after the request's last message, it sends what people wrote to the session in the last 72
+any compaction summary, it sends the `dispatch-first` skill, whose text never changes. It also
+sends what people wrote to the session in the last 72
 hours that Dispatch delivered to it: answers to its asks, replies on them and in its comment
 threads, comments on its documents and routed issues, mentions, and messages, newest first and
 word for word. A subagent reads its parent's list. The list stays under 8,000 characters (at most 7,999): the oldest
@@ -104,9 +119,15 @@ own `404 NOT_FOUND` "no route for …". Against that Dispatch a request carries 
 `dispatch answers` cannot read it either; a list read before from it is still carried, its
 left-out line naming no command; the log says once per session that the Dispatch has no answers
 route; and that Dispatch is not asked again for 5 minutes. Any other answer, a proxy's 404 page or
-a 200 that is no answers list included, is a failed read. The list sits at the tail so that a
-change in it costs only its own tokens: the cached conversation before it is sent byte for byte as
-before.
+a 200 that is no answers list included, is a failed read.
+
+The list goes after the request's last message only on the request where it first shows an item,
+or new words in one. On every request after that it stays right after the message it followed
+there, so the request ends with its own last message and the model does not take a list with
+nothing new in it for a new turn; it keeps that place when it only loses items or its header
+changes. After a compaction summarizes that message, or in a new process, the list goes after the
+last message once more. It is never at the head, so a change in it costs only the bytes after it,
+and a list that keeps its place is inside the cached prefix of the next request.
 
 Oh My Pi also builds requests that are not turns of the conversation from it; those carry the
 skill but no list, and wait on no read: a side turn (a Dispatch BTW, the stop-time self-check,
@@ -176,10 +197,13 @@ The extension registers no Dispatch tool. Agents reach Dispatch through the `dis
 their shell: `dispatch --help` lists its commands, `dispatch <command> --help` each one's flags and
 an example, and the `dispatch` skill teaches when to use each. The package ships `bin/dispatch`, a
 shim that runs the bundled `dist/dispatch.js` (built from `@legion/envoy-client`'s
-`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH`, sets
-`DISPATCH_HOST=omp` and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session
-start, switch and branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the
-session whose shell ran it and reads the file that session reads.
+`bin/dispatch.ts`) with `bun`. The manifest's `omp.bin` names that `bin/`, so an Oh My Pi that
+supports the field puts it on `PATH` under the plugin's installed path, which keeps working when a
+symlinked plugins root is re-pointed and its old target removed; under an older Oh My Pi the
+extension puts `bin/` first on `PATH` itself at load. The extension also sets `DISPATCH_HOST=omp`
+and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session start, switch and
+branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the session whose shell
+ran it and reads the file that session reads.
 
 A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
@@ -269,6 +293,20 @@ dispatch artifact --issue LEGION-1 --name spec.md --content-file - <<'EOF'
 EOF
 ```
 
+Inline content is stored as a Markdown document, so `--content` and `--content-file` take only a
+`--name` that ends in `.md` or `.markdown` or has no extension. The command refuses any other name
+(`rows.jsonl`, `sizes.tsv`, `rows.jsonl.1`, `plan v1.2`) before it sends anything and names
+`--path`, which stores a file whose path does not end in `.md` or `.markdown` as its bytes,
+unchanged, under that name. A document title with a dot near its end takes `--content` once it
+ends in `.md`.
+
+`dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records a Legion phase
+handoff on its issue as this session: the file's text, one JSON object, is stored exactly as
+written, and each write is the phase's next version. Keep the file outside the workspace (such as
+`$TMPDIR/<KEY>-<phase>.json`), since jj snapshots every file in it.
+`dispatch handoff-read --issue <KEY> --phase <phase>` prints one line naming the record's version,
+id, session and time, then the body exactly as stored; `--version <n>` reads an earlier version.
+
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.
@@ -291,7 +329,12 @@ reviews these calls:
 Every other Dispatch command is outside the gate, and its text posts unreviewed: among them
 `dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
-The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name
+The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
+contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
+run and the `cd`'s `pwd -P` probe, take at most half the call's deadline: the first run of each
+is cut at 20 s, or sooner when that half ends sooner, and a run cut there is run once more with
+what is left of that half (25 s at the 90 s default), when at least 2 s of it is left. The
+review keeps the other half. An upload that reads its name
 from a file (`--name-file`) is decided from the name the dry run prints. `--path-file` is refused:
 its content names a file the gate does not read before Dispatch opens it. An upload whose name or
 path holds an expansion (`"$NAME"`) is outside the form the gate reads. The gate reads each file
@@ -315,10 +358,12 @@ before any call of that message runs. So the gate reads a file before an earlier
 message writes or edits it. A file that is not there yet is refused in `block` mode with the
 advice to send the call again in a later message; in `warn` mode the call runs unreviewed, with
 that advice as its note. A file that an earlier call changed is refused by the CLI in `block` mode
-(`… AskGate reviews the calls of a message before any of them runs, so it did not review that
-change. Send the call again in a later message.`); in `warn` mode it posts with a
+when a review, a rebuttal or a breaker trip stands behind the call (`… AskGate reads the files of a
+message's calls before any of them runs, so it did not see that change. Send the call again in a
+later message than the one that changes the file.`); in `warn` mode it posts with a
 `dispatch: warning:` line. Write or edit a file in one message, and send the write that posts it
-in the next.
+in the next. A call the gate reviewed nothing of (a halt, a session whose model is on another
+provider, a review that failed) checks no file, so its file posts as the CLI reads it.
 
 **The form the gate reads.** One `dispatch` call, alone in the bash call:
 
@@ -364,11 +409,12 @@ gated write only when it consumes one, so a write sent any other way is refused 
   record pi-envoy cannot write is a notice in the session, at start or at a switch.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
-  review or a deliberate pass (a rebuttal, a breaker trip, a halt, another provider), the digest
-  of the arguments the dry run printed and the sha256 of each file the argv names, as the gate
-  read it. A call no verdict stands behind, and a `task` subagent's literal call, get a marker of
-  the argument vector alone. Nothing of it is in the command the agent sees. A marker goes when
-  its call ends, is refused or the session shuts down; a backgrounded call keeps its marker until
+  review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry
+  run printed and the sha256 of each file the argv names, as the gate read it. A call no verdict
+  stands behind (a halt and another provider among them), and a `task` subagent's literal call,
+  get a marker of the argument vector alone. Nothing of it is in the command the agent sees. A
+  marker goes when its call ends, is refused or the session shuts down; a backgrounded call keeps
+  its marker until
   shutdown, and a marker older than two hours, longer than any tool's time limit, is refused and
   removed. The process removes its store when it exits; the CLI's daily session pruning removes
   the store of a process that is gone and that nothing changed for two hours.
@@ -382,8 +428,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   it when the ledger cannot take that line, and then posts it with a `dispatch: warning:` line.
   Either way pi-envoy records an `advisor-gate` entry with outcome `unmarked`. A record that cannot
   be read, or that names a store that is gone, is a refusal. A session no live record names needs
-  no marker: a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with no
-  Dispatch and one with `askgate.enabled: false`.
+  no marker: a terminal, CI, Claude Code, a pod without pi-envoy, a session with no Dispatch and
+  one with `askgate.enabled: false`.
 - **The cause note.** When a `bash` call outside the literal form holds a `dispatch` word and a
   gated subcommand, and its result holds the CLI's refusal (or warn-mode warning) of a write with
   no marker, the gate appends an `AskGate note:` to that result. It names the first cause it found
@@ -536,7 +582,7 @@ why. The note reaches a headless session too:
 | Outcome | What happened |
 | --- | --- |
 | `timeout` | the review did not answer within its deadline |
-| `error` | the review failed: a model error, a handler exception, or a dry run that failed |
+| `error` | the review failed: a model error, a handler exception, or a dry run that failed; a dry run that timed out twice, or once with no time left to run it again, gets a note that the machine was busy and that the agent should read back what the write posted |
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
 | `skipped` | the session's main model is on another provider than the gate's |

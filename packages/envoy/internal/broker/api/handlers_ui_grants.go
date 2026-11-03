@@ -1,7 +1,7 @@
 // handlers_ui_grants.go: GET /v1/grants, POST /v1/grants/{id}/revoke-by-approver — a person's own
 // live-grant list and human revocation route. Part of the routes a listed service calls with its
-// own ServiceAccount token (accountAuth), relaying a person's own page; see handlers_ui_records.go
-// for the shared trust-model note.
+// own ServiceAccount token (accountAuth), relaying a person's own page: the token proves which
+// service is calling, and the person is the one the service names.
 package api
 
 import (
@@ -77,18 +77,19 @@ func (s *server) writeApproverGrants(w http.ResponseWriter, r *http.Request, app
 }
 
 // revokeByApproverBody is {"approver"}, the body of both revoke-by-approver routes (a grant's and a
-// launcher credential's): the revoking human's Dispatch login, which Dispatch's server sets from
-// its own session.
+// launcher credential's): the revoking person's login, which Dispatch's server sets from its own
+// session.
 type revokeByApproverBody struct {
-	// The Dispatch login of the person revoking: for a grant, its approver or its session's
-	// operator; for a person's machine login, the person who approved it; for a service's machine
-	// login, anyone signed in.
+	// The login of the person revoking: for a grant, its approver or its session's operator; for a
+	// person's machine login, the person who approved it; for a service's machine login, anyone
+	// signed in.
 	Approver string `json:"approver"`
 }
 
-// revokeByApprover ends a grant on a human's Dispatch login, as the person Dispatch names
-// (revokeGrantAs), logging the caller that relayed it beside that person: the caller is a named
-// service identity, while the person it names is still its own to state (dispatch://INFRA-314).
+// revokeByApprover ends a grant as the person the caller names (revokeGrantAs), logging the caller
+// that relayed it beside that person. The caller is a named service identity, while the person's
+// name is still taken on the caller's word: a revoke only takes power away, unlike a secret
+// request's approval, which only the broker's own page makes.
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request, callerName string) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {

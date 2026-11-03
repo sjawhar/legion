@@ -79,10 +79,13 @@ def reads(*entries):
 
 
 def envoy_top_level_but_infra():
-    """packages/envoy/* and every top-level directory of it but infra, node_modules and testdata."""
+    """packages/envoy/* and every top-level directory of it but infra, node_modules, testdata and
+    out. The last three hold no tracked file, and a rule naming a directory that holds none is
+    refused: out is where packages/dispatch/e2e/run-broker.sh builds the broker binaries the
+    browser suite starts, so it exists on a checkout that has run that suite and nowhere else."""
     globs = [f"{ENVOY}/*"]
     for entry in sorted(Path(ENVOY).iterdir()):
-        if entry.is_dir() and entry.name not in {"infra", "node_modules", "testdata"}:
+        if entry.is_dir() and entry.name not in {"infra", "node_modules", "out", "testdata"}:
             globs.append(f"{ENVOY}/{entry.name}/**")
     return globs
 
@@ -90,7 +93,7 @@ def envoy_top_level_but_infra():
 # ---------------------------------------------------------------- shared step reads
 WORKSPACES = [
     "packages/contracts", "packages/envoy-client", "packages/pi-envoy", "packages/pi-legion",
-    "packages/pi-shared", "packages/envoy-plugin", "packages/claude-envoy", "packages/proof-editor",
+    "packages/pi-shared", "packages/claude-envoy", "packages/proof-editor",
     "packages/dispatch", "packages/envoy/internal/dispatch/pmdoc/gen", "docs/site",
 ]
 
@@ -167,6 +170,8 @@ CLAUDE_ENVOY_BUILD = reads(
         (".claude-plugin/marketplace.json", "packages/claude-envoy/tests/envoy-channel-server.test.ts:7"),
         (".github/scripts/check-private-names.sh", "packages/claude-envoy/scripts/verify-build.sh checks the build with it"),
         (".github/scripts/release-push.sh", "packages/claude-envoy/scripts/verify-build.sh runs its check-built; the job runs its extract-built"),
+        (".github/workflows/claude-envoy-rebuild.yaml",
+         "packages/claude-envoy/tests/build-inputs.test.ts holds its on.push.paths to the files scripts/build-inputs.txt matches"),
 )
 
 
@@ -178,7 +183,7 @@ PACK_READS = [  # bun pm pack of pi-envoy / pi-legion runs their prepack (script
     "package.json", "bun.lock", "patches/**",
 ]
 PMDOC_GEN = [f"{ENVOY}/internal/dispatch/pmdoc/gen/**", "packages/proof-editor/**", "package.json", "bun.lock", "patches/**"]
-BROKER_REFGEN_DIRS = ("internal/broker/api", "internal/broker/helper", "internal/broker/config", "cmd/broker", "cmd/agent-secrets")
+BROKER_REFGEN_DIRS = ("internal/broker/api", "internal/broker/helper", "internal/broker/config", "internal/broker/approval", "cmd/broker", "cmd/agent-secrets")
 MODULE_SOURCES = [Read(f"{ENVOY}/**", "internal/dispatch/api/lock_level_test.go's moduleSources walks every non-test .go file "
                                       "under packages/envoy (infra included); used by :75, event_insert_guard_test.go:32, "
                                       "review_write_guard_test.go:44")]
@@ -234,6 +239,8 @@ RULES = {
         Read(f"{DAEMON}/cmd/legion/testdata/gh-help/**", "internal/runtime/tmux/tmux_real_test.go:1822")],
     f"{DAEMON}/internal/stream/integration_test.go": [legion_build("internal/stream/integration_test.go:130 go build .../daemon/cmd/legion")],
     f"{DAEMON}/internal/runtime/workerbin/workerbin_test.go": reads((f"{DAEMON}/docker/gh", "internal/runtime/workerbin/workerbin_test.go:58")),
+    f"{DAEMON}/internal/testpg/file_copy_test.go": reads(
+        (f"{DAEMON}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/daemon (../..)")),
     # --- envoy
     f"{ENVOY}/cmd/broker-refgen/auth_test.go": [
         Read(f"{ENVOY}/{d}/*", "cmd/broker-refgen/auth_test.go:14 readAPI(repo root) parses it") for d in BROKER_REFGEN_DIRS],
@@ -286,6 +293,8 @@ RULES = {
         run(ENVOY, ["./..."], "internal/testnats/nats_test.go:708-709 go list -f ... ./... in packages/envoy", mode="build"),
         *[Read(g, "internal/testnats/nats_test.go:741-747 walks every .go file under packages/envoy but infra, node_modules, testdata")
           for g in envoy_top_level_but_infra()]],
+    f"{ENVOY}/internal/testpg/file_copy_test.go": reads(
+        (f"{ENVOY}/**", "internal/testpg/file_copy_test.go:22 walks every .go file under packages/envoy (../.., infra included)")),
     # --- envoy-infra
     f"{INFRA}/core/permissions_live_test.go": [
         run(ENVOY, ["./cmd/dispatch", "./cmd/listener"], "infra/core/permissions_live_test.go's buildEnvoyCommand go build . in ../../cmd/<dispatch|listener> (root go.work)", mode="build")],
@@ -340,9 +349,13 @@ for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
   tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
   tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
 done"""
-SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
-SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
-                 """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
+SCHEMA_STEP = "The envoy-infra plugin's schema carries the version and the download URL it was built with"
+SCHEMA_SCRIPT = (
+    'url=$(GITHUB_REPOSITORY=cybermonklabs/legion ../../../.github/scripts/repo-paths.sh plugin_download_url)\n'
+    """go build -ldflags "-X main.version=1.2.3 -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=$url'" -o "$RUNNER_TEMP/pr" ./cmd/pulumi-resource-envoy-infra\n"""
+    "# shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion\n"
+    """pulumi package get-schema "$RUNNER_TEMP/pr" | jq -e '.version == "1.2.3" and .pluginDownloadURL == "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"'"""
+)
 # The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
@@ -352,6 +365,10 @@ SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServ
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
 DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
+RUN_BROKER = "packages/dispatch/e2e/run-broker.sh"
+# One go build of the three commands the real broker's harness rows start, under a lock.
+BROKER_BUILD = 'flock "$bin/.build.lock" go build -o "$bin/" ./cmd/broker ./cmd/dev-oidc-issuer ./internal/broker/brokertest/requestseed'
+BROKER_PKGS = ["./cmd/broker", "./cmd/dev-oidc-issuer", "./internal/broker/brokertest/requestseed"]
 SIGNIN_ISSUER = "packages/dispatch/e2e/run-signin-issuer.sh"
 BROWSER_MP = "dispatch-browser-multiprocess"
 BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes"
@@ -459,6 +476,7 @@ GATES = [
         (f"{ENVOY}/cmd/broker/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/config.go:12,40)"),
         (f"{ENVOY}/internal/broker/helper/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:16, codes.go:15)"),
         (f"{ENVOY}/cmd/agent-secrets/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/pages.go:17, codes.go:68)"),
+        (f"{ENVOY}/internal/broker/approval/*", "broker-refgen parses it (packages/envoy/cmd/broker-refgen/routes.go:34,664)"),
     ) + setup_go(DOCS_JOB, f"{DAEMON}/go.mod", DOCS_SITE) + biome(at_docs("Lint the docs site"))
       + bun_job(DOCS_JOB, DOCS_SITE) + CI_SELF + DOCS_SITE_SELF),
 
@@ -472,15 +490,10 @@ GATES = [
         (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,48-50 and gen-go.ts:520"),
     ) + biome(at("contracts", "Lint contracts")) + bun_job("contracts") + CI_SELF),
 
-    gate("envoy_plugin", "envoy-plugin", reads=reads(
-        ("packages/envoy-plugin/**", f"{at('envoy-plugin', 'Lint envoy plugin')}, typecheck, test and pack in packages/envoy-plugin"),
-        (CONTRACTS_SRC, "packages/envoy-plugin/tsconfig.json paths @legion/contracts -> ../contracts/src/index.ts; bun resolves it to src (exports.bun)"),
-        (ENVOY_CLIENT_SRC, "packages/envoy-plugin/tsconfig.json paths @legion/envoy-client/* -> ../envoy-client/src/*; build bundles them"),
-        ("packages/envoy-client/bin/dispatch.ts", "packages/envoy-plugin/package.json build and scripts/prepack.sh:14 run build-dispatch-cli.sh, entry bin/dispatch.ts"),
-        ("packages/envoy-client/scripts/build-dispatch-cli.sh", "packages/envoy-plugin/scripts/prepack.sh:14"),
-        ("scripts/third-party-notices.ts", "packages/envoy-plugin/scripts/prepack.sh:15 (bun pm pack runs prepack)"),
-        ("skills/**", "packages/envoy-plugin/scripts/prepack.sh:17 cp -r ../../skills skills; src/server.ts:25-28 reads ../../skills"),
-    ) + biome(at("envoy-plugin", "Lint envoy plugin")) + bun_job("envoy-plugin") + CI_SELF),
+    gate("conflicts_script", "conflicts-script", reads=reads(
+        ("scripts/conflicts/**", f"{at('conflicts-script', 'Lint the conflict measurement script')}, typecheck (tsc -p scripts/conflicts) "
+                                 "and test (__tests__/ and __fixtures__/); its modules import only one another, node: and bun:"),
+    ) + biome(at("conflicts-script", "Lint the conflict measurement script")) + bun_job("conflicts-script") + CI_SELF),
 
     gate("envoy_client", "envoy-client", reads=reads(
         ("packages/envoy-client/**", f"{at('envoy-client', 'Lint Envoy client')}, typecheck, test and build in packages/envoy-client"),
@@ -554,6 +567,9 @@ GATES = [
     gate("dispatch", "dispatch", runs=[
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts's dispatchServer, which e2e/run.ts starts in "
                    f"{at('dispatch', 'Browser-test dispatch dashboard')}", ENVOY, ["./cmd/dispatch"], mode="build"),
+        script_run(RUN_BROKER, BROKER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts's realBrokerListeners, which e2e/run.ts "
+                   f"starts in {at('dispatch', 'Browser-test dispatch dashboard')} for e2e/broker-approval.e2e.ts (a one-process run on the "
+                   "fake broker, e2e/harness-real-broker.ts)", ENVOY, BROKER_PKGS, mode="build"),
     ], reads=reads(
         ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
         ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:104-123"),
@@ -716,6 +732,8 @@ GATES = [
         (".github/actions/install-pulumi/**", at("envoy-smoke", "./.github/actions/install-pulumi")),
         (f"{INFRA}/internal/pulumitest/pulumitest.go",
          f"{at('envoy-smoke', 'Download the docker provider plugin the live tests pin')}: sed reads const DockerPluginVersion"),
+        (".github/scripts/repo-paths.sh",
+         f"{at('envoy-smoke', SCHEMA_STEP)}: it derives the download URL the build stamps in"),
     ) + setup_go("envoy-smoke", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("envoy_e2e_local", "envoy-e2e-local", runs=[

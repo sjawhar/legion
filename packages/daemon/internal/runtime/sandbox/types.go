@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Scheduling is where Legion's pods may run, beyond the Legion pool every one of them selects.
@@ -75,6 +76,9 @@ type Store interface {
 	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
 	// the controller's pod turn, since the known set it was handed was read before it listed.
 	ClaimUnretired(ctx context.Context, token claim.Token) (bool, error)
+	// Claims is every stored claim, including retired claims whose session files can
+	// remain on a Sandbox-owned volume until its cleanup reaps it.
+	Claims(ctx context.Context) ([]supervise.Claim, error)
 }
 
 // Options is what a Runtime is built from. Every field without a stated default is required.

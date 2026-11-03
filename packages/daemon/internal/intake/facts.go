@@ -97,6 +97,31 @@ type DispatchIssue struct {
 	// edit test (a status equal to the one Dispatch showed before) does not hold for it. Never set by
 	// a decoded event.
 	StatusMove bool
+	// LabelSetter is the kind of the Dispatch actor (`user`, `session` or `system`) that added
+	// dispatch.LegionLabel to the issue, by the rule the function LabelSetter states: the actor of
+	// the newest issue.created or issue.updated event in the issue's Dispatch event log whose
+	// labels carry the label while the previous such event's did not. The triggering event's own
+	// actor decides nothing. It is read from the log when the fact is prepared, outside the fact
+	// lock, only for an unrecorded root in `triage` that carries the label: by the prepare stage
+	// (the daemon's workflowRuntime.prepareIssue) and by the boot listing (reconcileListing). It is
+	// "" for every other fact, when the log shows no such transition, and when nothing read it.
+	// Only "user" has admission queue a person's handover (a todo through the outbox); every other
+	// value, "" included, keeps today's `triage` wake of the controller.
+	LabelSetter string
+}
+
+// LabelledTriageRoot says whether the fact shows a root (no Dispatch parent) in triage that
+// carries the label: the one kind of issue whose label's setter the prepare stage and the boot
+// listing read (LabelSetter), and admission then judges, so the two sides test one predicate.
+func (i DispatchIssue) LabelledTriageRoot() bool {
+	return i.Status == "triage" && i.Parent == "" && i.HandedOver
+}
+
+// LabelSetByPerson says whether a person set the label (LabelSetter), by the one rule the daemon
+// has for who is a person (dispatch.Actor.Person): a session's or Dispatch's own label is not,
+// and neither is a setter nothing read.
+func (i DispatchIssue) LabelSetByPerson() bool {
+	return dispatch.Actor{Kind: i.LabelSetter}.Person()
 }
 
 // ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
@@ -207,9 +232,47 @@ type DispatchArtifact struct {
 	Reason              string
 	Mark                record.EventMark
 	RequestWaitsOnAgent bool
+	// Actor is who Dispatch names as having made the review: the event's own actor, decoded from an
+	// artifact.approved or artifact.changes_requested event wherever one is decoded (the live
+	// consumer, the boot catch-up's DecodeDispatchEvent). It is zero for a version event and for a
+	// fact the gate seed builds from its read of Dispatch's approval, which names nobody. A
+	// person's (Actor.Person()) approval of a parked labelled root's primary document is what has
+	// the workflow queue that root; a review a session or Dispatch itself wrote queues nothing.
+	Actor dispatch.Actor
+	// Issue is Dispatch's view of the issue the review is on, read when the fact is prepared by
+	// the daemon's workflowRuntime.prepareArtifact, for a person's approval that is not a carried
+	// one (CarriedApproval), outside the fact lock; nil for every other fact, a seed's or the boot
+	// catch-up's among them. The workflow reads its parent, label, status and primary document to
+	// decide whether the approval queues the root: a nil view queues nothing and is never an
+	// error, since nothing but that decision reads it.
+	Issue *dispatch.Issue
 }
 
 func (DispatchArtifact) isFact() {}
+
+// CarriedApprovalReasonPrefix opens the reason of a carried approval: the review Dispatch writes
+// in a person's name when their answer to a decision block was the whole change since the version
+// they approved (packages/envoy/internal/dispatch/docs/approval_carry.go, carryReason, whose
+// format is "Carried forward from the approval of version %d: ..."). The daemon cannot import that
+// package, so it holds the prefix before the version number as a literal of its own.
+const CarriedApprovalReasonPrefix = "Carried forward from the approval of version"
+
+// CarriedApproval says whether the review is a carried approval, by its reason's prefix
+// (CarriedApprovalReasonPrefix). A carry is Dispatch's bookkeeping of an earlier approval, not a
+// person's new act, so it queues no parked root. An empty reason (a null `reason` on the event, as
+// an approval given with none carries) is not a carry.
+func (a DispatchArtifact) CarriedApproval() bool {
+	return strings.HasPrefix(a.Reason, CarriedApprovalReasonPrefix)
+}
+
+// PersonApproval says whether the review is an approval a person made themselves: an approval,
+// not a changes request or a version, by an actor Dispatch names a person, and not a carried one
+// (CarriedApproval). It is the one review the daemon reads the issue for when it prepares the
+// fact, and the one that can queue a parked labelled root as the person's handover, so the read
+// side and the deciding side test one predicate.
+func (a DispatchArtifact) PersonApproval() bool {
+	return a.Kind == DispatchArtifactApproved && a.Actor.Person() && !a.CarriedApproval()
+}
 
 // GateAboveDispatch is the gate seed of a generation (Generation) finding the document at a version
 // below the one the seed was queued at (Above): Read is what the seed read of Dispatch, as the fact
@@ -610,18 +673,13 @@ type MergeFailed struct {
 
 func (MergeFailed) isFact() {}
 
-// Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
+// Push records a branch push.
 type Push struct {
 	Repo   string
 	Branch string
 	// Before is the head the push replaced, After the head it left.
-	Before       string
-	After        string
-	ChangedPaths *string
-	Truncated    *string
-	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
-	// a listener that predates the field.
-	Forced *string
+	Before string
+	After  string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 	// Sender is the login of the account that pushed (the webhook's sender), which a synchronize's
@@ -664,7 +722,16 @@ type HandoffComplete struct {
 	Summary    string
 	Verdict    string
 	Ready      bool
-	Commit     string
+	// Commit is the commit the completion reports: the implementer's pushed tip for an implementing
+	// round, the commit retro stands on, the head the merger's READY names; none for the planner,
+	// the tester or the reviewer.
+	Commit string
+	// HandoffRecord and HandoffVersion name the Dispatch handoff record the completion of a phase
+	// with a handoff ends with (phase.Handoff): the route read it back from Dispatch and held it to
+	// the issue, the phase's word, this version and the claim's session before it applied the fact.
+	// Empty and zero for a phase that writes none.
+	HandoffRecord  string
+	HandoffVersion int
 	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
 	// answer the route's READY checks give a pull request whose change touches a path the project's
 	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.

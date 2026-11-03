@@ -40,6 +40,25 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	}
 }
 
+// bindBoundDurable binds consumer to handler as the listener's start does, then waits, as a
+// rebuild does (awaitDurableBound), until the server reports the durable delivering to client's own
+// subscription. A consumer info read right after the bind can still find the durable unbound: a
+// /healthz read did once on CI, failing TestHealthzNamesTheLiveTopicsLane with "not bound to this
+// listener's subscription". Every test that reads /healthz over a freshly bound durable binds it
+// here.
+func bindBoundDurable(t *testing.T, client *bus.Client, consumer string, handler natsgo.MsgHandler) *natsgo.Subscription {
+	t.Helper()
+	sub, err := startListenerSubscription(client, consumer, handler)
+	if err != nil {
+		t.Fatalf("bind the durable: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := awaitDurableBound(context.Background(), client, consumer, 25*time.Millisecond, 10*time.Second); err != nil {
+		t.Fatalf("wait for the server to report the durable bound: %v", err)
+	}
+	return sub
+}
+
 // setupUnboundDurableFixture is the listener a recreated durable or a stalled rewatch is tested
 // against, built on client: handler bound to the durable, both registries open with their caches
 // ready, and the listenerDeps /healthz reads. The client is the caller's, so a test that needs one
@@ -48,11 +67,7 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 // listener share.
 func setupUnboundDurableFixture(t *testing.T, client *bus.Client, consumer string, handler natsgo.MsgHandler) func() (int, map[string]any) {
 	t.Helper()
-	sub, err := startListenerSubscription(client, consumer, handler)
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	bindBoundDurable(t, client, consumer, handler)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
@@ -102,7 +117,7 @@ func startUnboundDurableMonitor(t *testing.T, client *bus.Client, consumer strin
 			func() error { return checkSelfHealth(caches, probe) },
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
 			client.Connected,
-			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler) },
+			func() error { return rebuildListenerDependencies(ctx, client, caches, probe, consumer, handler, nil) },
 			func() { terminated.Store(true) },
 			50*time.Millisecond,
 			3,

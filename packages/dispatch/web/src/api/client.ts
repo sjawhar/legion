@@ -62,6 +62,8 @@ import type {
   EditCommentInput,
   Event,
   GraphReferences,
+  Handoff,
+  HandoffSummary,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -1175,6 +1177,17 @@ export class DispatchApiClient {
     return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
   }
 
+  /** `GET /api/v1/issues/{key}/handoffs`: every phase handoff of the issue, newest first, without
+   *  its body. */
+  listHandoffs(key: string): Promise<HandoffSummary[]> {
+    return this.json<HandoffSummary[]>(`/api/v1/issues/${pathSegment(key)}/handoffs`);
+  }
+
+  /** `GET /api/v1/handoffs/{id}`: one handoff with the body its session wrote. */
+  getHandoff(id: string): Promise<Handoff> {
+    return this.json<Handoff>(`/api/v1/handoffs/${pathSegment(id)}`);
+  }
+
   listArtifacts(key: string): Promise<Artifact[]> {
     return this.json<Artifact[]>(`/api/v1/issues/${pathSegment(key)}/artifacts`);
   }
@@ -1441,20 +1454,18 @@ export class DispatchApiClient {
 
   /** `GET /api/v1/credential-requests?approver=me`: every request the viewer may decide - the
    *  ones naming the viewer, and the ones any signed-in person may decide - as the Inbox's
-   *  credential-requests section lists them, or `null` when this Dispatch has no secrets broker. */
+   *  credential-requests section lists them, each secret request with the secrets broker's page
+   *  where it is decided, or `null` when this Dispatch has no secrets broker. */
   getCredentialPending(): Promise<CredentialPendingResponse | null> {
     return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
     );
   }
 
-  getCredentialRecord(recordId: string): Promise<CredentialRecord> {
-    return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
-  }
-
-  /** Approve a credential request as the signed-in viewer: Dispatch names the viewer's own login
-   *  as the approver, and the broker decides whether that login may. A machine login also carries
-   *  the code the viewer typed. */
+  /** Approve a machine login as the signed-in viewer with the code the viewer typed: Dispatch
+   *  names the viewer's own login as the approver, and the broker decides whether that login may.
+   *  A secret request is decided only on the secrets broker's own page, so the broker refuses it
+   *  here with 403 `DECIDE_ON_BROKER_PAGE`. */
   approveCredentialRecord(
     recordId: string,
     body: { code?: string },
@@ -1467,7 +1478,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
+  /** Deny a machine login as the signed-in viewer with the code the viewer typed. */
   denyCredentialRecord(
     recordId: string,
     body: { code?: string },

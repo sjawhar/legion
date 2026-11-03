@@ -35,7 +35,12 @@ type ConsumerSpec struct {
 	// Deploys are the project's deploy workflows (`projects.<KEY>.deploys`), fixed for the boot:
 	// only a completed run of one of them is decoded (decodeWorkflowRun), since only such a run can
 	// wake a production check; every other workflow run is acknowledged without a transaction.
-	Deploys  []config.Deploy
+	Deploys []config.Deploy
+	// Renames is the deployment's repository equivalence (`repository_renames`,
+	// config.Config.RepositoryRenames): a deploy entry naming the repository as it was matches a
+	// run on the one it moved to (DeployOf). The zero value, which answers as a comparison
+	// without case does, while the deployment configures none.
+	Renames  ghrepo.Renames
 	AckWait  time.Duration
 	NakDelay time.Duration
 	Logger   *slog.Logger
@@ -74,6 +79,14 @@ type ConsumerSpec struct {
 	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
 	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
 	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
+	// PrepareArtifact readies what the workflow reads of the issue a Dispatch review event is on
+	// (DispatchArtifact.Issue), before the fact is applied, within AckWait, and returns the fact to
+	// apply: the workflow performs no I/O, and decides from Dispatch's view of the issue whether a
+	// person's approval of a parked labelled root's primary document queues that root, so the view
+	// is read here, for a person's approval that is not a carried one. A failed preparation is
+	// retried after NakDelay rather than applied without it. No preparer (a test) applies the fact
+	// as decoded, with no view, which queues nothing.
+	PrepareArtifact func(ctx context.Context, artifact DispatchArtifact) (DispatchArtifact, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -556,7 +569,7 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // terminated as poison, with JetStream taking the acknowledgement or the termination, the two ways
 // a message leaves its consumer's waiting count. A nak is not handled: the message waits again.
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) bool {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, spec.Deploys, spec.Renames, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -594,6 +607,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		return false
 	}
 	decoded.Fact = prepared
+	prepared, err = prepareArtifact(ctx, spec, decoded.Fact)
+	if err != nil {
+		nakResolve(spec, message, decoded.EventID, "prepare the review's issue", "nak the review's issue preparation", err)
+		return false
+	}
+	decoded.Fact = prepared
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
@@ -627,13 +646,18 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 
 // recordedPullRequest says whether the daemon records the pull request a review or a checks
 // settlement names (PullRequestReview, PullRequestChecks), by repository and number as the workflow
-// looks it up (record.PullRequestRecorded), and is true for every other fact. It is one read of the
-// pool within AckWait, in no transaction and under no lock, made before the review's GitHub reads
-// (resolveReviewBody, resolveReviewPermission): the workflow applies either fact only to a recorded
-// pull request, so one of any other pull request is acknowledged with no transaction under the fact
-// lock (ApplyFact) and no GitHub read, whatever the number of other pull requests a mapped
-// repository reviews and checks. A pull request recorded after this read, by a later opened, gets
-// its checks and reviews from their next event or from the pass's read.
+// looks it up (record.PullRequestRecorded), and is true for every other fact. It asks under the
+// name the fact carries and then, when that finds nothing, under the other name of the pair that
+// names it (ghrepo.Under, ConsumerSpec.Renames), as the workflow reads the row: a pull request
+// already open when its repository was transferred is recorded under the name it moved from,
+// while the fact names the one it moved to. It is one read of the pool per name within the one
+// AckWait, in no transaction and under no lock, made before
+// the review's GitHub reads (resolveReviewBody, resolveReviewPermission): the workflow applies
+// either fact only to a recorded pull request, so one of any other pull request is acknowledged
+// with no transaction under the fact lock (ApplyFact) and no GitHub read, whatever the number of
+// other pull requests a mapped repository reviews and checks. A pull request recorded after this
+// read, by a later opened, gets its checks and reviews from their next event or from the pass's
+// read.
 func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.Pool, fact Fact) (bool, error) {
 	var repo string
 	var number int
@@ -647,7 +671,9 @@ func recordedPullRequest(ctx context.Context, spec ConsumerSpec, pool *pgxpool.P
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	return record.PullRequestRecorded(read, pool, repo, number)
+	return ghrepo.Under(spec.Renames, repo, func(name string) (bool, error) {
+		return record.PullRequestRecorded(read, pool, name, number)
+	})
 }
 
 // readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.
@@ -670,6 +696,18 @@ func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact,
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
 	return spec.PrepareRepository(read, issue)
+}
+
+// prepareArtifact runs ConsumerSpec.PrepareArtifact for a Dispatch review or version fact, within
+// AckWait, and is the fact to apply. Every other fact passes through untouched.
+func prepareArtifact(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+	artifact, ok := fact.(DispatchArtifact)
+	if !ok || spec.PrepareArtifact == nil {
+		return fact, nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	return spec.PrepareArtifact(read, artifact)
 }
 
 // resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission

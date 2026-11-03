@@ -12,17 +12,46 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
+import { brokerPage } from "./brokerPage";
 import { CredentialSessionLines } from "./CredentialSessionLines";
 import type { CredentialRequests } from "./pending";
 import { credentialSessionNamesAnyone } from "./session";
 
-/** A `launcher_credential` (machine) record is decided only through the code-lookup route: its
- *  inbox row links to the code-entry page rather than trying to deep-link the
- *  specific pending request. */
-function pendingRowPath(row: CredentialPendingRow): string {
-  return row.kind === "launcher_credential"
-    ? "/credentials/machine"
-    : `/credentials/${row.record_id}`;
+const rowLineClass = "flex flex-wrap items-center gap-2 text-sm";
+const rowLinkClass = `${rowLineClass} rounded-lg outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`;
+
+/** One pending request's line. A machine (`launcher_credential`) record is decided only through
+ *  the code-lookup route, so its line links to the code-entry page rather than trying to deep-link
+ *  the specific pending request. A secret request is decided on the secrets broker's own page, so
+ *  its line is a plain link there, leaving Dispatch in the same tab; from a broker that names no
+ *  page (one older than it), the line is the same summary with no link at all, since Dispatch
+ *  decides no secret request of its own any more. */
+function PendingRowLine({ row }: { row: CredentialPendingRow }): ReactNode {
+  const summary = (
+    <>
+      <LabelPill>
+        {row.kind === "launcher_credential" ? "Machine login" : "Secret request"}
+      </LabelPill>
+      <span>{row.identifiers.join(", ")}</span>
+      <Timestamp at={row.requested_at} className={textMutedOnCanvas} />
+    </>
+  );
+  if (row.kind === "launcher_credential") {
+    return (
+      <Link className={rowLinkClass} to="/credentials/machine">
+        {summary}
+      </Link>
+    );
+  }
+  const page = brokerPage(row.approve_url);
+  if (page === null) {
+    return <div className={rowLineClass}>{summary}</div>;
+  }
+  return (
+    <a className={rowLinkClass} href={page}>
+      {summary}
+    </a>
+  );
 }
 
 /** The Inbox's supplementary credential-requests section, mounted above the ask sections, from the
@@ -61,16 +90,7 @@ export function CredentialRequestsSection({
       <ul className="mt-2 space-y-2">
         {requests.map((row) => (
           <li key={row.record_id}>
-            <Link
-              className={`flex flex-wrap items-center gap-2 rounded-lg text-sm outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`}
-              to={pendingRowPath(row)}
-            >
-              <LabelPill>
-                {row.kind === "launcher_credential" ? "Machine login" : "Secret request"}
-              </LabelPill>
-              <span>{row.identifiers.join(", ")}</span>
-              <Timestamp at={row.requested_at} className={textMutedOnCanvas} />
-            </Link>
+            <PendingRowLine row={row} />
             <div className="mt-0.5 flex flex-col gap-0.5 text-xs">
               <CredentialSessionLines
                 agents={agents}

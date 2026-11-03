@@ -110,13 +110,35 @@ function isRoleTurn(request: Request): boolean {
   return conversation(request).includes("BGSUB-ROLE-ASSIGNMENT");
 }
 
+/**
+ * One moment the case observed: `at` is the wall clock, which the message's bound and the report
+ * are measured in, and `order` is a counter minted with it, which is what the orderings are
+ * asserted on. Date.now() has a one-millisecond floor, and the moments this case orders are
+ * separated by the host's own work rather than by any wait: a request the stand-in takes and the
+ * reply the case sends next land inside one millisecond often enough on a loaded runner that a
+ * `<` between their stamps fails on an order that is in fact right. Every moment here is minted
+ * by this process, in the order the process saw them, so the counter cannot tie.
+ */
+interface Moment {
+  readonly at: number;
+  readonly order: number;
+}
+
+let moments = 0;
+
+/** Stamps the moment it is called; the case's only source of a `Moment`. */
+function moment(): Moment {
+  moments += 1;
+  return { at: Date.now(), order: moments };
+}
+
 /** One Messages request the stand-in holds until the case answers it, and when it arrived. */
 interface Held {
   readonly request: Request;
   /** When the stand-in took it, which for the subagent's is when the subagent really started. */
-  readonly arrivedAt: number;
+  readonly arrived: Moment;
   /** Answers it, returning the moment the stand-in let it go. */
-  reply(blocks: readonly Block[]): number;
+  reply(blocks: readonly Block[]): Moment;
 }
 
 /**
@@ -149,7 +171,7 @@ function forwardedRoleEnvelope(summary: string, label: string): string {
  */
 async function natsPublisher(
   url: string
-): Promise<(subject: string, payload: string) => Promise<number>> {
+): Promise<(subject: string, payload: string) => Promise<Moment>> {
   const address = new URL(url);
   const pongs: (() => void)[] = [];
   let buffered = "";
@@ -176,7 +198,7 @@ async function natsPublisher(
   socket.write('CONNECT {"verbose":false,"pedantic":false,"protocol":1}\r\n');
   return async (subject, payload) => {
     const bytes = Buffer.byteLength(payload);
-    const published = Date.now();
+    const published = moment();
     socket.write(`PUB ${subject} ${bytes}\r\n${payload}\r\nPING\r\n`);
     const flushed = Promise.withResolvers<void>();
     pongs.push(flushed.resolve);
@@ -208,11 +230,11 @@ interface RolePane {
   /** The session id the pane registered with the listener, whose agent subject carries messages. */
   readonly sessionId: string;
   /** When the host printed its first `agent_end` frame, once it has. */
-  firstAgentEnd(): number | undefined;
+  firstAgentEnd(): Moment | undefined;
   /** Waits for a held Messages request `match` accepts that the case has not taken yet. */
   next(what: string, match: (request: Request) => boolean): Promise<Held>;
   /** Publishes `payload` on the pane's agent subject, returning the publish's stamp. */
-  publish(payload: string): Promise<number>;
+  publish(payload: string): Promise<Moment>;
   /** Polls `probe` until it returns a value, failing at the deadline or when omp exits. */
   until<T>(what: string, probe: () => T | undefined): Promise<T>;
 }
@@ -256,9 +278,9 @@ async function startRolePane(): Promise<RolePane> {
       const index = held.length;
       held.push({
         request,
-        arrivedAt: Date.now(),
+        arrived: moment(),
         reply(blocks) {
-          const released = Date.now();
+          const released = moment();
           answer.resolve(messageStream(blocks, `msg_${index}`));
           return released;
         },
@@ -309,7 +331,7 @@ async function startRolePane(): Promise<RolePane> {
   await writeStandinProfile(home, base, ["  deep: standin/standin-model"]);
 
   const frames: object[] = [];
-  const agentEnds: number[] = [];
+  const agentEnds: Moment[] = [];
   const closed: { error?: unknown } = {};
   const rpc = spawnRpc(
     binary,
@@ -342,7 +364,7 @@ async function startRolePane(): Promise<RolePane> {
         // the run that ends with an agent-owned job still pending is not the session's last, so a
         // wait on the terminal flag (the harness's `runLegionPane`) would never fire here. That
         // frame is the moment the `task` call's turn ended, which is what the case times.
-        if ("type" in frame && frame.type === "agent_end") agentEnds.push(Date.now());
+        if ("type" in frame && frame.type === "agent_end") agentEnds.push(moment());
       },
     },
     cleanup
@@ -454,41 +476,42 @@ test.skipIf(skip)(
     started.reply([
       { type: "text", text: "The worker is running; I will be woken by its result." },
     ]);
-    const endedAt = await pane.until("the role's turn to end", () => pane.firstAgentEnd());
+    const ended = await pane.until("the role's turn to end", () => pane.firstAgentEnd());
 
     // Ordering, by the session's own facts rather than by a clock the case set: the subagent had
     // started before the role's turn ended, and the role's turn ended before the stand-in let the
-    // subagent's request go.
-    expect(subagent.arrivedAt).toBeLessThan(endedAt);
+    // subagent's request go. Each is asserted on the moments' order, not on their clock stamps,
+    // which are a millisecond apart at best and tie whenever the host does this work fast.
+    expect(subagent.arrived.order).toBeLessThan(ended.order);
 
-    const publishedAt = await pane.publish(
+    const published = await pane.publish(
       forwardedRoleEnvelope(MESSAGE_SUMMARY, `bgsub-${randomUUID()}`)
     );
     const read = await pane.next("the role's turn carrying the message", (request) =>
       isRoleTurn(request) ? conversation(request).includes(MESSAGE_SUMMARY) : false
     );
-    expect(read.arrivedAt - publishedAt).toBeLessThan(MESSAGE_BOUND_MS);
+    expect(read.arrived.at - published.at).toBeLessThan(MESSAGE_BOUND_MS);
     read.reply([{ type: "text", text: "Noted; the retry bound is three." }]);
 
-    const releasedAt = subagent.reply([{ type: "text", text: SUBAGENT_REPORT }]);
-    expect(endedAt).toBeLessThan(releasedAt);
+    const released = subagent.reply([{ type: "text", text: SUBAGENT_REPORT }]);
+    expect(ended.order).toBeLessThan(released.order);
     // The message's own turn ran while the subagent's request was still held: the role read it
     // while the worker was running, not once the worker had ended.
-    expect(read.arrivedAt).toBeLessThan(releasedAt);
+    expect(read.arrived.order).toBeLessThan(released.order);
 
     // The finished job wakes the role into a turn nothing prompted, carrying the worker's report.
     const woken = await pane.next("the role's turn woken by the finished job", (request) =>
       isRoleTurn(request) ? conversation(request).includes(SUBAGENT_REPORT) : false
     );
     expect(lastMessage(woken.request)).toMatch(/[Bb]ackground job/);
-    expect(woken.arrivedAt).toBeGreaterThan(releasedAt);
+    expect(woken.arrived.order).toBeGreaterThan(released.order);
     woken.reply([{ type: "text", text: "The worker is done." }]);
 
     console.error(
-      `the subagent started ${endedAt - subagent.arrivedAt} ms before the role's turn ended; ` +
-        `the role's turn ended ${releasedAt - endedAt} ms before the subagent's request was released; ` +
-        `the message was read ${read.arrivedAt - publishedAt} ms after it was published; ` +
-        `the job woke the role ${woken.arrivedAt - releasedAt} ms after the release`
+      `the subagent started ${ended.at - subagent.arrived.at} ms before the role's turn ended; ` +
+        `the role's turn ended ${released.at - ended.at} ms before the subagent's request was released; ` +
+        `the message was read ${read.arrived.at - published.at} ms after it was published; ` +
+        `the job woke the role ${woken.arrived.at - released.at} ms after the release`
     );
   },
   300_000

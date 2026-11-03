@@ -193,7 +193,7 @@ func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
 			citingBlock := random(t, text.MaxBlockIDBytes)
 			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 			}
 			var fromComment, fromBlock int
@@ -272,7 +272,7 @@ func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 	}
 	citingBlock := random(t, text.MaxBlockIDBytes)
 	blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 		t.Fatalf("write the references at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 	}
 	for _, table := range []string{"refs", "block_refs"} {
@@ -529,6 +529,32 @@ func TestReferencedByIncludesArtifactSources(t *testing.T) {
 		{Kind: "artifact", ID: d1ID, Project: "CORE", Excerpt: "d1", RefKey: d1RefKey},
 		{Kind: "comment", ID: commentID, IssueKey: &issueKey, Project: "CORE", Excerpt: "reference"},
 	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("referenced by = %#v; want %#v", got, want)
+	}
+}
+
+// A document an ask cites from an option, or from the answer it was given, is listed in that
+// document's own Referenced by as the ask: an ask's own refs row holds the links of its question
+// alone, so the part's edge is the only one that reaches the document, and the whole-document
+// read lists it by its item as it lists a comment citing from a block. Two parts citing the
+// document list the ask once.
+func TestReferencedByListsAnAskCitingFromItsParts(t *testing.T) {
+	tx := askPartFixture(t)
+	ctx := context.Background()
+	_, refKey := createReferenceArtifact(t, tx, "CORE-1", "CORE", "spec")
+	ask := insertAsk(t, tx, "CORE-1", "Which transport?",
+		model.AskOption{Label: "REST", Description: "as dispatch://" + refKey + " reads it"},
+		model.AskOption{Label: "gRPC"})
+	writeAskAnswer(t, tx, &ask, "bob", []string{"gRPC"}, "Ship it, as dispatch://"+refKey+" says.")
+	indexAskPartsAt(t, tx, ask, 1)
+
+	got, err := ReferencedBy(ctx, tx, refKey)
+	if err != nil {
+		t.Fatalf("read the citers of %s: %v", refKey, err)
+	}
+	issueKey := "CORE-1"
+	want := []model.ReferencedBy{{Kind: "ask", ID: ask.ID, IssueKey: &issueKey, Project: "CORE", Excerpt: "Which transport?"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("referenced by = %#v; want %#v", got, want)
 	}

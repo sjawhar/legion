@@ -150,7 +150,11 @@ func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"
-	dispatchEventsChannel    = "dispatch_events"
+	// EventsChannel is the channel every event commit announces itself on (events_notify,
+	// migration 0107), whichever process committed it: besides the delivery hub and the event
+	// stream relay, it is the channel whose pglisten.Hub wake the server passes to
+	// RunSuggestionOutcomeSweep.
+	EventsChannel = "dispatch_events"
 )
 
 // deliveryHub keeps every open Delivery and Pipeline page current (LEGION-690). It learns of a change
@@ -243,7 +247,9 @@ type deliveryView struct {
 	subs map[*deliverySub]struct{}
 	// dirty is set when a change can have moved the view's answer; immediate when a sub waits for
 	// its first answer, which no quiet delays. firstDirty and lastDirty time the coalescing, and
-	// notBefore holds a failed read's retry back.
+	// notBefore holds a failed read's retry back. A recompute clears dirty and immediate once its
+	// read holds its change position (deliveryHub.read), not when it begins: whatever marked the
+	// view until then was committed before the reads that follow, which answer it.
 	dirty, immediate      bool
 	firstDirty, lastDirty time.Time
 	notBefore             time.Time
@@ -257,10 +263,12 @@ type deliveryView struct {
 	readFrom time.Time
 	// body is the last answer, nil until the first and while delivery is not configured; seq the
 	// change position it reflects and changedAt when that change was recorded; readingSeq the
-	// position a read under way reflects, so a change at or before it marks nothing.
+	// position a read under way reflects, so a change at or before it marks nothing; and heard what
+	// the intake heard while that read was under way, past its position (nil when no read is).
 	body       *deliveryLiveEncoded
 	seq        int64
 	readingSeq int64
+	heard      *deliveryHeard
 	changedAt  *time.Time
 	// from and at are the window start and the pipeline clock the last answer resolved; expiry is
 	// the next moment something leaves it, zero for a custom range or a pinned at.
@@ -270,6 +278,39 @@ type deliveryView struct {
 	// session the population names with the title it shows.
 	issues, ancestors map[string]struct{}
 	sessions          map[string]string
+}
+
+// deliveryHeard is what the intake heard while a view's read was under way, past the read's change
+// position: each issue an event wrote, and each session's title as its newest event gave it. The
+// marks made meanwhile judged the view by the issues and sessions its last answer names
+// (dirtyIssueLocked, applyEventLocked), while the read under way names its own: an event about an
+// issue or a session only the read names can have committed after the read looked, and nothing
+// marked the view for it. recompute judges the read's answer by the same rules once it lands.
+type deliveryHeard struct {
+	issues map[string]struct{}
+	titles map[string]string
+}
+
+// missedBy is whether read names something heard: an issue it names or an ancestor of one
+// (dirtyIssueLocked's rule), or a session it shows under another title than the session's newest
+// event wrote (applyEventLocked's). A nil heard missed nothing.
+func (heard *deliveryHeard) missedBy(read deliveryViewRead) bool {
+	if heard == nil {
+		return false
+	}
+	for key := range heard.issues {
+		_, named := read.issues[key]
+		_, ancestor := read.ancestors[key]
+		if named || ancestor {
+			return true
+		}
+	}
+	for session, title := range heard.titles {
+		if shown, ok := read.sessions[session]; ok && shown != title {
+			return true
+		}
+	}
+	return false
 }
 
 // deliverySub is one page's subscription to a view.
@@ -316,7 +357,7 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what          string // "recompute begin", "recompute end", "events caught up", "events seeded", "connected", "broker dropped"
+	what          string // "recompute begin", "recompute position", "recompute read", "recompute end", "events caught up", "events seeded", "connected", "broker dropped"
 	view          string // the view's key
 	cause         string
 	sent          int
@@ -373,7 +414,7 @@ func (h *deliveryHub) start() {
 		listener := &pglisten.Listener{
 			Owner:       "dispatch",
 			Dial:        h.dial,
-			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, dispatchEventsChannel},
+			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, EventsChannel},
 			ListenIdle:  h.listenIdle,
 			PingTimeout: h.pingTimeout,
 			Backoff:     h.backoff,
@@ -416,7 +457,7 @@ func (h *deliveryHub) onNotify(channel, payload string) {
 	switch channel {
 	case deliveryChangesChannel:
 		signal(h.wakeChanges)
-	case dispatchEventsChannel:
+	case EventsChannel:
 		signal(h.wakeEvents)
 	case deliveryFreshnessChannel:
 		h.applyFreshness(payload)

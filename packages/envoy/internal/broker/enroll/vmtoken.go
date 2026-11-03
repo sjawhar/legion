@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -12,8 +13,12 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
-// ErrVMEmailNotVerified indicates that a VM identity token has no verified email.
+// ErrVMEmailNotVerified indicates that a VM identity token's email is not verified.
 var ErrVMEmailNotVerified = errors.New("vm token email is not verified")
+
+// ErrVMNoEmail indicates that a VM identity token names no email at all: one minted without
+// format=full, or for no service account.
+var ErrVMNoEmail = errors.New("vm token names no email (request it with format=full)")
 
 // ErrVMComputeEngineClaims indicates that a VM identity token lacks a Compute Engine identity.
 var ErrVMComputeEngineClaims = errors.New("vm token has no Compute Engine claims")
@@ -31,14 +36,42 @@ type VMClaims struct {
 	IssuedAt   time.Time
 }
 
-// VMVerifier verifies a VM identity token and returns its verified identity fields.
+// RuntimeID names one VM as the broker keys it: <account>@<project>/<zone>/<instance id>, the
+// service-account email with the instance's project, zone and id. An instance id is unique only
+// within a project and a zone, so the id alone does not name one VM. A VM's token login holds its
+// launcher credential under this subject, and its vm enrollment carries it as its runtime id, so
+// each VM of a fleet that shares one account has a credential and an enrollment of its own.
+func (c VMClaims) RuntimeID() string {
+	return c.Account + "@" + c.Project + "/" + c.Zone + "/" + c.InstanceID
+}
+
+// vmRuntimeAccount reads the account and project back out of a VMClaims.RuntimeID; ok is false
+// for any other subject, a Kubernetes ServiceAccount's among them, which holds no "@".
+func vmRuntimeAccount(id string) (account, project string, ok bool) {
+	at := strings.LastIndex(id, "@")
+	if at <= 0 {
+		return "", "", false
+	}
+	project, _, ok = strings.Cut(id[at+1:], "/")
+	return id[:at], project, ok
+}
+
+// VMVerifier verifies a VM identity token and returns its verified identity fields. Issues reports,
+// without verifying anything, whether a token names the verifier's issuer, so a token login sends
+// a VM's token to this verifier alone and every other token to the cluster's.
 type VMVerifier interface {
 	VerifyVM(ctx context.Context, raw string) (VMClaims, error)
+	Issues(raw string) bool
 }
 
 // GoogleVMVerifier verifies Google Compute Engine identity tokens against one configured OIDC
 // verifier and reads the email and Compute Engine claims from the verified token.
 type GoogleVMVerifier struct{ Verifier *oidc.Verifier }
+
+// Issues is the OIDC verifier's Issues: whether raw's unverified iss claim names its issuer.
+func (v GoogleVMVerifier) Issues(raw string) bool {
+	return v.Verifier.Issues(raw)
+}
 
 func isVMEmailVerified(value json.RawMessage) bool {
 	var text string
@@ -74,7 +107,10 @@ func (v GoogleVMVerifier) VerifyVM(ctx context.Context, raw string) (VMClaims, e
 	if err := parsed.UnsafeClaimsWithoutVerification(&registered, &private); err != nil {
 		return VMClaims{}, err
 	}
-	if private.Email == "" || !isVMEmailVerified(private.EmailVerified) {
+	if private.Email == "" {
+		return VMClaims{}, ErrVMNoEmail
+	}
+	if !isVMEmailVerified(private.EmailVerified) {
 		return VMClaims{}, ErrVMEmailNotVerified
 	}
 	compute := private.Google.ComputeEngine

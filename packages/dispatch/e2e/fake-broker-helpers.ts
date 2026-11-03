@@ -1,7 +1,6 @@
 import { test } from "@playwright/test";
 
-import type { CredentialRecord } from "../web/src/api/types";
-import type { FakePendingRequest } from "./fake-broker";
+import type { FakeMachineLogin, FakePendingRequest } from "./fake-broker";
 import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
 
@@ -26,12 +25,13 @@ export async function setPendingCredentialRequests(
   await fixtureRequest("/__fixture/pending", requests);
 }
 
-/** Replaces the fake broker's full credential records wholesale, keyed by their own `record_id`:
- *  what `GET /v1/credential-requests/{id}` answers for the record page. Skipped the same way
- *  `setPendingCredentialRequests` is. */
-export async function setCredentialRecords(records: readonly CredentialRecord[]): Promise<void> {
+/** Replaces the machine logins a typed code selects on the fake broker, each the code its
+ *  machine printed and the record `POST /v1/machine-logins/lookup` answers for it. Deciding one
+ *  writes its decision into that record, so a second lookup reads what the broker kept. Skipped
+ *  the same way `setPendingCredentialRequests` is. */
+export async function setMachineLogins(logins: readonly FakeMachineLogin[]): Promise<void> {
   test.skip(!usesFakeBroker, "this run's server reads no fake broker (e2e/harness-broker.ts)");
-  await fixtureRequest("/__fixture/records", records);
+  await fixtureRequest("/__fixture/machine-logins", logins);
 }
 
 /** Clears the fake broker between rows, so a request one row seeded never reaches the next. A run

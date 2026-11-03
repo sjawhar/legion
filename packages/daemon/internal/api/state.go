@@ -393,6 +393,15 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// UpdateRound is the update round the claim is in, and absent when none is open: the pod's
+	// drift round (`pod:<pod uid>`), which every claim of that pod shares, or the claim's own
+	// plugin round (`plugin:<daemon contract>`). Once its worker has answered, the process holding
+	// this claim is waiting to be replaced and the daemon holds the claim's next task. UpdateHead
+	// is the commit the worker reported as the head of its issue branch at origin when it answered
+	// the round, and is absent until it answers and for a worker that reported none (a planner
+	// before its first push). It is the worker's word, which nothing verifies.
+	UpdateRound string `json:"updateRound,omitempty"`
+	UpdateHead  string `json:"updateHead,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session
@@ -430,11 +439,21 @@ func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
 	return view
 }
 
-// PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
+// PhaseView is one phase worker's claim, the handoff of its current phase — the commit its
+// completion reported, the Dispatch handoff record it named — and the rounds the phase has run.
 type PhaseView struct {
-	Claim         ClaimView `json:"claim"`
-	HandoffCommit string    `json:"handoffCommit,omitempty"`
-	Rounds        int       `json:"rounds"`
+	Claim         ClaimView          `json:"claim"`
+	HandoffCommit string             `json:"handoffCommit,omitempty"`
+	HandoffRecord *HandoffRecordView `json:"handoffRecord,omitempty"`
+	Rounds        int                `json:"rounds"`
+}
+
+// HandoffRecordView is the Dispatch handoff record a worker's completion of its current
+// file-backed phase named: the record's id, and its version among its phase's records, which
+// `dispatch handoff-read --issue <KEY> --phase <word> --version <n>` reads.
+type HandoffRecordView struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.

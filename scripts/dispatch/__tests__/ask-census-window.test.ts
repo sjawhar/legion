@@ -101,7 +101,6 @@ describe("ask census since #1671", () => {
       DISPATCH_URL: _dispatchUrl,
       ENVOY_CONFIG_FILE: _envoyConfigFile,
       OMP_PROFILE: _ompProfile,
-      OPENCODE_CONFIG_DIR: _openCodeConfigDir,
       PI_CODING_AGENT_DIR: _piCodingAgentDir,
       XDG_CONFIG_HOME: _xdgConfigHome,
       ...environment
@@ -164,7 +163,6 @@ describe("ask census since #1671", () => {
       DISPATCH_URL: _dispatchUrl,
       ENVOY_CONFIG_FILE: _envoyConfigFile,
       OMP_PROFILE: _ompProfile,
-      OPENCODE_CONFIG_DIR: _openCodeConfigDir,
       PI_CODING_AGENT_DIR: _piCodingAgentDir,
       XDG_CONFIG_HOME: _xdgConfigHome,
       ...environment

@@ -6,6 +6,8 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  sendConfirmationText,
+  sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
 import { ToolInputError } from "../tool-input-errors";
@@ -53,6 +55,7 @@ describe("envoyToolSpecs", () => {
     expect(Object.keys(send?.arguments(schemaApi) ?? {}).sort()).toEqual([
       "expects_reply",
       "expires_at",
+      "idempotency_key",
       "in_reply_to",
       "message",
       "session_id",
@@ -108,6 +111,12 @@ describe("envoyToolSpecs", () => {
     expect(subscribe?.description).toContain("envoy.exceptions.<original-topic>");
     expect(publish?.description).toContain("at-least-once, possibly out of order across topics");
     expect(publish?.description).toContain("id for dedupe and at for freshness");
+    for (const description of [subscribe?.description, publish?.description]) {
+      expect(description).toContain(
+        "reach each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
+      );
+      expect(description).toContain("Team and other ad-hoc topics are live only.");
+    }
     expect(publish?.description).toContain("errs naming each session that did not confirm");
     expect(publish?.description).toContain(
       "a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions"
@@ -115,6 +124,36 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain(
       "a role message errs when its holder did not confirm it within the listener's window"
     );
+  });
+});
+
+describe("envoy_send resend", () => {
+  const key = "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80";
+
+  test("takes the idempotency_key an unconfirmed send named", () => {
+    expect(
+      parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key: key })
+    ).toEqual({ session_id: "ses_b", message: "hi", idempotency_key: key });
+  });
+
+  test("refuses a key the listener would not store once", () => {
+    for (const idempotency_key of ["retry-1", key.toUpperCase(), `${key}0`]) {
+      expect(() =>
+        parseEnvoyToolArguments("send", { session_id: "ses_b", message: "hi", idempotency_key })
+      ).toThrow(ToolInputError);
+    }
+  });
+
+  test("says a resend the listener already held stored no second copy", () => {
+    const envelope = { event_id: "event-2" };
+    expect(
+      sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: true })
+    ).toBe(
+      "sent to ses_b once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy"
+    );
+    expect(
+      sendConfirmationText({ envelope, recipient: "ses_b", confirmed: true, duplicate: false })
+    ).toBe("sent event-2 to ses_b");
   });
 });
 
@@ -178,7 +217,7 @@ describe("message metadata", () => {
     expect(failure.problems).toEqual([
       "message is required (string)",
       'expects_reply must be one of none|optional|required; got "no"',
-      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
     ]);
     expect(failure.message).toContain("envoy_send was not called: 3 problems");
   });
@@ -213,5 +252,48 @@ describe("message metadata", () => {
       `text is 1 characters over the ${SLACK_POST_TEXT_MAX}-character limit (${SLACK_POST_TEXT_MAX + 1}/${SLACK_POST_TEXT_MAX})`,
     ]);
     expect(failure.message).toContain("slack_post was not called: 2 problems");
+  });
+});
+
+describe("sessionsOnMachine", () => {
+  const session = (id: string, machineID: string, host: string) => ({
+    session_id: id,
+    machine_id: machineID,
+    host,
+    dir: "/work",
+    port: 0,
+    title: "",
+    topics: [],
+    self_subscribed: true,
+  });
+  const onHub = session("ses_on_hub", "envoy-hub", "gke-node-7");
+  const onDevbox = session("ses_on_devbox", "devbox", "devbox");
+  const sessions = [onHub, onDevbox];
+
+  test("finds a session by the machine it runs on and by the listener it registered through", () => {
+    expect(sessionsOnMachine(sessions, "envoy-hub")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "gke-node-7")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "devbox")).toEqual([onDevbox]);
+    expect(sessionsOnMachine(sessions, "other")).toEqual([]);
+  });
+
+  test("no filter lists every session", () => {
+    expect(sessionsOnMachine(sessions, undefined)).toEqual(sessions);
+    expect(sessionsOnMachine(sessions, "")).toEqual(sessions);
+  });
+
+  test("a session an earlier listener reported with no host still matches its listener", () => {
+    const hostless = {
+      session_id: "ses_old",
+      machine_id: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    };
+
+    expect(sessionsOnMachine([hostless], "devbox")).toEqual([hostless]);
+    expect(sessionsOnMachine([hostless], "gke-node-7")).toEqual([]);
   });
 });

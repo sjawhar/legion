@@ -25,8 +25,8 @@ import { hasErrnoCode, messageFor } from "./errors";
  * removes only its own file, so two processes that bind one session at the same time never drop
  * each other. An owner counts while its process lives and, on Linux, has that start time, so a
  * crashed session's file, or one whose pid another process took, is inert. A session no live
- * process records (a terminal, CI, Claude Code, OpenCode, a pod without pi-envoy, a session with
- * Dispatch or AskGate off) needs no marker.
+ * process records (a terminal, CI, Claude Code, a pod without pi-envoy, a session with Dispatch
+ * or AskGate off) needs no marker.
  *
  * The marker. For each literal `dispatch` call it lets run, the gate mints one file in the store,
  * `<store>/markers/<sha256 of the argv>.<32 random hex>`, created owner-only and exclusively,
@@ -522,7 +522,7 @@ function readMarker(file: string): Marker | undefined {
 
 /**
  * Whether the CLI may post: one marker consumed, or why none was. `changed` names the first file
- * whose bytes differ from the ones AskGate reviewed, when that is why.
+ * whose bytes differ from the ones AskGate read for the call, when that is why.
  */
 export type Consumed =
   | { readonly ok: true }
@@ -593,7 +593,7 @@ export function consumeMarker(
   if (changed !== undefined)
     return {
       ok: false,
-      why: `a file this write posts changed after AskGate reviewed it (\`${changed.flag} ${changed.operand}\`)`,
+      why: `a file this write posts changed after AskGate read it (\`${changed.flag} ${changed.operand}\`)`,
       changed,
     };
   return {

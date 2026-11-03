@@ -53,7 +53,9 @@ test("a docked Conversation send refused while the reader is on the Inbox is the
 
     await navigateInApp(page, `/issues/${issue.key}/conversation`);
     await expect(
-      page.getByRole("heading", { level: 1, name: "Left the issue mid-send" })
+      page
+        .getByTestId("issue-header")
+        .getByRole("heading", { level: 1, name: "Left the issue mid-send" })
     ).toBeVisible();
     const back = page.getByRole("form", { name: "Comment composer" }).last();
     await expect(back.getByText(refusedText)).toBeVisible();

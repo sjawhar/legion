@@ -135,12 +135,10 @@ consumer, would have carried, so such an event leaves the record behind for at m
   webhook would be. When no recorded push ends at that head, the pass first rebuilds the pushes
   that took the branch there from GitHub's repository activity of the branch (its newest hundred
   entries): one push for each push, force push or branch creation not yet recorded, oldest first,
-  with its pusher and the paths GitHub's compare of its two commits lists. When that activity does
-  not lead back to the recorded head, the pass applies none of them and logs a warning, `workflow:
-  the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; …`,
-  with its `reason`. Then, or when a recorded push ends at the head, it applies the one push
-  GitHub's compare shows changed only the issue's own `.legion/<issue>/`, and leaves any other push
-  to its webhook.
+  with its pusher. When that activity does not lead back to the recorded head, the pass applies
+  none of them and logs a warning, `workflow: the pass cannot rebuild from GitHub's activity the
+  pushes that moved a pull request's head; …`, with its `reason`, and each push is left to its own
+  webhook. When a recorded push already ends at the head, the pass rebuilds none.
 - **A review.** A deciding review whose webhook never arrived is applied, whatever phase the issue
   is in.
 - **A CI settlement.** For a head no settlement from Envoy's listener stands for, the pass reads
@@ -364,6 +362,28 @@ What each part is for:
   Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
   repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
   does any key it does not know.
+- **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
+  repository that moved: after a transfer GitHub's events name the new repository while every tree
+  Legion has already recorded names the old one.
+
+  ```yaml
+  repository_renames:
+    - from: <old-owner>/<name>
+      to: <new-owner>/<name>
+  ```
+
+  Both names are compared without case, wherever the daemon compares a repository name. The
+  equivalence is read-side only: no record is rewritten, and a tree keeps the repository name it
+  was recorded under for its whole life, so a pair must stay in the file for as long as any record
+  names the old repository. The loader refuses a pair whose two names are one repository, a
+  repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
+  owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
+  directory a worker reads is keyed by an owner and holds one installation's token; several
+  repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
+  counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
+  `legion start --check-config` prints one line
+  per configured pair, so you can read back what the daemon will treat as one repository before
+  the transfer.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -411,9 +431,12 @@ What each part is for:
   ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
   closed issue's production check waits for its deploy before its last look, 14 days by default,
-  decimals allowed), `review_round_cap` (3), `max_fix_attempts`
-  (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
-  `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+  decimals allowed), `pod_update_retask_hours` (1: how long an update round waits before it asks
+  a worker that has not answered again, decimals allowed), `pod_update_notice_hours` (4: how long
+  an update round runs before the controller is told it is not finishing, decimals allowed),
+  `review_round_cap` (3), `max_fix_attempts` (3), `controller_wake_interval_seconds` (3600), and
+  the supervision budgets `launch_failure_limit` (3), `prompt_failure_limit` (3) and
+  `prompt_retire_limit` (2).
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
@@ -513,7 +536,9 @@ To stand it up:
    next apply: a forced one writes its copy back, and one without force fails on any key whose value
    differs and leaves yours. Either way, stop that tool declaring the ConfigMap first.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
-   token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
+   token audience in place of `${MODEL_TOKEN_AUDIENCE}` and the ServiceAccount your pods run as in
+   place of `${POD_SERVICE_ACCOUNT}`. `legion start --check-config` refuses either placeholder
+   unfilled.
 
 Name every role Legion's agents use in `modelRoles` (`default`, `review`, `oracle`, `deep`, `smol`,
 `slow`, and the rest the example names): the daemon refuses to boot when an agent's role has no
@@ -677,12 +702,22 @@ Closing the terminal leaves the project without one, and the daemon logs
    `runtime.kubernetes` block must name a `session_store` that keeps sessions in a database, with
    that store's key — for a deployment today `session_store: postgres` and `session_dsn_secret`,
    with the providers Secret holding that key — before the daemon boots: the loader refuses the
-   file otherwise ([legion.yaml](#legionyaml)). An issue whose Sandbox still owns the volume of the
-   earlier shape keeps it until its next launch, which deletes that Sandbox and the volume with
-   it and starts the issue on a pod-owned disk, so stop each issue with its work pushed and start
-   it again rather than letting a relaunch choose the moment. The repository's
-   `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the audit that
-   finds any claim left behind, and what rolling the image back needs.
+   file otherwise ([legion.yaml](#legionyaml)). Before rolling that change, follow
+   [Copying file sessions before turning it on](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#copying-file-sessions-before-turning-it-on).
+   A later reaping of an older Sandbox-owned volume reads the retiring Sandbox's pod template.
+   The providers volume's `OMP_SESSION_SQL_DSN` item under `postgres`, or the launcher's three
+   Cloud SQL session flags under `cloudsql-iam`, proves that the Sandbox used the session database
+   and permits the reap. Without either marker, it refuses when the matching claim records a
+   session. To keep that session's contents, import it first. When `issue_close` already cleared
+   the resume path, the importer finds the retained session id under the volume's sessions
+   directory. Then run `legion claims forget-session` on the stopped claim with its recorded
+   session id; only that clears the reap guard. Its next generation starts fresh, while the
+   imported row remains in the database. An issue whose
+   Sandbox still owns the volume of the earlier shape keeps it until its next launch, which deletes
+   that Sandbox and the volume with it and starts the issue on a pod-owned disk, so stop each issue
+   with its work pushed and start it again rather than letting a relaunch choose the moment. The
+   repository's `docs/kubernetes.md` ("Cutting over to the pod-owned disk") has the procedure, the
+   audit that finds any claim left behind, and what rolling the image back needs.
 
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in

@@ -23,11 +23,7 @@ import (
 func healthzRoleViewRig(t *testing.T, consumer string) (func() (int, map[string]any), *store.Registry, *bus.Client) {
 	t.Helper()
 	client := setupTestNATS(t)
-	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	bindBoundDurable(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)

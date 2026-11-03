@@ -137,12 +137,30 @@ const legionClaimView = z.strictObject({
   capabilities: legionCapabilityReportView.optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
+   * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
+   * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
+   * round ends and the process is replaced (contract 46). */
+  updateRound: nonEmptyString.optional(),
+  /** The commit the worker reported as its issue branch's head at origin when it answered the
+   * round; absent until it answers, and for a worker that reported none. It is the worker's
+   * word, which nothing verifies. */
+  updateHead: nonEmptyString.optional(),
 });
 
-/** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
+/** `api.HandoffRecordView` — the Dispatch handoff record a worker's completion of its current
+ * file-backed phase named: its id, and its version among its phase's records. */
+const legionHandoffRecordView = z.strictObject({
+  id: nonEmptyString,
+  version: z.number().int().positive(),
+});
+
+/** `api.PhaseView` — one phase worker's claim, the handoff of its current phase (the commit its
+ * completion reported, the Dispatch handoff record it named), and the rounds it has run. */
 const legionPhaseView = z.strictObject({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
+  handoffRecord: legionHandoffRecordView.optional(),
   rounds: z.number().int().nonnegative(),
 });
 
@@ -532,6 +550,24 @@ export const LegionReadyRequest = z.strictObject({
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`, the body of `POST /legion/v1/claims/ready-for-update`: the
+ * worker's answer to its pod's update task, which says it has pushed everything it wants kept and
+ * its process may be replaced. `round` is the round the worker answers for, as the update task it
+ * read named it: the daemon takes the answer only for the round its claim stands in, and refuses
+ * one naming any other round with 409 and a sentence naming both. `head` is the commit the worker
+ * reports as the head of `legion/<issue>@origin`, empty or absent when the branch is not there (a
+ * planner before its first push); the daemon records it and verifies nothing of it. */
+export const LegionReadyForUpdateRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  round: nonEmptyString,
+  head: z.string().optional(),
+});
+
+export type LegionReadyForUpdateRequestBody = z.output<typeof LegionReadyForUpdateRequest>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,
@@ -626,6 +662,15 @@ export const LegionOperatorClaimResponse = z.strictObject({
   suspensionHeld: z.literal(true).optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** The update round the claim is in, absent while none is open: `pod:<pod uid>`, the drift
+   * round every claim of that pod shares, or `plugin:<daemon contract>`, this claim's own. Once
+   * the worker has answered `ready_for_update`, the daemon holds the claim's next task until the
+   * round ends and the process is replaced (contract 46). */
+  updateRound: nonEmptyString.optional(),
+  /** The commit the worker reported as its issue branch's head at origin when it answered the
+   * round; absent until it answers, and for a worker that reported none. It is the worker's
+   * word, which nothing verifies. */
+  updateHead: nonEmptyString.optional(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;
@@ -680,20 +725,27 @@ export const LegionControllerGrantRequest = z.strictObject({
 
 /** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow: a phase
  * completion, or the implementer's report on a look of its closed issue's production check.
- * `commit` is a phase completion's: the pushed commit carrying the phase's handoff,
- * `.legion/<issue>/<phase>.json`, which the `legion` tool's `handoff_complete` finds in the pane
- * with its jj before posting (as `legion handoff complete` did); a phase that writes no handoff
- * reports the commit the workspace stands on. A check report carries none (the look pushed
- * nothing), so the field is optional here, and the daemon requires it of a phase completion. The
- * daemon reads no handoff file and no branch head. `verdict` is `pass` or `fail` for the tester's
- * completion, `pass`, `pending` or `fail` for a check report (`CHECK_VERDICT_REQUIRED`), and the
- * empty string for every other completion; it stays a string on the wire, as the Go field is. */
+ * A file-backed phase (planning, implementing, testing, reviewing) ends with a handoff record on
+ * the Dispatch issue, which the worker writes with `dispatch handoff-write` under its own session;
+ * its completion names it, `handoffId` and `handoffVersion`, which the daemon reads back from
+ * Dispatch and refuses when it is missing (`HANDOFF_RECORD_REQUIRED`), unknown
+ * (`HANDOFF_RECORD_NOT_FOUND`), unreadable (`DISPATCH_READ_FAILED`), of another issue, phase or
+ * version (`HANDOFF_RECORD_MISMATCH`), or written by another session than the claim's
+ * (`HANDOFF_SESSION_MISMATCH`). `commit` is the implementer's (its pushed tip for an implementing
+ * round, the commit it stands on for retro) and the merger's READY head; the planner, the tester
+ * and the reviewer report none, and a check report carries neither (the look pushed nothing), so
+ * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
+ * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
+ * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
+ * on the wire, as the Go field is. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
   ready: z.boolean(),
   commit: nonEmptyString.optional(),
+  handoffId: nonEmptyString.optional(),
+  handoffVersion: z.number().int().positive().optional(),
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

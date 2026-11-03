@@ -34,6 +34,29 @@ func TestLoadReturnsForwardMigrationsInVersionOrder(t *testing.T) {
 	}
 }
 
+// A version past int4 is no longer refused: a migration added since the sets stopped being
+// numbered is named for the UTC moment it was created, 14 digits, which the runners' bigint
+// version column holds and which sorts after every number.
+func TestLoadAcceptsAVersionPastTheIntegerColumn(t *testing.T) {
+	set := fstest.MapFS{
+		"migrations/0140_last_numbered.up.sql":     file("select 140"),
+		"migrations/20261030120000_stamped.up.sql": file("select 1030"),
+		"migrations/2147483648_big.up.sql":         file("select 2147483648"),
+	}
+	got, err := Load(set, "migrations")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []Migration{
+		{Version: 140, Name: "0140_last_numbered.up.sql", SQL: "select 140"},
+		{Version: 2147483648, Name: "2147483648_big.up.sql", SQL: "select 2147483648"},
+		{Version: 20261030120000, Name: "20261030120000_stamped.up.sql", SQL: "select 1030"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Load = %+v, want %+v", got, want)
+	}
+}
+
 // unreadable is a set in which one file is listed but cannot be read.
 type unreadable struct {
 	fstest.MapFS
@@ -107,12 +130,14 @@ func TestLoadRefusesASetARunnerWouldApplyOtherThanAsWritten(t *testing.T) {
 		{
 			name: "version zero",
 			set:  fstest.MapFS{"migrations/0000_zero.up.sql": file("select 0")},
-			want: []string{"migration 0000_zero.up.sql: version 0000 is not a number from 1 to 2147483647"},
+			want: []string{"migration 0000_zero.up.sql: version 0000 is not a number from 1 that the runners' bigint version column holds"},
 		},
 		{
-			name: "a version past the integer column",
-			set:  fstest.MapFS{"migrations/2147483648_big.up.sql": file("select 1")},
-			want: []string{"migration 2147483648_big.up.sql: version 2147483648 is not a number from 1 to 2147483647"},
+			// A timestamp is 14 digits; 20 digits is past every version column there is, and
+			// past the number Go reads the digits into.
+			name: "a version past the bigint column",
+			set:  fstest.MapFS{"migrations/99999999999999999999_huge.up.sql": file("select 1")},
+			want: []string{"migration 99999999999999999999_huge.up.sql: version 99999999999999999999 is not a number from 1 that the runners' bigint version column holds"},
 		},
 		{
 			name: "a forward migration missing .up",

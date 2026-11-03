@@ -70,7 +70,9 @@
 # LEGION_E2E_PLATFORM (required, `gke-autopilot` or `eks`, above), LEGION_E2E_POD_REACHABILITY and
 # LEGION_E2E_MODEL_ROUTE (both required, above);
 # LEGION_E2E_STORAGE_CLASS (required) the issue volumes' StorageClass — AWS's gp2, GKE's
-# standard-rwo, or whatever else the cluster under test defaults to; LEGION_E2E_MODEL_GATEWAY_URL
+# standard-rwo, or whatever else the cluster under test defaults to; LEGION_E2E_POD_SERVICE_ACCOUNT
+# (required, both routes) the ServiceAccount the deployment's pods run as, substituted for the
+# operator route's ${POD_SERVICE_ACCOUNT} placeholder; LEGION_E2E_MODEL_GATEWAY_URL
 # and LEGION_E2E_MODEL_GATEWAY_AUDIENCE (both required under LEGION_E2E_MODEL_ROUTE=gateway, unused
 # under key-file) the gateway's Anthropic endpoint and the token audience it accepts, substituted
 # for the operator route's placeholders; LEGION_E2E_WORKER_STREAM_PORT (default 13373, the same
@@ -92,7 +94,12 @@
 # fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
 # to take over; the script refuses an image whose revision main or this checkout does not contain,
 # one whose commit already runs one container, or one at a contract other than 37 or 38; STAGE4A_FROM a development entry point, which is
-# never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
+# never the proof, any checkpoint the harness runs but identity and stale-incarnation (pod-update
+# and pod-update-fleet among them: entered there, the two workers of each of that checkpoint's
+# issues — one issue for pod-update, two for pod-update-fleet — push their own issue's branch to
+# the run's repository from inside their pod and the run deletes each again, as cache-lost-volume's
+# is);
+# STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
@@ -209,6 +216,8 @@ gke-autopilot | eks) ;;
 esac
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 [ -n "$storage_class" ] || fail "LEGION_E2E_STORAGE_CLASS is unset: name the issue volumes' StorageClass (the cluster has no default to fall back on)"
+pod_service_account=$(bash "$root/scripts/e2e/lib/pod-service-account.sh") ||
+  fail "LEGION_E2E_POD_SERVICE_ACCOUNT is not a ServiceAccount name the operator route's pod.yml can carry (the reason is above)"
 case "$model_route" in
 gateway)
   gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
@@ -431,6 +440,15 @@ key-file)
   note "operator pod: $work/pod.yml, the key-file fixture (no projected token: operator-token's projected-token assertion is skipped, the rest still run and pass)"
   ;;
 esac
+# The ServiceAccount is the operator's own whichever route the run takes, so it is filled once,
+# here, over whichever fixture the arm above wrote.
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+account_placeholder='${POD_SERVICE_ACCOUNT}'
+pod=$(<"$work/pod.yml")
+printf '%s\n' "${pod//"$account_placeholder"/"$pod_service_account"}" >"$work/pod.yml"
+grep -qF "service_account: $pod_service_account" "$work/pod.yml" ||
+  fail "the $model_route route's operator pod fixture has no ServiceAccount $account_placeholder to fill with the run's"
+note "operator pod: $work/pod.yml, its ServiceAccount from LEGION_E2E_POD_SERVICE_ACCOUNT"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
   --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
@@ -473,7 +491,9 @@ chmod 0700 "$work/previous-harness"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
-# cache-lost-volume deletes a cache-b branch older than that as a killed run's leftover.
+# cache-lost-volume deletes a branch of that shape older than that as a killed run's leftover —
+# cache-b's, pod-update's, and pod-update-fleet's two, which each issue's own workers push from
+# inside their pod.
 env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \

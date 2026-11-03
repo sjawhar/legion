@@ -11,7 +11,8 @@ import (
 // The Inbox's thread read and its count run on every page view and every badge refresh, so each
 // must read only the caller's own rows through the partial index its state has, never a scan of
 // user_threads, which holds a row for every thread anyone ever wrote in: user_threads_unread
-// (migration 0095) for state=unread, user_threads_login_replied (migration 0151) for state=all.
+// (migration 0095) for state=unread, user_threads_login_replied (migration 20261103071942) for
+// state=all.
 func TestMyRepliesQueriesReadTheUnreadIndex(t *testing.T) {
 	_, database := newTestHandlerWithStore(t)
 	ctx := context.Background()

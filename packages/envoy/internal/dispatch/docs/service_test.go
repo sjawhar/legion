@@ -4838,9 +4838,8 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 }
 
 // settleCurrentGeneration runs the room's settlement at its current generation once every live
-// update is durable. ygo persists live updates on its own worker, and a settlement that still
-// finds one queued defers itself to a retry timer instead of settling, so a caller that asserts on
-// the settlement's writes must not start it until that queue is empty.
+// update is durable, so it meets a room the room's own persistence has caught up with, as a
+// settlement after a quiet settle delay does; settleNow settles the room as it stands.
 func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -4851,6 +4850,12 @@ func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) 
 	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to become durable: %v", err)
 	}
+	settleNow(service, artifactID)
+}
+
+// settleNow runs the room's settlement at its current generation at once, whatever the room has not
+// stored yet: the settlement stores the room's updates through the point it reads it at itself.
+func settleNow(service *Service, artifactID string) {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.roomGeneration
@@ -5098,7 +5103,7 @@ type shutdownCompactStore struct {
 	compactionAfterClose chan struct{}
 }
 
-func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+func (s *shutdownCompactStore) compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error) {
 	if s.closed.Load() {
 		select {
 		case s.compactionAfterClose <- struct{}{}:
@@ -5106,9 +5111,12 @@ func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep in
 		}
 	}
 	s.compactions.Add(1)
-	return s.VersionedStore.Compact(ctx, room, keep)
+	return s.VersionedStore.compactRoom(ctx, room, rule, wait)
 }
 
+// Shutdown closes its resident rooms, and each close compacts the document under the tail rule
+// before the store closes: a document whose rows are all older than the tail is one row once
+// Shutdown returns, and no compaction runs after.
 func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -5123,12 +5131,19 @@ func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	waitForDocumentVersion(t, database, artifactID, 2)
+	if rows := storedUpdateCount(t, database, artifactID); rows < 2 {
+		t.Fatalf("stored updates before shutdown = %d, want the seed and the edit", rows)
+	}
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 
 	if err := service.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown document service: %v", err)
 	}
 	if persistence.compactions.Load() == 0 {
 		t.Fatal("shutdown did not run document compaction")
+	}
+	if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
+		t.Fatalf("stored updates after shutdown = %d, want the one row the close compacted them into", rows)
 	}
 
 	persistence.closed.Store(true)
@@ -5544,6 +5559,13 @@ func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room 
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
+func (s failingVersionedStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if s.appendErr != nil {
+		return 0, s.appendErr
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
 type failingBackfillVersionedStore struct {
 	VersionedStore
 	err error
@@ -5585,6 +5607,14 @@ func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, r
 		<-s.release
 	}
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+}
+
+func (s *blockingFirstAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
 }
 
 // room is the state the service holds for room now, created when it holds none, for a test to read

@@ -20,10 +20,23 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A failed room's eviction flushes and compacts the document under its advisory lock. An
-// operation inside a database transaction that waited for that eviction could be waiting on its
-// own transaction, which Postgres cannot see, so these tests bound every such wait.
+// A failed room's eviction flushes the document and compacts its rows older than the tail under
+// its advisory lock. An operation inside a database transaction that waited for that eviction
+// could be waiting on its own transaction, which Postgres cannot see, so these tests bound every
+// such wait.
 const recoveryBound = 10 * time.Second
+
+// seedFoldableText seeds the document as markdown in rows older than the tail, so a failed room's
+// eviction has rows to compact and waits for the document's advisory lock to write them: every
+// test here that holds that lock across an eviction needs the eviction to wait for it.
+func seedFoldableText(t *testing.T, service *Service, artifactID, markdown string) {
+	t.Helper()
+	seedServiceText(t, service, artifactID, "draft")
+	if _, err := joinedReplaceText(service, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
+		t.Fatalf("write the seeded text: %v", err)
+	}
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
+}
 
 // failsFast runs op and requires ErrServiceUnavailable within the bound.
 func failsFast(t *testing.T, what string, op func() error) {
@@ -275,7 +288,7 @@ func TestATransactionHoldingTheRoomLockFailsFastOnItsFailedRoom(t *testing.T) {
 			database := storetest.Open(t)
 			artifactID := create(t, database, "")
 			service := lockOrderServiceFor(t, database)
-			seedServiceText(t, service, artifactID, "before")
+			seedFoldableText(t, service, artifactID, "before")
 			ctx := context.Background()
 			if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 				t.Fatalf("load live document: %v", err)
@@ -311,13 +324,13 @@ func TestATransactionHoldingTheRoomLockFailsFastOnItsFailedRoom(t *testing.T) {
 // the room has recovered, a write runs as ever.
 func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 	database, service, artifactID := lockOrderService(t)
-	seedServiceText(t, service, artifactID, "before")
+	seedFoldableText(t, service, artifactID, "before")
 	ctx := context.Background()
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load live document: %v", err)
 	}
 	// Another transaction holds the document's advisory lock, so the failed room's eviction,
-	// which compacts the document, cannot finish until the test releases it.
+	// which compacts the document's old rows, cannot finish until the test releases it.
 	holder, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin lock holder: %v", err)
@@ -372,7 +385,7 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 // has recovered.
 func TestABlockPathReadThatCannotWaitFailsFastOnAFailedRoom(t *testing.T) {
 	database, service, artifactID := lockOrderService(t)
-	seedServiceText(t, service, artifactID, "before")
+	seedFoldableText(t, service, artifactID, "before")
 	ctx := context.Background()
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load live document: %v", err)
@@ -667,6 +680,13 @@ func (s *failingBrowserAppendStore) AppendUpdateWithCredit(ctx context.Context, 
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
+func (s *failingBrowserAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if err := s.fail(); err != nil {
+		return 0, err
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
 func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if hook := s.beforeTx.Swap(nil); hook != nil {
 		(*hook)()
@@ -675,12 +695,14 @@ func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.T
 }
 
 // A joined write's first operation forks the room while the room holds a browser paragraph,
-// "typed", that is not durable yet. That paragraph's append then fails, and the failed room is
-// evicted and reloaded without it before the write appends its own update. The write's fork
-// still holds the paragraph and its slot is on the failed room, so the write fails at its append
-// rather than versioning or publishing a document the room never held, and its transaction rolls
-// back to the durable document.
-func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
+// "typed", that is not durable yet. That paragraph's append then fails, which fails the room,
+// before the write appends its own update. The write holds the document's advisory lock from its
+// read, so the failed room's eviction, which compacts under that lock, waits for the write's
+// transaction to end: the room cannot reload under the write. The write's fork still holds the
+// paragraph and its slot is on the failed room, so the write fails at its append rather than
+// versioning or publishing a document the room never held, and its transaction rolls back to the
+// durable document, which the reloaded room then serves.
+func TestAWriteWhoseRoomFailsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	store := &failingBrowserAppendStore{
@@ -705,16 +727,13 @@ func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	store.failing.Store(true)
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
 	<-store.entered
-	reload := func() {
+	fail := func() {
 		close(store.release)
 		waitForRoomFailure(t, service, artifactID)
-		if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
-			t.Errorf("await room recovery: %v", err)
-		}
 		store.failing.Store(false)
 	}
-	store.beforeTx.Store(&reload)
-	failsFast(t, "a joined write whose room reloaded before its first append", func() error {
+	store.beforeTx.Store(&fail)
+	failsFast(t, "a joined write whose room failed before its first append", func() error {
 		_, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
 		return err
 	})
@@ -722,6 +741,9 @@ func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 		t.Fatalf("roll back: %v", err)
 	}
 	ledger.Discard()
+	if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
+		t.Fatalf("await room recovery: %v", err)
+	}
 	requireText(t, service, artifactID, "before\n")
 	var latest int
 	if err := database.Pool.QueryRow(ctx, `select max(number) from artifact_versions where artifact_id = $1`, artifactID).Scan(&latest); err != nil {

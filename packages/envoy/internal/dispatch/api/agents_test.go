@@ -346,7 +346,7 @@ func TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt
 	}
 
 	served.rosters.mu.Lock()
-	cached := served.rosters.roster.sessions
+	cached := served.rosters.built.sessions
 	served.rosters.mu.Unlock()
 	sent := make([]agentRow, len(cached))
 	for index, session := range cached {

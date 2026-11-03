@@ -8,10 +8,16 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput } from "./transport";
+import type { MessageMetadataInput, SessionInfo } from "./transport";
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+
+const STORED_DELIVERY =
+  "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
+  "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " +
+  "once from the durable consumer its listener relays to it, also one that was away or restarted. " +
+  "Team and other ad-hoc topics are live only.";
 
 const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
@@ -121,6 +127,7 @@ export interface ToolArgumentsByOperation {
   readonly send: MessageMetadataArguments & {
     readonly session_id: string;
     readonly message: string;
+    readonly idempotency_key?: string;
   };
   readonly publish: MessageMetadataArguments & { readonly topic: string; readonly message: string };
   readonly setRole: { readonly role: string };
@@ -150,7 +157,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
@@ -178,18 +185,24 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_send",
-    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT}`,
+    description: `Send an Envoy agent-to-agent message directly to another session by session ID. ${DELIVERY_CONTRACT} A send that is not confirmed delivered errs naming its idempotency_key; send the same message again with that idempotency_key within 72 hours, and Envoy drops it as a repeat if the first copy arrived.`,
     arguments: (schema) => ({
       session_id: schema
         .string()
         .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema),
+      idempotency_key: schema
+        .string()
+        .describe(
+          "Only to send again a message whose envoy_send was not confirmed delivered: the idempotency_key that error named. Omit it for a new message."
+        )
+        .optional(),
     }),
     operation: EnvoyToolOperation.send,
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -246,13 +259,39 @@ export function sendConfirmationText(result: {
   readonly envelope: { readonly event_id: string };
   readonly recipient: string;
   readonly confirmed: boolean;
+  readonly duplicate: boolean;
 }): string {
+  if (result.duplicate) {
+    return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
+  }
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The sessions an `envoy_sessions` call's `machine` argument names, which both hosts filter for
+ * themselves: the listener's `/v1/sessions` takes no machine. A session answers for two machines:
+ * `host`, where its process runs, and `machine_id`, the listener it registered through. A filter
+ * naming either one is that machine's filter, so a hub's id (`envoy-hub`, `gke`) lists the
+ * sessions registered through it. No filter — the argument absent or empty — lists them all.
+ */
+export function sessionsOnMachine(
+  sessions: readonly SessionInfo[],
+  machine: string | undefined
+): readonly SessionInfo[] {
+  if (machine === undefined || machine === "") return sessions;
+  return sessions.filter((session) => session.host === machine || session.machine_id === machine);
 }
 
 // The specs are frozen module constants, so each operation's schema is built once and shared;
 // parsing never mutates it.
 const envoyToolSchemas = new Map<EnvoyToolOperation, z.ZodType>();
+
+/**
+ * The idempotency key envoy_send takes: the transport's `crypto.randomUUID()`. The listener stores
+ * a send once per target and key only for a key of this shape (`MINTED_DEDUPE_KEY_PATTERN`), so a
+ * resend under any other key would be a second delivery.
+ */
+const SEND_IDEMPOTENCY_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Validates an Envoy tool call on real zod in one pass and returns its typed arguments,
@@ -274,5 +313,17 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
   if (!parsed.success) {
     throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema, spec.name));
   }
-  return parsed.data as ToolArgumentsByOperation[Operation];
+  const { data } = parsed;
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "idempotency_key" in data &&
+    typeof data.idempotency_key === "string" &&
+    !SEND_IDEMPOTENCY_KEY.test(data.idempotency_key)
+  ) {
+    throw new ToolInputError(spec.name, [
+      `idempotency_key must be the key an unconfirmed send named, a lower-case UUID; got ${JSON.stringify(data.idempotency_key)}`,
+    ]);
+  }
+  return data as ToolArgumentsByOperation[Operation];
 }

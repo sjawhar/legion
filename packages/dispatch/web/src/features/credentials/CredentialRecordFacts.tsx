@@ -7,11 +7,8 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
-import { CredentialSessionLines } from "./CredentialSessionLines";
 import { machineName } from "./machineLogins";
-import { credentialSessionNamesAnyone } from "./session";
 
 const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 86400, unit: "day" },
@@ -34,8 +31,8 @@ function formatLifetime(seconds: number | null): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
-/** The approver a record names when any signed-in person may decide it: a shared secret's request,
- *  and a service's machine login. */
+/** The approver a record names when any signed-in person may decide it: a service's machine login
+ *  here, and, on the broker's own page, a shared secret's request. */
 const ANYONE_APPROVER = "anyone";
 
 /** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
@@ -50,44 +47,23 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
 }
 
 /**
- * The broker's facts about a credential record, then the agent's stated reason as plain text
+ * The broker's facts about a machine login, then the agent's stated reason as plain text
  * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
- * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
- * grants: a person's machine starts agent sessions as them. A service (the Legion daemon) logs in
- * with its own Kubernetes token, which no person approves, so a pending service login a broker
- * opened before that is one the broker refuses to approve, and the sentence says so. A pod
- * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
- * same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show
- * this same layout before their own (page-specific) decision/action controls.
+ * for a pending one, the sentence explaining what approving it grants: a person's machine starts
+ * agent sessions as them. A service (the Legion daemon) logs in with its own Kubernetes token,
+ * which no person approves, so a pending service login a broker opened before that is one the
+ * broker refuses to approve, and the sentence says so. `MachineLoginPage` is the one page that
+ * renders this layout, above its decision controls, and the only records it holds are the machine
+ * logins its code lookup returns (`POST /api/v1/credential-requests/machine-lookup`): the kind is
+ * always `launcher_credential`, and the broker leaves such a record's enrollment and both of its
+ * session ids empty, so neither has a fact of its own here.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
-  const { agents, isError, isPending } = useAgents(
-    credentialSessionNamesAnyone(record.session),
-    true
-  );
   return (
     <div className="space-y-4">
       <dl className="grid grid-cols-2 gap-3 text-sm">
-        <Fact label="Kind">
-          {record.kind === "launcher_credential" ? "Machine login" : "Secret request"}
-        </Fact>
+        <Fact label="Kind">Machine login</Fact>
         <Fact label="Identifiers">{record.identifiers.join(", ")}</Fact>
-        <Fact label="Enrollment">
-          {record.enrollment === null
-            ? "—"
-            : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
-        </Fact>
-        {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
-        <Fact label="Session">
-          <div className="flex flex-col gap-1">
-            <CredentialSessionLines
-              agents={agents}
-              isError={isError}
-              isPending={isPending}
-              session={record.session}
-            />
-          </div>
-        </Fact>
         <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />
@@ -112,7 +88,7 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
           </blockquote>
         </div>
       )}
-      {record.kind === "launcher_credential" && record.state === "pending" ? (
+      {record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
           {record.service
             ? `${machineName({ host: record.identifiers[0], service: record.service })} is a service's login from before services logged in with their own Kubernetes token, and no one can approve it any more: deny it, or let it expire.`

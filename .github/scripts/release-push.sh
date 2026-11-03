@@ -60,14 +60,20 @@
 # tag:       commit the version bump and create the release tag on that
 #            un-rebased commit, so the tag always describes exactly the source
 #            the artifacts were built and published from; pushes nothing
-#            (`push-tag` pushes). A pre-existing tag is reused only when it
-#            carries the same package version; any other collision fails
-#            loudly.
+#            (`push-tag` pushes). The bump is <package-dir>/package.json, whose
+#            version the workflow set, and bun.lock, whose workspace entry for
+#            <package-dir> takes the same version on its "version" line
+#            (lock_set_version, text tools only: the publish job runs no bun),
+#            so a fresh checkout's `bun install` has nothing to rewrite. A
+#            lockfile without exactly one such entry and line fails the
+#            command. A pre-existing tag is reused only when it carries the
+#            same package version; any other collision fails loudly.
 # tagged:    print the release tag an earlier attempt pushed for this checkout,
 #            or nothing: the newest <tag-prefix> tag on HEAD itself, or, given
 #            <package-dir>, on a child of HEAD that changes only
-#            <package-dir>/package.json, the bump commit `tag` makes (the tag
-#            sits on HEAD itself when the manifest already held the version and
+#            <package-dir>/package.json, bun.lock or both, the bump commit
+#            `tag` makes (the tag sits on HEAD itself when the manifest and
+#            the lockfile already held the version and
 #            `tag` had nothing to commit). Without <package-dir> only a tag on
 #            HEAD counts, as for a job that tags the commit it checked out. A
 #            re-run of a release job checks out the same commit, with every tag
@@ -98,10 +104,13 @@
 #            HEAD has one parent; HEAD is the one commit main does not have;
 #            HEAD's tree differs from its parent's — main's fetched tip, or an
 #            older main commit it is then rebased onto and checked against
-#            again — in <package-dir>/package.json alone; and that manifest is
-#            its parent's copy with .version set to <version> and nothing
-#            else, as JSON (sorted-JSON equality: key order, a BOM, duplicate
-#            keys and the blob's mode are not compared; the test `tagged`
+#            again — in <package-dir>/package.json, bun.lock or both and
+#            nothing else; that manifest is its parent's copy with .version
+#            set to <version> and nothing else, as JSON (sorted-JSON equality:
+#            key order, a BOM, duplicate keys and the blob's mode are not
+#            compared); and that lockfile is its parent's copy with the
+#            "version" line of its workspace entry for <package-dir> set to
+#            <version> and nothing else, byte for byte (the test `tagged`
 #            applies to a bump commit, plus its content). The content checks
 #            run before any push, rebase or superseded-version exit, so a
 #            doctored commit on an older main commit is refused, not rebased
@@ -109,11 +118,12 @@
 #            passes them, is rebased onto the tip, which replays the one bump
 #            over what landed since the checkout, and checked again there.
 #            Anything else — a second commit, a merge commit, a parentless
-#            commit, a second path, a manifest changed in more than its
-#            version — is refused, origin untouched: the only commit a run
-#            dispatched from a branch other than main can land is the exact
-#            version bump, which is what a run from main lands. A HEAD main
-#            already holds (the manifest already held the version, so `tag`
+#            commit, another path, a manifest changed in more than its
+#            version, a lockfile changed in more than that one line — is
+#            refused, origin untouched: the only commit a run dispatched from
+#            a branch other than main can land is the exact version bump,
+#            which is what a run from main lands. A HEAD main already holds
+#            (the manifest and the lockfile already held the version, so `tag`
 #            committed nothing) has nothing to push and exits 0. This runs
 #            last, after the tag and GitHub release exist: a lost push only
 #            delays the metadata bump on main, which the tag-anchored version
@@ -124,14 +134,18 @@
 #            A run checks out the merge commit that triggered it, and when the
 #            previous run's bump commit landed after that merge (bump commits
 #            are "[skip ci]" and never trigger a run of their own), both bumps
-#            rewrite the one "version" line of the same package.json from the
-#            same base and the rebase conflicts. One rule resolves it: when the
-#            only conflicted path is the released package's package.json, take
-#            main's copy of that file, set its .version to the version being
-#            released, continue the rebase, and push again. Any other
-#            conflicted path — or the manifest deleted on main — is a real
-#            divergence: the rebase is aborted and the step fails naming the
-#            paths. Exhausting the attempts fails the step too. Every failure
+#            rewrite the one "version" line of the same package.json and of
+#            the same bun.lock entry from the same base and the rebase
+#            conflicts. One rule resolves it: when the conflicted paths are
+#            the released package's package.json, bun.lock or both, take
+#            main's copy of each, set its version to the version being
+#            released (.version in the manifest, the entry's line in the
+#            lockfile), continue the rebase, and push again. Any other
+#            conflicted path — or the manifest or the lockfile deleted on main
+#            — is a real divergence: the rebase is aborted and the step fails
+#            naming the paths. Two packages' bumps change different manifests
+#            and different lockfile entries, which a rebase merges without a
+#            conflict. Exhausting the attempts fails the step too. Every failure
 #            here — a rejected push, an unreachable origin, a rebase that stops
 #            for any other reason — says, in the log and in the job summary,
 #            that the publish, tag and GitHub release already succeeded and
@@ -145,7 +159,7 @@
 #            package landed. It says so in a notice and exits 0, dropping the
 #            bump commit whole, which is right only because the content checks
 #            above, run before this exit, found that commit to change nothing
-#            but the manifest's version. A push that fast-forwards main is not
+#            but the version. A push that fast-forwards main is not
 #            checked against main's version: it can lower main's manifest only
 #            when main held a version above the newest tag, which only a hand
 #            edit makes, and the tags decide every next version anyway.
@@ -295,6 +309,19 @@
 #            be folded, so fold-plan fails with one ::error:: that names every
 #            such entry of every spec, sorted, and tells the author to move or
 #            rename a fragment in one commit with `git mv`, and prints no plan.
+#            A file under the .changes/ of a package no <spec> names is not
+#            refused: the fold runs on main, where a refusal would stop the
+#            fold of every package. One ::warning:: on stderr names every such
+#            path HEAD's tree holds, sorted, and the specs it was given, and
+#            says the fold does not fold them; the plan is printed and the
+#            command exits 0 all the same. The warning says to remove the
+#            file, or to give its package a .changie.yaml and a CHANGELOG.md
+#            and add it to .github/changelog-packages. fold-orphans below is
+#            that check made strict, and ci.yaml's lint job runs it on every
+#            pull request, so such a file is caught before it reaches main;
+#            fold-notes and push-fold make neither check, since
+#            changelog-fold.yaml's build job runs fold-plan first and its
+#            publish job needs that job.
 #            With a tag prefix (a package with releases of its own), a
 #            fragment's label is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag
 #            that contains the commit which first added the entry, following
@@ -317,6 +344,22 @@
 #            same commit, but each fetches every tag, so a release tag pushed
 #            between the jobs can give the publish job's plan a version group
 #            the build job's lacks (push-fold defers it).
+# fold-orphans: fail when HEAD's tree holds a file under the .changes/ of a
+#            package no <spec> names, the strict form of the warning fold-plan
+#            gives: one ::error:: naming every such path, sorted, the specs it
+#            was given and what to do (remove the file, or give its package a
+#            .changie.yaml and a CHANGELOG.md and add it to
+#            .github/changelog-packages), and exit 1; nothing is printed and
+#            the exit is 0 when HEAD holds no such file. It reads HEAD's tree
+#            alone - no history, no tag, no working tree, no CHANGELOG.md - so
+#            a shallow checkout without the tags is enough for it. ci.yaml's
+#            lint job runs it over .github/changelog-packages on every pull
+#            request, inside a required check: a fragment of a package the
+#            fold does not fold is refused there, while the fold on main only
+#            warns about it and folds the rest. Each <spec> is
+#            <package-dir>[=<tag-prefix>], as fold-plan's is, and only the
+#            <package-dir> counts; no spec at all, or one of another shape, is
+#            refused as fold-plan refuses it.
 # fold-notes: the build job's half of a fold: render the plan's fragments with
 #            changie, which is dependency code, into <notes-dir>, which must be
 #            absent or empty and is created. Each (package, label) of the plan
@@ -397,7 +440,7 @@
 #            1.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-orphans <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
 
 # The identity of the commits this script makes, `tag`'s version bump,
 # push-fold's fold and push-built's rebuild: GitHub Actions' own bot.
@@ -416,6 +459,50 @@ is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)
 # is_commit_sha <value>: true when <value> is a full commit sha, 40 lower-case
 # hex.
 is_commit_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
+
+# The root lockfile. Its "workspaces" object holds an entry for each workspace
+# package, keyed by the package's directory, whose "version" line copies the
+# package's manifest; `bun install` rewrites a line that disagrees, so a version
+# bump sets it with the manifest (lock_set_version).
+lock=bun.lock
+
+# lock_set_version <package-dir> <version>: print the lockfile read on stdin
+# with the "version" line of its workspace entry for <package-dir> set to
+# <version>, every other byte as it was, a missing final newline included. The
+# entry is the line that is exactly `    "<package-dir>": {` inside the
+# top-level "workspaces" object, through its closing `    }` line, and its
+# version line the one line in it that is exactly `      "version":
+# "<anything>",` (a nested object's keys sit deeper). Both arguments reach awk
+# through its environment, which it reads literally, never through -v, which
+# would decode a backslash. A sentinel byte appended to the input marks its
+# end, so the last line is printed with a newline only when it had one. Text
+# tools only, never bun: a publish job holding credentials runs this. Exits 1,
+# its output not to be used, unless the lockfile holds exactly one such entry
+# with exactly one such line.
+lock_set_version() {
+  { cat; printf '\001'; } | LOCK_ENTRY="    \"$1\": {" LOCK_VERSION=$2 awk '
+    $0 == "  \"workspaces\": {" { workspaces = 1 }
+    workspaces && /^  },?$/ { workspaces = 0 }
+    workspaces && $0 == ENVIRON["LOCK_ENTRY"] { inside = 1; entries++ }
+    inside && /^    },?$/ { inside = 0 }
+    inside && /^      "version": "[^"]*",$/ { $0 = "      \"version\": \"" ENVIRON["LOCK_VERSION"] "\","; lines++ }
+    NR > 1 { print last }
+    { last = $0 }
+    END {
+      printf "%s", substr(last, 1, length(last) - 1)
+      exit !(entries == 1 && lines == 1)
+    }'
+}
+
+# is_bump_change <changed> <package-dir>: true when <changed>, `git diff
+# --name-only` of a commit against its parent, names <package-dir>'s manifest,
+# the lockfile or both, and nothing else: the paths a version bump touches. Git
+# lists the paths in byte order, as `LC_ALL=C sort` does.
+is_bump_change() {
+  local both
+  both=$(printf '%s\n' "$lock" "$2/package.json" | LC_ALL=C sort)
+  [ "$1" = "$2/package.json" ] || [ "$1" = "$lock" ] || [ "$1" = "$both" ]
+}
 
 # quote_all <value>...: the values, each %q-quoted, separated by spaces.
 quote_all() {
@@ -514,7 +601,7 @@ pushed_tag() {
     if [ "$commit" = "$head" ] || {
       [ -n "$package_dir" ] &&
         [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
-        [ "$(git diff --name-only "$head" "$commit")" = "$package_dir/package.json" ]
+        is_bump_change "$(git diff --name-only "$head" "$commit")" "$package_dir"
     }; then
       if ! is_plain_version "${candidate#"$prefix"}"; then
         printf -v shown '%q' "$candidate"
@@ -797,14 +884,38 @@ first_added() {
   printf '%s\n' "$commit"
 }
 
+# A package spec, which fold-plan, fold-orphans, fold-notes and push-fold all
+# take: <package-dir>[=<tag-prefix>]. The package dir goes into paths and
+# pathspecs, the prefix into a tag pattern, and the dir's basename names the
+# notes file of each group. package_dir_re keeps the dir free of pathspec magic
+# (a leading ':') and of glob characters, so it needs no --literal-pathspecs; a
+# fragment's name is anything git holds, so each git call given one reads it
+# literally.
+package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
+
+# check_specs <spec>...: fail unless at least one <spec> is given and each is
+# <package-dir>[=<tag-prefix>]. fold_plan checks this and more of every spec (a
+# repeated basename, a package holding no CHANGELOG.md); fold-orphans, which
+# reads the <package-dir>s and nothing else, checks this alone.
+check_specs() {
+  local spec dir prefix
+  [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
+  for spec in "$@"; do
+    dir=${spec%%=*} prefix=''
+    [[ $spec != *=* ]] || prefix=${spec#*=}
+    if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
+      fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
+    fi
+  done
+}
+
 # fold_plan <spec>...: set plan to the fold's plan, the lines fold-plan prints
 # (the header's fold-plan paragraph), each ending in a newline; empty when there
 # is nothing to fold. Sets groups to its distinct <package-dir><TAB><label>
 # pairs, in the plan's order.
 fold_plan() {
-  [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
+  check_specs "$@"
   local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
-  local package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
   local unexpected=()
   head=$(git rev-parse HEAD)
   head_label="main@${head:0:12}"
@@ -812,14 +923,6 @@ fold_plan() {
   for spec in "$@"; do
     dir=${spec%%=*} prefix=''
     [[ $spec != *=* ]] || prefix=${spec#*=}
-    # The package dir goes into paths and pathspecs, the prefix into a tag
-    # pattern, and the dir's basename names the notes file of each group.
-    # package_dir_re keeps the dir free of pathspec magic (a leading ':') and
-    # of glob characters, so it needs no --literal-pathspecs; a fragment's name
-    # is anything git holds, so each git call given one reads it literally.
-    if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
-      fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
-    fi
     [[ $names != *" ${dir##*/} "* ]] || fail_error "two package specs name a directory ${dir##*/}; the notes files are named by it, so each must differ"
     names+="${dir##*/} "
     git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD to fold its fragments into"
@@ -866,6 +969,32 @@ set_plan() {
   plan=$1
   [ -z "$plan" ] || plan+=$'\n'
   groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
+}
+
+# unlisted_files <spec>...: set unlisted to every path HEAD's tree holds under
+# the .changes/ of a package no <spec> names, sorted; an empty array when there
+# is none. fold-plan warns about them and fold-orphans refuses them (the
+# header's paragraph for each). It reads HEAD's tree, as fold_plan does, never
+# the working tree, and the package a path belongs to is read from the path
+# with a bash regex, so the only pathspec is packages/, which holds no magic.
+unlisted_files() {
+  local spec path listed=' '
+  unlisted=()
+  for spec in "$@"; do
+    listed+="${spec%%=*} "
+  done
+  while IFS= read -r -d '' path; do
+    [[ $path =~ ^(packages/[^/]+)/\.changes/ ]] || continue
+    [[ $listed == *" ${BASH_REMATCH[1]} "* ]] || unlisted+=("$path")
+  done < <(git ls-tree -r -z --name-only HEAD -- packages/)
+  [ ${#unlisted[@]} -eq 0 ] || mapfile -d '' -t unlisted < <(printf '%s\0' "${unlisted[@]}" | LC_ALL=C sort -z)
+}
+
+# unlisted_message <spec>...: what fold-plan's ::warning:: and fold-orphans'
+# ::error:: both say about the paths unlisted_files left in unlisted: every one
+# of them, the specs the command was given, and what to do with the file.
+unlisted_message() {
+  printf '%s at HEAD: each is under the .changes/ of a package the fold was not given, here %s, and the fold folds the fragments of the packages it is given alone, so the fold does not fold it and it stays on main unfolded; remove it, or give its package a .changie.yaml and a CHANGELOG.md and add it to .github/changelog-packages' "$(quote_all "${unlisted[@]}")" "$(quote_all "$@")"
 }
 
 # group_column <dir> <label> <column>: the plan's <column> (3 the date, 4 the
@@ -986,12 +1115,22 @@ case "$command" in
     tag=${4:?tag}
     git config user.name "$bot_name"
     git config user.email "$bot_email"
-    git add "$package_dir/package.json"
+    # The workflow's "Set release version" step set the manifest's version; the
+    # lockfile's workspace entry takes the same version here, so the bump
+    # leaves nothing for a later `bun install` to rewrite.
+    current_version=$(jq -r .version "$package_dir/package.json")
+    is_plain_version "$current_version" ||
+      fail_error "$package_dir/package.json's version $(quote_all "$current_version") is not X.Y.Z, each field a number without leading zeros; refusing it"
+    if ! lock_set_version "$package_dir" "$current_version" < "$lock" > "$lock.tmp"; then
+      rm -f "$lock.tmp"
+      fail_error "$lock holds no workspace entry \"$package_dir\" with one \"version\" line, so the bump cannot set it to $current_version"
+    fi
+    mv "$lock.tmp" "$lock"
+    git add "$package_dir/package.json" "$lock"
     git diff --staged --quiet || git commit -m "$commit_message"
     git fetch --tags origin
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
       tagged_version=$(git show "$tag:$package_dir/package.json" | jq -r .version)
-      current_version=$(jq -r .version "$package_dir/package.json")
       if [ "$tagged_version" != "$current_version" ]; then
         echo "::error::tag $tag already exists with version $tagged_version, not $current_version"
         exit 1
@@ -1228,7 +1367,7 @@ case "$command" in
     version=${3:?released version}
     manifest="$package_dir/package.json"
     deploy_key_env fail_outstanding
-    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, onto main's tip: its parent's $manifest with .version set to $version and nothing else, as JSON; a run from a branch other than main lands nothing but that exact bump on main."
+    only_bump="push-main pushes the one version-bump commit, which changes only $manifest and $lock, onto main's tip: its parent's $manifest with .version set to $version and nothing else, as JSON, and its parent's $lock with the version line of the workspace entry \"$package_dir\" set to $version and nothing else, byte for byte; a run from a branch other than main lands nothing but that exact bump on main."
     for attempt in 1 2 3 4 5; do
       git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD) || fail_outstanding "Reading main's fetched tip failed."
@@ -1258,13 +1397,17 @@ case "$command" in
       fi
       # The bump's content, against its one parent — main's tip, or an older
       # main commit it is rebased onto below and checked against again — before
-      # any push, rebase or superseded-version exit sees it. The paths and the
-      # manifest are compared against the parent, the manifest as JSON (jq -S),
-      # so the parent's copy with .version set to the released version must be
-      # HEAD's copy.
-      changed=$(git diff --name-only "$parent" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
-      if [ "$changed" != "$manifest" ]; then
-        paths=${changed//$'\n'/ }
+      # any push, rebase or superseded-version exit sees it. The paths, the
+      # manifest and the lockfile are compared against the parent: the
+      # manifest as JSON (jq -S), so the parent's copy with .version set to the
+      # released version must be HEAD's copy, and the lockfile byte for byte
+      # (its blob), so the parent's copy with its workspace entry's version line
+      # set (lock_set_version) must be HEAD's copy. A commit that leaves one of
+      # the two as its parent's passes only when the parent's copy already held
+      # the version.
+      bump_paths=$(git diff --name-only "$parent" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
+      if ! is_bump_change "$bump_paths" "$package_dir"; then
+        paths=${bump_paths//$'\n'/ }
         fail_outstanding "HEAD carries 1 commit main does not — $carried — which changes ${paths:-nothing}, and $only_bump"
       fi
       parent_copy=$(git show "$parent:$manifest" 2>/dev/null) || fail_outstanding "$manifest is missing at HEAD's parent $parent, so HEAD adds it rather than bumping it. $only_bump"
@@ -1272,6 +1415,12 @@ case "$command" in
       actual=$(git show "HEAD:$manifest" | jq -S .) || fail_outstanding "HEAD's $manifest is missing or not JSON."
       if [ "$expected" != "$actual" ]; then
         fail_outstanding "HEAD's $manifest differs from its parent's in more than .version = $version. $only_bump"
+      fi
+      expected=$(git show "$parent:$lock" 2>/dev/null | lock_set_version "$package_dir" "$version" | git hash-object --stdin) ||
+        fail_outstanding "$lock at HEAD's parent $parent is missing or holds no workspace entry \"$package_dir\" with one \"version\" line. $only_bump"
+      actual=$(git rev-parse -q --verify "HEAD:$lock") || fail_outstanding "$lock is missing at HEAD. $only_bump"
+      if [ "$expected" != "$actual" ]; then
+        fail_outstanding "HEAD's $lock differs from its parent's in more than the version line of the workspace entry \"$package_dir\" = $version. $only_bump"
       fi
       if [ "$parent" = "$upstream" ]; then
         # The bump sits on main's tip, checked: push it. HEAD:refs/heads/main
@@ -1288,18 +1437,27 @@ case "$command" in
       fi
       # HEAD's parent is an older main commit (main moved since the checkout,
       # or the push lost the race): the bump is rebased onto main's tip and the
-      # next attempt checks it there. Main's manifest at or past this version
-      # needs nothing pushed (the header's push-main paragraph). A manifest
-      # main deleted, or one without a plain version, is left to the rebase
-      # below.
+      # next attempt checks it there. Main's manifest past this version needs
+      # nothing pushed, nor does main's manifest at this version when main's
+      # lockfile entry holds it too (the header's push-main paragraph); a
+      # lockfile still behind is left to the rebase, so a bump that corrects
+      # the lockfile alone is not dropped when main moves. A manifest main
+      # deleted, or one without a plain version, is left to the rebase below.
       main_version=$(git show "$upstream:$manifest" 2>/dev/null | jq -r .version 2>/dev/null) || main_version=""
+      reason=""
       if is_plain_version "$main_version" &&
         [ "$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -n 1)" = "$main_version" ]; then
-        if [ "$main_version" = "$version" ]; then
-          reason="main's $manifest already holds v$version, so this version bump has nothing to add."
-        else
+        if [ "$main_version" != "$version" ]; then
           reason="main's $manifest holds v$main_version, a later release than v$version, so this version bump is superseded."
+        else
+          main_lock=$(git rev-parse -q --verify "$upstream:$lock") || main_lock=""
+          set_lock=$(git show "$upstream:$lock" 2>/dev/null | lock_set_version "$package_dir" "$version" | git hash-object --stdin) || set_lock=""
+          if [ -n "$main_lock" ] && [ "$main_lock" = "$set_lock" ]; then
+            reason="main's $manifest and $lock already hold v$version, so this version bump has nothing to add."
+          fi
         fi
+      fi
+      if [ -n "$reason" ]; then
         echo "::notice title=Version bump not pushed::$reason"
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
           printf '**Version bump for %s v%s not pushed.** %s\n' "$package_dir" "$version" "$reason" >> "$GITHUB_STEP_SUMMARY"
@@ -1313,28 +1471,39 @@ case "$command" in
         git rebase --abort 2>/dev/null || true
         fail_outstanding "Rebasing the version-bump commit onto main ($upstream) stopped and its conflicting paths could not be read; the rebase was aborted."
       }
-      # Resolvable only when exactly the manifest conflicted and main still has
-      # it: a modify/delete conflict lists that same one path.
-      if [ "$conflicted" != "$manifest" ] || ! git cat-file -e "HEAD:$manifest" 2>/dev/null; then
+      # Resolvable only when the conflict is confined to the manifest and the
+      # lockfile and main still has both: a modify/delete conflict lists the
+      # deleted path too.
+      if ! is_bump_change "$conflicted" "$package_dir" ||
+        ! git cat-file -e "HEAD:$manifest" 2>/dev/null || ! git cat-file -e "HEAD:$lock" 2>/dev/null; then
         git rebase --abort 2>/dev/null || true
         if [ -z "$conflicted" ]; then
           fail_outstanding "Rebasing the version-bump commit onto main ($upstream) failed without conflicting paths."
         fi
-        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: ${conflicted//$'\n'/ }. Only a conflict confined to $manifest, with the file still present on main, is resolved automatically."
+        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: ${conflicted//$'\n'/ }. Only a conflict confined to $manifest and $lock, with both files still present on main, is resolved automatically."
       fi
-      echo "Resolving the $manifest version-line conflict to v$version"
+      echo "Resolving the version-line conflict in ${conflicted//$'\n'/ } to v$version"
       # During a rebase stop HEAD is main's side (plus any commit already
-      # replayed), so this keeps every other change main made to the file. The
-      # rewrite lands through a temp file so a failed pipe never leaves a
-      # truncated manifest. The merge backend opens an editor on --continue;
-      # give it none.
-      if ! { git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest.tmp" \
-          && mv "$manifest.tmp" "$manifest" \
-          && git add "$manifest" \
-          && GIT_EDITOR=true git rebase --continue; }; then
-        rm -f "$manifest.tmp"
+      # replayed), so this keeps every other change main made to each file.
+      # Each rewrite lands through a temp file so a failed pipe never leaves a
+      # truncated file. The merge backend opens an editor on --continue; give
+      # it none.
+      resolved=true
+      while IFS= read -r path; do
+        if [ "$path" = "$lock" ]; then
+          git show "HEAD:$lock" | lock_set_version "$package_dir" "$version" > "$lock.tmp" || resolved=false
+        else
+          git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest.tmp" || resolved=false
+        fi
+        if [ "$resolved" != true ] || ! { mv "$path.tmp" "$path" && git add "$path"; }; then
+          resolved=false
+          break
+        fi
+      done <<<"$conflicted"
+      if [ "$resolved" != true ] || ! GIT_EDITOR=true git rebase --continue; then
+        rm -f "$manifest.tmp" "$lock.tmp"
         git rebase --abort 2>/dev/null || true
-        fail_outstanding "Resolving the $manifest version-line conflict onto main ($upstream) failed; the rebase was aborted."
+        fail_outstanding "Resolving the version-line conflict in ${conflicted//$'\n'/ } onto main ($upstream) failed; the rebase was aborted."
       fi
     done
     # Only main moving under every attempt gets here: each rebase placed the
@@ -1439,7 +1608,15 @@ case "$command" in
   fold-plan)
     shift
     fold_plan "$@"
+    unlisted_files "$@"
+    [ ${#unlisted[@]} -eq 0 ] || echo "::warning::release-push.sh $command: $(unlisted_message "$@")" >&2
     printf '%s' "$plan"
+    ;;
+  fold-orphans)
+    shift
+    check_specs "$@"
+    unlisted_files "$@"
+    [ ${#unlisted[@]} -eq 0 ] || fail_error "$(unlisted_message "$@")"
     ;;
   fold-notes)
     [ $# -ge 3 ] || fail_error "usage: release-push.sh fold-notes <notes-dir> <spec>..."

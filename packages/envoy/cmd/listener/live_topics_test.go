@@ -17,8 +17,8 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// These tests drive the built listener against a real NATS and a fake serving port: the OpenCode
-// plugin's way of being reached, where the listener POSTs each notification to
+// These tests drive the built listener against a real NATS and a fake serving port: how a session
+// that serves an HTTP port is reached, where the listener POSTs each notification to
 // /session/<id>/prompt_async. They use only what the listener had before INFRA-122 (its binary,
 // its /v1 API and the bus), so the file compiles unchanged at the commit before the change. There
 // TestAServingPortReceivesATopicTheStreamDoesNotStore and
@@ -92,8 +92,8 @@ func (p *servingPort) noPrompt(t *testing.T, window time.Duration) {
 	}
 }
 
-// registerServingSession registers sessionID with the listener as the OpenCode plugin does: its
-// serving port, the host it runs on, and its topics. The listener must answer 200.
+// registerServingSession registers sessionID with the listener as a session that serves an HTTP
+// port does: its serving port, the host it runs on, and its topics. The listener must answer 200.
 func registerServingSession(t *testing.T, listener *listenerProcess, serving *servingPort, host string, topics ...string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
@@ -466,6 +466,31 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 		t.Fatalf("publish an envelope naming another topic: %v", err)
 	}
 	valid := newEnvelope("agent", topic, "a valid envelope after them")
+	publish(t, publisher, valid)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 2*time.Second), valid)
+	serving.noPrompt(t, time.Second)
+}
+
+// The live lane leaves a session's relay subject (notifications.envoy.deliver.<id>) alone: a frame
+// there is a stored message the listener owning the session relays to it from its consumer, never
+// one to fan out, even to a session that names the subject as a topic. Core NATS keeps one
+// publisher's order, so a team topic's envelope published after the frame being the first prompt
+// shows the frame was dropped, not late.
+func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
+	uri := testnats.URL(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "relay-subject", liveLaneEnv...)
+	listener.waitHealthy(t)
+
+	relayed, team := bus.DeliverSubject("ses_relayed_"+id.New()), "notifications.team."+id.New()
+	serving := startServingPort(t, "ses_relay_watcher_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, listener, serving, "127.0.0.1", relayed, team)
+	publisher := connectPublisher(t, uri)
+
+	if err := publisher.PublishCoreTo(relayed, newEnvelope("agent", relayed, "a relay frame")); err != nil {
+		t.Fatalf("publish a frame on the relay subject: %v", err)
+	}
+	valid := newEnvelope("agent", team, "a team envelope after it")
 	publish(t, publisher, valid)
 
 	requirePromptCarries(t, serving.awaitPrompt(t, 2*time.Second), valid)

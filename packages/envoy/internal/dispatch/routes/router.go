@@ -134,6 +134,9 @@ type AppContextOptions struct {
 	// files in Postgres. See api.DepsInput.
 	Files            files.Store
 	TestHooksEnabled bool
+	// RouteRosterTTL replaces how long a stored listener answer serves issue reads; zero keeps the
+	// server's five seconds. See api.Deps.RouteRosterTTL.
+	RouteRosterTTL time.Duration
 	// ListenerRosterUncached is for end-to-end test processes only (cmd/dispatch:
 	// DISPATCH_TEST_ROSTER_UNCACHED); see api.DepsInput.
 	ListenerRosterUncached bool
@@ -189,6 +192,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
 		Files:                  opts.Files,
 		TestHooksEnabled:       opts.TestHooksEnabled,
+		RouteRosterTTL:         opts.RouteRosterTTL,
 		ListenerRosterUncached: opts.ListenerRosterUncached,
 		DashboardEntry:         opts.DashboardEntry,
 	})
@@ -258,7 +262,8 @@ type router struct {
 // work (api.Background): its Wait returns once every keyed write's handler and every delivery a
 // request left running past its answer has settled, and the delivery hub, every live socket and
 // their subscriptions, and the event stream relay have ended after the process lifetime is
-// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs.
+// cancelled; its ResumeDeliveries is the delivery sweep's pass the maintenance loop runs
+// (api.RunMaintenanceSweep).
 func New(ctx *AppContext) (http.Handler, api.Background) {
 	r := &router{
 		ctx:          ctx,

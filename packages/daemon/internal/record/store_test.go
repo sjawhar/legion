@@ -53,7 +53,8 @@ func emptyStore(t *testing.T) *store.Store {
 	t.Cleanup(admin.Close)
 
 	name := "legion_record_test_" + randomSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+name); err != nil {
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
@@ -361,8 +362,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
 	pushes := []ClassifiedPush{
-		{SHA: "b1c2d3", Before: "a0b1c2", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true},
-		{SHA: "c2d3e4", Before: "b1c2d3", Forced: true},
+		{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true},
+		{SHA: "c2d3e4", Before: "b1c2d3"},
 	}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
@@ -371,7 +372,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
 		Snapshot: "snapshot-4", Pushes: pushes, Moves: []Move{{Before: "9f8e7d", SHA: "a0b1c2"},
-			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeats: []ClassifiedPush{{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}, {SHA: "b1c2d3", Before: "a0b1c2", Forced: true}}}},
+			{Before: "a0b1c2", SHA: "b1c2d3", Pushed: true, Repeats: []ClassifiedPush{{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true}, {SHA: "b1c2d3", Before: "a0b1c2", Sender: "legion-implement[bot]"}}}},
 		HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A run's anchor keeps a set never read apart from an empty one, and so do its steps.
 		Run: &HeadRun{
@@ -387,7 +388,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
 	}
-	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass",
+	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", HandoffRecord: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", HandoffVersion: 3, Rounds: 2, Verdict: "pass",
 		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
@@ -847,6 +848,35 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.Run != nil || got.PlannedRed {
 			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q run=%+v plannedRed=%v, want 0, 0, \"\", nil and false",
 				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.Run, got.PlannedRed)
+		}
+	})
+}
+
+// A new generation clears each role's handoff of its current phase — the commit it reported and the
+// Dispatch handoff record it named — so no role of the new generation reads as having completed,
+// and keeps the record each role last named, which a completion naming it again is refused against.
+func TestClearGenerationClearsTheHandoffRecordAndKeepsTheLastNamed(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-286")
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPhase(ctx, tx, PhaseRow{Issue: issue.Key, Role: claim.RoleTester, Claim: "tester", HandoffRecord: "test-record", HandoffVersion: 2, LastHandoff: "test-record", Verdict: "pass"}))
+		must(t, records.PutPhase(ctx, tx, PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "head", HandoffRecord: "implement-record", HandoffVersion: 1, LastHandoff: "implement-record", Rounds: 1}))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.Phases(ctx, tx, issue.Key)
+		must(t, err)
+		want := map[claim.Role]string{claim.RoleImplementer: "implement-record", claim.RoleTester: "test-record"}
+		if len(rows) != len(want) {
+			t.Fatalf("phases after ClearGeneration = %#v, want both rows kept", rows)
+		}
+		for _, row := range rows {
+			if row.Completed() || row.HandoffVersion != 0 || row.LastHandoff != want[row.Role] {
+				t.Fatalf("the %s row after ClearGeneration = %#v, want no commit, record or version, and %q kept as the record it last named", row.Role, row, want[row.Role])
+			}
 		}
 	})
 }
@@ -1851,7 +1881,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
 			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
 			"ancestry", "handed_over_from"},
-		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment", "handoff_record", "handoff_version"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
@@ -2097,6 +2127,57 @@ func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
 		}
 		if _, err := records.RoleRuns(ctx, tx, []RoleRunKey{tester}); err == nil {
 			t.Fatal("the tester's run read its own undecodable row without an error")
+		}
+	})
+}
+
+// The three reads keyed by a pull request's repository find the row whatever the case the name is
+// spelled in: the row carries the spelling of the fact that opened the pull request, while a
+// later fact — an event under GitHub's own spelling of the other name of a configured rename,
+// say — names the same repository in another case. A name that is another repository still finds
+// nothing.
+func TestThePullRequestReadsFindTheRowInAnySpelling(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-303")
+	issue.Repo, issue.GitHubRepo = "sjawhar/legion", "sjawhar/legion"
+	pr := PullRequest{Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-303",
+		HeadSHA: "b1c2d3", HeadUpdatedAt: time.Date(2026, 9, 22, 14, 12, 13, 0, time.UTC),
+		Generation: int64(issue.Generation), State: PullRequestOpen}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+	})
+	for _, name := range []string{"sjawhar/legion", "SJAWHAR/Legion", "sjawhar/LEGION"} {
+		inTx(t, st, func(tx pgx.Tx) {
+			byNumber, err := records.PullRequestByNumber(ctx, tx, name, pr.Number)
+			must(t, err)
+			if byNumber == nil || byNumber.Issue != pr.Issue {
+				t.Fatalf("PullRequestByNumber(%q, %d) = %#v, want the row of %s", name, pr.Number, byNumber, pr.Issue)
+			}
+			byBranch, err := records.PullRequestByBranch(ctx, tx, name, pr.Branch)
+			must(t, err)
+			if byBranch == nil || byBranch.Issue != pr.Issue {
+				t.Fatalf("PullRequestByBranch(%q, %q) = %#v, want the row of %s", name, pr.Branch, byBranch, pr.Issue)
+			}
+			recorded, err := PullRequestRecorded(ctx, tx, name, pr.Number)
+			must(t, err)
+			if !recorded {
+				t.Fatalf("PullRequestRecorded(%q, %d) = false, want the row of %s", name, pr.Number, pr.Issue)
+			}
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		other := "cybermonklabs/legion"
+		byNumber, err := records.PullRequestByNumber(ctx, tx, other, pr.Number)
+		must(t, err)
+		byBranch, err := records.PullRequestByBranch(ctx, tx, other, pr.Branch)
+		must(t, err)
+		recorded, err := PullRequestRecorded(ctx, tx, other, pr.Number)
+		must(t, err)
+		if byNumber != nil || byBranch != nil || recorded {
+			t.Fatalf("the reads of %s = %#v, %#v, %v; want nothing: it is another repository", other, byNumber, byBranch, recorded)
 		}
 	})
 }

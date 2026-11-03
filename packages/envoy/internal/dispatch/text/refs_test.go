@@ -184,11 +184,50 @@ func TestEncodeBlockIDMatchesTheSharedTable(t *testing.T) {
 	}
 }
 
+// A block reference is written one way for each kind of document: an issue's primary document as
+// `/spec`, any other document of an issue or a project as `artifact/<slug>` (a project document
+// whose slug is spec too), the id as EncodeBlockID writes it, and a pin after the fragment. A
+// document, an issue or an agent conversation's document has no block reference.
+func TestFormatBlockRefWritesTheCanonicalReference(t *testing.T) {
+	cases := []struct {
+		ref  Ref
+		want string
+	}{
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "x"}, "dispatch://CORE-1/spec#b-x"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "notes-md", Block: "x"}, "dispatch://CORE-1/artifact/notes-md#b-x"},
+		{Ref{Kind: "block", Project: "CORE", ID: "handbook-md", Block: "x"}, "dispatch://CORE/artifact/handbook-md#b-x"},
+		{Ref{Kind: "block", Project: "CORE", ID: "spec", Block: "x"}, "dispatch://CORE/artifact/spec#b-x"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "décision:1"}, "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1"},
+		{Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "x", Pin: 2}, "dispatch://CORE-1/spec#b-x@v2"},
+	}
+	for _, tc := range cases {
+		got, ok := FormatBlockRef(tc.ref)
+		if !ok || got != tc.want {
+			t.Errorf("FormatBlockRef(%#v) = %q, %t; want %q", tc.ref, got, ok, tc.want)
+			continue
+		}
+		// What it writes is the one reference text reads back, and canonical.
+		if read, ok := CanonicalBlockRef(got); !ok || read != tc.ref {
+			t.Errorf("CanonicalBlockRef(%q) = %#v, %t; want %#v", got, read, ok, tc.ref)
+		}
+	}
+	for _, ref := range []Ref{
+		{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"},
+		{Kind: "issue", IssueKey: "CORE-1", ID: "CORE-1"},
+		{Kind: "block", Session: "s1", ID: "notes-md", Block: "x"},
+	} {
+		if got, ok := FormatBlockRef(ref); ok {
+			t.Errorf("FormatBlockRef(%#v) = %q; want no block reference", ref, got)
+		}
+	}
+}
+
 // A dashboard page's `#b-` fragment names the block the page lands on, read with any
 // percent-encoding. A pin is written only as a `dispatch://` reference, so a raw `@` in a page's
 // fragment names no block; an item in the query or a version page is what it names today. The
-// dashboard writes a document block's fragment beside a `?comment=`, so the fragment there names
-// no block of the comment, on any version of the page.
+// dashboard writes a document block's fragment beside a `?comment=` or an `?ask=`, so the
+// fragment there names no block of the item, on any version of the page: an ask's parts are
+// named by the ask's own page and reference.
 func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	const server = "https://dispatch.test"
 	cases := []struct {
@@ -206,6 +245,8 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 		{"/issues/CORE-1/spec?v=2&comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
 		{"/projects/CORE/documents/handbook-md?comment=c1#b-b2", Ref{Kind: "comment", Project: "CORE", ID: "c1"}},
 		{"/issues/CORE-1/spec?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
+		{"/projects/CORE/documents/handbook-md?ask=a1#b-b2", Ref{Kind: "ask", Project: "CORE", ID: "a1"}},
+		{"/issues/CORE-1/artifacts/notes-md?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
 	}
 	for _, tc := range cases {
 		got := Extract(server+tc.href, server)
@@ -215,16 +256,18 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	}
 }
 
-// A block of a comment or an issue message is addressed under its item, by a `dispatch://`
-// reference or the item's dashboard page, and its target id is `<item kind>/<item id>#<block
-// id>`. A comment block can be pinned to a revision of its comment; a message never changes, so a
-// pinned message block names nothing, nor does a block of an ask or of a project document's
-// message, which no reference addresses. A page's raw `@` is no pin: the page names the item. A
-// project document's page names its comment, never the comment's block: the fragment beside a
-// `?comment=` is the document's.
+// A block of an ask, a comment or an issue message is addressed under its item, by a
+// `dispatch://` reference or the item's dashboard page, and its target id is `<item kind>/<item
+// id>#<block id>`. An ask's part can be pinned to a revision of the ask's parts and a comment's
+// block to a revision of its comment; a message never changes, so a pinned message block names
+// nothing, nor does a block of a project document's message, which no reference addresses. A
+// page's raw `@` is no pin: the page names the item. A project document's page names its ask or
+// comment, never a block of it: the fragment beside a `?comment=` or an `?ask=` is the
+// document's.
 func TestExtractParsesItemBlockReferences(t *testing.T) {
 	const server = "https://dispatch.test"
 	const comment, message = "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333"
+	const ask = "22222222-2222-4222-8222-222222222222"
 	commentBlock := Ref{Kind: "block", Item: "comment", IssueKey: "CORE-1", ID: comment, Block: "b2"}
 	pinned := commentBlock
 	pinned.Pin = 1
@@ -232,6 +275,10 @@ func TestExtractParsesItemBlockReferences(t *testing.T) {
 	projectBlock := Ref{Kind: "block", Item: "comment", Project: "CORE", ID: comment, Block: "b2"}
 	projectPinned := projectBlock
 	projectPinned.Pin = 3
+	askBlock := Ref{Kind: "block", Item: "ask", IssueKey: "CORE-1", ID: ask, Block: "b3"}
+	askPinned := askBlock
+	askPinned.Pin = 2
+	projectAsk := Ref{Kind: "block", Item: "ask", Project: "CORE", ID: ask, Block: "b3"}
 	for _, test := range []struct {
 		reference string
 		want      []Ref
@@ -244,14 +291,18 @@ func TestExtractParsesItemBlockReferences(t *testing.T) {
 		{"dispatch://CORE/artifact/handbook-md/comment/" + comment + "#b-b2", []Ref{projectBlock}, "comment/" + comment + "#b2"},
 		{"dispatch://CORE/artifact/handbook-md/comment/" + comment + "#b-b2@v3", []Ref{projectPinned}, "comment/" + comment + "#b2"},
 		{"dispatch://CORE/artifact/handbook-md/message/" + message + "#b-b2", []Ref{}, ""},
-		{"dispatch://CORE-1/ask/" + comment + "#b-b2", []Ref{}, ""},
+		{"dispatch://CORE-1/ask/" + ask + "#b-b3", []Ref{askBlock}, "ask/" + ask + "#b3"},
+		{"dispatch://CORE-1/ask/" + ask + "#b-b3@v2", []Ref{askPinned}, "ask/" + ask + "#b3"},
+		{"dispatch://CORE/artifact/handbook-md/ask/" + ask + "#b-b3", []Ref{projectAsk}, "ask/" + ask + "#b3"},
 		{"dispatch://CORE-1/comment/" + comment + "#b-", []Ref{}, ""},
 		{"dispatch://CORE-1/comment/" + comment + "#c-b2", []Ref{}, ""},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2", []Ref{commentBlock}, "comment/" + comment + "#b2"},
 		{server + "/issues/CORE-1/messages/" + message + "#b-b2", []Ref{messageBlock}, "message/" + message + "#b2"},
 		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{{Kind: "comment", Project: "CORE", ID: comment}}, comment},
 		{server + "/issues/CORE-1/comments/" + comment + "#b-b2@v1", []Ref{{Kind: "comment", IssueKey: "CORE-1", ID: comment}}, comment},
-		{server + "/issues/CORE-1/asks/" + comment + "#b-b2", []Ref{{Kind: "ask", IssueKey: "CORE-1", ID: comment}}, comment},
+		{server + "/issues/CORE-1/asks/" + ask + "#b-b3", []Ref{askBlock}, "ask/" + ask + "#b3"},
+		{server + "/issues/CORE-1/asks/" + ask + "#b-b3@v2", []Ref{{Kind: "ask", IssueKey: "CORE-1", ID: ask}}, ask},
+		{server + "/projects/CORE/documents/handbook-md?ask=" + ask + "#b-b3", []Ref{{Kind: "ask", Project: "CORE", ID: ask}}, ask},
 	} {
 		t.Run(test.reference, func(t *testing.T) {
 			got := Extract("See "+test.reference+".", server)

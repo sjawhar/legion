@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -524,15 +525,18 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
+		// An unanswered read is what a listener take-over gives, so the send asks again for the
+		// take-over window before it settles; every one of those reads is cancelled the same way.
+		// The listener client's window is a short one, so those reads cost a fraction of a second
+		// each rather than the client's five.
 		cancelled := make(chan struct{})
+		var cancelledOnce sync.Once
 		listener := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			<-r.Context().Done()
-			close(cancelled)
+			cancelledOnce.Do(func() { close(cancelled) })
 		}))
 		defer listener.Close()
-		// A listener that never answers fails the delivery once the client's window ends; a window
-		// of its own keeps the test from waiting out the five-second default.
-		handler, _ := newTargetedMessageHandler(t, listener.URL, 150*time.Millisecond)
+		handler, _ := newTargetedMessageHandler(t, listener.URL, 300*time.Millisecond)
 		issue := createInteractionIssue(t, handler, "TEST", "Timeout listener", "before")
 		message := createIssueMessage(t, handler, issue.Key, map[string]any{
 			"body": "Can you receive?", "target": "session:s1", "delivery": "steer",
@@ -1544,14 +1548,14 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	if err := database.Pool.QueryRow(context.Background(),
 		`select id::text from messages where body = $1`, body,
 	).Scan(&messageID); err != nil {
-		t.Fatalf("read the abandoned sender's message: %v", err)
+		t.Fatalf("read the stalled sender's message: %v", err)
 	}
 	var attempt int
 	var state string
 	if err := database.Pool.QueryRow(context.Background(), `
 		select attempt, state from message_deliveries where message_id = $1
 	`, messageID).Scan(&attempt, &state); err != nil {
-		t.Fatalf("read the stranded attempt: %v", err)
+		t.Fatalf("read the attempt: %v", err)
 	}
 	if attempt != 1 || state != "pending" {
 		t.Fatalf("stranded attempt = %d/%q, want attempt 1 left pending", attempt, state)
@@ -1562,7 +1566,7 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `
 		update message_deliveries set claimed_at = now() - interval '5 minutes' where message_id = $1
 	`, messageID); err != nil {
-		t.Fatalf("abandon the claim: %v", err)
+		t.Fatalf("strand the attempt: %v", err)
 	}
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+messageID+"/deliveries", map[string]any{
@@ -1620,12 +1624,16 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 // its own. While the key carried the attempt number, that retry was a key no dedupe layer had
 // ever seen and the agent was handed the same instruction twice. The key is now stable across
 // the attempts of one message in one mode, so the stream recognises the repeat, answers
-// duplicate, and the retry's row says so instead of claiming a delivery that never happened.
+// duplicate, and the retry's row says so instead of claiming a delivery that never happened. A
+// missed receipt is tried again inside the listener take-over window (takeoverRetry) under the
+// same key, so the attempt is recorded failed only when every try of that window missed; this
+// listener misses every one until the message's own request has answered.
 func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
 		keys      []string
 		delivered map[string]struct{}
+		answering bool
 	}
 	listenerState.delivered = map[string]struct{}{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
@@ -1645,7 +1653,7 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 			}
 			listenerState.Lock()
 			listenerState.keys = append(listenerState.keys, request.IdempotencyKey)
-			first := len(listenerState.keys) == 1
+			missing := !listenerState.answering
 			// The real listener publishes the envelope before it answers, so the send has
 			// landed by this point whatever the caller later learns. JetStream's MsgId, built
 			// from this key, is what keeps a repeat out of the stream - and what makes the
@@ -1654,7 +1662,7 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 			_, held := listenerState.delivered[key]
 			listenerState.delivered[key] = struct{}{}
 			listenerState.Unlock()
-			if first {
+			if missing {
 				// Past the window the handler below gives the client, so Dispatch records the
 				// attempt failed while the agent already has the message.
 				time.Sleep(400 * time.Millisecond)
@@ -1680,11 +1688,14 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 	}
 	message := decodeBody[model.Message](t, created)
 	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
-		t.Fatalf("first attempt = %#v, want one attempt recorded failed after the receipt timeout", message.Deliveries)
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed once every try missed its receipt", message.Deliveries)
 	}
 	if failure := message.Deliveries[0].Error; failure == nil || !strings.Contains(*failure, "may already have been delivered") {
 		t.Fatalf("receipt-timeout error = %v, want the text that tells a human a retry is safe", failure)
 	}
+	listenerState.Lock()
+	listenerState.answering = true
+	listenerState.Unlock()
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -1702,8 +1713,8 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
 	original := message.ID + ":steer"
-	if len(keys) != 2 || keys[0] != original || keys[1] != original {
-		t.Fatalf("send keys = %#v, want both sends under the mode-scoped key %q", keys, original)
+	if len(keys) < 2 || slices.ContainsFunc(keys, func(key string) bool { return key != original }) {
+		t.Fatalf("send keys = %#v, want every send under the mode-scoped key %q", keys, original)
 	}
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys %#v, want the agent to receive the message once", delivered, keys)
@@ -1750,11 +1761,14 @@ func readMessageAttemptHistory(t *testing.T, database *store.Store, messageID st
 
 // The control for the test above: an attempt that failed WITHOUT landing carries nothing the
 // listener has seen, so its retry must reach the agent. A fix that collapses every retry of a
-// message onto one key has to keep this green.
+// message onto one key has to keep this green. A refusal is a listener take-over's failure, tried
+// again inside the take-over window (takeoverRetry) under the same key, so the attempt is recorded
+// failed only when every try of that window was refused; this listener refuses every one until
+// the message's own request has answered.
 func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
-		sends     int
+		answering bool
 		delivered map[string]struct{}
 	}
 	listenerState.delivered = map[string]struct{}{}
@@ -1774,13 +1788,12 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 				t.Errorf("decode targeted send: %v", err)
 			}
 			listenerState.Lock()
-			listenerState.sends++
-			first := listenerState.sends == 1
-			if !first {
+			refusing := !listenerState.answering
+			if !refusing {
 				listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
 			}
 			listenerState.Unlock()
-			if first {
+			if refusing {
 				// Refused before the envelope was published: nothing landed.
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte(`{"error":"listener refused the send"}`))
@@ -1792,7 +1805,7 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "A send that never landed", "before")
 
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
@@ -1803,8 +1816,11 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	}
 	message := decodeBody[model.Message](t, created)
 	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
-		t.Fatalf("first attempt = %#v, want one attempt recorded failed", message.Deliveries)
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed once every try was refused", message.Deliveries)
 	}
+	listenerState.Lock()
+	listenerState.answering = true
+	listenerState.Unlock()
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -1821,6 +1837,13 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	listenerState.Unlock()
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys, want the retry to reach the agent once", delivered)
+	}
+	// The first attempt failed without landing, so the second is a real delivery, not a duplicate.
+	if got := readMessageAttemptHistory(t, database, message.ID); !reflect.DeepEqual(got, []attemptRow{
+		{Attempt: 1, State: "failed", Duplicate: false},
+		{Attempt: 2, State: "sent", Duplicate: false},
+	}) {
+		t.Fatalf("attempt history = %#v", got)
 	}
 }
 

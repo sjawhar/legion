@@ -18,9 +18,9 @@ import { hasErrnoCode, messageFor } from "./errors";
 import { jsonErrorPosition } from "./json-position";
 import { sendable } from "./secret-file";
 
-/** Where a caller runs: one of the three plugins (and the `dispatch` command, which takes its host
+/** Where a caller runs: one of the two plugins (and the `dispatch` command, which takes its host
  * plugin's rule), or a script outside any of them (`command`). */
-export type EnvoyHarness = "omp" | "claude" | "opencode" | "command";
+export type EnvoyHarness = "omp" | "claude" | "command";
 
 /** The variables a read consults, by name, over whatever else the environment holds. */
 export type EnvoyConfigEnvironment = {
@@ -31,7 +31,6 @@ export type EnvoyConfigEnvironment = {
   readonly PI_CODING_AGENT_DIR?: string | undefined;
   readonly CLAUDE_CONFIG_DIR?: string | undefined;
   readonly CLAUDE_CODE_CHILD_SESSION?: string | undefined;
-  readonly OPENCODE_CONFIG_DIR?: string | undefined;
   readonly DISPATCH_URL?: string | undefined;
 } & Readonly<Record<string, string | undefined>>;
 
@@ -72,7 +71,6 @@ function neutralConfig(env: EnvoyConfigEnvironment): { path: string } | { error:
 const HARNESS_DIRECTORY_VARIABLE = {
   omp: "PI_CODING_AGENT_DIR",
   claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR",
 } as const;
 
 type PluginHarness = keyof typeof HARNESS_DIRECTORY_VARIABLE;
@@ -80,8 +78,7 @@ type PluginHarness = keyof typeof HARNESS_DIRECTORY_VARIABLE;
 const PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE) as readonly PluginHarness[];
 
 /** The directory a plugin's harness names, as written: Oh My Pi's `PI_CODING_AGENT_DIR` when
- * `OMP_PROFILE` names a profile other than `default`, Claude Code's `CLAUDE_CONFIG_DIR`,
- * OpenCode's `OPENCODE_CONFIG_DIR`. */
+ * `OMP_PROFILE` names a profile other than `default`, Claude Code's `CLAUDE_CONFIG_DIR`. */
 function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): string | undefined {
   if (harness === "omp") {
     const profile = nonEmpty(env.OMP_PROFILE);
@@ -91,8 +88,8 @@ function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): st
 }
 
 /** The directory `harness` reads its envoy.json from, refused when relative: a plugin's own
- * (`namedDirectory`), or for a command the first one named of Oh My Pi's, Claude Code's and
- * OpenCode's, in that order, Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`. */
+ * (`namedDirectory`), or for a command the first one named of Oh My Pi's and Claude Code's, in
+ * that order, Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`. */
 function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string | undefined {
   for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
     // A shell outside Claude Code can export CLAUDE_CONFIG_DIR too; only Claude Code sets
@@ -115,13 +112,12 @@ export function handedConfigPath(env: EnvoyConfigEnvironment): string | undefine
 
 /**
  * The envoy.json a caller reads. A plugin reads its own harness's directory (omp: a named
- * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`; OpenCode:
- * `OPENCODE_CONFIG_DIR`) and no other harness's, else the file `ENVOY_CONFIG_FILE` names, else
- * `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script (`command`) reads
- * `ENVOY_CONFIG_FILE` first, then the omp, Claude Code and OpenCode directories in that order
- * (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`), then that same neutral file. Throws
- * when the path it would use is relative: `ENVOY_CONFIG_FILE`, the harness directory, or
- * `XDG_CONFIG_HOME` for the neutral file.
+ * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`) and no other harness's, else
+ * the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`.
+ * A script (`command`) reads `ENVOY_CONFIG_FILE` first, then the omp and Claude Code directories
+ * in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`), then that same neutral
+ * file. Throws when the path it would use is relative: `ENVOY_CONFIG_FILE`, the harness
+ * directory, or `XDG_CONFIG_HOME` for the neutral file.
  */
 export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string {
   const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;

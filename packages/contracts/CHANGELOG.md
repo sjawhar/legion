@@ -1,5 +1,25 @@
 # Changelog
 
+## [main@6b1524cdb8aa] - 2026-11-01
+
+### Added
+
+- A typed block's `block[]` attribute: `BlockAttributeKind` gains `"block[]"` and
+  `BlockAttributeSchema` gains `targets`, the block types it points at. `parseBlockPointerValue`
+  reads a value (canonical block references joined by exactly one space), and
+  `blockPointerValueProblem` and `blockPointersProblem` say why a value or a list of pointers is
+  refused (a block of a comment or a message with a reason of its own), following the server's
+  wording, with `parseCanonicalBlockReference` and
+  `formatBlockReference` for one reference, tested with Go's `pmdoc.ParseBlockPointerValue` against
+  `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits a `block[]` attribute's name beside the
+  structural kinds, the kind of the edges its pointers make.
+- `typedBlockIdAttribute` writes a typed block's id as Go's renderer writes it in the opening line
+  (`pmdoc.TypedBlockIDAttribute`): `#id`, or `id="…"` with `&`, `"`, line feeds and carriage
+  returns as character references when the id is empty or holds a character the `#` shortcut
+  cannot hold (a space, tab, line ending, `"`, `#`, `&`, `'`, `.`, `<`, `=`, `>`, backtick or `}`).
+  Both writers are tested against `DISPATCH_TYPED_BLOCK_ID_SPELLINGS`, whose Go copy is
+  `packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json`.
+
 ## [main@d7e1daaaaf70] - 2026-10-31
 
 ### Added

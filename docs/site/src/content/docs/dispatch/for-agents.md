@@ -5,8 +5,8 @@ sidebar:
   order: 6
 ---
 
-An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the agent's
-host (Oh My Pi, Claude Code, or OpenCode) puts it on the agent's `PATH` and tells it which session
+An agent works in Dispatch through one shell command, `dispatch`. The Envoy plugin for the
+agent's host (Oh My Pi or Claude Code) puts it on the agent's `PATH` and tells it which session
 it acts for. `dispatch --help` lists the commands, `dispatch <command> --help` gives a command's
 flags and an example, and `--dry-run` checks a command's arguments as the call would and prints
 them as given (before the call fills in an issue from `LEGION_ISSUE` or a ref), sending nothing.
@@ -33,15 +33,14 @@ goes through a `dispatch` command.
    }
    ```
 
-   A session under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
-   an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
-   other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
-   `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
-   `dispatch` command reads the file its session's plugin chose, which the plugin hands it in
-   `ENVOY_CONFIG_FILE`; in a Claude Code shell that gets nothing the plugin hands on, as a
-   subagent's can, it still reads the session's `CLAUDE_CONFIG_DIR`. A token written as
-   `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the
-   token.
+   A session under an Oh My Pi profile other than `default` or a Claude Code `CLAUDE_CONFIG_DIR`
+   reads the `envoy.json` in that directory and no other. Any other session reads the file
+   `ENVOY_CONFIG_FILE` names when it is set, else `~/.config/legion/envoy.json`
+   (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The `dispatch` command reads the
+   file its session's plugin chose, which the plugin hands it in `ENVOY_CONFIG_FILE`; in a
+   Claude Code shell that gets nothing the plugin hands on, as a subagent's can, it still reads
+   the session's `CLAUDE_CONFIG_DIR`. A token written as `!<command>`, such as
+   `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the token.
 
    The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
    but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
@@ -82,6 +81,7 @@ tells the agent who Dispatch takes it for.
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Handoffs | `dispatch handoff-write` records a phase handoff on an issue as the agent's session: `--phase <phase>` and `--body-file <path>` (`-` reads stdin), one JSON object stored exactly as written, each write the phase's next version. `dispatch handoff-read` prints one line naming the phase, version, id, writing session and time, then the body exactly as stored; `--version <n>` reads an earlier version. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
 A command with several problems is refused once, with every problem listed, so the next run can
@@ -251,11 +251,15 @@ an issue update, a new document version, or opening or rewording an ask. A perso
 reach the issue's route, when that is your session. Each write's result names that topic.
 
 If your connection to Envoy drops, or your session stops and is resumed, what was sent to you
-directly or published on an issue topic you follow in the meantime still arrives once you are
-back, each message once and marked as published while your connection was down, for up to 72
-hours. A person's Send, Aside or BTW that arrives this way is shown as a message only: nothing
-runs and no reply goes back on its own, so answer it with `dispatch message` and its
-`--in-reply-to` if it still matters. Messages to a role you hold are not recovered.
+directly, what was sent to a role you hold, and what was published on an issue topic you follow in
+the meantime still arrives once you are back, each message once and in the order it was
+published, for up to 72 hours. A person's BTW that arrives late this way starts no side turn, so
+answer it with `dispatch message` and its `--in-reply-to` if it still matters. Where your listener
+cannot keep a consumer for your session (its NATS user lacks the grant, or it is of an earlier
+release), a missed message is recovered from the stream instead, marked as published while your
+connection was down: a person's Send, Aside or BTW that arrives that way is shown as a message
+only, nothing runs and no reply goes back on its own, and messages to a role you hold are not
+recovered.
 
 A person can also message you from the Agents page:
 
@@ -288,6 +292,7 @@ dispatch://KEY
 dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@v<N>]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@v<N>]
 dispatch://KEY/message/<id>
@@ -305,8 +310,14 @@ splits it in the dashboard (a split block's id stays with the part holding its s
 `@v<N>` pins it to revision N of the comment, so `dispatch read` shows the text it had then and
 whether it has changed or been removed since. A message never changes, so its blocks take no pin.
 
+An ask is made of parts the same way: its question, each of its options and its answer.
+`#b-<part>` names one, and `@v<N>` pins it to a revision of the ask's parts. `dispatch read` of
+the ask prints the reference of each option and of its answer, with whatever points at that part
+under it, so you can cite the option a decision turns on rather than the whole ask.
+
 To answer one block rather than the whole item, pass its reference to
-`dispatch comment --reply-to` or `dispatch message --in-reply-to`. Dispatch records the reply as
+`dispatch comment --reply-to` or `dispatch message --in-reply-to`, and a part of an ask to
+`dispatch comment --reply-to-ask`. Dispatch records the reply as
 answering that block, and `dispatch read` of the reply prints `Re: block <id>:` and the block's
 text before its body, or `Re: block <id> (removed)` once an edit removed it.
 
@@ -322,7 +333,12 @@ carries an `Idempotency-Key` header of its own, and the command asks again under
 attempt fails on the way, gets no answer for 20 seconds while none of its body is going out,
 Dispatch answers 5xx, 408 or 429, or Dispatch is still running an earlier attempt
 (`409 KEY_IN_FLIGHT`): at most five attempts, the last starting within 30 seconds of the first, and
-the whole command within 60. It asks again only of a Dispatch that judges the key: one whose answer
+the whole command within 60. Once an attempt got no answer for 20 seconds or was told
+`409 KEY_IN_FLIGHT`, Dispatch may still be running the write, and it finishes it whatever the
+command does, so the command keeps asking every 3 seconds or less (longer only when Dispatch's
+`Retry-After` asks), starting no ask in the last 5 seconds of its 60, to collect the answer; an
+upload of a megabyte or more, whose every ask sends the whole file again, keeps the five attempts.
+It asks again only of a Dispatch that judges the key: one whose answer
 carried the key back, or whose `/healthz` said `idempotency_keys: true` in the last five minutes,
 whatever its status; any other would make a repeated write twice. Dispatch makes the write once per
 key and answers a repeat with the first answer, so the command never makes a write twice. When the

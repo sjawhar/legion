@@ -24,9 +24,10 @@ import (
 // its root - where someone else has written since they last read it; user_threads (migration 0095)
 // keeps one row per person per thread, maintained by the triggers 0095-0097 install, so the Reply
 // reads touch only the person's own rows, through user_threads_unread under state=unread and
-// user_threads_login_replied (migration 0151) under state=all. An Agent row is one of the person's
-// one-off messages to an agent session - a BTW, a broadcast's copy, or a Send or Aside the session
-// did not take as a turn of its live conversation - holding a reply from that session.
+// user_threads_login_replied (migration 20261103071942) under state=all. An Agent row is one of
+// the person's one-off messages to an agent session - a BTW, a broadcast's copy, or a Send or
+// Aside the session did not take as a turn of its live conversation - holding a reply from that
+// session.
 
 // myRepliesOwner is the filter every Reply read shares: the caller's rows ($1, their canonical
 // login), narrowed to one issue ($2, empty for any) or one project document ($3, null for any),

@@ -38,11 +38,13 @@ import {
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import { blockFragment } from "../refs/block-reference";
-import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
+import { fetchReferencePath, needsSpecSlug, watchPicturePath } from "../refs/reference-target";
 import {
+  buildDispatchReference,
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,
+  documentRoute,
   parseNodeReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
@@ -247,6 +249,7 @@ export function ProofDocument({
   marginRef.current = margin;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
+  const documentRef = buildDispatchReference(documentRoute(artifact));
   const blockSchemaQuery = useQuery({
     queryFn: loadBlockSchema,
     queryKey: ["block-schema"],
@@ -528,7 +531,9 @@ export function ProofDocument({
     // The editor's place in the page - its typed blocks, the margin, search highlights, a block
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
+        watchPicturePath(queryClient, route, onPicture)
+      );
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -750,6 +755,10 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                // The open document's own reference, never a version's: a pointer names a block
+                // of the document by it, so the editor refuses one to a block of a type the
+                // pointer's attribute does not allow.
+                documentRef,
                 ydoc: connection.doc,
               })
                 .then((handle) => {
@@ -782,6 +791,7 @@ export function ProofDocument({
     artifact.id,
     blockSchema,
     createEditor,
+    documentRef,
     focusInEditor,
     loadTransport,
     page,

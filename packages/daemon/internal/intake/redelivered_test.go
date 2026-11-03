@@ -137,12 +137,26 @@ func TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied(t *testing.T) {
 	setStreamSubjects(t, js, stream, captured)
 	t.Logf("3. the stream captures %s again", githubSubjects)
 
-	sweep := exec.Command(binaries.dispatch, "redeliver-webhooks", "--since", "1h")
+	// redeliver-webhooks reads the GitHub rate limits every Dispatch process shares from
+	// Dispatch's own database, so it needs DATABASE_URL, and it migrates nothing: a deployment
+	// runs it against the database its server already migrated. This test gives it a database of
+	// its own and brings it to Dispatch's schema first, through a subcommand that migrates and then
+	// finds nothing to do on an empty database.
+	dispatchDSN := testpg.Database(t, "legion_intake_redelivered_dispatch")
 	home := t.TempDir()
+	migrate := exec.Command(binaries.dispatch, "backfill-block-ids")
+	migrate.Dir = home
+	migrate.Env = []string{"HOME=" + home, "DATABASE_URL=" + dispatchDSN}
+	if output, err := migrate.CombinedOutput(); err != nil {
+		t.Fatalf("migrate Dispatch's database (envoy-dispatch backfill-block-ids): %v\n%s", err, output)
+	}
+
+	sweep := exec.Command(binaries.dispatch, "redeliver-webhooks", "--since", "1h")
 	sweep.Dir = home
 	sweep.Env = []string{
 		"HOME=" + home,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"DATABASE_URL=" + dispatchDSN,
 		"NATS_URLS=" + natsURL,
 		"DISPATCH_APP_CLIENT_ID=" + redeliveredClientID,
 		"DISPATCH_APP_PEM_B64=" + base64.StdEncoding.EncodeToString([]byte(pemText)),

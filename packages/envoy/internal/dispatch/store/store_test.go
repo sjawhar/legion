@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/migrationid"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -57,7 +58,8 @@ func openEmptyTestStore(t *testing.T) *Store {
 	t.Cleanup(admin.Close)
 
 	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	if _, err := admin.Exec(ctx, "create database "+databaseName); err != nil {
+	// A copy of template1's files, as storetest makes every database (its package comment says why).
+	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
 		t.Fatalf("create isolated database: %v", err)
 	}
 	t.Cleanup(func() {
@@ -223,6 +225,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_block_state",
 		"comment_block_refs",
 		"message_block_refs",
+		"handoffs",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -237,7 +240,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_ask_id",
 		"refs_to",
 		"refs_excerpt_drift",
-		"events_unpublished",
+		"events_outbox_fresh",
+		"events_outbox_retry",
+		"events_outbox_owner",
 		"asks_open_artifact",
 		"issues_search",
 		"comments_search",
@@ -357,6 +362,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"user_issue_state_pkey",
 		"user_issue_state_issue_key_fkey",
 		"user_agent_state_pkey",
+		"handoffs_pkey",
+		"handoffs_issue_key_fkey",
+		"handoffs_phase_check",
+		"handoffs_version_check",
+		"handoffs_issue_key_phase_version_key",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select conname
@@ -372,9 +382,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
-func TestMigrationSetIsNumberedOneToN(t *testing.T) {
-	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+// Dispatch's set hands its identifiers out the way the repository requires: its numbered
+// migrations are 1 to the file its series closed at (migrationid's closings), each
+// taken once and none above it, and every migration added since is named for the UTC moment its
+// author created it, so two pull requests open at once cannot both claim one version;
+// migrationid.Check says why.
+func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[int]string, len(migrations))
+	for _, migration := range migrations {
+		versions[migration.Version] = migration.Name
+	}
+	if err := migrationid.Check(versions); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -390,7 +412,8 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 // censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
 // more than the highest migration on main when the census landed, so no migration written before
 // the rule is caught by it. Every migration below it that declares one is a worked example. Read
-// from origin/main on 2026-10-01, where the set ended at 0055.
+// from origin/main on 2026-10-01, where the set ended at 0055. Every timestamped migration is
+// above it, so every migration added from now on declares a census.
 const censusRequiredFrom = 56
 
 // Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
@@ -627,9 +650,11 @@ func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *Pool, 
 func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	t.Helper()
 	ctx := context.Background()
+	// The runner's own DDL (createVersionTable), bigint included: a test that created the table
+	// as an integer would make the runner widen it, which is not what these tests are about.
 	if _, err := store.Pool.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {
