@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -200,7 +201,7 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	s.readThroughPullRequests(r.Context(), check.IssueKey, result.CommitSHA)
+	s.readThroughPullRequests(r.Context(), result.IssueKey, check.IssueKey, result.CommitSHA)
 	WriteJSON(w, http.StatusCreated, map[string]any{
 		"result": result,
 		"line":   checkResultLine(check, result),
@@ -723,29 +724,52 @@ func scanCheckResult(row pgx.Row) (model.CheckResult, error) {
 }
 
 // readThroughPullRequests teaches Dispatch the pull requests GitHub names for a result's commit
-// when that commit is the head of none it already knows for the check's issue, so a result
-// recorded at the head of a pull request no event has reached Dispatch for is current at once.
+// when that commit is the head of none it already knows, so a result recorded at the head of a
+// pull request no event has reached Dispatch for is current at once.
+//
+// It asks about the same two issues currencyReader.headOf asks about — the issue the result was
+// recorded on and the check's issue — and reads through the repository each of them resolves to.
+// A child proving its parent's check is the case that needs both: the child's own pull request
+// carries the work, and a child whose repository is not its parent's would otherwise be read for
+// in the parent's repository, where GitHub names no pull request for that commit, and the result
+// would read older until the delivery intake took the child's pull_request envelope off the bus.
+//
 // It never fails the record: the row is written, and a currency Dispatch could not establish
 // reads as it would have without the call.
-func (s *server) readThroughPullRequests(ctx context.Context, checkIssueKey, sha string) {
+func (s *server) readThroughPullRequests(ctx context.Context, issueKey, checkIssueKey, sha string) {
 	if s.deps.GitHub == nil || s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
-	known, err := delivery.HeadAttributedTo(ctx, s.deps.Store.Pool, checkIssueKey, sha)
-	if err != nil {
-		slog.Warn("dispatch: read the pull request heads of a recorded result", "issue", checkIssueKey, "error", err)
-		return
+	keys := []string{issueKey}
+	if checkIssueKey != "" && checkIssueKey != issueKey {
+		keys = append(keys, checkIssueKey)
 	}
-	if known {
-		return
+	repos := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		known, err := delivery.HeadAttributedTo(ctx, s.deps.Store.Pool, key, sha)
+		if err != nil {
+			slog.Warn("dispatch: read the pull request heads of a recorded result", "issue", key, "error", err)
+			return
+		}
+		if known {
+			return
+		}
+		repo, err := s.resolvedIssueRepo(ctx, key)
+		if err != nil || repo == nil {
+			continue
+		}
+		if !slices.Contains(repos, *repo) {
+			repos = append(repos, *repo)
+		}
 	}
-	repo, err := s.resolvedIssueRepo(ctx, checkIssueKey)
-	if err != nil || repo == nil {
-		return
-	}
-	if _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, *repo, sha, time.Now()); err != nil {
-		slog.Info("dispatch: GitHub named no pull request for a recorded result's commit",
-			"repo", *repo, "commit", sha, "error", err)
+	for _, repo := range repos {
+		if _, err := delivery.ReadThroughCommitPulls(ctx, s.deps.Store.Pool, s.deps.GitHub, repo, sha, time.Now()); err != nil {
+			slog.Info("dispatch: GitHub named no pull request for a recorded result's commit",
+				"repo", repo, "commit", sha, "error", err)
+		}
 	}
 }
 

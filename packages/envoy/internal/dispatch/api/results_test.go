@@ -508,3 +508,75 @@ func TestChildsResultAgainstAnAncestorsCheckIsCurrentAtTheChildsHead(t *testing.
 		t.Fatalf("the parent's own result at the child's head = %q, want older", got)
 	}
 }
+
+// A child whose repository is not its parent's, proving the parent's check: the read-through
+// must ask GitHub about the repository the recording issue resolves to as well as the check
+// issue's, or the child's own pull request is never learned and its result reads older until a
+// pull_request envelope reaches the intake. GitHub names the pull request in the child's
+// repository alone here, and names none in the parent's.
+func TestRecordingAResultReadsThroughTheRecordingIssuesOwnRepository(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"id":77,"app_slug":"dispatch-test","permissions":{"contents":"read","pull_requests":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"token":"ghs_fake_77","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	var childKey string
+	var askedParent bool
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{sha}/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("repo") != "gadgets" {
+			askedParent = true
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		fmt.Fprintf(w, `[{"number":31,"title":%q,"body":"","html_url":"https://github.com/acme/gadgets/pull/31",
+			"state":"open","merged":false,"updated_at":"2026-01-01T00:00:00Z",
+			"head":{"ref":"legion/child","sha":%q},"base":{"ref":"main"}}]`, childKey+" work", headCommit)
+	})
+	upstream := httptest.NewServer(mux)
+	t.Cleanup(upstream.Close)
+	handler, database, _ := newTestServer(t, testServerOptions{
+		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
+		githubAPIBase: upstream.URL,
+	})
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "RESR", "name": "Two repos"}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets",
+		map[string]any{"project": "RESR", "default": true}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets",
+		map[string]any{"project": "RESR"}, "alice")
+	parent := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RESR", "title": "Parent", "spec": "A spec\n"}, "alice"))
+	uploadDocument(t, handler, "/api/v1/issues/"+parent.Key, "verification.md", siblingChecks)
+	child := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues",
+		map[string]any{"project": "RESR", "title": "Child", "parent": parent.Key, "force": true}, "alice"))
+	childKey = child.Key
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key,
+		map[string]any{"repo": "acme/gadgets"}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("give the child its own repository: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	recorded := decodeBody[recordedResult](t, recordResult(t, handler, child.Key, resultBody("k1", "pass", headCommit, nil)))
+
+	var storedIssue *string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select issue_key from pull_request_heads where repo = 'acme/gadgets' and number = 31
+	`).Scan(&storedIssue); err != nil {
+		t.Fatalf("read the pull request the read-through stored for the child's repository: %v", err)
+	}
+	if storedIssue == nil || *storedIssue != child.Key {
+		t.Fatalf("the read-through stored issue=%v, want %s", storedIssue, child.Key)
+	}
+	if !askedParent {
+		t.Fatalf("the read-through never asked the parent's repository, which it must still do")
+	}
+	if got := currencyOf(t, readResults(t, handler, parent.Key), "k1", recorded.Result.ID); got != model.CurrencyCurrent {
+		t.Fatalf("the child's result at its own repository's head = %q, want current", got)
+	}
+}
