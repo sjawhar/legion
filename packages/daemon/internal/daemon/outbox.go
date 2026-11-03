@@ -743,7 +743,7 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
-	return r.noticeAnswered(ctx, row, payload, notice, tree, architect, published)
+	return r.noticeAnswered(ctx, row, payload, notice, tree, architect, key, published)
 }
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the

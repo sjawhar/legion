@@ -152,7 +152,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // again, and finishes undelivered once nobody will. Any other failure is the row's, retried on
 // its backoff.
 func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, payload, notice record.Notice,
-	tree treeSnapshot, architect claim.Token, published error,
+	tree treeSnapshot, architect claim.Token, key string, published error,
 ) error {
 	var notDelivered notify.ErrNotDelivered
 	var refused notify.ErrRefusedByHolder
@@ -163,13 +163,14 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 		// the telling is recorded under the key it went out on, before anything forgets them, and
 		// the settle after this run forgets them (toldKept, settleTold).
 		if payload.CatchUp != nil && payload.CatchUp.Kept != nil {
-			return r.toldKept(ctx, tree.root.Key, record.OutboxKey(row.ID))
+			return r.toldKept(ctx, tree.root.Key, key)
 		}
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
 		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		// The copy takes over this row's claims on the decisions it names (claims).
 		source := cmp.Or(payload.ResendOf, row.ID)
-		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect, claims: row.ID}
 		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
 			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
 		}
@@ -189,7 +190,7 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
 	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
-		if err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, record.OutboxKey(row.ID), row.ID); err != nil {
+		if err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, key, row.ID); err != nil {
 			return err
 		}
 		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
