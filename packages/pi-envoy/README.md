@@ -418,7 +418,13 @@ gated write only when it consumes one, so a write sent any other way is refused 
   another process removed is back by the gate's next call. A record written by an older pi-envoy
   names no namespace and is still looked up by pid in the reader's own. The pruning keeps a store
   such a pi-envoy named for 14 days rather than two hours, since its process may be a live one of
-  another namespace, which touches its store only when it mints a marker.
+  another namespace, which touches its store only when it mints a marker, and it keeps a session
+  directory whose record names a store that is still there. A process of another namespace that
+  reads the record (the host's CLI, for a box's session) is never that session's own agent, whose
+  calls run in its process's namespace, so it reads such an owner live only by its store. Every
+  `dispatch` command that shares the state directory must be this release or later (pi-envoy's,
+  and the copy Claude Code sessions run): an earlier one reads a namespaced owner by pid, and its
+  pruning can still remove a box session's idle directory.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry

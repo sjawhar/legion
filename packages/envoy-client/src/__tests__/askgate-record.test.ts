@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -116,4 +117,26 @@ test("an owner names its pid namespace in its record and in its store's name", (
     JSON.parse(readFileSync(join(dir, "askgate", `${process.pid}-${start}-${ns}.json`), "utf8"))
   ).toEqual({ v: 2, pid: process.pid, start, ns, store: owner.store, mode: "block" });
   expect(askgateState(dir)).toEqual({ kind: "on", stores: [owner.store], mode: "block" });
+});
+
+// A bind removes another owner's file only when that owner is known gone: one of this pid
+// namespace whose pid no longer has its start time. A file of another namespace, or one an earlier
+// pi-envoy wrote with no namespace, may name a live process this one cannot look up, which would
+// lose its record until its next call, so it stays.
+test("a bind removes only a gone owner of its own pid namespace from the record", () => {
+  const dir = join(root, "sessions", "ses-1");
+  const record = join(dir, "askgate");
+  const ns = pidNamespace();
+  const other = (name: string, owner: Record<string, unknown>) => {
+    mkdirSync(record, { recursive: true });
+    writeFileSync(join(record, `${name}.json`), JSON.stringify({ v: 2, ...owner, mode: "block" }));
+  };
+  const store = join(root, "askgate", "gone");
+  other("same-ns", { pid: process.pid, start: "1", ns, store });
+  other("other-ns", { pid: process.pid, start: "1", ns: "1", store });
+  other("no-ns", { pid: process.pid, start: "1", store });
+  writeAskgateRecord(dir, selfOwner(root), "warn");
+  expect(readdirSync(record).sort()).toEqual(
+    [`${basename(selfOwner(root).store)}.json`, "no-ns.json", "other-ns.json"].sort()
+  );
 });
