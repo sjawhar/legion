@@ -24,11 +24,12 @@
 // puts every sequence of schema public where the template left it.
 //
 // A database a test changed beyond its rows is dropped rather than put back. The reset compares
-// a fingerprint of the database - the tables and columns of schema public, the schemas it holds
-// and its own settings, which is where a test that ran alter database shows up - with the
-// template's, and ignores the snapshot schema in it. Any difference, a session of the test still
-// connected, or a reset that fails, sends the database to the background drops. OpenFresh is for
-// a test that must have a database no other test has written into.
+// a fingerprint of the database - the tables and columns of schema public, the functions and
+// triggers it holds there, the schemas it holds, and its own settings, which is where a test
+// that ran alter database shows up - with the template's, and ignores the snapshot schema in
+// it. Any difference, a session of the test still connected, or a reset that fails, sends the
+// database to the background drops. OpenFresh is for a test that must have a database no other
+// test has written into.
 //
 // A clone copies the template's files (strategy file_copy). Postgres's default from 15, strategy
 // wal_log, writes every page of the template into the write-ahead log instead: 6.4 MB of the
@@ -374,21 +375,45 @@ func inspect(ctx context.Context, conn *pgx.Conn) (string, int, error) {
 
 // fingerprintQuery answers what a reused database must still share with the template, and how
 // many sessions other than the asking one are on it. The fingerprint covers the tables and
-// columns information_schema lists for schema public, the schemas the database holds, and the
-// settings the database carries, which is where a test that ran alter database ... set
-// search_path shows up (they live in pg_db_role_setting, not in pg_database: PostgreSQL moved
-// them there). It leaves out the harness's own snapshot schema, which every clone carries and no
-// test may change.
+// columns information_schema lists for schema public and each column's default, every relation
+// of that schema - its sequences and indexes with its tables - the functions and the triggers of
+// that schema, the schemas the database holds, and the settings the database carries, which is
+// where a test that ran alter database ... set search_path shows up (they live in
+// pg_db_role_setting, not in pg_database: PostgreSQL moved them there). It leaves out the
+// harness's own snapshot schema, which every clone carries and no test may change.
+//
+// Functions and triggers are in it because a test that leaves one behind leaves the next test a
+// database that runs code it never wrote: a trigger on artifact_versions one api test added
+// made an unrelated create-issue answer 500 in another, until the fingerprint saw it and the
+// database was dropped rather than reused.
+//
+// A column's default is in it for the same reason, measured: the broadcast tests point
+// messages.id at a function of their own that hands out eight fixed identifiers
+// (installReverseBroadcastMessageIDDefault), and a database put back with that default still on
+// it made 67 later tests of the api package fail on a duplicate messages_pkey in CI run
+// 41729266538. A truncate empties a table; it does not restore what a test altered about one.
 const fingerprintQuery = `
 select
 	coalesce((
 		select md5(string_agg(entry, E'\n' order by entry))
 		from (
-			select format('column|%s|%s|%s|%s|%s', table_name, column_name, ordinal_position, data_type, is_nullable) as entry
+			select format('column|%s|%s|%s|%s|%s|%s', table_name, column_name, ordinal_position,
+				data_type, is_nullable, coalesce(column_default, '')) as entry
 				from information_schema.columns where table_schema = 'public'
 			union all
 			select format('table|%s|%s', table_name, table_type)
 				from information_schema.tables where table_schema = 'public'
+			union all
+			select format('relation|%s|%s', relation.relname, relation.relkind)
+				from pg_class relation where relation.relnamespace = 'public'::regnamespace
+			union all
+			select format('function|%s|%s', routine.oid::regprocedure::text, routine.prokind)
+				from pg_proc routine where routine.pronamespace = 'public'::regnamespace
+			union all
+			select format('trigger|%s|%s|%s', table_of.relname, trigger_of.tgname, trigger_of.tgtype)
+				from pg_trigger trigger_of
+				join pg_class table_of on table_of.oid = trigger_of.tgrelid
+				where table_of.relnamespace = 'public'::regnamespace and not trigger_of.tgisinternal
 			union all
 			select format('schema|%s', nspname)
 				from pg_namespace where nspname <> '` + seedSchema + `'
