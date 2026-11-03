@@ -13,8 +13,12 @@ import (
 // kept, the old root's held start task (row 5, 10, ...) is prompted to the old tree's architect
 // after the hand-over, and the child's architect is told the decision 0 times.
 func TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild(t *testing.T) {
+	t.Parallel()
+	// Each seed's run has a database, runtime and state directory of its own (newKeptRun), so the
+	// seeds run in parallel, with each other and with the other kept-decision seed tests.
 	for _, seed := range []int64{96, 414, 432} {
 		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
+			t.Parallel()
 			run := newKeptRun(t, seed, 300)
 			run.drive()
 			run.quiesce()

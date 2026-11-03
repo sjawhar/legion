@@ -834,29 +834,39 @@ type keptRun struct {
 // record with no such issue, no tree or no recorded root, which the rest of the run reads as a
 // broken record rather than as a state the root can be in.
 func TestKeptDecisionsReachTheCurrentArchitectOnce(t *testing.T) {
+	t.Parallel()
 	steps := keptPropertyEnv(t, "LEGION_KEPT_PROPERTY_STEPS", keptPropertySteps)
+	var mu sync.Mutex
 	var all keptCounts
 	var seeds, failedSeeds int
 	var modeSeeds [keptModes]int
-	for _, seed := range keptPropertySeeds(t) {
-		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
-			run := newKeptRun(t, seed, steps)
-			run.drive()
-			run.quiesce()
-			run.held()
-			run.report()
-			all.add(run.counts)
-			seeds++
-			if run.counts.failedClaim > 0 {
-				failedSeeds++
-			}
-			for mode, count := range run.counts.publishes {
-				if count > 0 {
-					modeSeeds[mode]++
+	// Each seed's run has a database, runtime and state directory of its own (newKeptRun), so the
+	// seeds run in parallel, with each other and with the other kept-decision seed tests; the group
+	// returns once every seed has, before the totals below.
+	t.Run("seeds", func(t *testing.T) {
+		for _, seed := range keptPropertySeeds(t) {
+			t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
+				t.Parallel()
+				run := newKeptRun(t, seed, steps)
+				run.drive()
+				run.quiesce()
+				run.held()
+				run.report()
+				mu.Lock()
+				defer mu.Unlock()
+				all.add(run.counts)
+				seeds++
+				if run.counts.failedClaim > 0 {
+					failedSeeds++
 				}
-			}
-		})
-	}
+				for mode, count := range run.counts.publishes {
+					if count > 0 {
+						modeSeeds[mode]++
+					}
+				}
+			})
+		}
+	})
 	t.Logf("%d seeds: %s", seeds, all)
 	t.Logf("%d of %d seeds reached a failed architect claim; seeds whose catch-ups met each listener mode: "+
 		"%d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
