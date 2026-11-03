@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -216,15 +217,17 @@ func TestEveryReadCarriesItsDisplayTreesOnlyUnderTheHeader(t *testing.T) {
 	})
 }
 
-// Every answer says its body depends on the header, so no cache between a browser and Dispatch
-// hands a reader with trees an answer written for a reader without them.
-func TestEveryAnswerVariesOnTheTreesHeader(t *testing.T) {
+// Every answer says its body depends on the trees header and on the encoding the caller takes, so
+// no cache between a browser and Dispatch hands a reader with trees an answer written for a reader
+// without them, or a caller that takes no gzip one that was compressed.
+func TestEveryAnswerVariesOnTheTreesHeaderAndTheEncoding(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "VARY", "Vary", "A spec")
 	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/issues/" + issue.Key + "/comments", "/api/v1/projects"} {
 		response := treesRequest(t, handler, target, false)
-		if got := response.Header().Values("Vary"); len(got) != 1 || got[0] != "Dispatch-Trees" {
-			t.Errorf("GET %s: Vary = %v, want [Dispatch-Trees]", target, got)
+		got := slices.Sorted(slices.Values(response.Header().Values("Vary")))
+		if !slices.Equal(got, []string{"Accept-Encoding", "Dispatch-Trees"}) {
+			t.Errorf("GET %s: Vary = %v, want Dispatch-Trees and Accept-Encoding", target, got)
 		}
 	}
 }

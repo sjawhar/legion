@@ -1,0 +1,5 @@
+kind: Added
+body: 'An API answer is gzipped for a caller whose `Accept-Encoding` says it takes gzip, and is the bytes it was for every other caller: a request that sends no header, names other encodings, or refuses gzip with `q=0` is answered exactly as before. A compressed answer carries `Content-Encoding: gzip` and no `Content-Length`, and every answer now says `Vary: Accept-Encoding` beside `Vary: Dispatch-Trees`, so no cache between a browser and Dispatch hands one caller the other''s answer. Only Dispatch''s own JSON is compressed, and only from 1 KiB up: a download is the stored bytes under the type they were stored as, and a refusal or a small read costs less on the wire than a compressor costs in time. The two websockets are untouched, their upgrades hijacking the connection through this layer as they did. One comment list of 103,121 bytes goes out as 6,860, which gzip takes about 2.5 ms to produce (BenchmarkCompressingAnAnswer, a 2.20 GHz Xeon).'
+time: 2026-11-04T01:50:00.000000000Z
+custom:
+    Issue: pr2712
