@@ -35,12 +35,13 @@ on:
 
 # A run cancels the run before it of the same pull request and event, so a pull request holds at
 # most one running and one pending PR Title run per event however many edits and reviews arrive.
-# Nothing is lost: each run checks the title and body its event names and reads the commits,
-# comments and reviews live, so the newest repeats every check of the runs it cancels. The event is
-# in the group because GitHub lists a pull request's checks once per check name and event (as
-# `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
-# latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
-# main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
+# Nothing is lost: each run reads the title, body, comments and reviews as they are when it runs,
+# and the commits of the head its event names, so the newest repeats every check of the runs it
+# cancels. The event is in the group because GitHub lists a pull request's checks once per check
+# name and event (as `gh pr checks` does): a review run that cancelled a pull_request run would
+# leave that event's latest `pr-title` cancelled on the head until the next push or edit. A review
+# run checks with main's copy of check-pr-text.sh; the required lint job checks a pull request that
+# changes it with
 # its own copy (ci.yaml says when that job runs: at every push to a pull request that is not a
 # draft, and when a draft is marked ready). A merge group carries no pull request and is a group
 # of its own per commit (its head sha), so no run cancels a merge group's, which the queue waits

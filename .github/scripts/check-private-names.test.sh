@@ -456,10 +456,12 @@ check "exits 0" "$(is "$status" 0)"
 check "scans the file" "$(contains "$out" '(1 files under docs/notes\.md)')"
 
 # write_pr_text <title> <body> <commit message> [branch] [author email] [committer email]: writes
-# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the title,
-# body, branch name and the head the run checks (its base and head sha, and its one commit); a
-# stand-in `gh` answers the compare route for exactly that base...head with that commit (message,
-# author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
+# the fixture check-pr-text.sh reads as CI runs it. A pull_request event payload carries the head
+# the run checks (its base and head sha, and its one commit); the stand-in `gh` answers the pull
+# request route with the title, body and branch name the pull request has now (`$work/pull`, the
+# event's own unless a case rewrites it); and it answers the compare route for exactly that
+# base...head with that commit (message, author and committer) in the route's own JSON shape, so
+# the real `.commits[] | .commit.message, …`
 # filter that feeds the required check runs for real, rather than a filter the stub fakes. It
 # matches that URL whole and refuses a call without --paginate, so losing either paging token
 # fails every case below instead of passing on a list GitHub cut short at 250 commits. It answers
@@ -489,6 +491,7 @@ case "$1 $2" in
   "api repos/example/repo/pulls/7/reviews?per_page=100&page="[1-9]*) page reviews "$2" ;;
   "api repos/example/repo/pulls/7/comments?per_page=100&page="[1-9]*) page review-comments "$2" ;;
   "api repos/example/repo/pulls/7/commits") cat "$PR_TEXT_TEST_DIR/pr-commits" ;;
+  "api repos/example/repo/pulls/7") cat "$PR_TEXT_TEST_DIR/pull" ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 GH
@@ -511,6 +514,7 @@ write_pr_text() {
                       head: {ref: $branch, sha: "event-head-sha"}, base: {sha: "base-sha"},
                       body: (if $body == "" then null else $body end)}}' \
     > "$work/event.json"
+  jq '.pull_request' "$work/event.json" > "$work/pull"
   rm -f "$work"/comments.* "$work"/reviews.* "$work"/review-comments.*
 }
 run_pr_text() {
@@ -572,6 +576,19 @@ check "does not print the title" "$(is "$(contains "$out" 'Keep the inbox order'
 
 run_pr_text "feat!: keep the inbox order" "Refs LEGION-7" "fix: keep the order"
 check "a breaking change with no scope passes" "$(is "$status" 0)"
+
+echo "case: an edit after the event: the pull request's title and body as they are now are checked"
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq --arg key "$key" '.title = "fix(dispatch): keep the inbox order (\($key)-7)"' "$work/pull" > "$work/pull.next"
+mv "$work/pull.next" "$work/pull"
+run_pr_text
+check "a title edited to name a deployment issue key fails although the event's was clean" "$(is "$status" 1)"
+check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
+write_pr_text "Keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+jq '.title = "fix(dispatch): keep the inbox order"' "$work/pull" > "$work/pull.next"
+mv "$work/pull.next" "$work/pull"
+run_pr_text
+check "a title edited to a conventional one passes although the event's was not" "$(is "$status" 0)"
 
 run_pr_text "fix(dispatch): keep the inbox order" "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" "fix: keep the order"
 check "a body naming the company fails" "$(is "$status" 1)"

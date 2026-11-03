@@ -19,10 +19,15 @@
 # and posts; both may post, and the later check run is the one GitHub and the Legion daemon read.
 # A job reports its own `job.status` (`always()`), so a failed, timed-out or cancelled job
 # reports too. A re-run attempt's report replaces that job's earlier one, and a job a failed-only
-# re-run did not run keeps its report from the attempt that ran it. A job `changes` did not
-# select and that never reported was skipped; a selected job that never reports (one a
-# failed-only re-run left skipped, or one cancelled before it started) leaves ci-ok unposted by
-# this run, which GitHub's merge box shows as expected and the daemon as missing, never as passed.
+# re-run did not run keeps its report from the attempt that ran it; during a whole re-run, a job
+# not yet re-run keeps its earlier attempt's report at this same head. A job `changes` did not
+# select and that never reported was skipped. A selected job that never reports (one a
+# failed-only re-run left skipped, one cancelled before it started, one that ended before its
+# first step) stands at the conclusion GitHub lists for it once it is one of the last two (below),
+# and otherwise leaves ci-ok unposted by this run, which GitHub's merge box shows as expected and
+# the daemon as missing, never as passed.
+#
+# GH_RETRY_SECONDS is the tests' knob for the retry delay (below).
 #
 # The verdict is ci-ok.sh's, over the NEEDS this script builds: `changes`' result and outputs as
 # `toJSON(needs.changes)` gave them to the reporting job, and every job's reported result.
@@ -98,6 +103,33 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
   --argjson map "$selected_by" --argjson pr "$pull_request_only" \
   --argjson names "$(jq -R . <<<"$names" | jq -s 'map(select(. != ""))')" "$program")
 
+# A job that ended before its first step ran (a service container that never started, a runner
+# lost) never reports, so a run whose other jobs all reported would never get ci-ok. When one or
+# two jobs are left unreported, read the run's jobs once (the latest attempt's, as GitHub lists
+# them): each such job GitHub shows completed stands at its conclusion, a called workflow's jobs
+# (`<job> / <its job>`) together. Fewer reads than every job reading the list, which the token's
+# hourly limit could not carry; a job that ends unreported as the run's very last leaves ci-ok
+# unposted, and re-running it posts ci-ok. A failed read leaves the jobs unreported.
+unreported=$(jq '.pending | length' <<<"$decision")
+if [ "$unreported" -ge 1 ] && [ "$unreported" -le 2 ] \
+  && jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+    --jq '.jobs[] | {name, status, conclusion}'); then
+  decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" '
+    def ended($job):
+      [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))] as $mine
+      | if ($mine | length) > 0 and all($mine[]; .status == "completed") then
+          [$mine[].conclusion]
+          | if any(. == "success" or . == "skipped" or . == "cancelled" | not) then "failure"
+            elif any(. == "cancelled") then "cancelled"
+            elif any(. == "success") then "success"
+            else "skipped" end
+        else null end;
+    reduce .pending[] as $job (.;
+      ended($job) as $result
+      | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \
+    <<<"$decision")
+fi
+
 pending=$(jq -r '.pending | join(", ")' <<<"$decision")
 if [ -n "$pending" ]; then
   echo "$JOB reported; ci-ok waits on $pending, and the last of them to finish posts it"
@@ -115,7 +147,7 @@ if [ "$status" -eq 0 ]; then
   title="Every job changes selected succeeded"
 else
   conclusion=failure
-  title=$(grep -m1 '^::error::' <<<"$verdict" | sed 's/^::error:://' | cut -c1-200)
+  title=$(grep -m1 '^::error::' <<<"$verdict" | sed 's/^::error:://' | cut -c1-200 || true)
   title=${title:-ci-ok.sh failed}
 fi
 {

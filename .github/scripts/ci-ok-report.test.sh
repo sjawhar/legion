@@ -28,6 +28,9 @@ case "\$*" in
   *"/actions/runs/41/artifacts?per_page=100"*)
     if [ -e "$work/list-fails" ]; then echo "HTTP 502" >&2; exit 1; fi
     cat "$work/artifacts" ;;
+  *"/actions/runs/41/jobs?per_page=100"*)
+    if [ ! -e "$work/jobs" ]; then echo "HTTP 502" >&2; exit 1; fi
+    cat "$work/jobs" ;;
   *"--method POST repos/o/r/check-runs"*)
     n=\$(find "$work" -maxdepth 1 -name 'posted.*.json' | wc -l)
     cat > "$work/posted.\$n.json"
@@ -51,7 +54,19 @@ selects='{"result": "success", "outputs": {"typecheck": "true", "envoy_client": 
 # report <artifact name>...: the run's artifacts, which other jobs' uploads leave beside the reports.
 report() {
   printf '%s\n' pi-envoy-pr "$@" > "$work/artifacts"
-  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails"
+  rm -f "$work"/posted.*.json "$work/list-fails" "$work/post-fails" "$work/jobs"
+}
+
+# jobs <name>=<status>[/<conclusion>]...: the run's jobs as the jobs route lists them, one JSON
+# object per line, as `gh api --jq '.jobs[] | …'` prints them.
+jobs() {
+  local pair
+  : > "$work/jobs"
+  for pair in "$@"; do
+    jq -nc --arg name "${pair%%=*}" --arg status "${pair#*=}" \
+      '{name: $name, status: ($status | split("/")[0]), conclusion: ($status | split("/")[1])}' \
+      >> "$work/jobs"
+  done
 }
 
 # run_report <changes> [<event>] [<workflow>]: sets out and status.
@@ -120,6 +135,27 @@ echo "case: a job changes did not select reported failure"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success ci-ok-envoy-client-1-failure
 run_report "$selects"
 check "fails" "$(is "$(field .conclusion)" failure)"
+
+echo "case: the last unreported job ended before its first step"
+report ci-ok-lint-1-success ci-ok-typecheck-1-success
+jobs lint=completed/success typecheck=completed/success "worker-image / build=completed/failure"
+run_report "$selects"
+check "posts once GitHub lists it completed" "$(is "$(posted)" 1)"
+check "at its conclusion" "$(is "$(field .conclusion)" failure)"
+check "naming it" "$(contains "$(field .output.summary)" '^worker-image: failure (selected')"
+
+echo "case: the last unreported job is still running"
+report ci-ok-lint-1-success ci-ok-typecheck-1-success
+jobs lint=completed/success typecheck=completed/success "worker-image / build=in_progress"
+run_report "$selects"
+check "posts nothing" "$(is "$(posted)" 0)"
+check "waits on it" "$(contains "$out" 'ci-ok waits on worker-image,')"
+
+echo "case: the jobs list cannot be read"
+report ci-ok-lint-1-success ci-ok-typecheck-1-success
+run_report "$selects"
+check "exits 0" "$(is "$status" 0)"
+check "posts nothing" "$(is "$(posted)" 0)"
 
 echo "case: a job the map does not name reported"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success ci-ok-contracts-1-success

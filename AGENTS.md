@@ -613,7 +613,8 @@ Each item below names a task and where its code is, then notes on it.
   one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator.
   Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required.
   It names a comment it refuses by kind and id (`comment:<id>`, `review:<id>`, `review-comment:<id>`), never its text;
-  delete that comment (a submitted review cannot be deleted, so edit its body), since an edit leaves the old text in its edit history, then re-run the newest failed run of each check that reported it on the current head (`lint`, which also posts the push's `pr-title`, and `pr-title.yaml`'s run once for each other event that is red), never an older run, since a re-run checks the title and body as they were at its own event
+  delete that comment (a submitted review cannot be deleted, so edit its body), since an edit leaves the old text in its edit history, then re-run the newest failed run of each check that reported it on the current head (`lint`, which also posts the push's `pr-title`, and `pr-title.yaml`'s run once for each other event that is red), never an older run, since a re-run checks the commits of the head its own event named and posts its check there.
+  The check reads the title, body and branch name as the pull request has them when it runs, not as its event carried them, so lint's push-time `pr-title`, which can land after a later edit's run, never passes over text that run refused
 
 - **A skill, a role prompt and an `AGENTS.md` name no person**
   — write the role instead: "a person" for whoever sends a message or makes a request, "the operator" for whoever runs this deployment, "the human" for whoever an agent asks for a decision.

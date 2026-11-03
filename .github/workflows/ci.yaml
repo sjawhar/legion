@@ -10,9 +10,10 @@ name: CI
 # meanwhile. Every job but `changes` ends with the ci-ok-report step
 # (.github/actions/ci-ok-report), and the last job of the run to finish posts ci-ok from it
 # (.github/scripts/ci-ok-report.sh says how); lint posts pr-title at a push (pr-title.yaml posts
-# it when the pull request is opened, reopened or edited, or a review is submitted or edited). The
-# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why. Its paths are held to the docs filter below.
+# it when the pull request is opened, reopened or edited, a review is submitted or edited, or the
+# merge queue runs its group). The docs site's build on a push to main, and its GitHub Pages
+# deploy, are docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held
+# to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that

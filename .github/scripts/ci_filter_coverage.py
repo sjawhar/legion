@@ -818,15 +818,18 @@ def check_ci_ok(document: dict, problems: list) -> None:
                                 f"`ci-ok-changes: {REPORT_CHANGES}`, so the called job cannot report to ci-ok")
             called = REPO / str(job["uses"]).removeprefix("./")
             called_jobs = ((yaml.safe_load(called.read_text()) or {}).get("jobs") or {}) if called.is_file() else {}
-            reports = [s for j in called_jobs.values() for s in ((j or {}).get("steps") or [])
-                       if s.get("uses") == REPORT_ACTION]
-            if not any(str((s.get("with") or {}).get("job", "")) == job_id
+            # The job that reports is the called workflow's job whose last step is the report:
+            # always() first, so it runs after a failed step too, and ended only by the call's own
+            # condition (docs-site.yaml's input, worker-image.yaml's event).
+            reports = [((j or {}).get("steps") or [])[-1] for j in called_jobs.values() if (j or {}).get("steps")]
+            if not any(s.get("uses") == REPORT_ACTION and str(s.get("if", "")).startswith("always()")
+                       and str((s.get("with") or {}).get("job", "")) == job_id
                        and str((s.get("with") or {}).get("changes", "")) == "${{ inputs.ci-ok-changes }}"
                        and str((s.get("with") or {}).get("job-status", "")) == REPORT_STATUS for s in reports):
-                problems.append(f"::error file={WORKFLOW}::{job['uses']}, which job {job_id} calls, has no step "
-                                f"`uses: {REPORT_ACTION}` with `job: {job_id}`, `changes: "
-                                f"${{{{ inputs.ci-ok-changes }}}}` and `job-status: {REPORT_STATUS}`, so a run that "
-                                f"{job_id} ends never gets ci-ok")
+                problems.append(f"::error file={WORKFLOW}::{job['uses']}, which job {job_id} calls, has no job "
+                                f"whose last step is `uses: {REPORT_ACTION}` with an `if:` that starts with "
+                                f"`always()`, `job: {job_id}`, `changes: ${{{{ inputs.ci-ok-changes }}}}` and "
+                                f"`job-status: {REPORT_STATUS}`, so a run that {job_id} ends never gets ci-ok")
             continue
         steps = job.get("steps") or []
         last = steps[-1] if steps else {}
