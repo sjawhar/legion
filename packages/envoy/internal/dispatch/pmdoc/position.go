@@ -2,7 +2,6 @@ package pmdoc
 
 import (
 	"fmt"
-	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -33,13 +32,6 @@ func units16(runes []rune) int {
 		}
 	}
 	return units
-}
-
-// splitsPair reports whether position at, an index between UTF-16 units, falls inside a surrogate
-// pair: the unit before it is a high surrogate and the unit after it a low one. A cut there leaves
-// two halves that no Go string holds, and each reads back as U+FFFD.
-func splitsPair(units []uint16, at int) bool {
-	return at > 0 && at < len(units) && units[at-1]&0xFC00 == 0xD800 && units[at]&0xFC00 == 0xDC00
 }
 
 // byteAt16 is where UTF-16 position at falls in value, as a byte offset, and whether it falls
@@ -90,13 +82,32 @@ func slice16(value string, from, to int) (string, error) {
 
 // context16 is value between UTF-16 positions from and to for a reader to see, each end moved
 // outward off the inside of a surrogate pair so the text holds every character it touches whole.
+//
+// It finds both ends in value itself and answers that much of value, as slice16 does: encoding
+// the whole text to UTF-16 and decoding the cut back held five and a half mebibytes for an
+// eighty-unit window of a mebibyte of text, all of it to throw away. byteAt16 answers the byte
+// offset of the character a position falls in and whether the position falls inside it, which is
+// the cut that splits a surrogate pair: the character's own start is what from-- means, and the
+// end of the character to falls inside is what to++ means, so each end moves outward off the
+// inside of a pair by reading the character whole. A text a browser left holding a byte that is
+// not UTF-8 reads back with one U+FFFD for each such byte, as its UTF-16 encoding did, so only
+// such a text is copied.
 func context16(value string, from, to int) string {
-	units := utf16.Encode([]rune(value))
-	if splitsPair(units, from) {
-		from--
+	// Where from falls inside a character, byteAt16 answers that character's own start, which is
+	// where from-- leaves the window, and the window is one unit longer for it.
+	start, startSplits := byteAt16(value, from)
+	length := to - from
+	if startSplits {
+		length++
 	}
-	if splitsPair(units, to) {
-		to++
+	stop, stopSplits := byteAt16(value[start:], length)
+	if stopSplits {
+		_, width := utf8.DecodeRuneInString(value[start+stop:])
+		stop += width
 	}
-	return string(utf16.Decode(units[from:to]))
+	cut := value[start : start+stop]
+	if !utf8.ValidString(cut) {
+		return string([]rune(cut))
+	}
+	return cut
 }

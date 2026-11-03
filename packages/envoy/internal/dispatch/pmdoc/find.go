@@ -865,42 +865,60 @@ func firstRunes(value string, count int) string {
 	return value
 }
 
+// findAllUnits is every position in haystack at which the UTF-16 units of needle begin, in
+// ascending order, and nil where there is none.
 func findAllUnits(haystack, needle []uint16) []int {
-	if len(needle) == 0 || len(needle) > len(haystack) {
-		return nil
-	}
-	matches := make([]int, 0)
-	for start := 0; start <= len(haystack)-len(needle); start++ {
-		if matched := true; matched {
-			for offset, unit := range needle {
-				if haystack[start+offset] != unit {
-					matched = false
-					break
-				}
-			}
-			if matched {
-				matches = append(matches, start)
-			}
-		}
-	}
-	return matches
+	return findAll(haystack, needle)
 }
 
+// findAllRunes is every position in haystack at which the runes of needle begin, in ascending
+// order, and nil where there is none.
 func findAllRunes(haystack, needle []rune) []int {
+	return findAll(haystack, needle)
+}
+
+// findAll is every position in haystack at which needle begins, in ascending order, overlapping
+// matches included, and nil where needle is empty, longer than haystack, or found nowhere.
+//
+// It is Knuth-Morris-Pratt: one pass over needle builds its borders, where borders[index] is the
+// length of the longest proper prefix of needle[:index+1] that is also its suffix, and one pass
+// over haystack reads each element once, falling back along those borders where an element
+// differs instead of comparing the needle again from the next start. The scan it replaced
+// compared the whole needle at every start, so a quote that almost matches everywhere cost the
+// length of the text times the length of the quote - half a second for a mebibyte of text and a
+// kibibyte of quote - where this costs the length of the text plus the length of the quote
+// whatever the two hold.
+//
+// The package searches two element types, a text's UTF-16 units and its normalized form's runes,
+// and the algorithm reads its elements only through ==, so it is written once over the element
+// type rather than twice over the same shape; findAllUnits and findAllRunes keep the names the
+// matchers call.
+func findAll[E comparable](haystack, needle []E) []int {
 	if len(needle) == 0 || len(needle) > len(haystack) {
 		return nil
 	}
-	matches := make([]int, 0)
-	for start := 0; start <= len(haystack)-len(needle); start++ {
-		matched := true
-		for offset, value := range needle {
-			if haystack[start+offset] != value {
-				matched = false
-				break
-			}
+	borders := make([]int, len(needle))
+	for index, length := 1, 0; index < len(needle); index++ {
+		for length > 0 && needle[index] != needle[length] {
+			length = borders[length-1]
 		}
-		if matched {
-			matches = append(matches, start)
+		if needle[index] == needle[length] {
+			length++
+		}
+		borders[index] = length
+	}
+	var matches []int
+	matched := 0
+	for index, element := range haystack {
+		for matched > 0 && element != needle[matched] {
+			matched = borders[matched-1]
+		}
+		if element == needle[matched] {
+			matched++
+		}
+		if matched == len(needle) {
+			matches = append(matches, index-len(needle)+1)
+			matched = borders[matched-1]
 		}
 	}
 	return matches

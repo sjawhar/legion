@@ -969,12 +969,20 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // character. That is kept only if it reads back, so an alt that fails for another
 // reason keeps the bytes it had, as inlineWithEscapes does.
 //
-// An alt's depth is 0 where Parse does not read it back, 1 where Parse alone does, and 2 where
-// storedMarkdown does too (altReadsBack); the escaped alt is written only where its depth is greater
-// than the written alt's, so the earlier of the two at the greater depth is kept. Each depth asks
-// more than the writer before the tilde pairing (sjawhar/legion#2360) asked at that step, so
-// wherever its choice reads back under Parse this writer makes it too.
+// An alt holding no ASCII punctuation, no line feed and no carriage return is written as it
+// stands, without reading it back at all: it holds no `]` and no `|`, so the written form is the
+// alt itself, and the escaped form below is the alt itself as well, since that loop writes a
+// character reference only for a line feed and an escape only for ASCII punctuation. The two
+// forms being the same string, they read back to the same depth, and the writer keeps the written
+// form whatever that depth is - so the two reads back it costs to find that out are two parses of
+// a document whose answer is known, about 30 microseconds of the writer's work per alt. A
+// carriage return is held out of the fast path with the line feed: a lone one is a line ending to
+// the parser as well, and an alt holding one is left to the reads back rather than reasoned about
+// here (plainAlt).
 func imageAlt(alt string, context inlineContext) string {
+	if plainAlt(alt) {
+		return alt
+	}
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
 	writtenDepth := altReadsBackFn(written, alt, context)
 	if writtenDepth == 2 {
@@ -997,6 +1005,19 @@ func imageAlt(alt string, context inlineContext) string {
 		return fallback
 	}
 	return written
+}
+
+// plainAlt reports whether alt is written as it stands, which imageAlt's doc comment reasons out:
+// it holds no ASCII punctuation, so neither the `]` the written form escapes nor the `|` a table
+// cell's escape looks for, and no line ending. Every byte above ASCII passes, as the escaping
+// loop passes it.
+func plainAlt(alt string) bool {
+	for index := range len(alt) {
+		if isASCIIPunctuation(alt[index]) || alt[index] == '\n' || alt[index] == '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 // altReadsBackFn is the test seam imageAlt reads an alt back through: a test swaps it for a

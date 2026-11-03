@@ -8,10 +8,12 @@ package pmdoc
 // implementation is held to the result the base gave, and what the benchmarks below measure
 // beside it, so that benchstat of the two commits compares like with like.
 //
-// Only those five functions are frozen. The helpers they call - altReadsBack, textRangeMarks,
-// simpleDiff, yTextDeltaInTransaction, formatAttributes, len16 - are the package's own, and each
-// frozen copy calls them directly. frozenImageAlt calls altReadsBack rather than the
-// altReadsBackFn seam, so a test that swaps the seam measures the live function alone.
+// Only those five functions are frozen. The helpers they call - altReadsBack, simpleDiff,
+// yTextDeltaInTransaction, formatAttributes, len16 - are the package's own, and each frozen copy
+// calls them directly. frozenImageAlt calls altReadsBack rather than the altReadsBackFn seam, so
+// a test that swaps the seam measures the live function alone. textRangeMarks is the exception:
+// updateYText walks the delta itself now, so the frozen copy is its only caller and it lives
+// here, verbatim, rather than as a function of the package that nothing in the package calls.
 
 import (
 	"fmt"
@@ -137,6 +139,37 @@ func frozenUpdateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node)
 		offset += length
 	}
 	return nil
+}
+
+// textRangeMarks is what updateYText read a run's marks with before textRunMarks walked the whole
+// delta once: it answers the attributes to clear over one range, whether the marks the text holds
+// over it are the range's own, and the "Yjs text is shorter than target" error where the delta
+// ends before the range does, reading the delta from its first operation for each range.
+func textRangeMarks(operations []crdt.Delta, from, length int, marks []Mark) (crdt.Attributes, bool, error) {
+	to := from + length
+	offset := 0
+	matches := true
+	attributes := make(crdt.Attributes)
+	for _, operation := range operations {
+		value, ok := operation.Insert.(string)
+		if !ok {
+			return nil, false, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
+		}
+		end := offset + len16(value)
+		if from < end && offset < to {
+			if !equalYMarks(operation.Attributes, marks) {
+				matches = false
+			}
+			for key := range operation.Attributes {
+				attributes[key] = nil
+			}
+		}
+		offset = end
+	}
+	if offset != to && offset < to {
+		return nil, false, fmt.Errorf("%w: Yjs text is shorter than target", ErrSchema)
+	}
+	return attributes, matches, nil
 }
 
 func frozenContext16(value string, from, to int) string {
@@ -378,6 +411,9 @@ var findAllSeeds = []struct{ haystack, needle string }{
 }
 
 // findAllUnits answers what the base implementation answered, whatever text and quote it is given.
+// The two are compared as sequences of positions, not with their nil-ness: the base answered an
+// allocated empty slice where a text holds no match and the live scan answers nil, which every
+// caller ranges over alike.
 func FuzzFindAllUnitsMatchesFrozen(f *testing.F) {
 	for _, seed := range findAllSeeds {
 		f.Add(seed.haystack, seed.needle)
@@ -388,13 +424,15 @@ func FuzzFindAllUnitsMatchesFrozen(f *testing.F) {
 		}
 		text, pattern := utf16.Encode([]rune(haystack)), utf16.Encode([]rune(needle))
 		got, want := findAllUnits(text, pattern), frozenFindAllUnits(text, pattern)
-		if !slices.Equal(got, want) || (got == nil) != (want == nil) {
+		if !slices.Equal(got, want) {
 			t.Fatalf("findAllUnits(%q, %q) = %v, frozen %v", haystack, needle, got, want)
 		}
 	})
 }
 
-// findAllRunes answers what the base implementation answered, whatever text and quote it is given.
+// findAllRunes answers what the base implementation answered, whatever text and quote it is given,
+// compared as FuzzFindAllUnitsMatchesFrozen compares the two: as sequences of positions, since the
+// base answered an allocated empty slice where the live scan answers nil.
 func FuzzFindAllRunesMatchesFrozen(f *testing.F) {
 	for _, seed := range findAllSeeds {
 		f.Add(seed.haystack, seed.needle)
@@ -405,7 +443,7 @@ func FuzzFindAllRunesMatchesFrozen(f *testing.F) {
 		}
 		text, pattern := []rune(haystack), []rune(needle)
 		got, want := findAllRunes(text, pattern), frozenFindAllRunes(text, pattern)
-		if !slices.Equal(got, want) || (got == nil) != (want == nil) {
+		if !slices.Equal(got, want) {
 			t.Fatalf("findAllRunes(%q, %q) = %v, frozen %v", haystack, needle, got, want)
 		}
 	})
@@ -562,10 +600,10 @@ func FuzzContext16MatchesFrozen(f *testing.F) {
 }
 
 // altReadsBackCallsOnAPlainAlt is how many times imageAlt reads an alt back while writing one that
-// holds no ASCII punctuation, no line feed and no carriage return. It is the base's count; the
-// change's commit lowers it to zero, since the writer leaves such an alt as it stands whatever a
-// read back would say.
-const altReadsBackCallsOnAPlainAlt = 1
+// holds no ASCII punctuation, no line feed and no carriage return. It is zero: the writer leaves
+// such an alt as it stands whatever a read back would say, where the base read it back once
+// before deciding the same thing.
+const altReadsBackCallsOnAPlainAlt = 0
 
 // TestImageAltReadsAPlainAltBack holds imageAlt to how many reads back it costs to write an alt
 // that needs no escape at all, through the altReadsBackFn seam.

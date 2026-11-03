@@ -7,6 +7,15 @@ import (
 	"unicode/utf16"
 )
 
+// splitsPair reports whether position at, an index between UTF-16 units, falls inside a surrogate
+// pair: the unit before it is a high surrogate and the unit after it a low one. A cut there leaves
+// two halves that no Go string holds, and each reads back as U+FFFD. byteAt16 answers the same
+// question of a text it is already reading, which is how slice16 and context16 ask it, so this
+// form is read only by the tests below and by the frozen context16 of frozen_test.go.
+func splitsPair(units []uint16, at int) bool {
+	return at > 0 && at < len(units) && units[at-1]&0xFC00 == 0xD800 && units[at]&0xFC00 == 0xDC00
+}
+
 // Characters outside the Basic Multilingual Plane whose UTF-16 pairs agree on one unit: pairA and
 // pairB share a high surrogate (D83D), pairC and pairD share a low one (DE0A) under different high
 // ones (D83D, D83E).
