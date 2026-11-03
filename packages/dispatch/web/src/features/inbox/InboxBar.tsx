@@ -14,8 +14,6 @@ import {
   INBOX_TYPE_VALUES,
   INBOX_URGENCY_VALUES,
   type InboxFilterField,
-  type InboxGroupBy,
-  type InboxSort,
   NO_FILTER_VALUE,
 } from "../refs/routes";
 import { AssigneeFilter } from "./AssigneeFilter";
@@ -28,9 +26,16 @@ import {
 } from "./grouping";
 import type { InboxListRow } from "./list-row";
 import { MARK_ALL_REFUSED_TEXT, type MarkAllRead } from "./mark-all";
-import type { ThreadOrder } from "./preferences";
 import { EVERYONE_FILTER_VALUE, inAssigneeFilter, UNASSIGNED_FILTER_VALUE } from "./sections";
-import { ViewMenu } from "./ViewMenu";
+import { ViewMenu, type ViewMenuProps } from "./ViewMenu";
+
+/** The bar's popovers, each of which opens alone: one of the five filter fields, the assignee
+ *  picker beside them, or the **View** menu. */
+export type InboxPopover = InboxFilterField | "assignee" | "view";
+
+/** The chrome **Filter** and **Mark all read** share. The **View** trigger's is deliberately
+ *  its own: it carries no focus ring, since its panel takes the focus. */
+const BAR_BUTTON_CLASS = `min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold outline-none focus-visible:ring-2 ${focusVisibleRing} ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`;
 
 /** The chosen values of every field the address carries as a comma list. */
 export type InboxFilters = Partial<Record<InboxFilterField, readonly string[]>>;
@@ -79,66 +84,50 @@ function fieldOptions(
  */
 export function InboxBar({
   agentToken,
-  allThreadCount,
   assignees,
   filters,
-  group,
   markAll,
   onAssigneesChange,
   onClearAgent,
   onFiltersChange,
-  onGroupChange,
   onPopoverOpenChange,
-  onShowReadThreadsChange,
-  onSortChange,
-  onThreadOrderChange,
   rows,
   selection,
-  showReadThreads,
-  sort,
-  threadOrder,
-  unreadThreadCount,
+  view,
   viewer,
 }: {
   /** The `?agent=` chip, as the Inbox draws it (an `AgentName` whose control clears the
    *  filter, with the agent's live link beside it): one of the tokens, and the only one the
    *  bar does not build for itself, because naming an agent is `AgentName`'s job. */
   agentToken: ReactNode;
-  /** Undefined while the list is on Unread, where that count is not read (`ViewMenu`). */
-  allThreadCount: number | undefined;
   /** `?assignee=` as the address carries it: undefined is the default, the reader alone. */
   assignees: readonly string[] | undefined;
   filters: InboxFilters;
-  group: InboxGroupBy;
   /** The list's own **Mark all read** (`mark-all.ts`): the bar offers it while there is an
    *  unread Reply or Agent row to mark, and says so when a press was refused. */
   markAll: MarkAllRead;
   onAssigneesChange: (next: readonly string[] | undefined) => void;
   onClearAgent: () => void;
   onFiltersChange: (next: InboxFilters) => void;
-  onGroupChange: (next: InboxGroupBy) => void;
-  /** Whether any of the bar's popovers is open, which the Inbox's Escape binding stands down
-   *  for: one press closes the popover rather than also clearing what the reader marked. */
-  onPopoverOpenChange: (open: boolean) => void;
-  onShowReadThreadsChange: (next: boolean) => void;
-  onSortChange: (next: InboxSort) => void;
-  onThreadOrderChange: (next: ThreadOrder) => void;
+  /** Which of the bar's popovers is open, or undefined for none. The Inbox's Escape binding
+   *  stands down while one is - one press closes the popover rather than also clearing what
+   *  the reader marked - and the **View** menu's own number is not read until it has been
+   *  opened. */
+  onPopoverOpenChange: (open: InboxPopover | undefined) => void;
   /** Every row the list could hold before these five fields narrow it: what the counts count. */
   rows: readonly InboxListRow[];
   /** Who the list is for, as the assignee filter resolves it (the reader alone by default). */
   selection: readonly string[];
-  showReadThreads: boolean;
-  sort: InboxSort;
-  threadOrder: ThreadOrder;
-  unreadThreadCount: number;
+  /** Everything the **View** menu shows and changes, which the bar only hands on. */
+  view: Omit<ViewMenuProps, "onOpenChange" | "open">;
   viewer: string;
 }): ReactNode {
   const [fieldsOpen, setFieldsOpen] = useState(false);
   /** Which single popover is open: one of the five fields, the View menu, or none. */
-  const [openControl, setOpenControl] = useState<string | undefined>(undefined);
-  const openPopover = (name: string, open: boolean) => {
+  const [openControl, setOpenControl] = useState<InboxPopover | undefined>(undefined);
+  const openPopover = (name: InboxPopover, open: boolean) => {
     setOpenControl(open ? name : undefined);
-    onPopoverOpenChange(open);
+    onPopoverOpenChange(open ? name : undefined);
   };
 
   /** Whether a row survives every filter but `field`'s own, which is what that field counts
@@ -202,7 +191,7 @@ export function InboxBar({
       <div className="flex flex-wrap items-center gap-2">
         <button
           aria-expanded={fieldsOpen}
-          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold outline-none focus-visible:ring-2 ${focusVisibleRing} ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
+          className={BAR_BUTTON_CLASS}
           data-inbox-filter=""
           onClick={() => setFieldsOpen((open) => !open)}
           type="button"
@@ -213,7 +202,7 @@ export function InboxBar({
             Agent row. It asks nothing first: the rows go, and a refusal brings them back. */}
         {markAll.offered ? (
           <button
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold outline-none focus-visible:ring-2 ${focusVisibleRing} ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
+            className={BAR_BUTTON_CLASS}
             data-inbox-mark-all=""
             onClick={markAll.markAll}
             type="button"
@@ -229,18 +218,9 @@ export function InboxBar({
         {/* The right end of the row. */}
         <div className="ml-auto">
           <ViewMenu
-            allThreadCount={allThreadCount}
-            group={group}
-            onGroupChange={onGroupChange}
+            {...view}
             onOpenChange={(open) => openPopover("view", open)}
-            onShowReadThreadsChange={onShowReadThreadsChange}
-            onSortChange={onSortChange}
-            onThreadOrderChange={onThreadOrderChange}
             open={openControl === "view"}
-            showReadThreads={showReadThreads}
-            sort={sort}
-            threadOrder={threadOrder}
-            unreadThreadCount={unreadThreadCount}
           />
         </div>
       </div>

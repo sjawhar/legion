@@ -265,7 +265,7 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
-  // The Replies page's read mark: an open thread is read once its newest reply has been on screen.
+  // The shared thread read mark: an open thread is read once its newest reply has been on screen.
   const newestReply = thread.replies.at(-1);
   const markRead = useMarkThreadRead({
     enabled: expanded,

@@ -261,6 +261,19 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	return &parsed, nil
 }
 
+// userAgentStateEvent announces that the viewer's state on one session moved. It is owned by the
+// session, like its messages, so the outbox publishes it nowhere and it reaches only the viewer's
+// other tabs and devices, which refresh their badge from it rather than waiting for a focus or
+// the next message. Both writers of that state build it here: putUserAgentState below, and the
+// Inbox's Mark all read (api/inbox_read.go).
+func userAgentStateEvent(actor model.Actor, sessionID string) model.Event {
+	return model.Event{
+		Type:    "user_agent_state.updated",
+		Actor:   actor,
+		Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
+	}
+}
+
 // putUserAgentState records a Clear (cleared_before, which replaces the previous one), a read
 // mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
 // make a reply unread again), and/or replies read one by one (read_replies, the session's own
@@ -432,15 +445,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// The viewer's other open tabs and devices refresh their badge from this event rather
-		// than waiting for a focus or the next message. It is owned by the session, like its
-		// messages, so the outbox publishes it nowhere and it reaches only the dashboard's event
-		// stream.
-		event, err := s.appendEvent(r.Context(), tx, model.Event{
-			Type:    "user_agent_state.updated",
-			Actor:   actor,
-			Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
-		})
+		event, err := s.appendEvent(r.Context(), tx, userAgentStateEvent(actor, sessionID))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

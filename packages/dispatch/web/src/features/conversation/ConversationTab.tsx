@@ -192,7 +192,7 @@ function ConversationReply({
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
-  /** The Replies page's read mark, on the thread's newest reply. */
+  /** The shared thread read mark (`useMarkThreadRead`), on the thread's newest reply. */
   markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
   reply: Message;
@@ -273,7 +273,7 @@ function Thread({
   replyDisabled: boolean;
   root: MessageConversation;
 }): ReactNode {
-  // The Replies page's read mark: the thread is read once its newest reply has been on screen.
+  // The shared thread read mark: the thread is read once its newest reply has been on screen.
   // It watches that reply's own element, so a thread taller than the screen still clears.
   const newest = root.replies.at(-1);
   const markRef = useMarkThreadRead({

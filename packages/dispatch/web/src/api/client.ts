@@ -8,6 +8,7 @@ import {
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
   type IdempotencyLandedCode,
+  type InboxThreadKind,
 } from "@legion/contracts";
 
 import { reachable, routeOf, unreachable } from "./reachability";
@@ -1064,20 +1065,16 @@ export class DispatchApiClient {
   listMyReplies(page: {
     artifact?: string;
     issue?: string;
-    kind?: readonly ("agent" | "reply")[];
+    kind?: readonly InboxThreadKind[];
     limit?: number;
-    offset?: number;
     state?: "all" | "unread";
   }): Promise<MyRepliesResponse> {
-    // The route reads `kind` as one comma list, not as a repeated parameter, so it is folded
-    // here rather than by `pathWithQuery`, whose other callers do repeat theirs (`?label=`).
-    // The caller's own key order is kept, so the request reads as the route documents it.
-    const query: Record<string, number | string> = {};
-    for (const [key, value] of Object.entries(page)) {
-      if (value === undefined) continue;
-      query[key] = Array.isArray(value) ? value.join(",") : (value as number | string);
-    }
-    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", query));
+    // The route reads `kind` as one comma list, not as the repeated parameter `pathWithQuery`
+    // writes an array as (`?label=`), so it is folded here. Spreading `page` keeps the caller's
+    // own key order, so the request reads as the route documents it.
+    return this.json<MyRepliesResponse>(
+      pathWithQuery("/api/v1/me/replies", { ...page, kind: page.kind?.join(",") })
+    );
   }
 
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
@@ -1085,13 +1082,6 @@ export class DispatchApiClient {
    *  moved. */
   async markThreadRead(threadId: string, readThrough: string, bounds: WriteBounds): Promise<void> {
     await this.send(threadReadRequest(threadId, readThrough), bounds);
-  }
-
-  /** `POST /api/v1/me/inbox/read`: mark the Inbox's unread threads read in one request, narrowed
-   *  as the list is narrowed and no further than `body.read_through`. Answers how many it
-   *  marked. */
-  markInboxRead(body: MarkInboxReadRequest, bounds: WriteBounds): Promise<MarkInboxReadResponse> {
-    return this.send<MarkInboxReadResponse>(markInboxReadRequest(body), bounds);
   }
 
   async removeAskFollower(id: string, sessionId: string, bounds: WriteBounds): Promise<void> {

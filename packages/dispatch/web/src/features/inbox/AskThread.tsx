@@ -26,7 +26,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { type ThreadOrder, useThreadOrder } from "./preferences";
+import type { ThreadOrder } from "./preferences";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 import { earlierRepliesLabel, threadLayout } from "./thread-layout";
 
@@ -182,15 +182,15 @@ export interface AskThreadProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
-  /** The Replies page's mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the newest
-   *  reply's own element when that reply is the newest write the card shows. */
+  /** The shared thread read mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the
+   *  newest reply's own element when that reply is the newest write the card shows. */
   markNewest?: DwellRef;
   /** The reply a deep link named, which only the Conversation passes: that reply carries
    *  `aria-current`, and the fold over the older replies opens when it is one of them. */
   currentReplyId?: string;
-  /** The order the thread reads in. The card passes the reader's choice; a thread drawn without
-   *  one reads the same stored choice itself (`useThreadOrder`). */
-  order?: ThreadOrder;
+  /** The order the thread reads in: the reader's own choice, which the card holds
+   *  (`preferences.ts`). */
+  order: ThreadOrder;
   /** The ids of the replies the reader has not read (`useUnreadReplies`): an unread reply is
    *  never folded away. */
   unread?: ReadonlySet<string>;
@@ -217,12 +217,11 @@ export function AskThread({
   unread,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
-  const [storedOrder] = useThreadOrder();
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState<boolean>();
   const { composerFirst, folded, shown } = threadLayout({
     collapse: true,
-    order: order ?? storedOrder,
+    order,
     replies,
     unread,
   });

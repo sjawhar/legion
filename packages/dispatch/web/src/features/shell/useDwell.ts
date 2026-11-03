@@ -82,9 +82,10 @@ function watch(element: Element, listener: EntryListener): () => void {
 }
 
 /**
- * The on-screen rule the Conversation's read mark and the Replies page's thread mark share: an
- * element at least 75% visible for 1,000 ms dwells, and an element taller than the screen dwells
- * once it fills 75% of the screen; dropping below that first cancels its timer.
+ * The on-screen rule the Conversation's read mark and the shared thread read mark
+ * (`useMarkThreadRead`) share: an element at least 75% visible for 1,000 ms dwells, and an
+ * element taller than the screen dwells once it fills 75% of the screen; dropping below that
+ * first cancels its timer.
  * One IntersectionObserver serves every element any `useDwell` on the page registers through its
  * returned ref callback, and an element whose ref is detached (it unmounted, or the ref moved to
  * another element) leaves the watch at once.

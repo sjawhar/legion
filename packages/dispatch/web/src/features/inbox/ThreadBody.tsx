@@ -20,7 +20,7 @@ import { type ReactNode, useContext, useEffect, useId, useRef, useState } from "
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { agentMessagesQuery, issueQuery, myRepliesKey } from "../../api/queries";
+import { agentMessagesQuery, askThreadQuery, issueQuery, myRepliesKey } from "../../api/queries";
 import type { Actor, Comment, Message, MessageRead, MyReplyRow } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { useSending } from "../../hooks/useSending";
@@ -472,11 +472,7 @@ function AskThreadBody({
         ? undefined
         : { artifact: artifactId }
   );
-  const read = useQuery({
-    queryKey: ["ask-thread", thread.thread_id],
-    queryFn: () => api.getAsk(thread.thread_id),
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const read = useQuery(askThreadQuery(thread.thread_id));
   if (read.isPending) return <LoadingSkeleton label="Opening the thread" />;
   if (read.isError) {
     return <p className={`mt-2 text-sm ${dangerText}`}>Could not load this thread.</p>;

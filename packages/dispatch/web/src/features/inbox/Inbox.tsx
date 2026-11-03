@@ -40,7 +40,7 @@ import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { READING_PANE_QUERY, useMediaQuery } from "../shell/useDialog";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
-import { AskOwnerLink, InboxOwnerLink } from "./AskOwnerLink";
+import { InboxOwnerLink, ThreadOwnerLine } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
 import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
@@ -48,7 +48,7 @@ import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { group, inFieldFilter, LATER_GROUP_KEY, sortRows } from "./grouping";
-import { InboxBar, type InboxFilters } from "./InboxBar";
+import { InboxBar, type InboxFilters, type InboxPopover } from "./InboxBar";
 import { GROUP_PAGE, groupItems } from "./InboxGroups";
 import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
 import {
@@ -58,6 +58,7 @@ import {
   rowPriority,
   rowType,
   rowUrgency,
+  threadReferenceRoute,
 } from "./list-row";
 import { useMarkAllRead } from "./mark-all";
 import { useMotionHold } from "./motion-hold";
@@ -76,7 +77,7 @@ import {
   sectionOf,
   sectionTitles,
 } from "./sections";
-import { ThreadRowCard, threadOwner, threadReferenceRoute } from "./ThreadRowCard";
+import { ThreadRowCard } from "./ThreadRowCard";
 import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
 
 /** When an agent replied last on a row that still needs the viewer, that reply is surfaced so
@@ -283,7 +284,6 @@ function InboxShortRow({
   selected: boolean;
 }): ReactNode {
   const reference = row.kind === "thread" ? threadReferenceRoute(row.thread) : undefined;
-  const owner = row.kind === "thread" ? threadOwner(row.thread) : null;
   return (
     <InboxRowShell
       group={groupKey}
@@ -323,12 +323,11 @@ function InboxShortRow({
           <RowUrgencyMark urgency={rowUrgency(row)} />
           {row.kind === "ask" ? (
             <InboxOwnerLink ask={row.ask} rowOwner />
-          ) : owner === null ? (
-            <span className={`truncate text-sm ${textMutedOnCanvas}`}>
-              {row.thread.session?.name ?? "Agent message"}
-            </span>
           ) : (
-            <AskOwnerLink className="grow" owner={owner} />
+            <ThreadOwnerLine
+              className={`truncate text-sm ${textMutedOnCanvas}`}
+              thread={row.thread}
+            />
           )}
           {reference === undefined ? null : <CopyRefButton route={reference} />}
         </div>
@@ -601,10 +600,13 @@ export function Inbox({
   const threads = useQuery({ ...inboxThreadsQuery(threadState), enabled: human });
   // The count the switch's other side carries. With the switch on, the unpaged read above
   // counts every thread and the unread ones are the rows that say so; with it off, that read
-  // counts only the unread, so how many there are in all is a count-only read of its own.
+  // counts only the unread, so how many there are in all is a count-only read of its own. It
+  // is the costliest shape this route answers, and the View menu's open panel is the only
+  // place its number is drawn, so nothing asks for it until the reader has opened that menu.
+  const [viewOpened, setViewOpened] = useState(false);
   const allThreads = useQuery({
     ...inboxAllThreadCountQuery(),
-    enabled: human && threadState !== "all",
+    enabled: human && threadState !== "all" && viewOpened,
   });
   const listRef = useRef<HTMLElement>(null);
   /** The list column, which scrolls in itself beside the reading column. */
@@ -637,8 +639,14 @@ export function Inbox({
   const showMore = useCallback((key: string) => {
     setPages((current) => new Map(current).set(key, (current.get(key) ?? 1) + 1));
   }, []);
-  // A popover of the bar's is open, so Escape is that popover's rather than the selection's.
-  const [barOpen, setBarOpen] = useState(false);
+  // Which of the bar's popovers is open, so Escape is that popover's rather than the
+  // selection's, and so the View menu's own count is asked for once it has been opened.
+  const [openPopover, setOpenPopover] = useState<InboxPopover | undefined>(undefined);
+  const barOpen = openPopover !== undefined;
+  const onPopoverOpenChange = (open: InboxPopover | undefined) => {
+    setOpenPopover(open);
+    if (open === "view") setViewOpened(true);
+  };
   const changeFilter = (next: InboxRoute) => {
     if (onFilterChange) {
       onFilterChange(next);
@@ -1180,29 +1188,30 @@ export function Inbox({
       <CredentialRequestsSection credentials={credentials} />
       <InboxBar
         agentToken={agentChip}
-        allThreadCount={allThreadCount}
         assignees={filter.assignees}
         filters={filters}
-        group={groupBy}
         markAll={markAll}
         onAssigneesChange={(next) => changeFilter({ ...filter, assignees: next })}
         onClearAgent={() => changeFilter({ ...filter, agent: undefined, section: undefined })}
         onFiltersChange={(next) =>
           changeFilter({ ...filter, filters: Object.keys(next).length === 0 ? undefined : next })
         }
-        onGroupChange={(next) => changeFilter({ ...filter, group: next })}
-        onPopoverOpenChange={setBarOpen}
-        onShowReadThreadsChange={(next) =>
-          changeFilter({ ...filter, threads: next ? "all" : undefined })
-        }
-        onSortChange={(next) => changeFilter({ ...filter, sort: next })}
-        onThreadOrderChange={setThreadOrder}
+        onPopoverOpenChange={onPopoverOpenChange}
         rows={candidates}
         selection={selection}
-        showReadThreads={threadState === "all"}
-        sort={sort}
-        threadOrder={threadOrder}
-        unreadThreadCount={unreadThreadCount}
+        view={{
+          allThreadCount,
+          group: groupBy,
+          onGroupChange: (next) => changeFilter({ ...filter, group: next }),
+          onShowReadThreadsChange: (next) =>
+            changeFilter({ ...filter, threads: next ? "all" : undefined }),
+          onSortChange: (next) => changeFilter({ ...filter, sort: next }),
+          onThreadOrderChange: setThreadOrder,
+          showReadThreads: threadState === "all",
+          sort,
+          threadOrder,
+          unreadThreadCount,
+        }}
         viewer={viewer}
       />
       {agent === undefined ? (

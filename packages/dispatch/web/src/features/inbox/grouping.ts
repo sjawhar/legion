@@ -16,7 +16,7 @@
 import { compareTimestamps } from "../../lib/timestamps";
 import type { InboxDimension, InboxFilterField, InboxGroupBy, InboxSort } from "../refs/routes";
 import { NO_FILTER_VALUE } from "../refs/routes";
-import { URGENCY_LABELS } from "./ask-urgency";
+import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "./ask-urgency";
 import {
   INBOX_ROW_TYPES,
   type InboxListRow,
@@ -133,7 +133,12 @@ function valueRank(dimension: InboxDimension, value: string): number {
   if (value === NO_FILTER_VALUE || value === UNASSIGNED_FILTER_VALUE)
     return Number.MAX_SAFE_INTEGER;
   if (dimension === "priority") return Number(value.slice(1));
-  if (dimension === "urgency") return ["blocking", "high", "med", "low"].indexOf(value);
+  if (dimension === "urgency") {
+    // The bands read most urgent first, which is `ASK_URGENCIES_ASCENDING` read backwards; an
+    // urgency this build does not know keeps the -1 it has always ranked at.
+    const ascending = (ASK_URGENCIES_ASCENDING as readonly string[]).indexOf(value);
+    return ascending < 0 ? -1 : ASK_URGENCIES_ASCENDING.length - 1 - ascending;
+  }
   if (dimension === "type") return (INBOX_ROW_TYPES as readonly string[]).indexOf(value);
   return 0;
 }
@@ -174,6 +179,20 @@ export function sortRows(
 /** Whether `row` is a snoozed ask, the one row every grouping puts in **Later** instead. */
 function deferred(row: InboxListRow, now: number): boolean {
   return row.kind === "ask" && isSnoozed(row.ask, now);
+}
+
+/** What a band's heading reads: the **Waiting on** bands have titles of their own, the Type
+ *  bands their own words, and every other field labels its own value. **None** has no heading
+ *  at all - there is one band and it holds the whole list. */
+function bandLabel(
+  by: InboxGroupBy,
+  key: string,
+  titles: Record<InboxSection, string>
+): string | undefined {
+  if (by === "none") return undefined;
+  if (by === "waiting-on") return titles[key as InboxSection] ?? key;
+  if (by === "type") return TYPE_GROUP_LABELS[key as keyof typeof TYPE_GROUP_LABELS];
+  return dimensionValueLabel(by, key);
 }
 
 /**
@@ -221,14 +240,7 @@ export function group(
   }
   const groups: InboxGroup[] = keys.map((key) => ({
     key,
-    label:
-      by === "none"
-        ? undefined
-        : by === "waiting-on"
-          ? (titles[key as InboxSection] ?? key)
-          : by === "type"
-            ? TYPE_GROUP_LABELS[key as keyof typeof TYPE_GROUP_LABELS]
-            : dimensionValueLabel(by, key),
+    label: bandLabel(by, key, titles),
     rows: bands.get(key) ?? [],
   }));
   if (later.length > 0) {

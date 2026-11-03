@@ -22,10 +22,6 @@ const SECTION_TITLES: Record<InboxSection, string> = {
   later: "Later",
 };
 
-/** Bands the Inbox folds away until the reader opens them: rows they have already dealt with
- *  by deferring. Their heading carries the count so the fold never hides how much is in there. */
-export const COLLAPSED_SECTIONS: Partial<Record<InboxSection, true>> = { later: true };
-
 /** The viewer's own rows: asks on issues assigned to their lowercase login, and every thread
  *  row, which the route answers for the reader alone. */
 export function isMine(row: InboxListRow, viewer: string): boolean {
@@ -87,11 +83,6 @@ export function sectionTitles(
 ): Record<InboxSection, string> {
   if (isOwnList(selection, viewer)) return SECTION_TITLES;
   return { ...SECTION_TITLES, human: "Waiting on a person" };
-}
-
-/** A turn band, as opposed to one the reader's own act (an assignment, a snooze) put the row in. */
-export function isTurnSection(section: InboxSection): section is AskTurn {
-  return section === "human" || section === "agent";
 }
 
 /**

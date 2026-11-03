@@ -1048,7 +1048,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.listIssueAskThreads("CORE-1");
   await api.getAsk("ask-1");
   await api.listMyAnswers({ limit: 50, offset: 100 });
-  await api.listMyReplies({ limit: 50, offset: 0 });
+  await api.listMyReplies({ limit: 50 });
   await api.listMyReplies({ issue: "CORE-1", limit: 200 });
   await api.listMyReplies({ artifact: "artifact-1", limit: 200 });
   await api.markThreadRead("comment-1", "2026-10-12T00:00:00.000Z", keyed("put-1"));
@@ -1121,7 +1121,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/v1/issues/CORE-1/asks?state=all&thread=1"],
     ["GET", "/api/v1/asks/ask-1"],
     ["GET", "/api/v1/me/answers?limit=50&offset=100"],
-    ["GET", "/api/v1/me/replies?limit=50&offset=0"],
+    ["GET", "/api/v1/me/replies?limit=50"],
     ["GET", "/api/v1/me/replies?issue=CORE-1&limit=200"],
     ["GET", "/api/v1/me/replies?artifact=artifact-1&limit=200"],
     ["PUT", "/api/v1/me/threads/comment-1/read"],

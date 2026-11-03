@@ -23,6 +23,7 @@ import {
   AGENT_ARTIFACT_PATH,
   AGENT_LIVE_PATH,
   ANSWERS_PATH,
+  buildInboxPath,
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
@@ -779,7 +780,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 {/* The Replies page is the Inbox's Reply rows now; an old link lands on them. */}
-                <Route element={<Navigate replace to="/?type=reply" />} path="/replies" />
+                <Route
+                  element={
+                    <Navigate replace to={buildInboxPath({ filters: { type: ["reply"] } })} />
+                  }
+                  path="/replies"
+                />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

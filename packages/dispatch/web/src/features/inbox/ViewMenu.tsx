@@ -72,6 +72,28 @@ function Section({ children, label }: { children: ReactNode; label: string }): R
   );
 }
 
+/** What the menu shows and changes. The bar owns `open` and `onOpenChange`; the other ten are
+ *  the Inbox's, which the bar only passes on (`InboxBar`'s `view` prop). */
+export interface ViewMenuProps {
+  /** How many thread rows the list would hold with the switch on, or undefined while the list
+   *  is on Unread: that count is the read's own `total`, and the read the switch is off for
+   *  counts the unread alone. It is read only once the reader has opened this menu, the one
+   *  place it is drawn. */
+  allThreadCount: number | undefined;
+  group: InboxGroupBy;
+  onGroupChange: (next: InboxGroupBy) => void;
+  onOpenChange: (open: boolean) => void;
+  onShowReadThreadsChange: (next: boolean) => void;
+  onSortChange: (next: InboxSort) => void;
+  onThreadOrderChange: (next: ThreadOrder) => void;
+  open: boolean;
+  showReadThreads: boolean;
+  sort: InboxSort;
+  threadOrder: ThreadOrder;
+  /** How many thread rows the list holds with the switch off, its default. */
+  unreadThreadCount: number;
+}
+
 /**
  * The Inbox bar's **View** menu: how the list is ordered, how it is banded, whether the threads
  * the reader has already read are in it, and which way a thread's own replies read.
@@ -92,24 +114,7 @@ export function ViewMenu({
   sort,
   threadOrder,
   unreadThreadCount,
-}: {
-  /** How many thread rows the list would hold with the switch on, or undefined while the list
-   *  is on Unread: that count is the read's own `total`, and the read the switch is off for
-   *  counts the unread alone. */
-  allThreadCount: number | undefined;
-  group: InboxGroupBy;
-  onGroupChange: (next: InboxGroupBy) => void;
-  onOpenChange: (open: boolean) => void;
-  onShowReadThreadsChange: (next: boolean) => void;
-  onSortChange: (next: InboxSort) => void;
-  onThreadOrderChange: (next: ThreadOrder) => void;
-  open: boolean;
-  showReadThreads: boolean;
-  sort: InboxSort;
-  threadOrder: ThreadOrder;
-  /** How many thread rows the list holds with the switch off, its default. */
-  unreadThreadCount: number;
-}): ReactNode {
+}: ViewMenuProps): ReactNode {
   const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);

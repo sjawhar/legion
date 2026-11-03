@@ -6,6 +6,7 @@ import { buildInboxPath, type InboxRoute } from "../refs/routes";
 import { answerDraft } from "./answer-drafts";
 import { ROW_ATTRIBUTE } from "./inbox-row";
 import { type InboxListRow, rowId } from "./list-row";
+import { readRow } from "./mark-all";
 import { answerOutstanding } from "./outstanding-answers";
 import type { InboxSection } from "./sections";
 
@@ -131,14 +132,9 @@ export function usePaneSelection({
       const id = rowId({ kind: "thread", thread });
       if (current.has(id)) return current;
       // Held as read: the row the list draws from here on says so, whatever the read it came
-      // from said. An Agent row's unread replies are its ids; every other row's is its mark.
-      const read = { ...thread, unread: false, unread_count: 0 };
-      return new Map(current).set(
-        id,
-        thread.kind === "agent"
-          ? { ...read, unread_reply_ids: [] }
-          : { ...read, read_through: thread.reply.created_at }
-      );
+      // from said. The transform is **Mark all read**'s own (`readRow`), under this row's own
+      // newest reply rather than the read mark the whole list was taken at.
+      return new Map(current).set(id, readRow(thread, thread.reply.created_at));
     });
   }, []);
   // The hold ends when the selection moves off the row: the column is the reader's place in the

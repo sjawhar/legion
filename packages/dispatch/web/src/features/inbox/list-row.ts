@@ -9,7 +9,14 @@
  * the selection and the row itself all ask the same seven questions of whichever row they hold.
  */
 
-import type { AskUrgency, InboxRow, IssuePriority, MyReplyRow } from "../../api/types";
+import type {
+  AskUrgency,
+  InboxRow,
+  IssuePriority,
+  MyReplyRow,
+  OpenAskOwner,
+} from "../../api/types";
+import type { DispatchReferenceRoute } from "../refs/routes";
 import { isDecisionAsk } from "./ask-decision";
 
 /** One row of the Inbox list: an open ask, or a thread of the reader's own. */
@@ -24,7 +31,7 @@ export type InboxRowType = (typeof INBOX_ROW_TYPES)[number];
  *  kind and its thread id, so an ask and a thread can never collide in the address. */
 export function rowId(row: InboxListRow): string {
   if (row.kind === "ask") return row.ask.id;
-  return `${row.thread.kind === "agent" ? "agent" : "reply"}:${row.thread.thread_id}`;
+  return `${rowType(row)}:${row.thread.thread_id}`;
 }
 
 /** When the row last had something written in it: the thread's own reply, or the ask's newest
@@ -78,14 +85,30 @@ export function rowType(row: InboxListRow): InboxRowType {
   return row.ask.kind === "approval" ? "approval" : "question";
 }
 
-/** Whether the row still holds a write the reader has not read. An ask is never unread: it is
- *  an open question, which the reader has either answered or not. */
-export function rowUnread(row: InboxListRow): boolean {
-  return row.kind === "thread" && row.thread.unread;
+/** The issue or project document a thread belongs to, or null for an Agent row, which belongs
+ *  to neither: its thread is a message the reader sent a session. */
+export function threadOwner(thread: MyReplyRow): OpenAskOwner | null {
+  if (thread.issue !== undefined) return { issue: thread.issue };
+  return thread.document === undefined ? null : { document: thread.document };
 }
 
-/** The ask a row holds, or undefined for a thread row: what every ask-only control - the mark
- *  checkbox, `x`, the bulk snooze and the reading pane's answer form - asks of a row first. */
-export function rowAsk(row: InboxListRow): InboxRow | undefined {
-  return row.kind === "ask" ? row.ask : undefined;
+/**
+ * The `dispatch://` reference a thread row copies: the thread's own root, under its issue when
+ * it has one and under its project document otherwise. An Agent row has none - its thread is a
+ * message the reader sent a session, which no reference names - so it draws no copy control and
+ * `y` does nothing on it. A message thread on a project document has none either: only asks and
+ * comments are referenced under a document.
+ */
+export function threadReferenceRoute(thread: MyReplyRow): DispatchReferenceRoute | undefined {
+  if (thread.kind === "agent") return undefined;
+  const key = thread.issue?.key;
+  if (key !== undefined) return { id: thread.thread_id, key, kind: thread.kind };
+  const document = thread.document;
+  if (document === undefined || thread.kind === "message") return undefined;
+  return {
+    item: { id: thread.thread_id, kind: thread.kind },
+    kind: "document",
+    project: document.project,
+    slug: document.slug,
+  };
 }

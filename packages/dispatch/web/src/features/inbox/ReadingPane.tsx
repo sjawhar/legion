@@ -11,7 +11,7 @@ import {
 
 import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
-import { issueQuery, whoAmIQuery } from "../../api/queries";
+import { askThreadQuery, issueQuery, whoAmIQuery } from "../../api/queries";
 import type {
   Artifact,
   AskApproval,
@@ -763,11 +763,7 @@ function DocumentThreadBody({
  *  shows its card, with its answer and its thread. */
 function AskThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
   // The card's own key, so the card below reads no second copy of the same thread.
-  const read = useQuery({
-    queryFn: () => api.getAsk(thread.thread_id),
-    queryKey: ["ask-thread", thread.thread_id],
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const read = useQuery(askThreadQuery(thread.thread_id));
   const ask = read.data?.ask;
   if (ask !== undefined && isDecisionAsk(ask)) {
     return (

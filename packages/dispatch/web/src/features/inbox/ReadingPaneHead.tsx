@@ -13,14 +13,14 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
-import { AskOwnerLink, InboxOwnerLink } from "./AskOwnerLink";
+import { InboxOwnerLink, ThreadOwnerLine } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
 import { askIssueKey, controlName } from "./ask-name";
 import { EarlierApproval } from "./EarlierApproval";
+import { threadReferenceRoute } from "./list-row";
 import { SnoozeControl } from "./SnoozeControl";
 import { isUnassigned } from "./sections";
 import { isSnoozed } from "./snooze";
-import { threadOwner, threadReferenceRoute } from "./ThreadRowCard";
 
 /** The page "Open page" opens: the question's issue, or — for a project document, which has no
  *  issue page — the document itself at the section the column is scrolled to. The section is the
@@ -177,19 +177,15 @@ export function ThreadPaneHead({
   sectionBlockId?: string | undefined;
   thread: MyReplyRow;
 }): ReactNode {
-  const owner = threadOwner(thread);
   const reference = threadReferenceRoute(thread);
   const page =
     sectionBlockId === undefined ? thread.ref : `${thread.ref}${blockFragment(sectionBlockId)}`;
   return (
     <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      {owner === null ? (
-        <span className={`min-w-0 truncate text-sm font-semibold ${textMutedOnCanvas}`}>
-          {thread.session?.name ?? "Agent message"}
-        </span>
-      ) : (
-        <AskOwnerLink className="grow" owner={owner} />
-      )}
+      <ThreadOwnerLine
+        className={`min-w-0 truncate text-sm font-semibold ${textMutedOnCanvas}`}
+        thread={thread}
+      />
       <Link className={`text-sm ${linkText} ${linkHoverText}`} data-inbox-owner="" to={page}>
         Open page
       </Link>

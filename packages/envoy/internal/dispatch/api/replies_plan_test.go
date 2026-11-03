@@ -34,9 +34,9 @@ func TestMyRepliesQueriesReadTheUnreadIndex(t *testing.T) {
 		index string
 	}{
 		{"the count", myRepliesCountQuery, []any{"alice", "", nil}, "user_threads_unread"},
-		{"every unread row", myRepliesPageQuery, []any{"alice", "", nil, everyRow, 0}, "user_threads_unread"},
-		{"one issue's unread set", myRepliesPageQuery, []any{"alice", "TEST-1", nil, &oneIssuesPage, 0}, "user_threads_unread"},
-		{"every row under state=all", myRepliesAllPageQuery, []any{"alice", "", nil, everyRow, 0}, "user_threads_login_replied"},
+		{"every unread row", myRepliesPageQuery, []any{"alice", "", nil, everyRow}, "user_threads_unread"},
+		{"one issue's unread set", myRepliesPageQuery, []any{"alice", "TEST-1", nil, &oneIssuesPage}, "user_threads_unread"},
+		{"every row under state=all", myRepliesAllPageQuery, []any{"alice", "", nil, everyRow}, "user_threads_login_replied"},
 	} {
 		t.Run(query.name, func(t *testing.T) {
 			var planJSON []byte

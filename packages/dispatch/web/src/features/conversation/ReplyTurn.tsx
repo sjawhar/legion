@@ -76,7 +76,8 @@ export function ReplyTurn({
   body: ReactNode;
   current?: boolean;
   delivery?: ReplyDelivery;
-  /** The Replies page's read mark, on the newest reply of a thread: the element it watches. */
+  /** The shared thread read mark (`useMarkThreadRead`), on the newest reply of a thread: the
+   *  element it watches. */
   markRef?: DwellRef;
   onReply?: () => void;
   /** The parent the reply quotes: its author, its body, the block of it the reply answers (its

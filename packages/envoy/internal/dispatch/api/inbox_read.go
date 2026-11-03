@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -367,13 +368,7 @@ func (s *server) markInboxReadThreads(
 		}
 		marked += roots
 		for _, session := range sessions {
-			// The session's own event, as putUserAgentState appends it: owned by the session,
-			// so the outbox publishes it nowhere and it reaches only the viewer's dashboards.
-			events = append(events, model.Event{
-				Type:    "user_agent_state.updated",
-				Actor:   actor,
-				Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: session},
-			})
+			events = append(events, userAgentStateEvent(actor, session))
 		}
 	}
 	// A request that moved nothing announces nothing and has nothing to commit: the Inbox marks
@@ -403,15 +398,9 @@ func (s *server) readInboxReadThreads(
 ) (inboxReadThreads, error) {
 	read := inboxReadThreads{roots: map[string]string{}}
 	if scope.wantsReplyThreads() {
-		var priorities, projects any
-		if scope.priorities != nil {
-			priorities = scope.priorities
-		}
-		if scope.projects != nil {
-			projects = scope.projects
-		}
 		rows, err := tx.Query(ctx, inboxReadReplyThreads,
-			login, scope.issue, scope.artifact, readThrough, priorities, scope.priorityNone, projects)
+			login, scope.issue, scope.artifact, readThrough,
+			scope.priorities, scope.priorityNone, scope.projects)
 		if err != nil {
 			return read, fmt.Errorf("read the inbox's unread threads: %w", err)
 		}
@@ -435,7 +424,9 @@ func (s *server) readInboxReadThreads(
 		if err := rows.Err(); err != nil {
 			return read, fmt.Errorf("read the inbox's unread threads: %w", err)
 		}
-		read.documents, read.issues, read.projects = sortedKeys(documents), sortedKeys(issues), sortedKeys(projectKeys)
+		read.documents = slices.Sorted(maps.Keys(documents))
+		read.issues = slices.Sorted(maps.Keys(issues))
+		read.projects = slices.Sorted(maps.Keys(projectKeys))
 	}
 	if scope.wantsAgentThreads() {
 		args := append(unreadDirectRepliesArgs(actor.ID, nil), readThrough)
@@ -528,7 +519,7 @@ func markInboxReadReplyThreads(ctx context.Context, tx pgx.Tx, login, readThroug
 	if err := rows.Err(); err != nil {
 		return moved, err
 	}
-	moved.keys = sortedKeys(projects)
+	moved.keys = slices.Sorted(maps.Keys(projects))
 	return moved, nil
 }
 
@@ -555,21 +546,11 @@ func (s *server) markInboxReadAgentReplies(
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("mark the inbox's agent replies read: %w", err)
 	}
-	touched := sortedKeys(sessions)
+	touched := slices.Sorted(maps.Keys(sessions))
 	if len(touched) > 0 {
 		if _, err := tx.Exec(ctx, inboxReadPruneAgentReplies, login, touched); err != nil {
 			return nil, 0, fmt.Errorf("prune the agent replies the read marks cover: %w", err)
 		}
 	}
 	return touched, len(roots), nil
-}
-
-// sortedKeys is a set as one ascending list, which is both a lock order and an event order.
-func sortedKeys(values map[string]struct{}) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }

@@ -278,8 +278,8 @@ interface AskCompletionCardProps {
   documentLink?: boolean;
   edits: AskEdit[];
   frame?: AskFrame;
-  /** The Replies page's mark for the ask (`AskCard`), placed on an answered record when its answer
-   *  is the newest write the card shows. */
+  /** The shared thread read mark for the ask (`AskCard`, `useMarkThreadRead`), placed on an
+   *  answered record when its answer is the newest write the card shows. */
   markRef?: DwellRef;
   /** Shown only to the person who gave the current, non-approval answer. */
   onChangeAnswer?: () => void;

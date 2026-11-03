@@ -1127,6 +1127,13 @@ export interface MyRepliesResponse {
   readonly as_of: string;
 }
 
+/** The two kinds of thread row the Inbox holds, as `GET /api/v1/me/replies`'s `?kind=` and the
+ *  Mark all read body below both name them: a Reply row, a thread the reader wrote in where
+ *  somebody else has written since, and an Agent row, a one-off message they sent a session
+ *  that it answered. */
+export const INBOX_THREAD_KINDS = ["reply", "agent"] as const;
+export type InboxThreadKind = (typeof INBOX_THREAD_KINDS)[number];
+
 /** A priority the Inbox's Mark all read narrows to: `P0` to `P3` as the Inbox's filter writes
  *  them, or `none` for a thread whose issue carries no priority, a thread on a project document,
  *  which has no issue, and an Agent thread, which has neither. */
@@ -1146,7 +1153,7 @@ export interface MarkInboxReadRequest {
    *  the server is 400 INVALID_STATE. */
   readonly read_through: string;
   /** Both kinds by default, unlike the list route's default of `reply` alone. */
-  readonly kind?: ("reply" | "agent")[];
+  readonly kind?: InboxThreadKind[];
   readonly priority?: MarkInboxReadPriority[];
   readonly urgency?: (AskUrgency | "none")[];
   /** Project keys, and `none` for a thread with no project. */

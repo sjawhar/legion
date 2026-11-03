@@ -57,25 +57,27 @@ function Bar({ filters = {} }: { filters?: InboxFilters }): ReactNode {
       <output data-testid="listed">{rows.length}</output>
       <InboxBar
         agentToken={undefined}
-        allThreadCount={undefined}
         assignees={undefined}
         filters={filters}
-        group="priority"
         markAll={markAll}
         onAssigneesChange={noop}
         onClearAgent={noop}
         onFiltersChange={noop}
-        onGroupChange={noop}
         onPopoverOpenChange={noop}
-        onShowReadThreadsChange={noop}
-        onSortChange={noop}
-        onThreadOrderChange={noop}
         rows={rows}
         selection={["alice"]}
-        showReadThreads={false}
-        sort="newest"
-        threadOrder="oldest"
-        unreadThreadCount={rows.length}
+        view={{
+          allThreadCount: undefined,
+          group: "priority",
+          onGroupChange: noop,
+          onShowReadThreadsChange: noop,
+          onSortChange: noop,
+          onThreadOrderChange: noop,
+          showReadThreads: false,
+          sort: "newest",
+          threadOrder: "oldest",
+          unreadThreadCount: rows.length,
+        }}
         viewer="alice"
       />
     </>

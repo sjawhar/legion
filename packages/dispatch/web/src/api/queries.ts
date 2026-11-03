@@ -1,3 +1,5 @@
+import { INBOX_THREAD_KINDS } from "@legion/contracts";
+
 import {
   keepPreviousData,
   type QueryFunctionContext,
@@ -103,9 +105,15 @@ export const userAgentStateQuery = () =>
  *  owner's unread set. One invalidation of it refreshes them all. */
 export const myRepliesKey = ["me", "replies"] as const;
 
-/** The kinds of thread the Inbox lists: a reply somebody wrote where the viewer wrote, and an
- *  agent's answer to a message the viewer sent. */
-const INBOX_THREAD_KINDS = ["reply", "agent"] as const;
+/** One Inbox thread's ask, with its replies and its answer: the row's body in the list and in
+ *  the reading pane read the one copy under this key. It never goes stale on its own - an event
+ *  refresh is what moves it (`api/event-refresh.ts`). */
+export const askThreadQuery = (threadId: string) =>
+  queryOptions({
+    queryKey: ["ask-thread", threadId],
+    queryFn: () => api.getAsk(threadId),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
 
 /** The viewer's count of unread threads, from the one-row page's `total`: the sidebar's and the
  *  compact header's one Inbox number counts it beside the work waiting on them. One request per

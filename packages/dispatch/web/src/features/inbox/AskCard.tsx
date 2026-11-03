@@ -116,10 +116,10 @@ export interface AskCardProps {
   onAnswered?: (id: string) => void;
   /** `change` opens the seeded form when the viewer may replace the current answer. */
   mode?: "answer" | "change";
-  /** Marks the ask's thread read on the Replies page once its newest write (the newest reply, or
-   *  an answer given after every reply) has been on screen. Set only on the ask's own pages - its
-   *  Conversation turn, its margin card, its decision block - so the Inbox, its drawer and the
-   *  Answers page start no unread-set reads. */
+  /** Marks the ask's thread read through the shared thread read mark (`useMarkThreadRead`) once
+   *  its newest write (the newest reply, or an answer given after every reply) has been on
+   *  screen. Set only on the ask's own pages - its Conversation turn, its margin card, its
+   *  decision block - so the Inbox, its drawer and the Answers page start no unread-set reads. */
   markRead?: boolean;
   /** The reply a deep link named: the Conversation marks that reply and opens the card's
    *  collapsed thread over it. No other surface lands on a reply. */
@@ -328,8 +328,9 @@ export function AskCard({
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
   const turnHolder = askTurnHolder(currentAsk, threadQuery.data?.replies.at(-1));
-  // The thread's newest write the card shows, which the Replies mark watches and reads through:
-  // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
+  // The thread's newest write the card shows, which the shared thread read mark watches and
+  // reads through: the newest reply, unless the record's answer came after it (an answer is a
+  // write like a reply).
   const newestReply = threadQuery.data?.replies.at(-1);
   const recordedAnswer = completed?.state === "answered" ? completed.answer : null;
   const answerIsNewest =

@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { myRepliesKey } from "../../api/queries";
-import type { MyReplyRow, OpenAskOwner, UserAgentState } from "../../api/types";
+import type { MyReplyRow, UserAgentState } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
@@ -16,42 +16,13 @@ import {
   unreadDotBg,
 } from "../../theme/classes";
 import { storeAgentState } from "../agents/unread";
-import type { DispatchReferenceRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { AskOwnerLink } from "./AskOwnerLink";
+import { ThreadOwnerLine } from "./AskOwnerLink";
 import { rowPriority, rowType } from "./list-row";
 import { questionLine } from "./question-line";
 import { RowKindIcon, RowPriorityTag } from "./RowMarks";
 import { ThreadBody } from "./ThreadBody";
-
-/** The issue or project document a thread belongs to, or null for an Agent row, which belongs
- *  to neither: its thread is a message the reader sent a session. */
-export function threadOwner(thread: MyReplyRow): OpenAskOwner | null {
-  if (thread.issue !== undefined) return { issue: thread.issue };
-  return thread.document === undefined ? null : { document: thread.document };
-}
-
-/**
- * The `dispatch://` reference a thread row copies: the thread's own root, under its issue when
- * it has one and under its project document otherwise. An Agent row has none - its thread is a
- * message the reader sent a session, which no reference names - so it draws no copy control and
- * `y` does nothing on it. A message thread on a project document has none either: only asks and
- * comments are referenced under a document.
- */
-export function threadReferenceRoute(thread: MyReplyRow): DispatchReferenceRoute | undefined {
-  if (thread.kind === "agent") return undefined;
-  const key = thread.issue?.key;
-  if (key !== undefined) return { id: thread.thread_id, key, kind: thread.kind };
-  const document = thread.document;
-  if (document === undefined || thread.kind === "message") return undefined;
-  return {
-    item: { id: thread.thread_id, kind: thread.kind },
-    kind: "document",
-    project: document.project,
-    slug: document.slug,
-  };
-}
 
 /**
  * A Reply or an Agent row as a card: the layout below the reading pane's width, and the one the
@@ -85,7 +56,6 @@ export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
       return queryClient.invalidateQueries({ queryKey: myRepliesKey });
     },
   });
-  const owner = threadOwner(thread);
   const row = { kind: "thread", thread } as const;
   const title = questionLine(thread.subject);
   return (
@@ -113,13 +83,7 @@ export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
       </div>
       <div className="mt-1 flex min-w-0 flex-wrap items-baseline gap-2">
         <RowPriorityTag priority={rowPriority(row)} />
-        {owner === null ? (
-          <span className={`truncate text-sm ${textMutedOnCanvas}`}>
-            {thread.session?.name ?? "Agent message"}
-          </span>
-        ) : (
-          <AskOwnerLink className="grow" owner={owner} />
-        )}
+        <ThreadOwnerLine className={`truncate text-sm ${textMutedOnCanvas}`} thread={thread} />
       </div>
       <ThreadBody quote thread={thread} />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">

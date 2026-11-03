@@ -82,7 +82,7 @@ const (
 // always names the thread's root, never the reply: a reply carries no anchor, so a link to it
 // would skip the document redirect an anchored root takes.
 //
-// $4 is the number of rows to read, null for every row, and $5 how many to skip.
+// $4 is the number of rows to read, null for every row.
 //
 // The unread count is one lateral over the thread's own writes, so the read stays one statement:
 // an ask's replies and its answer, a comment thread's root and replies (every reply is stored
@@ -97,7 +97,7 @@ const myRepliesPage = `
 		`
 const myRepliesPageRest = `
 		order by u.replied_at desc, u.thread_id desc
-		limit $4 offset $5
+		limit $4
 	),
 	message_replies as (
 		select p.thread_id as root_id, m.id, m.created_at, m.author
@@ -200,7 +200,7 @@ func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err e
 // counting an accepted Send's reply, which still shows in the live view.
 //
 // Parameters are unreadDirectRepliesCTE's own (unreadDirectRepliesArgs), so the first free one is
-// $4; this read needs none.
+// $4, the number of rows the page read takes (null for every row); the count read binds none.
 const myAgentRows = `
 	one_off_replies as (
 		select dt.root_id, dt.session_id, dt.id as reply_id, dt.created_at, dt.author
@@ -229,12 +229,15 @@ const myAgentRows = `
 		from one_off_replies o
 		`
 
+// myAgentRoots closes the roots set the page read and the count read both select over.
+const myAgentRoots = `
+		group by o.root_id, o.session_id
+	)`
+
 // myAgentRowsRest is what both states select over those roots: the root's body as the subject, the
 // newest session reply in the thread as the row's reply, and the unread replies the Inbox marks
 // read by id.
-const myAgentRowsRest = `
-		group by o.root_id, o.session_id
-	)
+const myAgentRowsRest = myAgentRoots + `
 	select r.root_id::text, r.session_id, r.replied_at, root.body,
 	       newest.reply_id::text, newest.author, newest.body, newest.created_at,
 	       coalesce(c.unread_count, 0), coalesce(c.unread_reply_ids, '{}'::text[])
@@ -248,14 +251,23 @@ const myAgentRowsRest = `
 		limit 1
 	) newest on true
 	left join counted c on c.root_id = r.root_id
-	order by r.replied_at desc, r.root_id desc`
+	order by r.replied_at desc, r.root_id desc
+	limit $4`
+
+// myAgentCountRest counts those same roots, for the answer's total when the read is paged.
+const myAgentCountRest = myAgentRoots + `
+	select count(*) from roots`
 
 const (
+	myAgentHead   = `with recursive` + unreadDirectRepliesCTE + `,` + myAgentRows
+	myAgentUnread = `where exists (select 1 from one_off_unread where one_off_unread.root_id = o.root_id)`
 	// myAgentRowsQuery reads the one-off roots holding a reply the caller has not read.
-	myAgentRowsQuery = `with recursive` + unreadDirectRepliesCTE + `,` + myAgentRows +
-		`where exists (select 1 from one_off_unread where one_off_unread.root_id = o.root_id)` + myAgentRowsRest
+	myAgentRowsQuery = myAgentHead + myAgentUnread + myAgentRowsRest
 	// myAgentAllRowsQuery reads every one-off root holding a session reply, read or not.
-	myAgentAllRowsQuery = `with recursive` + unreadDirectRepliesCTE + `,` + myAgentRows + myAgentRowsRest
+	myAgentAllRowsQuery = myAgentHead + myAgentRowsRest
+	// myAgentCountQuery and myAgentAllCountQuery are those two sets counted.
+	myAgentCountQuery    = myAgentHead + myAgentUnread + myAgentCountRest
+	myAgentAllCountQuery = myAgentHead + myAgentCountRest
 )
 
 // The kinds of row GET /api/v1/me/replies answers, as ?kind= names them, and the states it reads
@@ -330,8 +342,12 @@ func parseMyRepliesPage(r *http.Request) (limit *int, offset int, err error) {
 //
 // The two kinds come from unrelated tables, so they are merged in Go rather than unioned in SQL:
 // each read answers in the merge's own order (newest reply first, ties by thread id descending),
-// and the page is cut from the merged list. The Reply read is asked for no more rows than the cut
-// can reach, since a row past offset+limit of its own order cannot be inside the merged page.
+// and the page is cut from the merged list. Each read is asked for no more rows than the cut can
+// reach, since a row past offset+limit of its own order cannot be inside the merged page, and the
+// total is then counted by a statement of its own. An unpaged read needs neither: in the same
+// snapshot over the same filter it reads every matching row, so what it read is the total. The
+// Agent rows' sessions are named after the cut (nameAgentSessions), so a row the page throws away
+// costs no title.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.requireHuman(w, r)
 	if !ok {
@@ -377,45 +393,57 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows := []model.MyReplyRow{}
+	var reach *int
+	if limit != nil {
+		through := offset + *limit
+		reach = &through
+	}
 	if wantReply {
 		countQuery, pageQuery := myRepliesCountQuery, myRepliesPageQuery
 		if all {
 			countQuery, pageQuery = myRepliesAllCountQuery, myRepliesAllPageQuery
 		}
-		var total int
-		if err := tx.QueryRow(r.Context(), countQuery, login, issue, artifact).Scan(&total); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("count my replies: %w", err))
-			return
-		}
-		response.Total += total
-		var reach *int
 		if limit != nil {
-			through := offset + *limit
-			reach = &through
+			var total int
+			if err := tx.QueryRow(r.Context(), countQuery, login, issue, artifact).Scan(&total); err != nil {
+				s.writeHandlerError(w, fmt.Errorf("count my replies: %w", err))
+				return
+			}
+			response.Total += total
 		}
 		read, err := s.readMyReplyRows(r.Context(), tx, pageQuery, login, issue, artifact, reach)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		if limit == nil {
+			response.Total += len(read)
+		}
 		rows = append(rows, read...)
 	}
 	if wantAgent {
-		query := myAgentRowsQuery
+		countQuery, pageQuery := myAgentCountQuery, myAgentRowsQuery
 		if all {
-			query = myAgentAllRowsQuery
+			countQuery, pageQuery = myAgentAllCountQuery, myAgentAllRowsQuery
 		}
-		read, err := s.readMyAgentRows(r.Context(), tx, query, caller.ID)
+		if limit != nil {
+			var total int
+			countArgs := unreadDirectRepliesArgs(caller.ID, nil)
+			if err := tx.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total); err != nil {
+				s.writeHandlerError(w, fmt.Errorf("count my agent threads: %w", err))
+				return
+			}
+			response.Total += total
+		}
+		read, err := s.readMyAgentRows(r.Context(), tx, pageQuery, caller.ID, reach)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		response.Total += len(read)
+		if limit == nil {
+			response.Total += len(read)
+		}
 		rows = append(rows, read...)
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read my replies: %w", err))
-		return
 	}
 
 	slices.SortFunc(rows, func(left, right model.MyReplyRow) int {
@@ -432,6 +460,14 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	if limit != nil && *limit < len(rows) {
 		rows = rows[:*limit]
 	}
+	if err := nameAgentSessions(r.Context(), tx, rows); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("read my replies: %w", err))
+		return
+	}
 	response.Rows = append(response.Rows, rows...)
 	WriteJSON(w, http.StatusOK, response)
 }
@@ -440,7 +476,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 func (s *server) readMyReplyRows(
 	ctx context.Context, tx pgx.Tx, query, login, issue string, artifact *string, reach *int,
 ) ([]model.MyReplyRow, error) {
-	rows, err := tx.Query(ctx, query, login, issue, artifact, reach, 0)
+	rows, err := tx.Query(ctx, query, login, issue, artifact, reach)
 	if err != nil {
 		return nil, fmt.Errorf("list my replies: %w", err)
 	}
@@ -498,17 +534,17 @@ func (s *server) readMyReplyRows(
 	return read, nil
 }
 
-// readMyAgentRows reads one state's Agent rows and names each one's session. A session's name is
-// the newest title it stamped on anything it wrote (delivery.ResolveSessionTitles, the Delivery
-// page's own read), which outlives the session; one it never stamped is named by its id.
-func (s *server) readMyAgentRows(ctx context.Context, tx pgx.Tx, query, actorID string) ([]model.MyReplyRow, error) {
-	rows, err := tx.Query(ctx, query, unreadDirectRepliesArgs(actorID, nil)...)
+// readMyAgentRows reads one state's Agent rows, at most reach of them (nil for every row). Their
+// sessions are named once the merged page is cut, by nameAgentSessions.
+func (s *server) readMyAgentRows(
+	ctx context.Context, tx pgx.Tx, query, actorID string, reach *int,
+) ([]model.MyReplyRow, error) {
+	rows, err := tx.Query(ctx, query, append(unreadDirectRepliesArgs(actorID, nil), reach)...)
 	if err != nil {
 		return nil, fmt.Errorf("list my agent threads: %w", err)
 	}
 	defer rows.Close()
 	read := []model.MyReplyRow{}
-	sessions := []string{}
 	for rows.Next() {
 		row := model.MyReplyRow{Kind: myReplyKindAgent, Reply: model.MyReplyReply{Kind: "reply"}}
 		var session, subject, body string
@@ -530,19 +566,36 @@ func (s *server) readMyAgentRows(ctx context.Context, tx pgx.Tx, query, actorID 
 		row.Unread = row.UnreadCount > 0
 		row.Session = &model.MyReplySession{ID: session}
 		read = append(read, row)
-		sessions = append(sessions, session)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list my agent threads: %w", err)
 	}
+	return read, nil
+}
+
+// nameAgentSessions names the session of every Agent row on the page. A session's name is the
+// newest title it stamped on anything it wrote (delivery.ResolveSessionTitles, the Delivery page's
+// own read), which outlives the session; one it never stamped is named by its id.
+func nameAgentSessions(ctx context.Context, tx pgx.Tx, rows []model.MyReplyRow) error {
+	sessions := []string{}
+	for _, row := range rows {
+		if row.Session != nil {
+			sessions = append(sessions, row.Session.ID)
+		}
+	}
+	if len(sessions) == 0 {
+		return nil
+	}
 	titles, err := delivery.ResolveSessionTitles(ctx, tx, sessions)
 	if err != nil {
-		return nil, fmt.Errorf("name my agent threads' sessions: %w", err)
+		return fmt.Errorf("name my agent threads' sessions: %w", err)
 	}
-	for index := range read {
-		read[index].Session.Name = delivery.SessionTitle(titles, read[index].Session.ID)
+	for index := range rows {
+		if rows[index].Session != nil {
+			rows[index].Session.Name = delivery.SessionTitle(titles, rows[index].Session.ID)
+		}
 	}
-	return read, nil
+	return nil
 }
 
 // putThreadRead answers PUT /api/v1/me/threads/{id}/read: it moves the caller's read mark on one

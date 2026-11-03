@@ -10,6 +10,7 @@
  * fails, which an old server with no such route is one way of doing.
  */
 
+import { INBOX_THREAD_KINDS, type InboxThreadKind } from "@legion/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -31,26 +32,15 @@ import { compareTimestamps } from "../../lib/timestamps";
 import { INBOX_PRIORITY_VALUES, INBOX_URGENCY_VALUES, NO_FILTER_VALUE } from "../refs/routes";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import type { InboxFilters } from "./InboxBar";
-import type { InboxListRow } from "./list-row";
+import { type InboxListRow, rowId, rowType } from "./list-row";
 
 /** What the page says when the server refused the press and nothing was marked. */
 export const MARK_ALL_REFUSED_TEXT = "Nothing was marked read.";
 
-/** The two kinds of thread row the Inbox holds, as both the list route and this one name them. */
-const THREAD_KINDS = ["reply", "agent"] as const;
-type ThreadKind = (typeof THREAD_KINDS)[number];
-
-/** The kind of row a thread is listed as: an Agent row, else a Reply row. The list route and
- *  this one name the two kinds alike, and a Reply row is any of the three thread shapes the
- *  reader wrote in. */
-function threadKind(thread: MyReplyRow): ThreadKind {
-  return thread.kind === "agent" ? "agent" : "reply";
-}
-
-/** The ids one optimistic press matches a cached row by: an ask and a message can share neither
- *  id nor kind, so the pair names a row exactly, as `rowId` names it in the list. */
-function threadRowId(thread: MyReplyRow): string {
-  return `${threadKind(thread)}:${thread.thread_id}`;
+/** The ids one optimistic press matches a cached row by, which is `rowId`'s own: an ask and a
+ *  message can share neither id nor kind, so the pair names a row exactly. */
+function threadListRow(thread: MyReplyRow): InboxListRow {
+  return { kind: "thread", thread };
 }
 
 /** Whether a filter list, absent for every value, holds `value`. The server reads an absent list
@@ -77,10 +67,10 @@ function chosen<T extends string>(
 /** The kinds of thread row the Type filter is showing: both while it shows every type, since the
  *  button sits over one list of both. A Type filter naming only ask types shows no thread row at
  *  all, and the button is not offered then (`marksAnything`). */
-export function markAllKinds(filters: InboxFilters): ThreadKind[] {
+export function markAllKinds(filters: InboxFilters): InboxThreadKind[] {
   const type = filters.type;
-  if (type === undefined || type.length === 0) return [...THREAD_KINDS];
-  return THREAD_KINDS.filter((kind) => type.includes(kind));
+  if (type === undefined || type.length === 0) return [...INBOX_THREAD_KINDS];
+  return INBOX_THREAD_KINDS.filter((kind) => type.includes(kind));
 }
 
 /**
@@ -113,7 +103,7 @@ export function markAllReadBody(filters: InboxFilters, readThrough: string): Mar
 export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boolean {
   if (!thread.unread) return false;
   if (compareTimestamps(thread.reply.created_at, body.read_through) > 0) return false;
-  if (!(body.kind ?? THREAD_KINDS).includes(threadKind(thread))) return false;
+  if (!allows(body.kind, rowType(threadListRow(thread)))) return false;
   const priority = thread.priority;
   return (
     allows(body.priority, priority === undefined ? NO_FILTER_VALUE : `P${priority}`) &&
@@ -122,10 +112,11 @@ export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boo
   );
 }
 
-/** A thread row as the press leaves it: read, with nothing unread in it. A Reply row's mark moves
- *  to the read mark the request carried; an Agent row has none - its replies are read by id - so
- *  only its unread ids are emptied. */
-function readRow(thread: MyReplyRow, readThrough: string): MyReplyRow {
+/** A thread row as a read mark leaves it: read, with nothing unread in it. A Reply row's mark
+ *  moves to `readThrough`; an Agent row has none - its replies are read by id - so only its
+ *  unread ids are emptied. The press reads every row it marks through this, and so does a card
+ *  the reader dwelt on (`pane-selection.ts`), which marks itself at its own newest reply. */
+export function readRow(thread: MyReplyRow, readThrough: string): MyReplyRow {
   const read = { ...thread, unread: false, unread_count: 0 };
   if (thread.kind === "agent") return { ...read, unread_reply_ids: [] };
   return { ...read, read_through: readThrough };
@@ -147,11 +138,11 @@ export function applyMarkAll(
     return {
       ...answer,
       rows: answer.rows.map((row) =>
-        marked.has(threadRowId(row)) ? readRow(row, readThrough) : row
+        marked.has(rowId(threadListRow(row))) ? readRow(row, readThrough) : row
       ),
     };
   }
-  const rows = answer.rows.filter((row) => !marked.has(threadRowId(row)));
+  const rows = answer.rows.filter((row) => !marked.has(rowId(threadListRow(row))));
   return { ...answer, rows, total: Math.max(0, answer.total - (answer.rows.length - rows.length)) };
 }
 
@@ -223,7 +214,7 @@ export function useMarkAllRead({
       const marked = new Set(
         (threads?.rows ?? [])
           .filter((thread) => marksThread(thread, input))
-          .map((thread) => threadRowId(thread))
+          .map((thread) => rowId(threadListRow(thread)))
       );
       if (threads !== undefined) {
         queryClient.setQueryData(

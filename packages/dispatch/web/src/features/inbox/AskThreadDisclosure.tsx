@@ -5,7 +5,7 @@ import type { Ask } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
 import type { DwellRef } from "../shell/useDwell";
 import { AskReplyComposer, AskThread, type AskThreadQuery, type CreateReply } from "./AskThread";
-import { type ThreadOrder, useThreadOrder } from "./preferences";
+import type { ThreadOrder } from "./preferences";
 
 interface AskThreadDisclosureProps {
   ask: Ask;
@@ -14,13 +14,14 @@ interface AskThreadDisclosureProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
-  /** The Replies page's mark for the ask, placed on its newest reply (`AskThread`). */
+  /** The shared thread read mark for the ask (`useMarkThreadRead`), placed on its newest reply
+   *  (`AskThread`). */
   markNewest?: DwellRef;
   /** The reply a deep link named (`AskThread`); only the Conversation passes one. */
   currentReplyId?: string;
   /** The order the thread reads in (`AskThread`), which also places this control and the
    *  composer it reveals: under the question in Newest first, at the foot in Oldest first. */
-  order?: ThreadOrder;
+  order: ThreadOrder;
   /** The ids of the replies the reader has not read (`AskThread`). */
   unread?: ReadonlySet<string>;
 }
@@ -38,8 +39,6 @@ export function AskThreadDisclosure({
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
-  const [storedOrder] = useThreadOrder();
-  const threadOrder = order ?? storedOrder;
   if (thread.isError) {
     const message =
       thread.error instanceof Error ? thread.error.message : "Unable to load replies.";
@@ -72,7 +71,7 @@ export function AskThreadDisclosure({
         currentReplyId={currentReplyId}
         embedded={embedded}
         markNewest={markNewest}
-        order={threadOrder}
+        order={order}
         showComposer={false}
         thread={thread}
         unread={unread}
@@ -98,7 +97,7 @@ export function AskThreadDisclosure({
       </>
     ) : null;
 
-  return threadOrder === "newest" ? (
+  return order === "newest" ? (
     <>
       {composer}
       {threadNode}
