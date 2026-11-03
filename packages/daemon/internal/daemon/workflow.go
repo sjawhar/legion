@@ -201,6 +201,29 @@ func appTransient(err error) bool {
 	return errors.As(err, &transient)
 }
 
+// appAttempt is one attempt at the boot's App reads, bounded by appMintAttempt: passed, refused,
+// transient (appTransient), or pending when a token_command is still running past the bound
+// (appauth.ErrCommandPending, most often a grant that waits on a person's approval). A pending
+// attempt spends no retry: the command goes on, and the next attempt joins it, so the boot waits
+// for the grant with one request and never kills it.
+func appAttempt(attempt func(context.Context) error) func(context.Context) bootprobe.Outcome {
+	return func(ctx context.Context) bootprobe.Outcome {
+		bounded, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		err := attempt(bounded)
+		switch {
+		case err == nil:
+			return bootprobe.Outcome{Passed: true}
+		case errors.Is(err, appauth.ErrCommandPending):
+			return bootprobe.Outcome{Pending: err.Error()}
+		case appTransient(err):
+			return bootprobe.Outcome{Detail: err.Error()}
+		default:
+			return bootprobe.Outcome{Refusal: err}
+		}
+	}
+}
+
 // appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
 // installation, so a daemon serving no repository yet still knows the review App's login, as one
 // attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
@@ -209,7 +232,7 @@ func appTransient(err error) bool {
 // review App's and count no fix attempt, and is refused, as is a review App that names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			login, err := apps.AppLogin(ctx, role)
 			if err != nil {
@@ -218,7 +241,7 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 			logins[role] = login
 		}
 		return nil
-	}, appMintAttempt, appTransient))
+	}))
 	if err != nil {
 		return "", err
 	}
@@ -233,14 +256,14 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
 // token passed asks GitHub only for the review token.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
-	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			if _, err := tokens.Token(ctx, role, owner); err != nil {
 				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
 		return nil
-	}, appMintAttempt, appTransient))
+	}))
 }
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the

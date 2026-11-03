@@ -113,8 +113,12 @@ A read-only token holds what the command's read-only release gives: the broker's
 `contents: read` and `metadata: read` and not `pull_requests: read`, which the key forms' read-only
 token also holds, so on another owner's repository a role on `token_command` can clone and read
 files but not read pull requests.
-The daemon passes the command's stderr through as it runs, so `agent-secrets`' line naming the
-pending request appears in the daemon's log while the review App waits for its grant.
+The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
+so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
+App waits for its grant.
+A run is not cut off by the boot's 15-second attempt: the boot waits for it, logging that it waits,
+and the next attempt joins the same run, so a grant that waits on a person's approval is one
+request; `agent-secrets`' exit 75 (still waiting when its own wait ended) is retried.
 `legion start --check-config` never runs it, and `installations` cannot be set beside it, since
 the release names every installation.
 

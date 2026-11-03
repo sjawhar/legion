@@ -185,7 +185,10 @@ app_token_mint_file() {
     rm -f -- "$tmp"
     return 125
   fi
-  mv -f -- "$tmp" "$file"
+  if ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # mint_app_tokens DIR OWNER... records the OWNERs the run serves (app_token_owners) and mints,

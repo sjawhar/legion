@@ -134,6 +134,7 @@ type Manager struct {
 	installations     map[AppRole]map[string]string
 	identities        map[string]GitIdentity
 	pendingIdentities map[string]*pendingIdentity
+	commands          map[string]*commandRun
 }
 
 type pendingLease struct {
@@ -180,6 +181,7 @@ func New(apps config.GitHubApps, options Options) *Manager {
 		installations:     map[AppRole]map[string]string{},
 		identities:        map[string]GitIdentity{},
 		pendingIdentities: map[string]*pendingIdentity{},
+		commands:          map[string]*commandRun{},
 	}
 }
 

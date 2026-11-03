@@ -40,9 +40,7 @@ func (m *Manager) AppLogin(ctx context.Context, role AppRole) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read the %s App's login: %w", role, err)
 		}
-		identity, err := m.identity(ctx, app.AppID, func(ctx context.Context) (GitIdentity, error) {
-			return m.tokenIdentity(ctx, role, app.AppID, installation.token)
-		})
+		identity, err := m.tokenIdentity(ctx, role, app.AppID, installation.token)
 		if err != nil {
 			return "", fmt.Errorf("read the %s App's login: %w", role, err)
 		}

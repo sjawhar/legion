@@ -726,6 +726,21 @@ mint_app_tokens "$TOKEN_DIR" sjawhar`
     expect(readdirSync(join(tokenDir, "implement"))).toEqual([]);
   });
 
+  test("a release whose rename fails leaves no temporary file", async () => {
+    const tokenDir = mkdtempSync(join(dir, "tokens."));
+    const failingMv = mkdtempSync(join(dir, "mv."));
+    writeFileSync(join(failingMv, "mv"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const { code, stdout, stderr } = await githubApps(
+      { ...appInputs, TOKEN_DIR: tokenDir, FAILING_MV: failingMv },
+      `require_app_inputs implement review
+PATH="$FAILING_MV:$PATH"
+mint_app_tokens "$TOKEN_DIR" sjawhar`
+    );
+    expect(code).toBe(1);
+    expect(readdirSync(join(tokenDir, "implement"))).toEqual([]);
+    holdsNoToken(stdout + stderr);
+  });
+
   test("the refresher mints the files again on its period and stops when told", async () => {
     const tokenDir = mkdtempSync(join(dir, "tokens."));
     const refreshStore = mkdtempSync(join(dir, "store."));

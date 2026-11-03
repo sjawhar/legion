@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +57,22 @@ const (
 // kilobytes.
 const releaseLimit = 1 << 20
 
+// tokenCommandLimit bounds one run of a token_command. A run is not its caller's: a caller whose
+// own deadline ends first returns ErrCommandPending while the run goes on, and the next caller
+// asking the same thing joins it, so a grant that waits on a person's approval is one request,
+// never killed and asked again. `agent-secrets` waits 30 minutes for a decision by default, then
+// exits 75; the limit leaves it that.
+var tokenCommandLimit = 35 * time.Minute
+
+// exitPending is `agent-secrets`' exit status for a request still waiting on a person's approval
+// when its wait ended: no answer about the App, so a later run may pass.
+const exitPending = 75
+
+// ErrCommandPending is a token_command still running when its caller's deadline ended, wrapped in
+// a TransientError: most often a grant that waits on a person's approval. The run goes on, and the
+// caller's next attempt joins it.
+var ErrCommandPending = errors.New("token_command is still running")
+
 // releasedInstallation is one installation of a token_command's release.
 type releasedInstallation struct {
 	owner     string
@@ -63,19 +80,73 @@ type releasedInstallation struct {
 	expiresAt time.Time
 }
 
+// commandRun is one run of a token_command, which every caller asking for the same owner and
+// narrowing while it runs shares.
+type commandRun struct {
+	done          chan struct{}
+	installations map[string]releasedInstallation
+	err           error
+}
+
 // tokenCommandField is the configuration key of role's token_command, the name its failures carry.
 func tokenCommandField(role AppRole) string {
 	return "github_apps." + string(role) + ".token_command"
 }
 
-// runTokenCommand runs app's token_command for owner ("" for every installation) and readOnly, and
-// returns the installations its release names, keyed by lowercased account login. A command that
-// ctx ended is GitHub's or the broker's trouble (TransientError), as a request its deadline cut
-// off is; one that exited non-zero, printed too much, or printed no release is the configuration's
-// answer.
+// runTokenCommand returns the release of app's token_command for owner ("" for every installation)
+// and readOnly, keyed by lowercased account login, from a run that outlives ctx (commandRun): ctx
+// ending first returns ErrCommandPending, transient. A release of every installation records its
+// accounts as role's installations (recordOwners), the set a narrowed run that fails is read
+// against.
 func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
+	key := fmt.Sprintf("%s|%s|%t", role, strings.ToLower(owner), readOnly)
+	m.mu.Lock()
+	run, ok := m.commands[key]
+	if !ok {
+		run = &commandRun{done: make(chan struct{})}
+		m.commands[key] = run
+		go func() {
+			bounded, cancel := context.WithTimeout(context.Background(), tokenCommandLimit)
+			defer cancel()
+			run.installations, run.err = m.execTokenCommand(bounded, role, app, owner, readOnly)
+			if run.err == nil && owner == "" {
+				m.recordOwners(role, run.installations)
+			}
+			m.mu.Lock()
+			delete(m.commands, key)
+			m.mu.Unlock()
+			close(run.done)
+		}()
+	}
+	m.mu.Unlock()
+	select {
+	case <-run.done:
+		return run.installations, run.err
+	case <-ctx.Done():
+		return nil, &TransientError{Err: fmt.Errorf("%s for %q is still running after %v (a grant may wait on a person's approval): %w", tokenCommandField(role), owner, ctx.Err(), ErrCommandPending)}
+	}
+}
+
+// recordOwners records the accounts of a release of every installation as role's installations.
+func (m *Manager) recordOwners(role AppRole, installations map[string]releasedInstallation) {
+	owners := make(map[string]string, len(installations))
+	for owner := range installations {
+		owners[owner] = owner
+	}
+	m.mu.Lock()
+	m.installations[role] = owners
+	m.mu.Unlock()
+}
+
+// execTokenCommand runs app's token_command once, under ctx, for owner and readOnly. A run ctx
+// ended, or that exited 75 (`agent-secrets`' request still waiting for approval), is transient;
+// one that exited otherwise, printed too much, or printed no release is the configuration's
+// answer. Its stderr reaches the daemon's and the error with every GitHub token redacted.
+func (m *Manager) execTokenCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (map[string]releasedInstallation, error) {
 	field := tokenCommandField(role)
-	command := exec.CommandContext(ctx, "sh", "-c", app.TokenCommand)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(runCtx, "sh", "-c", app.TokenCommand)
 	procgroup.Configure(command)
 	readOnlyValue := ""
 	if readOnly {
@@ -84,30 +155,95 @@ func (m *Manager) runTokenCommand(ctx context.Context, role AppRole, app config.
 	command.Env = append(slices.DeleteFunc(runtime.WithoutNATSSeeds(os.Environ()), func(entry string) bool {
 		return strings.HasPrefix(entry, TokenCommandOwner+"=") || strings.HasPrefix(entry, TokenCommandReadOnly+"=")
 	}), TokenCommandOwner+"="+owner, TokenCommandReadOnly+"="+readOnlyValue)
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = io.MultiWriter(m.stderr, &stderr)
+	stdout := &boundedBuffer{limit: releaseLimit, overflow: cancel}
+	var stderr bytes.Buffer
+	relay := &redactingLines{out: io.MultiWriter(m.stderr, &stderr)}
+	command.Stdout = stdout
+	command.Stderr = relay
 	err := command.Run()
+	relay.flush()
+	if stdout.overflowed {
+		return nil, fmt.Errorf("%s printed more than %d bytes, which no release is", field, releaseLimit)
+	}
 	if ctx.Err() != nil {
-		return nil, &TransientError{Err: fmt.Errorf("%s did not finish: %w", field, ctx.Err())}
+		return nil, &TransientError{Err: fmt.Errorf("%s did not finish within %s: %w", field, tokenCommandLimit, ctx.Err())}
 	}
 	if err != nil {
 		var exit *exec.ExitError
-		message := strings.TrimSpace(stderr.String())
-		switch {
-		case errors.As(err, &exit) && message != "":
-			return nil, fmt.Errorf("%s failed (exit %d): %s", field, exit.ExitCode(), message)
-		case errors.As(err, &exit):
-			return nil, fmt.Errorf("%s failed (exit %d)", field, exit.ExitCode())
-		default:
+		if !errors.As(err, &exit) {
 			return nil, fmt.Errorf("%s could not run: %w", field, err)
 		}
+		failed := fmt.Errorf("%s failed (exit %d)", field, exit.ExitCode())
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			failed = fmt.Errorf("%s failed (exit %d): %s", field, exit.ExitCode(), message)
+		}
+		if exit.ExitCode() == exitPending {
+			return nil, &TransientError{Err: failed}
+		}
+		return nil, failed
 	}
-	if stdout.Len() > releaseLimit {
-		return nil, fmt.Errorf("%s printed more than %d bytes, which no release is", field, releaseLimit)
-	}
-	return parseRelease(stdout.Bytes(), field, m.now())
+	return parseRelease(stdout.buf.Bytes(), field, m.now())
 }
+
+// boundedBuffer keeps at most limit bytes of a command's stdout; the first write past it marks the
+// output overflowed and calls overflow, which ends the command, so no broken command fills the
+// daemon's memory.
+type boundedBuffer struct {
+	buf        bytes.Buffer
+	limit      int
+	overflow   func()
+	overflowed bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.overflowed || b.buf.Len()+len(p) > b.limit {
+		if !b.overflowed {
+			b.overflowed = true
+			b.overflow()
+		}
+		return 0, errors.New("token_command output exceeds its limit")
+	}
+	return b.buf.Write(p)
+}
+
+// tokenPattern matches the GitHub token forms (installation, OAuth, user-to-server, refresh,
+// personal, fine-grained personal), which a command's stderr may carry and no log or error may.
+var tokenPattern = regexp.MustCompile(`(gh[opsur]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})`)
+
+// redactingLines writes each whole line of a command's stderr to out with every GitHub token in
+// it replaced, so `agent-secrets`' line naming a pending request reaches the daemon's log as it is
+// written while a token never does; flush writes a last line with no newline.
+type redactingLines struct {
+	out     io.Writer
+	pending []byte
+}
+
+func (r *redactingLines) Write(p []byte) (int, error) {
+	r.pending = append(r.pending, p...)
+	for {
+		end := bytes.IndexByte(r.pending, '\n')
+		if end < 0 {
+			break
+		}
+		_, _ = r.out.Write(tokenPattern.ReplaceAll(r.pending[:end+1], []byte("[redacted]")))
+		r.pending = r.pending[end+1:]
+	}
+	if len(r.pending) > releaseLimit {
+		r.pending = r.pending[:0]
+	}
+	return len(p), nil
+}
+
+func (r *redactingLines) flush() {
+	if len(r.pending) > 0 {
+		_, _ = r.out.Write(tokenPattern.ReplaceAll(r.pending, []byte("[redacted]")))
+		r.pending = nil
+	}
+}
+
+// loginPattern is a GitHub account login: what a release may name an installation by, and the only
+// owner text a refusal of a release quotes.
+var loginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 
 // parseRelease reads a token_command's stdout as the broker's release. Every refusal names the
 // field and the account and never quotes the output, which holds tokens.
@@ -126,8 +262,8 @@ func parseRelease(output []byte, field string, now time.Time) (map[string]releas
 	}
 	installations := make(map[string]releasedInstallation, len(release.Installations))
 	for owner, entry := range release.Installations {
-		if owner == "" {
-			return nil, fmt.Errorf("%s released an installation with no account login", field)
+		if !loginPattern.MatchString(owner) {
+			return nil, fmt.Errorf("%s released an installation whose account is not a GitHub login", field)
 		}
 		if _, err := installationID(entry.InstallationID); err != nil {
 			return nil, fmt.Errorf("%s released %s's installation with no installation id", field, owner)
@@ -144,31 +280,43 @@ func parseRelease(output []byte, field string, now time.Time) (map[string]releas
 	return installations, nil
 }
 
+// brokerNoInstallation is the secrets broker's refusal of a release for an account the App has no
+// installation on (packages/envoy/internal/broker/secrets/githubapp.go, GitHubApp.Mint), which
+// `agent-secrets` prints on stderr and runTokenCommand's error carries.
+const brokerNoInstallation = "has no installation on"
+
 // mintFromCommand is mint in token mode: the command's release for owner, narrowed to read-only
-// when readOnly, and the App's bot identity read under the token. A release without owner's
-// installation, or a command that fails while the App's release of every installation lacks owner,
-// is ErrNotInstalled, so a removed App is an answer about the owner, as in key mode.
+// when readOnly, and the token checked to be the configured App's on every release (tokenIdentity,
+// since a later release could carry another App's token). A release without owner's installation
+// is ErrNotInstalled, and so is a run that failed with the broker's refusal for an account with no
+// installation, or failed for an owner the last release of every installation did not name: no
+// second, wider release is asked for to decide it, so a read-only request never mints a write
+// token.
 func (m *Manager) mintFromCommand(ctx context.Context, role AppRole, app config.GitHubApp, owner string, readOnly bool) (Lease, error) {
+	notInstalled := fmt.Errorf("%w: the %s App's %s released no installation on %s", ErrNotInstalled, role, tokenCommandField(role), owner)
 	installations, err := m.runTokenCommand(ctx, role, app, owner, readOnly)
 	if err != nil {
 		var transient *TransientError
-		if errors.As(err, &transient) {
+		switch {
+		case errors.As(err, &transient):
 			return Lease{}, err
+		case strings.Contains(err.Error(), brokerNoInstallation):
+			return Lease{}, fmt.Errorf("%w: %w", notInstalled, err)
 		}
-		if every, everyErr := m.runTokenCommand(ctx, role, app, "", false); everyErr == nil {
-			if _, ok := every[strings.ToLower(owner)]; !ok {
-				return Lease{}, fmt.Errorf("%w: the %s App's %s released no installation on %s", ErrNotInstalled, role, tokenCommandField(role), owner)
-			}
+		m.mu.Lock()
+		known, recorded := m.installations[role]
+		_, listed := known[strings.ToLower(owner)]
+		m.mu.Unlock()
+		if recorded && !listed {
+			return Lease{}, fmt.Errorf("%w: %w", notInstalled, err)
 		}
 		return Lease{}, err
 	}
 	installation, ok := installations[strings.ToLower(owner)]
 	if !ok {
-		return Lease{}, fmt.Errorf("%w: the %s App's %s released no installation on %s", ErrNotInstalled, role, tokenCommandField(role), owner)
+		return Lease{}, notInstalled
 	}
-	identity, err := m.identity(ctx, app.AppID, func(ctx context.Context) (GitIdentity, error) {
-		return m.tokenIdentity(ctx, role, app.AppID, installation.token)
-	})
+	identity, err := m.tokenIdentity(ctx, role, app.AppID, installation.token)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -194,22 +342,41 @@ func (m *Manager) anyInstallation(ctx context.Context, role AppRole, app config.
 }
 
 // tokenIdentity is the bot identity of the App whose installation token token is, with no JWT:
-// GraphQL's viewer names the bot login, `<slug>[bot]`; GET /apps/<slug> must answer appID, so a
-// command that releases another App's token is refused rather than acted as; and GET
-// /users/<login> gives the bot user's id for its noreply email.
+// verifyTokenApp checks the token is appID's App's and names its bot login, run for every token,
+// and GET /users/<login> gives the bot user's id for its noreply email, read once per App.
 func (m *Manager) tokenIdentity(ctx context.Context, role AppRole, appID, token string) (GitIdentity, error) {
-	login, err := m.viewerLogin(ctx, role, token)
+	login, err := m.verifyTokenApp(ctx, role, appID, token)
 	if err != nil {
 		return GitIdentity{}, err
 	}
-	slug, ok := strings.CutSuffix(login, "[bot]")
-	if !ok || slug == "" {
-		return GitIdentity{}, fmt.Errorf("the %s App's %s released a token that acts as %s, not an App's bot", role, tokenCommandField(role), login)
-	}
-	if err := m.checkAppID(ctx, role, slug, appID, token); err != nil {
+	identity, err := m.identity(ctx, appID, func(ctx context.Context) (GitIdentity, error) {
+		return m.botIdentity(ctx, login, token)
+	})
+	if err != nil {
 		return GitIdentity{}, err
 	}
-	return m.botIdentity(ctx, login, token)
+	if identity.Name != login {
+		return GitIdentity{}, fmt.Errorf("the %s App's %s released a token that acts as %s, where the App acted as %s", role, tokenCommandField(role), login, identity.Name)
+	}
+	return identity, nil
+}
+
+// verifyTokenApp returns the bot login token acts as, refusing a token that is not the App appID's:
+// GraphQL's viewer names the bot login, `<slug>[bot]`, and GET /apps/<slug> must answer appID, so a
+// command that releases another App's token is refused rather than acted as.
+func (m *Manager) verifyTokenApp(ctx context.Context, role AppRole, appID, token string) (string, error) {
+	login, err := m.viewerLogin(ctx, role, token)
+	if err != nil {
+		return "", err
+	}
+	slug, ok := strings.CutSuffix(login, "[bot]")
+	if !ok || slug == "" {
+		return "", fmt.Errorf("the %s App's %s released a token that acts as %s, not an App's bot", role, tokenCommandField(role), login)
+	}
+	if err := m.checkAppID(ctx, role, slug, appID, token); err != nil {
+		return "", err
+	}
+	return login, nil
 }
 
 // viewerLogin is the login GitHub's GraphQL viewer answers for token.
@@ -281,35 +448,53 @@ func (m *Manager) checkAppID(ctx context.Context, role AppRole, slug, appID, tok
 }
 
 // installedFromCommand is InstalledOn in token mode: the App is installed on repo when the release
-// of every installation names repo's owner and that installation's repositories
-// (GET /installation/repositories, every page) include repo. GET /repos/{owner}/{repo} would not
-// do: an installation token reads any public repository, installed or not.
+// for repo's owner names an installation whose repositories (GET /installation/repositories, every
+// page) include repo. GET /repos/{owner}/{repo} would not do: an installation token reads any
+// public repository, installed or not. A cached lease GitHub answers 401 (an App uninstalled while
+// its token lived) is dropped and minted once again, so an uninstall reads as not installed rather
+// than an error until the lease expires.
 func (m *Manager) installedFromCommand(ctx context.Context, role AppRole, repo ghrepo.Repository) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		installed, refused, err := m.listInstallation(ctx, role, repo)
+		if !refused || attempt > 0 {
+			return installed, err
+		}
+		m.Forget(role, repo.Owner())
+	}
+}
+
+// listInstallation reads whether repo is among the repositories of its owner's installation under
+// the owner's read lease; refused reports a 401, a token GitHub no longer honours.
+func (m *Manager) listInstallation(ctx context.Context, role AppRole, repo ghrepo.Repository) (installed, refused bool, err error) {
 	lease, err := m.ReadToken(ctx, role, repo.Owner())
 	if errors.Is(err, ErrNotInstalled) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read whether the %s App is installed on %s: %w", role, repo, err)
+		return false, false, nil
 	}
 	what := fmt.Sprintf("read whether the %s App is installed on %s", role, repo)
+	if err != nil {
+		return false, false, fmt.Errorf("%s: %w", what, err)
+	}
 	for page := 1; ; page++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet,
 			m.baseURL+"/installation/repositories?per_page=100&page="+strconv.Itoa(page), nil)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		tokenHeaders(request, lease.Token)
 		response, err := m.client.Do(request)
 		if err != nil {
-			return false, &TransientError{Err: fmt.Errorf("%s: %w", what, err)}
+			return false, false, &TransientError{Err: fmt.Errorf("%s: %w", what, err)}
+		}
+		if response.StatusCode == http.StatusUnauthorized {
+			refusalBody(response)
+			return false, true, fmt.Errorf("%s failed (401)", what)
 		}
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-			return false, transient(response, refusalBody(response), fmt.Errorf("%s failed (%d)", what, response.StatusCode))
+			return false, false, transient(response, refusalBody(response), fmt.Errorf("%s failed (%d)", what, response.StatusCode))
 		}
 		body, err := readBody(response, what)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		var listing struct {
 			Repositories []struct {
@@ -317,15 +502,15 @@ func (m *Manager) installedFromCommand(ctx context.Context, role AppRole, repo g
 			} `json:"repositories"`
 		}
 		if json.Unmarshal(body, &listing) != nil {
-			return false, fmt.Errorf("%s: GitHub answered an invalid repository list", what)
+			return false, false, fmt.Errorf("%s: GitHub answered an invalid repository list", what)
 		}
 		for _, listed := range listing.Repositories {
 			if strings.EqualFold(listed.FullName, repo.String()) {
-				return true, nil
+				return true, false, nil
 			}
 		}
 		if len(listing.Repositories) < 100 {
-			return false, nil
+			return false, false, nil
 		}
 	}
 }

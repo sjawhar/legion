@@ -45,6 +45,10 @@ printf '%%s|%%s\n' "$LEGION_GITHUB_OWNER" "$LEGION_GITHUB_READ_ONLY" >>%q
 mode=write
 [ -z "$LEGION_GITHUB_READ_ONLY" ] || mode=read
 [ -z "$FAKE_BROKER_FAIL" ] || { echo "broker: refused" >&2; exit 3; }
+if [ -n "$FAKE_BROKER_NONE" ]; then
+  [ -n "$LEGION_GITHUB_OWNER" ] || { printf '{"installations":{}}'; exit 0; }
+  echo "agent-secrets: github app has no installation on $LEGION_GITHUB_OWNER" >&2; exit 1
+fi
 owner=$(printf %%s "$LEGION_GITHUB_OWNER" | tr A-Z a-z)
 case "$owner" in
   "") printf '{"installations":{%%s}}' "%s" ;;
@@ -70,6 +74,13 @@ func (b fakeBroker) runs(t *testing.T) []string {
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }
 
+// uninstall makes the fake broker hold no installation from now on, as the broker answers once
+// the App is uninstalled everywhere.
+func (b fakeBroker) uninstall(t *testing.T) {
+	t.Helper()
+	t.Setenv("FAKE_BROKER_NONE", "1")
+}
+
 // fakeTokenGitHub answers what token mode asks of GitHub under an installation token: GraphQL's
 // viewer, GET /apps/<slug>, GET /users/<login> and GET /installation/repositories. It refuses any
 // JWT-only route (GET /app, the installation listing and exchange), since token mode signs none.
@@ -80,6 +91,7 @@ type fakeTokenGitHub struct {
 	repos     []string
 	asked     []string
 	viewerErr int
+	listErr   int
 }
 
 func (g *fakeTokenGitHub) serve(t *testing.T) *httptest.Server {
@@ -103,6 +115,10 @@ func (g *fakeTokenGitHub) serve(t *testing.T) *httptest.Server {
 		case r.URL.Path == "/users/"+g.slug+"[bot]":
 			fmt.Fprint(w, `{"id":271566630}`)
 		case r.URL.Path == "/installation/repositories":
+			if g.listErr != 0 {
+				w.WriteHeader(g.listErr)
+				return
+			}
 			var listed []string
 			for _, repo := range g.repos {
 				listed = append(listed, fmt.Sprintf(`{"full_name":%q}`, repo))
@@ -167,14 +183,40 @@ func TestTokenModeMintsTheOwnersEntryAndRefreshes(t *testing.T) {
 	}
 	github.mu.Lock()
 	defer github.mu.Unlock()
-	viewers := 0
+	viewers, apps, users := 0, 0, 0
 	for _, asked := range github.asked {
-		if asked == "POST /graphql" {
+		switch asked {
+		case "POST /graphql":
 			viewers++
+		case "GET /apps/legion-implementer":
+			apps++
+		case "GET /users/legion-implementer[bot]":
+			users++
 		}
 	}
-	if viewers != 1 {
-		t.Fatalf("GitHub was asked %v, want the identity read once", github.asked)
+	// Every release's token is checked to be the configured App's; the bot user is read once.
+	if viewers != 3 || apps != 3 || users != 1 {
+		t.Fatalf("GitHub was asked %v, want the App checked for each of the three releases and the bot user read once", github.asked)
+	}
+}
+
+// A refresh whose release carries another App's token is refused, though the App's identity was
+// read before: the check runs on every release, never from the cache.
+func TestTokenModeRefusesAnotherAppsTokenOnRefresh(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"sjawhar"}, now.Add(time.Hour))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345"}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+	if _, err := tokens.Token(context.Background(), Implement, "sjawhar"); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	github.mu.Lock()
+	github.slug, github.appID = "someone-else", "99999"
+	github.mu.Unlock()
+	now = now.Add(41 * time.Minute)
+	if _, err := tokens.Token(context.Background(), Implement, "sjawhar"); err == nil || !strings.Contains(err.Error(), "not of the configured app_id 12345") {
+		t.Fatalf("refresh to another App's token = %v, want the app_id refusal", err)
 	}
 }
 
@@ -220,6 +262,112 @@ func TestTokenModeRefusesAMalformedReleaseWithoutQuotingIt(t *testing.T) {
 				t.Fatalf("parseRelease = %v, want %q and no token", err, tc.want)
 			}
 		})
+	}
+}
+
+// No token reaches a log or an error: a token on the command's stderr is redacted in both, a
+// release keyed by something other than a GitHub login is refused without naming the key, and
+// output past releaseLimit ends the command rather than filling memory.
+func TestTokenModeKeepsTokensOutOfLogsAndErrors(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	leaky := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: `echo "denied for ghs_abcdefghijklmnopqrstuvwxyz0123" >&2; exit 3`}},
+		Options{Now: func() time.Time { return now }, Stderr: &stderr})
+	_, err := leaky.runTokenCommand(context.Background(), Implement, leaky.apps.Implement, "acme", false)
+	if err == nil || strings.Contains(err.Error(), "ghs_abc") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("error = %v, want the stderr with its token redacted", err)
+	}
+	if strings.Contains(stderr.String(), "ghs_abc") || !strings.Contains(stderr.String(), "denied for [redacted]") {
+		t.Fatalf("daemon stderr = %q, want the line with its token redacted", stderr.String())
+	}
+
+	_, err = parseRelease([]byte(`{"installations":{"ghs_secret_value":{"installation_id":1,"token":"x","expires_at":"2026-11-03T13:00:00Z"}}}`), "f", now)
+	if err == nil || strings.Contains(err.Error(), "ghs_secret_value") {
+		t.Fatalf("parseRelease of a token-shaped key = %v, want a refusal that does not name it", err)
+	}
+
+	huge := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: "yes ghs_secret_value_padding"}}, Options{Now: func() time.Time { return now }})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = huge.runTokenCommand(ctx, Implement, huge.apps.Implement, "acme", false)
+	if err == nil || !strings.Contains(err.Error(), "printed more than") || ctx.Err() != nil {
+		t.Fatalf("a command printing without end = %v (ctx %v), want the over-limit refusal before the deadline", err, ctx.Err())
+	}
+}
+
+// A ReadToken for an owner the broker refuses asks nothing wider: the one narrowed run decides it,
+// so no write token of any installation is released for a read-only request.
+func TestTokenModeReadTokenForAMissingOwnerReleasesNothingWider(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"sjawhar"}, now.Add(time.Hour))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345"}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+	if _, err := tokens.ReadToken(context.Background(), Implement, "stranger"); !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("ReadToken for an owner with no installation = %v, want ErrNotInstalled", err)
+	}
+	if got := broker.runs(t); len(got) != 1 || got[0] != "stranger|1" {
+		t.Fatalf("command runs = %q, want the one narrowed read-only run", got)
+	}
+}
+
+// `agent-secrets` exits 75 while its request still waits for approval: transient, never the
+// configuration's answer.
+func TestTokenModeAPendingApprovalIsTransient(t *testing.T) {
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: "echo 'still waiting for approval' >&2; exit 75"}}, Options{})
+	var transient *TransientError
+	if _, err := tokens.Token(context.Background(), Implement, "acme"); !errors.As(err, &transient) || errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("Token on exit 75 = %v, want a transient error", err)
+	}
+}
+
+// A command still running when its caller's deadline ends goes on: the caller gets
+// ErrCommandPending, the next caller joins the same run, and the command runs once.
+func TestTokenModeACallerDeadlineNeitherKillsNorRepeatsTheCommand(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	runs, gate := filepath.Join(dir, "runs"), filepath.Join(dir, "gate")
+	command := fmt.Sprintf(`echo run >>%q; while [ ! -e %q ]; do sleep 0.05; done; printf '{"installations":{"acme":{"installation_id":1,"token":"ghs_x","expires_at":"%s"}}}'`,
+		runs, gate, now.Add(time.Hour).Format(time.RFC3339))
+	tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "1", TokenCommand: command}}, Options{Now: func() time.Time { return now }})
+	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var transient *TransientError
+	if _, err := tokens.runTokenCommand(short, Implement, tokens.apps.Implement, "acme", false); !errors.Is(err, ErrCommandPending) || !errors.As(err, &transient) {
+		t.Fatalf("a caller past its deadline = %v, want a transient ErrCommandPending", err)
+	}
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tokens.runTokenCommand(context.Background(), Implement, tokens.apps.Implement, "acme", false)
+	if err != nil || got["acme"].token != "ghs_x" {
+		t.Fatalf("the next caller = %v, %v; want the running command's release", got, err)
+	}
+	if data, _ := os.ReadFile(runs); strings.Count(string(data), "run") != 1 {
+		t.Fatalf("the command ran %d times, want once", strings.Count(string(data), "run"))
+	}
+}
+
+// A lease GitHub refuses with 401 (the App uninstalled while its token lived) is dropped and
+// minted once more, so InstalledOn answers not installed rather than an error.
+func TestTokenModeInstalledOnRemintsAfterA401(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"acme"}, now.Add(time.Hour))
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345", repos: []string{"acme/widgets"}}
+	server := github.serve(t)
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(server, broker, &now, &stderr)
+	if got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/widgets")); err != nil || !got {
+		t.Fatalf("InstalledOn = %v, %v; want installed", got, err)
+	}
+	github.mu.Lock()
+	github.listErr = http.StatusUnauthorized
+	github.mu.Unlock()
+	t.Setenv("FAKE_BROKER_FAIL", "")
+	broker.uninstall(t)
+	got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/widgets"))
+	if err != nil || got {
+		t.Fatalf("InstalledOn after an uninstall = %v, %v; want not installed", got, err)
 	}
 }
 
