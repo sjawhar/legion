@@ -155,9 +155,10 @@ func recordableHold(hold workflow.IdleHold) bool {
 
 // recordIdleHold records one pass of the idle rule that kept a pod past the idle period, under
 // the rule's own word for the reason and the detail that word leaves out ("" where there is
-// none), and ends every streak of that pod under another reason (store.RecordPodHold). Its
-// caller has read recordableHold: a hold no deployment reads as a hold is a streak to end and
-// not a row to write, and ending it is the caller's, which knows whether the pod has one. A
+// none), and ends every streak of that pod under another reason (store.RecordPodHold). It writes
+// every hold it is given: the idle pass reads recordableHold before it calls (releaseIdlePod), and
+// the teardown's holds come from releaseHold, which names only recordable ones. Ending a streak
+// is the idle pass's, which knows whether the pod has one. A
 // record that cannot be written is logged and nothing else: the records are a deployment's
 // measurement, and a release is a saving, so nothing waits on either.
 func recordIdleHold(ctx context.Context, st *store.Store, project, issue string, hold workflow.IdleHold, detail string, at time.Time, log *slog.Logger) {

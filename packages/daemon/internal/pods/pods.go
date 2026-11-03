@@ -158,8 +158,9 @@ func (v IdleView) RootStanding() Standing {
 // InWorkflow is whether one issue's status and phase alone are still the workflow's: it carries
 // no status that takes an issue out of the workflow (outOfWorkflow, which is
 // record.OutOfWorkflow — this package sits below record, so the rule is passed in rather than
-// restated) and its phase is short of done. A linger is not read here, because a lingering
-// issue is still one the workflow runs for every reader of this rule but the pod gate.
+// restated) and its phase is short of done. A linger is not read here: admission and
+// awaiting-person add it beside this call themselves, the production check and the tree-close
+// wait leave it out, and the pod gate adds it in InWorkflowNotLingering.
 //
 // It is the one statement of that rule in the daemon: workflow.InWorkflow is this call, which
 // is what admission, the linger, the production check and awaiting-person read, and
