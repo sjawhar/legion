@@ -101,3 +101,16 @@ test.each([
   expect(tools).toContain("bash");
   expect(body.replace(/\s+/g, " ")).toContain("Run only commands that read.");
 });
+
+// dispatch://INFRA-331: a thermonuclear agent returned `{"verdict":"APPROVE","report":"see
+// markdown"}` and no report, and the reviewer answered the security rows itself. No Legion agent
+// or caller defines a `report` field and no Legion overlay sets an output schema, so the rule
+// names the whole result the agent hands back, whatever its shape.
+test.each([
+  "thermonuclear-deep-review.md",
+  "thermonuclear-code-quality.md",
+])("%s returns its whole report in the result, never a pointer to one", (file) => {
+  expect(definition(file).body.replace(/\s+/g, " ")).toContain(
+    'Return the whole report in the result you hand back. Never name another place for it — no file, no document, no "see markdown": the caller reads only what the result carries, so a verdict with no report behind it is a review that did not happen.'
+  );
+});
