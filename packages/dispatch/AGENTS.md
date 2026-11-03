@@ -1010,11 +1010,23 @@ checks exist to prevent;
 `text-on-background.test.ts` statically resolves each text composite's nearest enclosing
 background composite in its own file and asserts that pairing is registered, since a component
 can compose a text role onto a background role its own registration never checked;
-`styles-css-pin.test.ts` asserts the hand-written hex/`rgb()` literals in `styles.css` (the
+`styles-css-pin.test.ts` asserts the hand-written color literals in `styles.css` (the
 pre-hydration `:root` fallback and Proof editor variables, both outside the `dark:` className
 mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
-`/* swatch-name */` comment names. Adding a new color pairing means adding a registered
-composite to `classes.ts`, not inventing a shade inline. The document editor
+`/* swatch-name */` comment names. The colors it has to check are found by `css-colors.ts`
+beside it, which walks the stylesheet's declarations with comments dropped and reads a color
+out of every declaration whose property sets one (`color`, the backgrounds, the border,
+outline, text-decoration, column-rule, caret and accent color properties, `fill`/`stroke`, the
+two shadows) or is a custom property, and out of every SVG `fill`/`stroke` attribute inside a
+data URI. It finds 3-, 4-, 6- and 8-digit hex, `%23`-escaped hex, `rgb()`, `rgba()`, `hsl()`,
+`hsla()`, `oklch()`, `oklab()`, and a named color that is a whole value token — so
+`var(--color-red-500)`, `transparent`, `currentColor`, a `url(%23tick)` fragment reference and
+a `color-mix()`'s own color space are not colors anyone wrote, and neither is anything inside a
+comment. The one exemption is a data URI under `mask` or `mask-image`, which paints alpha and
+not color (the task checkbox's tick); under any other property its paint attributes are read.
+A color the reader finds passes only as a 6-digit hex or `rgb()` carrying its annotation, so a
+fallback color is written the one way the pin can check it. Adding a new color pairing means
+adding a registered composite to `classes.ts`, not inventing a shade inline. The document editor
 (`@legion/proof-editor`) themes itself through CSS variables scoped to `.proof-editor`;
 `styles.css` maps them to palette swatches under `.dispatch-doc .proof-editor` for both schemes,
 and those literals are what `styles-css-pin.test.ts` pins.
