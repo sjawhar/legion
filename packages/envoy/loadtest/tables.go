@@ -298,7 +298,7 @@ func kindsTable(md *markdown, steps []stepData) {
 func resourcesTable(md *markdown, steps []stepData) {
 	md.line("\n## Resources\n")
 	md.header("step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
-		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
+		"box busy", "box busy before", "Dispatch RSS max MiB", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
 		"Dispatch CPU-s per operation")
 	marked, unread := false, false
@@ -312,7 +312,7 @@ func resourcesTable(md *markdown, steps []stepData) {
 		if r == nil {
 			// No sampler window: every cell is "-" but box busy before, which is meta.json's
 			// reading, not the sampler's.
-			md.row(s.commitsLabel(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-", "-")
+			md.row(s.commitsLabel(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-")
 			continue
 		}
 		marked = marked || r.failedReads() > 0
@@ -346,10 +346,10 @@ func resourcesTable(md *markdown, steps []stepData) {
 			pgMax = num(r.PGConnsTotal.Max, 0)
 		}
 		md.row(withFailedReads(s.commitsLabel(), r.failedReads()), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
-			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
+			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.Goroutines, p50, smax, 0),
 			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
 	}
-	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine and heap profiles",
+	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity (a failed connect included) and of Dispatch's goroutine profile",
 		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
 	commitsUnreadNote(md, unread, "the Dispatch CPU-s per operation (its operations count the committed writes)", "shows")
 }

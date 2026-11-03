@@ -28,7 +28,7 @@ same step before and after its change, and compares the two rows.
 | `marker.go` | The write marker `lgm<nonce><counter>x`: its format, the run's nonce and the parse that keeps one run's markers |
 | `routes.go` | The route-mix file parser and the request paths |
 | `delivery.go` | The join of writes, database commits and receipts into delivery latencies |
-| `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
+| `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
 | `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
@@ -1182,7 +1182,7 @@ What to compare, from each step's `summary.json` and `samples.json`:
 | The CPU | `summary.json` `replay.dispatch_cpu_s` | Dispatch's CPU-seconds over the window: the figure the three base runs and the three head runs are compared on. The spread is the highest base run's value less the lowest. |
 | The same work | `summary.json` `replay.end_state.sha256` | Equal hashes show the runs did the same work. Within one build they are always equal; across the two builds they are equal when neither replanned (`base_docs.replanned` false on both) and the builds' answers are the same, and can differ when the builds' renderings differ (The client's text is the build's, above). |
 | Not saturated | `summary.json` `replay.saturated` | False in every one of the six runs that are compared. A saturated run measures the box's limit, not the change (A saturated run, below). |
-| Memory | `samples.json` `heap_inuse` and `rss_kib` key `dispatch`, over the samples with `in_window` true | Dispatch's heap in use and its resident size during the window. |
+| Memory | `samples.json` `rss_kib` key `dispatch`, over the samples with `in_window` true | Dispatch's resident size during the window. It is the memory figure: the harness reads no heap profile in the window (Resources, below). |
 
 **A saturated run.** A run with `replay.saturated` true is discarded: it is not compared. Run it
 again in the same place of the interleave, under a new name and with the same flags: a saturated
@@ -1299,7 +1299,7 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
 | `meta.json` | Mode 600 (owner only). The step name and arguments (`args`: the normalized flag list, each flag given to `loadgen run` once as `-name=value` in name order, with the values of `-token` and `-listener-token` replaced by `<redacted>`, the URL of each of `-url`, `-listener`, `-nats-mon` and `-pprof` read whole by Go's `net/url` and written without its userinfo and its `password` parameter, and `-nats` split at commas as nats.go splits it, each server without its own userinfo; the user name goes too, since nats.go takes a user name with no password as the NATS token. `-pg` is written from pgx's own parse of it (`pgconn.ParseConfig`, the parser `pgx.Connect` uses), never from the text given: `postgres://`, each host and port pgx would try, comma-separated (a port the URL leaves out as pgx fills it in, such as 5432), then `/` and the database, such as `postgres://127.0.0.1:15432/dispatch`; never its user, password, `sslpassword` or any other parameter, and `<redacted>` when pgx does not read it as a URL. No file of the step, and no line that `loadgen run` prints, holds a token, a URL password or a NATS token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), `build_commit` and `build_dirty` (the checkout `stack.sh` built from), `dispatch_commit`, `dispatch_binary_sha256` and `dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch binary this step ran, which `--dispatch-commit`/`LOADTEST_DISPATCH_COMMIT` makes another commit than `build_commit`; empty, and `run.log` says so, when that file is absent), the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
 | `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, the dashboard choice (the stream count, `live` or `sse`, and the URL), a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. An endpoint that a line names is written without its URL password. |
-| `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`, `nats`); their values in that sample are 0 (`nats` empty) and enter no statistic. A read that failed once the run had ended is neither named nor counted. |
+| `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, NATS `/varz`. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `nats`); their values in that sample are 0 (`nats` empty) and enter no statistic. A read that failed once the run had ended is neither named nor counted. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
 | `heap-start.pprof`, `heap-end.pprof` | Under `-source replay`: Dispatch's heap profile at the window's start and end (The replay, above). |
@@ -1414,7 +1414,6 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `box busy` | percent | The share of the box's total CPU time (all CPUs) that was not idle or I/O wait, from `/proc/stat`. | `resources.sys_busy_frac` |
 | `box busy before` | percent | The same share over 5 s just before the step, read by `run-step.sh` before its reset, while Dispatch is stopped: the other work on the machine, other roles' processes in the pod included. Above 10%, the step shared the box (`run.log` warns). | `meta.json` `box_busy_before` |
 | `Dispatch RSS max MiB` | MiB | Dispatch's highest resident memory (`VmRSS`) in a sample. | `resources.rss_mib_max.dispatch` |
-| `heap in use MiB p50 / max` | MiB | Dispatch's `HeapInuse` from `/debug/pprof/heap?debug=1`, read every 15 s. | `resources.heap_inuse_mib` |
 | `goroutines p50 / max` | count | Dispatch's goroutines, from `/debug/pprof/goroutine?debug=1`. | `resources.goroutines` |
 | `goroutines waiting for a pool connection p50 / max` | count | Dispatch's goroutines with a pgx pool `Acquire` frame (puddle) in their stack. | `resources.pool_acquire_goroutines` |
 | `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
@@ -1428,18 +1427,32 @@ reads that worked, `null` when fewer than two worked; slow consumers are the las
 cores have a value, and no stack process is checked for an exit.
 
 A sample's read of `pg_stat_activity` fails when the query fails or the sampler cannot connect;
-its read of Dispatch's goroutine or heap profile fails when the GET fails, answers other than 200,
-or holds no goroutine total (no `HeapInuse` for the heap); its read of NATS `/varz` fails when the
-GET fails, answers other than 200 or holds no JSON. `resources.pg_read_errors` counts the
-in-window samples whose Postgres read failed, `resources.pprof_read_errors` the in-window goroutine
-and heap reads that failed, and `resources.nats_read_errors` the in-window NATS reads that failed.
-The row carries the mark `(1 failed read)` or `(<n> failed reads)` with the sum of the first two;
-no column shows the NATS reads. `run.log` shows the first three of each kind and their total; its
-totals count every sample from the warm-up to the end of the grace period, while
-`pg_read_errors`, `pprof_read_errors` and `nats_read_errors` count in-window samples only, so the
-two totals can differ. A failed read enters no statistic, so the Postgres, goroutine, pool-waiter
-and heap columns are over the reads that worked, and a column with no read that worked shows `-`,
-not 0. `TABLES.md` repeats this under the table when a row has the mark.
+its read of Dispatch's goroutine profile fails when the GET fails, answers other than 200, or
+holds no goroutine total; its read of NATS `/varz` fails when the GET fails, answers other than
+200 or holds no JSON. `resources.pg_read_errors` counts the in-window samples whose Postgres read
+failed, `resources.pprof_read_errors` the in-window goroutine reads that failed, and
+`resources.nats_read_errors` the in-window NATS reads that failed. The row carries the mark
+`(1 failed read)` or `(<n> failed reads)` with the sum of the first two; no column shows the NATS
+reads. `run.log` shows the first three of each kind and their total; its totals count every sample
+from the warm-up to the end of the grace period, while `pg_read_errors`, `pprof_read_errors` and
+`nats_read_errors` count in-window samples only, so the two totals can differ. A failed read
+enters no statistic, so the Postgres, goroutine and pool-waiter columns are over the reads that
+worked, and a column with no read that worked shows `-`, not 0. `TABLES.md` repeats this under the
+table when a row has the mark.
+
+**Why the harness reads no heap profile in the window.** The sampler takes no heap profile from
+Dispatch while the window runs, and `resources` holds no heap figure: Dispatch's resident memory
+(`Dispatch RSS max MiB`, read from `/proc`) is the memory the tables show. Rendering
+`/debug/pprof/heap?debug=1` runs inside Dispatch, and it was about half of all the CPU the replay
+measured for Dispatch: over six GC-pass runs, `runtime/pprof.writeHeap`'s cumulative time was 46%
+to 51% of the profile's total (`go tool pprof -top -cum -nodecount=100000 <dispatch binary>
+cpu.pprof`, the `runtime/pprof.writeHeap` line's cum). A sampler that reads it charges its own
+sampling to the process it measures. On an older Dispatch build the render buffered gigabytes in
+`text/tabwriter`; a client that timed out (30 s) left the render running, and the renders piled up
+until one run grew Dispatch's RSS to 9.4 GB and the pod was OOM-killed. The goroutine profile is
+far cheaper to render and stays. The binary profiles at the window's edges stay too
+(`heap-start.pprof`, `heap-end.pprof`, and `heap.pprof` and `heap.txt` after the CPU profile):
+they are taken before the window's measured work, or once it has ended.
 
 ### Session delivery, listener and NATS
 

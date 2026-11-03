@@ -33,30 +33,28 @@ type sample struct {
 	PGTotal    int                `json:"pg_total"`
 	Goroutines int                `json:"goroutines"`
 	PoolWait   int                `json:"pool_acquire_goroutines"`
-	HeapInuse  float64            `json:"heap_inuse"`
-	HeapAlloc  float64            `json:"heap_alloc"`
-	HeapSys    float64            `json:"heap_sys"`
 	NATS       map[string]float64 `json:"nats"`
 	InWindow   bool               `json:"in_window"`
 	// FailedReads names the reads of this sample that failed: readPostgres, readGoroutines,
-	// readHeap, readNATS. Their values above stay 0 (NATS empty) and enter no statistic.
+	// readNATS. Their values above stay 0 (NATS empty) and enter no statistic.
 	FailedReads []string `json:"failed_reads,omitempty"`
 }
 
 // The sampler's reads that can fail, as sample.FailedReads names them: pg_stat_activity (a failed
-// connect included), Dispatch's goroutine and heap profiles, and NATS /varz.
+// connect included), Dispatch's goroutine profile, and NATS /varz.
 const (
 	readPostgres   = "postgres"
 	readGoroutines = "goroutines"
-	readHeap       = "heap"
 	readNATS       = "nats"
 )
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
-// Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, NATS /varz and
-// /jsz, and the pull-request counts of the pull spy. A failed Postgres, pprof or NATS /varz read is
-// marked in its sample (sample.FailedReads); a /jsz read that fails leaves its keys out of the
-// sample. At each sample it also checks that every stack process is alive (checkAlive).
+// Postgres connections, Dispatch's goroutines and pool waiters, NATS /varz and /jsz, and the
+// pull-request counts of the pull spy. It reads no heap profile: rendering one runs inside
+// Dispatch, so the harness would charge its own sampling to the process it measures (README.md,
+// "Why the harness reads no heap profile in the window"). A failed Postgres, pprof or NATS /varz
+// read is marked in its sample (sample.FailedReads); a /jsz read that fails leaves its keys out
+// of the sample. At each sample it also checks that every stack process is alive (checkAlive).
 type sampler struct {
 	pids    map[string]int // by name; "postgres" is the postmaster
 	pprof   string
@@ -255,7 +253,7 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	self := os.Getpid()
-	for n := 0; ; n++ {
+	for {
 		sm := sample{At: time.Now(), CPUTicks: map[string]float64{}, RSSKiB: map[string]float64{}, PGConns: map[string]int{}, NATS: map[string]float64{}}
 		sm.InWindow = !sm.At.Before(winStart) && !sm.At.After(winEnd.Add(5*time.Second))
 		// failed marks and counts a failed read, unless it failed because ctx ended.
@@ -302,11 +300,6 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time, lg *log.
 		}
 		if sm.Goroutines, sm.PoolWait, err = goroutineCounts(s.pprof); err != nil {
 			failed(readGoroutines, &pprofErrs, err)
-		}
-		if n%3 == 0 {
-			if sm.HeapInuse, sm.HeapAlloc, sm.HeapSys, err = heapStats(s.pprof); err != nil {
-				failed(readHeap, &pprofErrs, err)
-			}
 		}
 		if v, err := natsVarz(s.natsMon); err != nil {
 			failed(readNATS, &natsErrs, err)
@@ -432,38 +425,6 @@ func goroutineCounts(pprof string) (total, poolWait int, err error) {
 		return 0, 0, fmt.Errorf("GET %s: no goroutine profile total", redactURL(url))
 	}
 	return total, poolWait, nil
-}
-
-// heapStats reads Dispatch's HeapInuse, HeapAlloc and HeapSys from /debug/pprof/heap?debug=1; an
-// error when the read fails or the profile names no HeapInuse.
-func heapStats(pprof string) (inuse, alloc, sys float64, err error) {
-	url := pprof + "/debug/pprof/heap?debug=1"
-	body, err := getOK(&http.Client{Timeout: 30 * time.Second}, url)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	defer body.Close()
-	sc := bufio.NewScanner(body)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	haveInuse := false
-	for sc.Scan() {
-		line := sc.Text()
-		if v, ok := strings.CutPrefix(line, "# HeapInuse = "); ok {
-			inuse, err = strconv.ParseFloat(v, 64)
-			haveInuse = err == nil
-		} else if v, ok := strings.CutPrefix(line, "# HeapAlloc = "); ok {
-			alloc, _ = strconv.ParseFloat(v, 64)
-		} else if v, ok := strings.CutPrefix(line, "# HeapSys = "); ok {
-			sys, _ = strconv.ParseFloat(v, 64)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return 0, 0, 0, fmt.Errorf("GET %s: %w", redactURL(url), err)
-	}
-	if !haveInuse {
-		return 0, 0, 0, fmt.Errorf("GET %s: no HeapInuse", redactURL(url))
-	}
-	return inuse, alloc, sys, nil
 }
 
 // natsVarz reads NATS's CPU, memory, connections, message counts, slow consumers and subscriptions
@@ -595,7 +556,6 @@ type resourcesSummary struct {
 	PoolAcquireGoroutines stat               `json:"pool_acquire_goroutines"`
 	PGConnsTotal          stat               `json:"pg_conns_total"`
 	PGConnsByState        map[string]stat    `json:"pg_conns_by_state"`
-	HeapInuseMiB          stat               `json:"heap_inuse_mib"`
 	// NATSOutMsgsPerS and NATSInMsgsPerS are NATS's messages out and in per second, from the
 	// first to the last in-window /varz read that worked; null when fewer than two worked.
 	// NATSSlowConsumers is the last such read's count; null when none worked.
@@ -625,9 +585,9 @@ type resourcesSummary struct {
 	XIDsPerS     *float64 `json:"xids_per_s"`
 	XIDReadError string   `json:"xid_read_error,omitempty"`
 	// PGReadErrors counts the in-window samples whose pg_stat_activity read failed, a failed
-	// connect included; PprofReadErrors the in-window reads of Dispatch's goroutine and heap
-	// profiles that failed; NATSReadErrors the in-window /varz reads that failed. A failed read
-	// enters no statistic above.
+	// connect included; PprofReadErrors the in-window reads of Dispatch's goroutine profile that
+	// failed; NATSReadErrors the in-window /varz reads that failed. A failed read enters no
+	// statistic above.
 	PGReadErrors    int `json:"pg_read_errors"`
 	PprofReadErrors int `json:"pprof_read_errors"`
 	NATSReadErrors  int `json:"nats_read_errors"`
@@ -667,7 +627,7 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 			}
 		}
 	}
-	var gor, pw, pgTot, heap []float64
+	var gor, pw, pgTot []float64
 	var natsOK []sample
 	pgState := map[string][]float64{}
 	for _, s := range win {
@@ -679,11 +639,6 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 		} else {
 			gor = append(gor, float64(s.Goroutines))
 			pw = append(pw, float64(s.PoolWait))
-		}
-		if slices.Contains(s.FailedReads, readHeap) {
-			res.PprofReadErrors++
-		} else if s.HeapInuse > 0 {
-			heap = append(heap, s.HeapInuse/1048576)
 		}
 		if slices.Contains(s.FailedReads, readNATS) {
 			res.NATSReadErrors++
@@ -702,7 +657,7 @@ func summarizeResources(ss []sample, ops int, durationS float64) *resourcesSumma
 	for k, v := range pgState {
 		res.PGConnsByState[k] = mkStat(v)
 	}
-	res.Goroutines, res.PoolAcquireGoroutines, res.PGConnsTotal, res.HeapInuseMiB = mkStat(gor), mkStat(pw), mkStat(pgTot), mkStat(heap)
+	res.Goroutines, res.PoolAcquireGoroutines, res.PGConnsTotal = mkStat(gor), mkStat(pw), mkStat(pgTot)
 	if total := b.SysTotal - a.SysTotal; total > 0 {
 		res.SysBusyFrac = (b.SysBusy - a.SysBusy) / total
 	}

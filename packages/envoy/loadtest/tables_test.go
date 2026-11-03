@@ -28,7 +28,7 @@ func TestTablesMarkAStepWhoseStackProcessExited(t *testing.T) {
 		t.Fatalf("the Resources table lacks box busy before 42%%:\n%s", md)
 	}
 	// The killed step has no resources: its row keeps the box busy before column, empty here.
-	if !strings.Contains(section(md, "Resources"), "| killed (dispatch exited) | - | - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n") {
+	if !strings.Contains(section(md, "Resources"), "| killed (dispatch exited) | - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n") {
 		t.Fatalf("the killed step's Resources row is not all -:\n%s", md)
 	}
 	checkRowWidths(t, md)
@@ -134,21 +134,21 @@ func TestTablesResourcesShowFailedSamplerReadsAsMissing(t *testing.T) {
 		return stepData{name: name, sum: summary{Config: summaryConfig{Step: name}, Resources: summarizeResources(ss, 0, 15)}}
 	}
 	md := renderTables([]stepData{
-		step("unread", fakeSample(0, 0, 0, 0, readPostgres, readGoroutines, readHeap), fakeSample(5, 0, 0, 0, readPostgres, readGoroutines),
-			fakeSample(10, 0, 0, 0, readPostgres, readGoroutines)),
-		step("partial", fakeSample(0, 0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 10, 100, 0), fakeSample(10, 12, 120, 0)),
-		step("clean", fakeSample(0, 8, 90, 20), fakeSample(5, 9, 95, 0), fakeSample(10, 9, 95, 0)),
+		step("unread", fakeSample(0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 0, 0, readPostgres, readGoroutines),
+			fakeSample(10, 0, 0, readPostgres, readGoroutines)),
+		step("partial", fakeSample(0, 0, 0, readPostgres, readGoroutines), fakeSample(5, 10, 100), fakeSample(10, 12, 120)),
+		step("clean", fakeSample(0, 8, 90), fakeSample(5, 9, 95), fakeSample(10, 9, 95)),
 	})
 	text := section(md, "Resources")
-	// The columns: heap in use, goroutines, pool waiters, Postgres connections max, connections
-	// waiting on a lock.
-	const heap, goroutines, pool, pgMax, lockWait = 10, 11, 12, 13, 14
+	// The columns: goroutines, pool waiters, Postgres connections max, connections waiting on a
+	// lock.
+	const goroutines, pool, pgMax, lockWait = 10, 11, 12, 13
 
 	unread := rowCells(text, "unread")
-	if unread == nil || unread[0] != "unread (7 failed reads)" {
-		t.Fatalf("the row whose reads all failed is not marked with its 7 failed reads:\n%s", text)
+	if unread == nil || unread[0] != "unread (6 failed reads)" {
+		t.Fatalf("the row whose reads all failed is not marked with its 6 failed reads:\n%s", text)
 	}
-	for _, col := range []int{heap, goroutines, pool, pgMax, lockWait} {
+	for _, col := range []int{goroutines, pool, pgMax, lockWait} {
 		if unread[col] != "-" {
 			t.Errorf("column %d of the row whose reads all failed reads %q, want -:\n%s", col, unread[col], text)
 		}
@@ -237,7 +237,7 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 	}{
 		{"Events, delivery and requests", []int{5, 6, 7}},
 		{"Write latency by kind", nil},
-		{"Resources", []int{15}},
+		{"Resources", []int{14}},
 		{"Delivery from sending, and live socket frames", []int{1, 3}},
 	} {
 		text := section(md, c.title)

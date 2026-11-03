@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,37 +76,37 @@ func TestSamplerChecksNothingWithoutPIDs(t *testing.T) {
 }
 
 // fakeSample is an in-window sample at second at, with pgTotal connections ("idle|" state),
-// goroutines and heap in MiB (0: not read), and the reads named in failed marked as failed.
-func fakeSample(at, pgTotal, goroutines int, heapMiB float64, failed ...string) sample {
+// goroutines, and the reads named in failed marked as failed.
+func fakeSample(at, pgTotal, goroutines int, failed ...string) sample {
 	t0 := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
 	return sample{
 		At: t0.Add(time.Duration(at) * time.Second), InWindow: true,
 		CPUTicks: map[string]float64{"dispatch": float64(at) * 50}, RSSKiB: map[string]float64{"dispatch": 1024},
 		PGConns: map[string]int{"idle|": pgTotal}, PGTotal: pgTotal, Goroutines: goroutines, PoolWait: goroutines / 10,
-		HeapInuse: heapMiB * 1048576, FailedReads: failed,
+		FailedReads: failed,
 	}
 }
 
 func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
-	// Every Postgres and goroutine read failed, and the one heap read.
+	// Every Postgres and goroutine read failed.
 	none := summarizeResources([]sample{
-		fakeSample(0, 0, 0, 0, readPostgres, readGoroutines, readHeap),
-		fakeSample(5, 0, 0, 0, readPostgres, readGoroutines),
-		fakeSample(10, 0, 0, 0, readPostgres, readGoroutines),
+		fakeSample(0, 0, 0, readPostgres, readGoroutines),
+		fakeSample(5, 0, 0, readPostgres, readGoroutines),
+		fakeSample(10, 0, 0, readPostgres, readGoroutines),
 	}, 0, 10)
-	if none.PGConnsTotal.N != 0 || len(none.PGConnsByState) != 0 || none.Goroutines.N != 0 || none.PoolAcquireGoroutines.N != 0 || none.HeapInuseMiB.N != 0 {
+	if none.PGConnsTotal.N != 0 || len(none.PGConnsByState) != 0 || none.Goroutines.N != 0 || none.PoolAcquireGoroutines.N != 0 {
 		t.Fatalf("failed reads entered the stats: %+v", none)
 	}
-	if none.PGReadErrors != 3 || none.PprofReadErrors != 4 {
-		t.Fatalf("pg_read_errors %d, pprof_read_errors %d; want 3 and 4", none.PGReadErrors, none.PprofReadErrors)
+	if none.PGReadErrors != 3 || none.PprofReadErrors != 3 {
+		t.Fatalf("pg_read_errors %d, pprof_read_errors %d; want 3 and 3", none.PGReadErrors, none.PprofReadErrors)
 	}
 
 	// Some reads failed: their zeros would pull each p50 down to 0.
 	some := summarizeResources([]sample{
-		fakeSample(0, 0, 0, 0, readPostgres, readGoroutines, readHeap),
-		fakeSample(5, 0, 100, 0, readPostgres),
-		fakeSample(10, 10, 120, 0),
-		fakeSample(15, 12, 140, 30),
+		fakeSample(0, 0, 0, readPostgres, readGoroutines),
+		fakeSample(5, 0, 100, readPostgres),
+		fakeSample(10, 10, 120),
+		fakeSample(15, 12, 140),
 	}, 0, 15)
 	if some.PGConnsTotal.N != 2 || some.PGConnsTotal.P50 != 10 || some.PGConnsByState["idle|"].N != 2 {
 		t.Fatalf("Postgres connections %+v by state %+v: want the 2 reads that succeeded, p50 10", some.PGConnsTotal, some.PGConnsByState)
@@ -112,11 +114,8 @@ func TestSummarizeResourcesLeavesFailedReadsOutOfTheStats(t *testing.T) {
 	if some.Goroutines.N != 3 || some.Goroutines.P50 != 120 || some.PoolAcquireGoroutines.N != 3 {
 		t.Fatalf("goroutines %+v, pool waiters %+v: want the 3 reads that succeeded, p50 120", some.Goroutines, some.PoolAcquireGoroutines)
 	}
-	if some.HeapInuseMiB.N != 1 || some.HeapInuseMiB.Max != 30 {
-		t.Fatalf("heap %+v, want the one read that succeeded", some.HeapInuseMiB)
-	}
-	if some.PGReadErrors != 2 || some.PprofReadErrors != 2 {
-		t.Fatalf("pg_read_errors %d, pprof_read_errors %d; want 2 and 2", some.PGReadErrors, some.PprofReadErrors)
+	if some.PGReadErrors != 2 || some.PprofReadErrors != 1 {
+		t.Fatalf("pg_read_errors %d, pprof_read_errors %d; want 2 and 1", some.PGReadErrors, some.PprofReadErrors)
 	}
 }
 
@@ -141,16 +140,58 @@ func TestGoroutineCountsFailsWithoutAProfile(t *testing.T) {
 		if _, _, err := goroutineCounts(base); err == nil {
 			t.Errorf("goroutineCounts(%s) read no profile and no error", base)
 		}
-		if _, _, _, err := heapStats(base); err == nil {
-			t.Errorf("heapStats(%s) read no profile and no error", base)
+	}
+}
+
+// TestSamplerAsksDispatchForNoHeapProfile: Dispatch renders /debug/pprof/heap?debug=1 itself, and
+// that render was about half of all the CPU the replay measured for Dispatch (46-51% over six
+// runs), so a heap read in the window measures the harness's own sampling (README.md, "Why the
+// harness reads no heap profile in the window"). The sampler must ask Dispatch for its goroutine
+// profile and for no form of /debug/pprof/heap. Only the sampler is driven here: the binary
+// profiles at the window's edges (heap-start.pprof and heap-end.pprof in runReplay, heap.pprof
+// and heap.txt in step.profile) stay, and driving them needs a whole run.
+func TestSamplerAsksDispatchForNoHeapProfile(t *testing.T) {
+	const profile = "goroutine profile: total 1\n1 @ 0x1\n#\t0x1\truntime.gopark+0x1\tproc.go:1\n\n"
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.RequestURI())
+		mu.Unlock()
+		if !strings.HasPrefix(r.URL.Path, "/debug/pprof/goroutine") {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
 		}
+		fmt.Fprint(w, profile)
+	}))
+	defer srv.Close()
+
+	s := newSampler(endpoints{pprof: srv.URL, natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	now := time.Now()
+	s.loop(ctx, now, now.Add(time.Minute), log.New(io.Discard, "", 0))
+
+	mu.Lock()
+	defer mu.Unlock()
+	goroutines := 0
+	for _, uri := range asked {
+		if strings.HasPrefix(uri, "/debug/pprof/heap") {
+			t.Errorf("the sampler asked Dispatch for %q; its window must hold no heap read", uri)
+		}
+		if strings.HasPrefix(uri, "/debug/pprof/goroutine") {
+			goroutines++
+		}
+	}
+	if goroutines == 0 {
+		t.Fatalf("the sampler read no goroutine profile (it asked for %v), so it proves nothing about the heap", asked)
 	}
 }
 
 // natsSample is fakeSample at second at with the NATS /varz counts in and out, or, when ok is
 // false, with its NATS read marked as failed.
 func natsSample(at int, in, out float64, ok bool) sample {
-	s := fakeSample(at, 1, 1, 0)
+	s := fakeSample(at, 1, 1)
 	s.NATS = map[string]float64{}
 	if !ok {
 		s.FailedReads = append(s.FailedReads, readNATS)
@@ -200,7 +241,7 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	defer cancel()
 	running.loop(ctx, now, now.Add(time.Minute), log.New(&logged, "", 0))
 	ss := running.all()
-	if want := []string{readPostgres, readGoroutines, readHeap, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
+	if want := []string{readPostgres, readGoroutines, readNATS}; len(ss) == 0 || !slices.Equal(ss[0].FailedReads, want) {
 		t.Fatalf("samples %+v: want the first to mark %v", ss, want)
 	}
 	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: nats"} {
