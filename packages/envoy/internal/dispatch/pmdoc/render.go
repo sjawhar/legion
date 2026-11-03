@@ -457,14 +457,22 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
 		tight := r.inTightItemBelowQuotes()
+		// The block's own schema fills an empty paragraph in ahead of another block
+		// (opensWithAParagraph, emptyParagraphFirst), so writing that paragraph's line would put a
+		// blank line in the block that neither parser reads back as it: written as nothing, both
+		// read the block holding it again.
+		children := n.Children
+		if opensWithAParagraph(n.Type) && opensWithUnwrittenParagraph(n) {
+			children = children[1:]
+		}
 		r.enterTyped(n, prefix, colons)
 		if tight {
 			// A typed block's lines are the list item's, so a tight item's typed block writes its
 			// blocks as the item writes its own (itemBlocks): a blank line between two of them
 			// would be a blank line of the item, which the browser editor reads as spacing it.
-			r.itemBlocks(n.Children, false, prefix, prefix, false)
+			r.itemBlocks(children, false, prefix, prefix, false)
 		} else {
-			r.blocksNoTrailing(n.Children, prefix)
+			r.blocksNoTrailing(children, prefix)
 		}
 		r.blanksEndingQuotedList(n.Children, prefix, true)
 		// A spread item whose only written block is this one has no blank line between two of its

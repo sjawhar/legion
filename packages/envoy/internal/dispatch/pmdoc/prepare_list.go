@@ -6,16 +6,26 @@ import (
 )
 
 // This file ports the two upstream functions that decide a list's and a list item's spread in the
-// browser editor's parser, run over this package's own line positions and goldmark tree:
+// browser editor's parser, run over this package's own line positions and goldmark tree. The
+// browser editor runs the versions the repository's root package.json pins,
+// micromark-core-commonmark@2.0.3 and mdast-util-from-markdown@2.0.3, each with this
+// repository's own patch applied (patches/micromark-core-commonmark@2.0.3.patch,
+// patches/mdast-util-from-markdown@2.0.3.patch), so this port is of the patched source:
 //
 //   - micromark-core-commonmark/dev/lib/list.js - tokenizeListStart, tokenizeListContinuation,
 //     tokenizeIndent and tokenizeListItemPrefixWhitespace, with micromark's block-quote.js,
 //     micromark-extension-gfm-footnote's definition continuation and this repository's own
 //     packages/proof-editor/src/directive-container.ts, decide which lines each container holds
-//     and how much of each line it strips (lineMachine below);
+//     and how much of each line it strips (lineMachine below). The patch adds a fast path to
+//     tokenizeListContinuation for a line already over at its call (a line ending or the end of
+//     the document), which sets furtherBlankLines exactly as onBlank does and takes no space,
+//     so the lines it holds and strips are the stock function's;
 //   - mdast-util-from-markdown/dev/lib/index.js - prepareList, with the container-exit move
 //     micromark-util-subtokenize does before it, decide the spread itself (prepareList and
-//     moveContainerExits below).
+//     moveContainerExits below). The patch collects that function's listItem events and inserts
+//     them once at the end of the walk instead of splicing each one in place, which changes
+//     where they are written and not which events are written or what _spread each list gets;
+//     this port writes the events in their final order, as the patched compiler leaves them.
 //
 // The machine writes the event stream those two read, holding only the token kinds they tell
 // apart, and then runs them over it. Columns are counted the way micromark's preprocessor and

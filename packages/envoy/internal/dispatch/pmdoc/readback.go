@@ -409,12 +409,15 @@ func blockIDOf(node *Node) string {
 
 // writtenChildren is node's children as its markdown writes them: an empty paragraph is not
 // written, except where the parser reads one as the browser editor does (emptyParagraphFirst), as
-// its container's only child and ahead of a list item's first block when that is not a paragraph.
+// its container's only child, ahead of a list item's first block when that is not a paragraph, and
+// ahead of the first block of a typed block whose schema opens with a paragraph
+// (opensWithAParagraph), which both parsers fill in again.
 func writtenChildren(node *Node) []*Node {
 	only := len(node.Children) == 1
+	fills := node.Type == "list_item" || opensWithAParagraph(node.Type)
 	written := make([]*Node, 0, len(node.Children))
 	for index, child := range node.Children {
-		readFirst := node.Type == "list_item" && index == 0 && len(node.Children) > 1 && node.Children[1].Type != "paragraph"
+		readFirst := fills && index == 0 && len(node.Children) > 1 && node.Children[1].Type != "paragraph"
 		if only || readFirst || child.Type != "paragraph" || len(child.Children) != 0 {
 			written = append(written, child)
 		}

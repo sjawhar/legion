@@ -834,7 +834,24 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: directive.values, Children: emptyParagraphFirst(children, false)}, nil
+	return &Node{
+		Type:     directive.Name,
+		Attrs:    directive.values,
+		Children: emptyParagraphFirst(children, opensWithAParagraph(directive.Name)),
+	}, nil
+}
+
+// opensWithAParagraph reports whether this typed block's schema content begins with a paragraph,
+// which the browser editor's own schema fills in when the markdown opens the block with another
+// block: an `ask` written with a list first is read holding an empty paragraph ahead of it, since
+// ProseMirror fills a node's content expression from its left (`paragraph+ bullet_list?`). A
+// block whose content is `block+` takes what it is given.
+func opensWithAParagraph(name string) bool {
+	typ, ok := schemaTypes[name]
+	if !ok {
+		return false
+	}
+	return typ.Content == BlockContentParagraphs || typ.Content == BlockContentParagraphsOptionalBulletList
 }
 
 // parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it
