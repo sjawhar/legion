@@ -774,6 +774,15 @@ var digestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // rpc_chunk on its side.
 const LauncherBundlePayloadBytes = 256 << 10
 
+// MaxWorkspaceBundleBodyBytes is the largest body a launcher_bundle sequence carries, and every
+// allocation this file makes for one is under it. It is the wire's own refusal rather than the
+// release's: a release stops above runtime.MaxWorkspaceBundleBytes long before a body reaches
+// here (outbox's release), and this bound says what the sequence itself will build, so a caller
+// that never read that policy cannot ask for a slice count or a body buffer sized by a length
+// nothing checked. 64 MiB leaves the release's 40 MiB its header and room to grow under a bound
+// a test keeps ordered (runtime's workspace_bundle_wire_test.go).
+const MaxWorkspaceBundleBodyBytes = 64 << 20
+
 // SplitWorkspaceBundle slices b, the work release saved, into the launcher_bundle sequence that
 // carries it, every slice declaring the release and the digest of the whole body so the launcher
 // can refuse one that did not arrive as it was sent. The sequence's id is name, the release and
@@ -794,7 +803,10 @@ func SplitWorkspaceBundle(name string, release int64, b WorkspaceBundle) ([]Laun
 	}
 	digest := BundleDigest(body)
 	id := name + "-" + strconv.FormatInt(release, 10) + "-" + digest
-	count := (len(body) + LauncherBundlePayloadBytes - 1) / LauncherBundlePayloadBytes
+	count := len(body) / LauncherBundlePayloadBytes
+	if len(body)%LauncherBundlePayloadBytes != 0 {
+		count++
+	}
 	frames := make([]LauncherBundle, 0, count)
 	for index := range count {
 		end := min((index+1)*LauncherBundlePayloadBytes, len(body))
@@ -840,9 +852,17 @@ func marshalWorkspaceBundle(b WorkspaceBundle) ([]byte, error) {
 	if len(b.Bundle) == 0 {
 		return nil, fmt.Errorf("%w: a workspace bundle carries no bundle", ErrMalformedFrame)
 	}
+	if len(b.Bundle) > MaxWorkspaceBundleBodyBytes {
+		return nil, fmt.Errorf("%w: a workspace bundle of %d bytes is over the %d a launcher_bundle sequence carries",
+			ErrMalformedFrame, len(b.Bundle), MaxWorkspaceBundleBodyBytes)
+	}
 	head, err := json.Marshal(b)
 	if err != nil {
 		return nil, err
+	}
+	if len(head) > MaxWorkspaceBundleBodyBytes {
+		return nil, fmt.Errorf("%w: a workspace bundle header of %d bytes is over the %d a launcher_bundle sequence carries",
+			ErrMalformedFrame, len(head), MaxWorkspaceBundleBodyBytes)
 	}
 	body := make([]byte, 0, len(head)+1+len(b.Bundle))
 	body = append(body, head...)
