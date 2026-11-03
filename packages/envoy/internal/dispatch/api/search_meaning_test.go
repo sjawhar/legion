@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -579,8 +580,9 @@ func TestSearchAndWritesRideOutAnAzureOutage(t *testing.T) {
 	ctx := context.Background()
 	processAllPending(t, database, client)
 	var embeddedDuringOutage, dead bool
-	if err := database.Pool.QueryRow(ctx, "select embedding is not null, dead from embeddings where kind = 'comment' and id = $1", commentID).Scan(&embeddedDuringOutage, &dead); err != nil {
-		t.Fatalf("read the comment's embeddings row: %v", err)
+	commentWindow := "select %s from embeddings where kind = 'comment_block' and split_part(id, '#', 1) = 'comment/' || $1"
+	if err := database.Pool.QueryRow(ctx, fmt.Sprintf(commentWindow, "embedding is not null, dead"), commentID).Scan(&embeddedDuringOutage, &dead); err != nil {
+		t.Fatalf("read the window of the comment's blocks: %v", err)
 	}
 	if embeddedDuringOutage || dead {
 		t.Fatalf("comment row embedded=%v dead=%v while Azure answers 500, want pending: not embedded, not dead", embeddedDuringOutage, dead)
@@ -596,16 +598,16 @@ func TestSearchAndWritesRideOutAnAzureOutage(t *testing.T) {
 
 	var identity string
 	var current bool
-	if err := database.Pool.QueryRow(ctx, "select coalesce(model, ''), embedding is not null and embedded_hash = content_hash from embeddings where kind = 'comment' and id = $1", commentID).Scan(&identity, &current); err != nil {
-		t.Fatalf("read the comment's embeddings row: %v", err)
+	if err := database.Pool.QueryRow(ctx, fmt.Sprintf(commentWindow, "coalesce(model, ''), embedding is not null and embedded_hash = content_hash"), commentID).Scan(&identity, &current); err != nil {
+		t.Fatalf("read the window of the comment's blocks: %v", err)
 	}
 	if !current || identity != client.Identity() {
-		t.Fatalf("comment row current=%v model=%q once Azure answers 200, want current under %q", current, identity, client.Identity())
+		t.Fatalf("the comment's window current=%v model=%q once Azure answers 200, want current under %q", current, identity, client.Identity())
 	}
 	report := searchCoverageResponse(t, handler)
 	requireCoverageIdentity(t, report, client.Identity(), "azure", "embed-v-4-0")
-	if report.Kinds.Comment.Current != 1 || report.Kinds.Comment.Lacking != 0 {
-		t.Errorf("comment coverage = %+v, want the comment current", report.Kinds.Comment)
+	if report.Kinds.CommentBlock.Current != 1 || report.Kinds.CommentBlock.Lacking != 0 {
+		t.Errorf("comment_block coverage = %+v, want the comment's one window current", report.Kinds.CommentBlock)
 	}
 
 	recovered := searchResponse(t, handler, "q=wibbleflorp")

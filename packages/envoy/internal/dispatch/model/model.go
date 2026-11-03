@@ -400,8 +400,9 @@ type SearchResponse struct {
 
 // SearchCoverage is how much of what meaning search covers has a current vector from the
 // configured embedder (INFRA-393, GET /api/v1/search/coverage). Identity is the embedder's
-// identity (embed.Embedder.Identity), Place ("bedrock" or "azure") and Model are read from it;
-// all three are null when no embedder is configured, and then nothing is current.
+// identity (embed.Embedder.Identity), Place ("bedrock", "azure", or "dev" for the local
+// harness's own embedder, which no deployment runs) and Model are read from it; all three are
+// null when no embedder is configured, and then nothing is current.
 type SearchCoverage struct {
 	Identity *string              `json:"identity"`
 	Place    *string              `json:"place"`
@@ -410,13 +411,16 @@ type SearchCoverage struct {
 	Kinds    SearchCoverageKinds  `json:"kinds"`
 }
 
-// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks.
+// SearchCoverageKinds is SearchCoverage's counts for each kind meaning search ranks: the issue,
+// whose vector is its title and the head of its spec, and one kind for each kind of window of
+// blocks - a document's, a comment's, a message's and an ask's parts - whose items are the
+// windows themselves, not the documents or the comments they belong to.
 type SearchCoverageKinds struct {
-	Issue    SearchCoverageCounts `json:"issue"`
-	Document SearchCoverageCounts `json:"document"`
-	Comment  SearchCoverageCounts `json:"comment"`
-	Ask      SearchCoverageCounts `json:"ask"`
-	Message  SearchCoverageCounts `json:"message"`
+	Issue         SearchCoverageCounts `json:"issue"`
+	DocumentBlock SearchCoverageCounts `json:"document_block"`
+	CommentBlock  SearchCoverageCounts `json:"comment_block"`
+	MessageBlock  SearchCoverageCounts `json:"message_block"`
+	AskPart       SearchCoverageCounts `json:"ask_part"`
 }
 
 // SearchCoverageCounts splits Items, the searchable items of a kind (or of all of them), into

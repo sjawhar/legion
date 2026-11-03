@@ -25,10 +25,17 @@ import (
 // reconciliation holds none) and the item row; the index takes the state row after them. It
 // reports whether the item was owed and so indexed.
 func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string) (bool, error) {
+	return indexItemBlocksIfOwed(ctx, tx, kind, itemID, serverURL, false)
+}
+
+// indexItemBlocksIfOwed is IndexItemIfOwed, indexing the item whatever its state says when
+// always is set: that is how the block-index tick's window arm gives windows to an item whose
+// blocks are indexed and whose windows are not (ReindexItemBlocks).
+func indexItemBlocksIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serverURL string, always bool) (bool, error) {
 	var query string
 	switch kind {
 	case ItemAsk:
-		return indexAskIfOwed(ctx, tx, itemID, serverURL)
+		return indexAskIfOwed(ctx, tx, itemID, serverURL, always)
 	case ItemComment:
 		query = `
 			select c.body, coalesce(c.edited_at, c.created_at), true,
@@ -51,7 +58,7 @@ func IndexItemIfOwed(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID, serv
 	if err := tx.QueryRow(ctx, query, itemID).Scan(&body, &writtenAt, &mentions, &stated, &owed, &sum); err != nil {
 		return false, fmt.Errorf("read the block state of %s %s: %w", kind, itemID, err)
 	}
-	if stated && !owed && sum != nil && *sum == itemblocks.BodySHA256(body) {
+	if !always && stated && !owed && sum != nil && *sum == itemblocks.BodySHA256(body) {
 		return false, nil
 	}
 	var located []text.Located

@@ -99,8 +99,8 @@ func requireOnlyTheIssueCounted(t *testing.T, database *store.Store, identity st
 		t.Fatalf("Coverage: %v", err)
 	}
 	for kind, items := range map[string]int64{
-		"document": report.Kinds.Document.Items, "comment": report.Kinds.Comment.Items,
-		"ask": report.Kinds.Ask.Items, "message": report.Kinds.Message.Items,
+		"document_block": report.Kinds.DocumentBlock.Items, "comment_block": report.Kinds.CommentBlock.Items,
+		"ask_part": report.Kinds.AskPart.Items, "message_block": report.Kinds.MessageBlock.Items,
 	} {
 		if items != 0 {
 			t.Errorf("%s items = %d, want 0 (its only item has nothing to embed): %+v", kind, items, report)
@@ -114,12 +114,16 @@ func requireOnlyTheIssueCounted(t *testing.T, database *store.Store, identity st
 	}
 }
 
-// An empty document, an empty comment and a whitespace-only message, enqueued by their triggers,
-// never reach the embedder, never go dead, and are settled with no vector; Coverage counts none
-// of them, and the coverage pass adds and changes nothing for them.
+// A window with nothing to embed - an empty document's, an empty comment's, a whitespace-only
+// message's, each as its indexer wrote it with no context and no text to hold - never reaches
+// the embedder, never goes dead, and is settled with no vector; Coverage counts none of them,
+// and the coverage pass adds and changes nothing for them.
 func TestNothingToEmbedNeverReachesTheEmbedderAndIsNotCovered(t *testing.T) {
 	database := storetest.Open(t)
 	documentID, commentID, messageID := seedNothingToEmbed(t, database.Pool, "BLNK")
+	enqueueWindow(t, database.Pool, "document_block", documentID, "b1", "", "b1")
+	enqueueWindow(t, database.Pool, "comment_block", "comment/"+commentID, "b1", "", "b1")
+	enqueueWindow(t, database.Pool, "message_block", "message/"+messageID, "b1", whitespaceOnly, "b1")
 	embedder := newPlaceEmbedder(configuredIdentity)
 	deps := Deps{Store: database, Embedder: embedder}
 
@@ -128,9 +132,9 @@ func TestNothingToEmbedNeverReachesTheEmbedderAndIsNotCovered(t *testing.T) {
 	if len(embedder.calls) != 1 || !slices.Equal(embedder.calls[0], []string{"A real title"}) {
 		t.Errorf("embedder calls = %q, want one call with the issue's title alone", embedder.calls)
 	}
-	requireSettledWithNoVector(t, database, "document", documentID, configuredIdentity)
-	requireSettledWithNoVector(t, database, "comment", commentID, configuredIdentity)
-	requireSettledWithNoVector(t, database, "message", messageID, configuredIdentity)
+	requireSettledWithNoVector(t, database, "document_block", documentID+"#b1", configuredIdentity)
+	requireSettledWithNoVector(t, database, "comment_block", "comment/"+commentID+"#b1", configuredIdentity)
+	requireSettledWithNoVector(t, database, "message_block", "message/"+messageID+"#b1", configuredIdentity)
 	requireOnlyTheIssueCounted(t, database, configuredIdentity)
 
 	before := snapshotRows(t, database)

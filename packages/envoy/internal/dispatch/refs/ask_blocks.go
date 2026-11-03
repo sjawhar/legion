@@ -215,6 +215,10 @@ func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itembl
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
 			return askPartPairs(next, ids, serverURL)
 		},
+		// The question is what gives an option and an answer their meaning: "eu, for latency"
+		// is found by a reader asking which region was chosen only through the question it
+		// answers, so every part of an ask is embedded under it.
+		windowContext: func(context.Context, pgx.Tx) (string, error) { return ask.Question, nil },
 	})
 }
 
@@ -261,11 +265,12 @@ func askForParts(ctx context.Context, q Queryer, askID string) (model.Ask, time.
 	return ask, writtenAt, true, nil
 }
 
-// indexAskIfOwed is IndexItemIfOwed for an ask: it indexes the ask's parts when they are owed,
-// which is when its state row is missing (a build older than the part index wrote the ask),
-// owed (owed_at set by such a build's write, or by rebuild-refs), or indexed from other parts
-// than the ask holds now. The caller holds the ask row.
-func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bool, error) {
+// indexAskIfOwed is indexItemBlocksIfOwed for an ask: it indexes the ask's parts when they are
+// owed, which is when its state row is missing (a build older than the part index wrote the
+// ask), owed (owed_at set by such a build's write, or by rebuild-refs), or indexed from other
+// parts than the ask holds now, and whatever its state says when always is set. The caller
+// holds the ask row.
+func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string, always bool) (bool, error) {
 	var stated, owed bool
 	var sum *string
 	ask, writtenAt, err := scanAskForParts(tx.QueryRow(ctx, `
@@ -278,7 +283,7 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 	}
 	parts := AskParts(ask)
 	partsSum := askPartsSum(parts)
-	if stated && !owed && sum != nil && *sum == partsSum {
+	if !always && stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
 	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, serverURL, writtenAt); err != nil {

@@ -1447,20 +1447,27 @@ func runHub(t *testing.T, hub *pglisten.Hub) {
 	})
 }
 
-// insertComment writes a comment on issueKey through its trigger, which enqueues it.
-func insertComment(t *testing.T, q querier, issueKey, body string) {
+// insertCommentWithWindow writes a comment on issueKey and the one window its indexer writes
+// for it in the same transaction (refs.IndexItem), which is what enqueues it now that the
+// comment's own write-time trigger is gone.
+func insertCommentWithWindow(t *testing.T, q querier, issueKey, body string) {
 	t.Helper()
-	mustExec(t, q, `insert into comments (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2)`, issueKey, body)
+	var comment string
+	if err := q.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body) values ($1, '{"kind":"user","id":"alice"}', $2) returning id::text
+	`, issueKey, body).Scan(&comment); err != nil {
+		t.Fatalf("insert the comment: %v", err)
+	}
+	enqueueWindow(t, q, "comment_block", "comment/"+comment, "b1", body, "b1")
 }
 
-// Once Run has embedded what was pending at boot and its coverage pass has added and the queue
-// embedded what no trigger saw, nothing changes, so Run makes no statement at all: no scan
-// timer, no due time, no coverage pass. The window is longer than the 5-second period the scan
-// ticker ran at before.
+// Once Run has embedded what was pending at boot and its coverage pass has run, nothing
+// changes, so Run makes no statement at all: no scan timer, no due time, no coverage pass. The
+// window is longer than the 5-second period the scan ticker ran at before.
 func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "IDLE", "IDLE-1", "Enqueued by its trigger")
-	withTriggersOff(t, database, func(q querier) { insertComment(t, q, "IDLE-1", "Written with the triggers off") })
+	insertCommentWithWindow(t, database.Pool, "IDLE-1", "A comment its indexer windowed")
 	counter := &storetest.StatementCounter{}
 	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	runQueue(t, Deps{Store: counted, Embedder: newSyncEmbedder(configuredIdentity)})
@@ -1472,10 +1479,11 @@ func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	storetest.RequireNoStatements(t, counter, 7*time.Second, "Run with nothing pending and nothing changing")
 }
 
-// A write's notification wakes the idle queue, through a real pglisten.Hub on WakeChannel: a
-// comment written once the queue has drained, and once the scan the hub's catch-up signal after
-// its LISTEN earned has run, is embedded within 6 seconds, and nothing else would have scanned
-// for it.
+// A write's notification wakes the idle queue, through a real pglisten.Hub on WakeChannel: the
+// window of a comment written once the queue has drained, and once the scan the hub's catch-up
+// signal after its LISTEN earned has run, is embedded within 6 seconds, and nothing else would
+// have scanned for it. embeddings_enqueue_window announces on the same channel as
+// embeddings_enqueue, so a window wakes the queue exactly as a whole-text row did.
 func TestAWriteIsEmbeddedOnItsNotification(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "NTFY", "NTFY-1", "Written before the queue started")
@@ -1498,7 +1506,7 @@ func TestAWriteIsEmbeddedOnItsNotification(t *testing.T) {
 	time.Sleep(time.Until(started.Add(retryInterval + time.Second)))
 	storetest.AwaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
 
-	insertComment(t, database.Pool, "NTFY-1", "Written while the queue is idle")
+	insertCommentWithWindow(t, database.Pool, "NTFY-1", "Written while the queue is idle")
 	if got := pendingCount(t, database); got != 1 {
 		t.Fatalf("pending after the comment = %d, want 1", got)
 	}

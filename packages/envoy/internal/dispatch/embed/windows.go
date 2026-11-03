@@ -93,6 +93,40 @@ func Windows(context string, blocks []Block) []Window {
 	return windows
 }
 
+// DocumentWindows is Windows for a document, whose context is its title and the nearest heading
+// above the window, where Windows takes one context for every block it is given. It calls
+// Windows once for each heading section - the heading and the blocks under it, up to the next
+// heading - with that section's own context, which is what gives each window the heading it
+// stands under. A heading always starts a window, so a section's windows are the windows of a
+// run of blocks and the sections' windows together are the ones one call would make, each with
+// the heading above it as context.
+//
+// The heading's own text is in the context of its section and in the first window of it, which
+// covers the heading block: a query matching the heading's words finds that window, and an edit
+// of the heading moves the content hash of every window of its section and of no other.
+func DocumentWindows(title string, blocks []Block) []Window {
+	var windows []Window
+	section, context := []Block(nil), title
+	flush := func() {
+		if len(section) > 0 {
+			windows = append(windows, Windows(context, section)...)
+			section = nil
+		}
+	}
+	for _, block := range blocks {
+		if block.Type == headingType {
+			flush()
+			context = title
+			if block.Text != "" {
+				context = strings.TrimPrefix(title+"\n\n"+block.Text, "\n\n")
+			}
+		}
+		section = append(section, block)
+	}
+	flush()
+	return windows
+}
+
 // wholeBlocks is the window a run of neighbouring blocks makes, named for the first of them.
 func wholeBlocks(context string, run []Block) Window {
 	covers := make([]string, len(run))

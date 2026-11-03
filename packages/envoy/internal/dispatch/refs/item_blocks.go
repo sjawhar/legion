@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
@@ -58,6 +59,23 @@ func (tables itemTables) revisions() bool { return tables.texts != "" }
 // (TargetOf).
 func (kind ItemKind) BlockKind() string {
 	return string(kind) + "_block"
+}
+
+// WindowKind is the embeddings kind of a window of an item's blocks: comment_block,
+// message_block, and ask_part for an ask, whose blocks are the parts of its question, options
+// and answer rather than blocks of a body.
+func (kind ItemKind) WindowKind() string {
+	if kind == ItemAsk {
+		return "ask_part"
+	}
+	return kind.BlockKind()
+}
+
+// WindowOwnerKey is the owner key of the windows of item itemID: `<kind>/<uuid>`, the id
+// grammar the item's block nodes already use (ParseItemBlockNode), so a window's id reads as
+// `<kind>/<uuid>#<the first block it covers>`.
+func (kind ItemKind) WindowOwnerKey(itemID string) string {
+	return string(kind) + "/" + itemID
 }
 
 // ParseItemBlockNode reads an item block's node id: the kind of item it is a block of, that
@@ -201,20 +219,46 @@ func IndexItem(
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
 			return itemBlockPairs(next, ids, located)
 		},
+		windowContext: func(ctx context.Context, tx pgx.Tx) (string, error) {
+			return itemIssueTitle(ctx, tx, kind, itemID)
+		},
 	})
+}
+
+// itemIssueTitle is the title of the issue comment or message itemID stands on, the context its
+// blocks are embedded with (embed.Windows), so a reader searching for what the issue is about
+// reaches the reply written under it. A comment on a document and an agent's direct message
+// stand on no issue and have no context: their blocks are embedded with their own text alone.
+func itemIssueTitle(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string) (string, error) {
+	tables, err := kind.tables()
+	if err != nil {
+		return "", err
+	}
+	var title string
+	if err := tx.QueryRow(ctx, `
+		select coalesce(i.title, '') from `+tables.items+` t
+		left join issues i on i.key = t.issue_key
+		where t.id = $1::uuid
+	`, itemID).Scan(&title); err != nil {
+		return "", fmt.Errorf("read the issue title of %s %s for its windows: %w", kind, itemID, err)
+	}
+	return title, nil
 }
 
 // itemBlockSource is one reading of an item's blocks, which indexItemBlocks writes: the blocks in
 // order, the sum of the text they were read from (the state row's body_sha256), how each takes
 // its id against the blocks the item holds, the maker each records (made_by, for a kind whose
-// blocks have one: nil, or an entry per block, null where the item's own author made it), and the
-// links the blocks hold once their ids are known.
+// blocks have one: nil, or an entry per block, null where the item's own author made it), the
+// links the blocks hold once their ids are known, and the context the blocks are embedded with
+// (windowContext, read in the same transaction: the issue's title for a comment or a message,
+// the question for an ask's parts).
 type itemBlockSource struct {
-	blocks  []itemblocks.Block
-	bodySum string
-	ids     func(stored []itemblocks.Stored, next []itemblocks.Block, revision, counter int) ([]string, int, error)
-	madeBy  []*string
-	pairs   func(next []itemblocks.Block, ids []string) []blockPair
+	blocks        []itemblocks.Block
+	bodySum       string
+	ids           func(stored []itemblocks.Stored, next []itemblocks.Block, revision, counter int) ([]string, int, error)
+	madeBy        []*string
+	pairs         func(next []itemblocks.Block, ids []string) []blockPair
+	windowContext func(ctx context.Context, tx pgx.Tx) (string, error)
 }
 
 // indexItemBlocks records source as the current revision of the blocks of item itemID, written at
@@ -351,7 +395,27 @@ func indexItemBlocks(
 	if err := storeItemState(ctx, tx, kind, tables, itemID, revision, counter, source.bodySum); err != nil {
 		return nil, err
 	}
+	if err := writeItemWindows(ctx, tx, kind, itemID, next, ids, source); err != nil {
+		return nil, err
+	}
 	return moved, nil
+}
+
+// writeItemWindows writes the windows of the item's blocks (next, under ids), in the caller's
+// transaction. Every call writes them, a call that found nothing changed included: the window
+// of a text that did not move is a no-op upsert (writeWindows), and an item whose blocks are
+// indexed and whose windows are not - one written before meaning search moved to windows, one
+// whose write failed between the two - takes them from the next index of its blocks.
+func writeItemWindows(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string, next []itemblocks.Block, ids []string, source itemBlockSource) error {
+	context, err := source.windowContext(ctx, tx)
+	if err != nil {
+		return err
+	}
+	blocks := make([]embed.Block, len(next))
+	for i, block := range next {
+		blocks[i] = embed.Block{ID: ids[i], Type: block.Type, Text: block.Text}
+	}
+	return writeWindows(ctx, tx, kind.WindowKind(), kind.WindowOwnerKey(itemID), embed.Windows(context, blocks))
 }
 
 // itemState is an item's state row as indexItemBlocks found it: whether a block-aware build
@@ -701,6 +765,22 @@ func OwedItemBlocks(ctx context.Context, q Queryer, limit int) ([]OwedItemBlock,
 // longer owed and is left alone; one deleted since took its state row with it (on delete
 // cascade), so nothing is owed.
 func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) (bool, error) {
+	return indexItemBlocksInTx(ctx, pool, item, serverURL, false)
+}
+
+// ReindexItemBlocks indexes one comment, message or ask whatever its state row says, in a
+// transaction of its own, as IndexOwedItemBlocks indexes an owed one and under the same locks.
+// The block-index tick's window arm calls it for an item whose blocks hold no embedding window,
+// and what it writes, the windows beside the blocks, is what the item's own write would have
+// written (writeItemWindows).
+func ReindexItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string) error {
+	_, err := indexItemBlocksInTx(ctx, pool, item, serverURL, true)
+	return err
+}
+
+// indexItemBlocksInTx is IndexOwedItemBlocks, indexing the item whatever its state says when
+// always is set.
+func indexItemBlocksInTx(ctx context.Context, pool Pool, item OwedItemBlock, serverURL string, always bool) (bool, error) {
 	tables, err := item.Kind.tables()
 	if err != nil {
 		return false, err
@@ -717,9 +797,46 @@ func IndexOwedItemBlocks(ctx context.Context, pool Pool, item OwedItemBlock, ser
 	case err != nil:
 		return false, fmt.Errorf("lock %s %s: %w", item.Kind, item.ID, err)
 	}
-	indexed, err := IndexItemIfOwed(ctx, tx, item.Kind, item.ID, serverURL)
+	indexed, err := indexItemBlocksIfOwed(ctx, tx, item.Kind, item.ID, serverURL, always)
 	if err != nil {
 		return false, err
 	}
 	return indexed, tx.Commit(ctx)
+}
+
+// ItemsWithoutWindows lists at most limit comments, messages or asks of kind whose blocks the
+// index holds and whose windows it does not, in id order past after (empty: from the start),
+// for the block-index tick's window arm. An item written before meaning search moved to
+// windows has blocks and no window, and so has one whose write failed between the two. The read
+// walks the kind's state table, one row per indexed item, and probes the blocks and the
+// embeddings through their keys.
+func ItemsWithoutWindows(ctx context.Context, q Queryer, kind ItemKind, after string, limit int) ([]OwedItemBlock, error) {
+	tables, err := kind.tables()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.Query(ctx, `
+		select s.`+tables.item+`::text from `+tables.state+` s
+		where s.`+tables.item+` > $1::uuid
+		  and exists (
+			select 1 from `+tables.blocks+` b where b.`+tables.item+` = s.`+tables.item+` and b.position is not null
+		  )
+		  and not exists (
+			select 1 from embeddings e
+			where e.kind = '`+kind.WindowKind()+`' and split_part(e.id, '#', 1) = '`+string(kind)+`/' || s.`+tables.item+`::text
+		  )
+		order by s.`+tables.item+` limit $2
+	`, uuidAfter(after), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list the %ss whose blocks hold no window: %w", kind, err)
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (OwedItemBlock, error) {
+		item := OwedItemBlock{Kind: kind}
+		err := row.Scan(&item.ID)
+		return item, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list the %ss whose blocks hold no window: %w", kind, err)
+	}
+	return items, nil
 }

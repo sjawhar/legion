@@ -1950,23 +1950,27 @@ export interface SearchCoverageCounts {
   readonly oldest_lacking_seconds: number | null;
 }
 
-/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+/** `SearchCoverage`'s counts for each kind meaning search ranks: the issue, whose vector is its
+ * title and the head of its spec, and one kind for each kind of window of blocks - a document's,
+ * a comment's, a message's and an ask's parts (INFRA-370) - whose items are the windows
+ * themselves, not the documents or the comments they belong to. Mirrors
  * `model.SearchCoverageKinds`. */
 export interface SearchCoverageKinds {
   readonly issue: SearchCoverageCounts;
-  readonly document: SearchCoverageCounts;
-  readonly comment: SearchCoverageCounts;
-  readonly ask: SearchCoverageCounts;
-  readonly message: SearchCoverageCounts;
+  readonly document_block: SearchCoverageCounts;
+  readonly comment_block: SearchCoverageCounts;
+  readonly message_block: SearchCoverageCounts;
+  readonly ask_part: SearchCoverageCounts;
 }
 
 /** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
  * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
  * search compares, `place` and `model` are read from it; all three are null when no embedder is
- * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+ * configured, and then nothing is current. `dev` is the local harness's own embedder, which no
+ * deployment runs. Mirrors `model.SearchCoverage`. */
 export interface SearchCoverage {
   readonly identity: string | null;
-  readonly place: "bedrock" | "azure" | null;
+  readonly place: "bedrock" | "azure" | "dev" | null;
   readonly model: string | null;
   readonly total: SearchCoverageCounts;
   readonly kinds: SearchCoverageKinds;

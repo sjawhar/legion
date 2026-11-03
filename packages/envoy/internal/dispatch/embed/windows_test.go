@@ -120,6 +120,35 @@ func TestTheContextIsPartOfEveryWindowsText(t *testing.T) {
 	}
 }
 
+// DocumentWindows gives each window the title and the heading it stands under: a window before
+// the first heading carries the title alone, every window of a section carries that section's
+// heading, and an edit of one heading moves the text of its own section's windows and of no
+// other.
+func TestDocumentWindowsCarryTheHeadingAboveThem(t *testing.T) {
+	const title = "notes.md"
+	blocks := append([]Block{{ID: "b0", Type: "paragraph", Text: "Before any heading."}}, fixtureBlocks()...)
+	windows := DocumentWindows(title, blocks)
+	first, second := title+"\n\nWhat a window is", title+"\n\nWhat a piece is"
+	contexts := []string{title, first, second, second, second, second}
+	if len(windows) != len(contexts) {
+		t.Fatalf("%d windows, want %d: the opening paragraph, the first section, b4, b5's two pieces and b6", len(windows), len(contexts))
+	}
+	for i, window := range windows {
+		if !strings.HasPrefix(window.Text, contexts[i]+"\n\n") {
+			t.Errorf("window %s (covering %v) opens with %q, want the context %q", window.IDSuffix, window.Covers, opening(window.Text), contexts[i])
+		}
+	}
+	edited := slices.Clone(blocks)
+	edited[1] = Block{ID: "b1", Type: "heading", Text: "What a window holds"}
+	after := DocumentWindows(title, edited)
+	for i := range windows {
+		if moved, under := windows[i].Text != after[i].Text, i == 1; moved != under {
+			t.Errorf("window %s moved = %t, want %t: the edited heading opens the windows covering %v and no other",
+				windows[i].IDSuffix, moved, under, windows[i].Covers)
+		}
+	}
+}
+
 // opening is the start of a text, for a failure message.
 func opening(value string) string {
 	runes := []rune(value)

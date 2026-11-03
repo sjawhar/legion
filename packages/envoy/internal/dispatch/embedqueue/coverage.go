@@ -27,16 +27,25 @@ const coverageStatementRows = 500
 // rather than wait out ten minutes.
 var identityRecheckInterval = 10 * time.Minute
 
-// coverageSource is one kind of item meaning search ranks: its FROM clause (from, plus where when
+// coverageSource is one kind of row meaning search ranks: its FROM clause (from, plus where when
 // the kind needs a filter), and the expressions for its id, its text and when it was written.
-// id and text are the kind's write-time trigger's own (0073-0077, the issue's as 0140 replaced
-// it), byte for byte, so a row the coverage pass writes is the row the trigger would have
-// written, and a row the trigger wrote is never seen as stale. from and where are the items search
-// ranks (api/search.go's meaning candidate CTEs), which the triggers can exceed: see
-// coverageSources.
+// For a kind with a source table - the issue - id and text are the kind's write-time trigger's
+// own (0073, as 0140 replaced it), byte for byte, so a row the coverage pass writes is the row
+// the trigger would have written, and a row the trigger wrote is never seen as stale; from and
+// where are the items search ranks (api/search.go's meaning candidate CTEs), which the trigger
+// can exceed.
+//
+// A kind that declares no source table (from empty) is one whose rows the indexers own: the
+// window kinds, whose rows are written by the indexer of the owner's blocks and by the
+// block-index tick's window arm (refs.writeWindows). Its items are its own rows, so the pass
+// adds none and repairs none and the report counts the windows that exist. owned reads that.
 type coverageSource struct {
 	kind, from, where, id, text, writtenAt string
 }
+
+// owned reports whether the indexers own which rows of the kind exist, so the coverage pass
+// runs its identity steps over the kind and nothing else (coverPass).
+func (s coverageSource) owned() bool { return s.from == "" }
 
 // coverageSources is the single list of what meaning search covers, read by the coverage pass
 // (Cover) and the coverage report (Coverage) alike. An item whose text has nothing to embed
@@ -46,16 +55,14 @@ type coverageSource struct {
 //   - issue: 0073's trigger, as 0140 replaced it, and 0140's trigger on a new version of the
 //     issue's primary document enqueue new.key and
 //     issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
-//   - document: 0074 enqueues new.artifact_id::text, new.markdown for every artifact_versions
-//     insert with markdown, the latest version's being the last; search ranks only doc artifacts,
-//     at their latest version (only a doc's versions carry markdown today).
-//   - comment: 0075 enqueues new.id::text, new.body.
-//   - ask: 0076 enqueues new.id::text and new.question, one space, then the answer's text
-//     (coalesce(new.answer->>'text', ...) with the empty string): an unanswered ask's text keeps
-//     its trailing space, and options are not part of it.
-//   - message: 0077 enqueues new.id::text, new.body for every message, an agent's conversation's
-//     too; search ranks only a message on an issue, so that is what this list covers. An agent
-//     message's row is still the queue's to embed, and the pass's identity steps still reach it.
+//   - document_block, comment_block, message_block, ask_part: one row per window of a
+//     document's, a comment's, a message's blocks or of an ask's parts (INFRA-370). Migration
+//     20261102233626 and the three after it dropped the whole-text triggers these replace, so
+//     every such row is written by the indexer that wrote the blocks it covers, in that write's
+//     own transaction, or by the block-index tick for an owner written before this build. No
+//     statement of this pass may invent one: the pass has no way to window an owner, and a row
+//     it inserted for a window that no longer exists would be embedded for ever at a text no
+//     reader can reach.
 var coverageSources = []coverageSource{
 	{
 		kind:      "issue",
@@ -64,19 +71,10 @@ var coverageSources = []coverageSource{
 		text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
 		writtenAt: "i.created_at",
 	},
-	{
-		kind: "document",
-		from: `artifacts a join lateral (
-			select v.markdown, v.created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1
-		) v on true`,
-		where:     "a.kind = 'doc' and v.markdown is not null",
-		id:        "a.id::text",
-		text:      "v.markdown",
-		writtenAt: "v.created_at",
-	},
-	{kind: "comment", from: "comments c", id: "c.id::text", text: "c.body", writtenAt: "c.created_at"},
-	{kind: "ask", from: "asks k", id: "k.id::text", text: "k.question || ' ' || coalesce(k.answer->>'text', '')", writtenAt: "k.created_at"},
-	{kind: "message", from: "messages m join issues i on i.key = m.issue_key", id: "m.id::text", text: "m.body", writtenAt: "m.created_at"},
+	{kind: "document_block"},
+	{kind: "comment_block"},
+	{kind: "message_block"},
+	{kind: "ask_part"},
 }
 
 // items renders the kind's searchable items, those whose text has something to embed (not
@@ -90,7 +88,17 @@ func (s coverageSource) items() string {
 // allItems is items with the ones whose text has nothing to embed kept in: repairStale needs
 // them, so a row whose item's text became empty with the trigger off takes that text and the
 // queue settles it, dropping the vector of the text the item no longer holds.
+//
+// A kind the indexers own has its own rows as its items: a window exists only while the
+// indexer that wrote it says so, and its text and hash are the ones that indexer wrote. Such a
+// kind's items are therefore read from embeddings itself, which is what makes the report count
+// the windows of the database rather than items it has no way to window.
 func (s coverageSource) allItems() string {
+	if s.owned() {
+		return fmt.Sprintf(`select s.id, s.text, s.hash, s.written_at from (
+			select e.id, e.text_snapshot as text, e.content_hash as hash, e.pending_since as written_at
+			from embeddings e where e.kind = '%s') s`, s.kind)
+	}
 	where := ""
 	if s.where != "" {
 		where = " where " + s.where
@@ -327,18 +335,23 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 	return result, nil
 }
 
-// Cover is the coverage pass: for every kind in coverageSources it adds a row for each item that
-// has none, repairs each row whose text is stale and settles each dead row whose text has nothing
-// to embed; then, once the configured embedder has answered (decideIdentitySteps), it drops each
-// vector another identity made and re-admits each other row dead under another identity; and it
-// logs one line with what it changed, whether it skipped those two steps, and the coverage that
-// leaves (Coverage). Every step is a statement of at most coverageStatementRows rows in its own
-// short transaction, repeated until one changes nothing, and each is safe beside a live write and
-// beside another process's pass, so it takes no lease: two envoy-dispatch processes may run it at
-// once, as both do at boot during a rolling deploy, and a lease would let an old-configuration
-// process's pass stand in for the new one's. One deployment configures one identity; two
-// processes configured differently would each drop the other's vectors, which is why every
-// replica gets the same settings.
+// Cover is the coverage pass: for every kind in coverageSources it settles each dead row whose
+// text has nothing to embed and, for a kind with a source table, adds a row for each item that
+// has none and repairs each row whose text is stale; then, once the configured embedder has
+// answered (decideIdentitySteps), it drops each vector another identity made and re-admits each
+// other row dead under another identity; and it logs one line with what it changed, whether it
+// skipped those two steps, and the coverage that leaves (Coverage). Every step is a statement of
+// at most coverageStatementRows rows in its own short transaction, repeated until one changes
+// nothing, and each is safe beside a live write and beside another process's pass, so it takes
+// no lease: two envoy-dispatch processes may run it at once, as both do at boot during a rolling
+// deploy, and a lease would let an old-configuration process's pass stand in for the new one's.
+// One deployment configures one identity; two processes configured differently would each drop
+// the other's vectors, which is why every replica gets the same settings.
+//
+// A kind the indexers own (coverageSource.owned: the window kinds) takes the identity steps
+// alone. The pass has no way to window an owner, so a row it added would name a window nothing
+// wrote, and every whole-text row the block-index tick retires would come back at the next
+// boot, be embedded again, and be retired again, for ever.
 func Cover(ctx context.Context, deps Deps) error {
 	_, err := coverPass(ctx, deps)
 	return err
@@ -349,11 +362,13 @@ func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 	identity := deps.Embedder.Identity()
 	var added, repaired, settled int64
 	for _, source := range coverageSources {
-		for _, step := range []coverStep{
-			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
-			{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}},
-			{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}},
-		} {
+		statements := []coverStep{{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}}}
+		if !source.owned() {
+			statements = append(statements,
+				coverStep{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
+				coverStep{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}})
+		}
+		for _, step := range statements {
 			if err := step.run(ctx, deps, source.kind); err != nil {
 				return identityRun{}, err
 			}
@@ -467,11 +482,11 @@ func Coverage(ctx context.Context, database *store.Store, identity string) (mode
 		report.Identity, report.Place, report.Model = &identity, &place, &name
 	}
 	kinds := map[string]*model.SearchCoverageCounts{
-		"issue":    &report.Kinds.Issue,
-		"document": &report.Kinds.Document,
-		"comment":  &report.Kinds.Comment,
-		"ask":      &report.Kinds.Ask,
-		"message":  &report.Kinds.Message,
+		"issue":          &report.Kinds.Issue,
+		"document_block": &report.Kinds.DocumentBlock,
+		"comment_block":  &report.Kinds.CommentBlock,
+		"message_block":  &report.Kinds.MessageBlock,
+		"ask_part":       &report.Kinds.AskPart,
 	}
 	rows, err := database.Pool.Query(ctx, coverageQuery, identity)
 	if err != nil {
