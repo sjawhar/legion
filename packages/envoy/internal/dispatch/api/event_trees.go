@@ -23,14 +23,16 @@ const eventBodyTreePath = eventPayloadPrefix + ".body"
 
 // attachEventTrees fills the trees of every listed event, for a caller that asked for them. The
 // REST event lists do this only under the header; a /ws/live frame always does, since a browser
-// can set no header on a socket (liveEventFrame).
+// can set no header on a socket (liveEventFrame). The events are filled on as many processors as
+// the process may use, as a list of rows is (fillReads): on a cold cache every event's text is a
+// markdown parse of its own, and each fill writes the trees of its own event.
 func attachEventTrees(events []model.Event, trees bool) {
 	if !trees {
 		return
 	}
-	for index := range events {
+	fillReads(trees, len(events), func(index int) {
 		events[index].Trees = eventDisplayTrees(events[index])
-	}
+	})
 }
 
 // eventDisplayTrees is the display tree of every stored text the event's payload carries, keyed

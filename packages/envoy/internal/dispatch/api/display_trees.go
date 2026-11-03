@@ -3,6 +3,10 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"runtime"
+	"sync"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -32,9 +36,20 @@ func varyOnDisplayTrees(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// displayTreeBuilds makes one reading of one text at a time. A read fills the trees of its rows
+// on several processors at once (fillReads), and the display cache holds a tree only once it is
+// built, so without this the goroutines of one read - and two readers of one text at once -
+// would each parse it. The key is the text itself: one reading per text, which is what the
+// cache is keyed by (its SHA-256 and the mode, and this builds only DisplayLatest).
+var displayTreeBuilds singleflight.Group
+
 // displayTree is the tree a stored text is shown as, or nil for an empty text, which needs none.
 func displayTree(markdown string) json.RawMessage {
-	return pmdoc.DisplayJSON(markdown, pmdoc.DisplayLatest)
+	built, _, _ := displayTreeBuilds.Do(markdown, func() (any, error) {
+		return pmdoc.DisplayJSON(markdown, pmdoc.DisplayLatest), nil
+	})
+	tree, _ := built.(json.RawMessage)
+	return tree
 }
 
 // displayTreeOf is displayTree for a text a row may not hold at all.
@@ -42,7 +57,44 @@ func displayTreeOf(markdown *string) json.RawMessage {
 	if markdown == nil {
 		return nil
 	}
-	return pmdoc.DisplayJSON(*markdown, pmdoc.DisplayLatest)
+	return displayTree(*markdown)
+}
+
+// fillReads shapes the count rows of one answer, each by its own index, on as many processors as
+// the process may use. A read of a 200-comment issue after a restart builds 200 trees, every one
+// of them a cache miss and each a markdown parse; one after another that is the whole cost of
+// the read (the cold read's profile), and the processors sit idle. Each fill writes only its own
+// row, so the answer's bytes and their order are what they were.
+//
+// With no trees to build, and for a list too short to be worth a goroutine, the rows are shaped
+// where they stand: the shaping then only re-wraps what the row already held.
+func fillReads(trees bool, count int, fill func(index int)) {
+	workers := runtime.GOMAXPROCS(0)
+	if !trees || count < 2 || workers < 2 {
+		for index := range count {
+			fill(index)
+		}
+		return
+	}
+	if workers > count {
+		workers = count
+	}
+	var wait sync.WaitGroup
+	rows := make(chan int)
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := range rows {
+				fill(index)
+			}
+		}()
+	}
+	for index := range count {
+		rows <- index
+	}
+	close(rows)
+	wait.Wait()
 }
 
 // The read shapes below are the dashboard's own view of a stored row: each embeds the row the
@@ -154,9 +206,9 @@ func askReads(asks []model.Ask, trees bool) []askRead {
 		return nil
 	}
 	reads := make([]askRead, len(asks))
-	for index := range asks {
+	fillReads(trees, len(asks), func(index int) {
 		reads[index] = newAskRead(asks[index], trees)
-	}
+	})
 	return reads
 }
 
@@ -166,12 +218,12 @@ func askAnswerReads(answers []model.AskAnswer, trees bool) []askAnswerRead {
 		return nil
 	}
 	reads := make([]askAnswerRead, len(answers))
-	for index, answer := range answers {
-		reads[index] = askAnswerRead{AskAnswer: answer}
+	fillReads(trees, len(answers), func(index int) {
+		reads[index] = askAnswerRead{AskAnswer: answers[index]}
 		if trees {
-			reads[index].TextTree = displayTreeOf(answer.Text)
+			reads[index].TextTree = displayTreeOf(answers[index].Text)
 		}
-	}
+	})
 	return reads
 }
 
@@ -181,7 +233,8 @@ func askEditReads(edits []model.AskEdit, trees bool) []askEditRead {
 		return nil
 	}
 	reads := make([]askEditRead, len(edits))
-	for index, edit := range edits {
+	fillReads(trees, len(edits), func(index int) {
+		edit := edits[index]
 		previous := askEditPreviousRead{
 			AskEditPrevious: edit.Previous,
 			Options:         askOptionReads(edit.Previous.Options, trees),
@@ -190,7 +243,7 @@ func askEditReads(edits []model.AskEdit, trees bool) []askEditRead {
 			previous.QuestionTree = displayTree(edit.Previous.Question)
 		}
 		reads[index] = askEditRead{AskEdit: edit, Previous: previous}
-	}
+	})
 	return reads
 }
 
@@ -243,9 +296,9 @@ func commentReads(comments []model.Comment, trees bool) []commentRead {
 		return nil
 	}
 	reads := make([]commentRead, len(comments))
-	for index := range comments {
+	fillReads(trees, len(comments), func(index int) {
 		reads[index] = newCommentRead(comments[index], trees)
-	}
+	})
 	return reads
 }
 
@@ -278,9 +331,9 @@ func messageReads(messages []model.Message, trees bool) []messageRead {
 		return nil
 	}
 	reads := make([]messageRead, len(messages))
-	for index := range messages {
+	fillReads(trees, len(messages), func(index int) {
 		reads[index] = newMessageRead(messages[index], trees)
-	}
+	})
 	return reads
 }
 
@@ -296,12 +349,12 @@ func artifactReviewReads(reviews []model.ArtifactReview, trees bool) []artifactR
 		return nil
 	}
 	reads := make([]artifactReviewRead, len(reviews))
-	for index, review := range reviews {
-		reads[index] = artifactReviewRead{ArtifactReview: review}
+	fillReads(trees, len(reviews), func(index int) {
+		reads[index] = artifactReviewRead{ArtifactReview: reviews[index]}
 		if trees {
-			reads[index].ReasonTree = displayTreeOf(review.Reason)
+			reads[index].ReasonTree = displayTreeOf(reviews[index].Reason)
 		}
-	}
+	})
 	return reads
 }
 
@@ -312,11 +365,11 @@ func attachApprovalTrees(trees bool, artifacts []model.Artifact) {
 	if !trees {
 		return
 	}
-	for index := range artifacts {
+	fillReads(trees, len(artifacts), func(index int) {
 		if approval := artifacts[index].Approval; approval != nil {
 			approval.ReasonTree = displayTreeOf(approval.Reason)
 		}
-	}
+	})
 }
 
 // attachNodeTrees fills the tree of a graph node's own text and of the text a pinned block

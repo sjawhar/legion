@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -356,5 +357,73 @@ func TestTheTreesCostOfACommentList(t *testing.T) {
 	without, with := gzipped(false), gzipped(true)
 	if with <= without {
 		t.Errorf("the answer with trees gzips to %d bytes, not over the %d without them", with, without)
+	}
+}
+
+// commentsToFill is a list long enough that fillReads runs it on every processor, each body its
+// own text so every tree is a build of its own.
+func commentsToFill() []model.Comment {
+	comments := make([]model.Comment, 64)
+	for index := range comments {
+		number := strconv.Itoa(index)
+		comments[index] = model.Comment{
+			ID:   "comment-" + number,
+			Body: "Comment **" + number + "** of the list.\n\n- an item\n\n> a quoted line\n",
+		}
+	}
+	return comments
+}
+
+// The parallel fill answers exactly what reading each row where it stands answered: the same
+// trees, each against its own row, in the order the rows came in (fillReads).
+func TestTheParallelFillAnswersTheTreeOfEveryRowInOrder(t *testing.T) {
+	comments := commentsToFill()
+	reads := commentReads(comments, true)
+	if len(reads) != len(comments) {
+		t.Fatalf("the read list holds %d rows, want %d", len(reads), len(comments))
+	}
+	for index, read := range reads {
+		if read.ID != comments[index].ID {
+			t.Fatalf("row %d is %s, want %s", index, read.ID, comments[index].ID)
+		}
+		want := pmdoc.DisplayJSON(comments[index].Body, pmdoc.DisplayLatest)
+		if !bytes.Equal(read.BodyTree, want) {
+			t.Errorf("row %d reads %s, want %s", index, read.BodyTree, want)
+		}
+	}
+}
+
+// A list with no trees asked for is shaped where it stands and carries none, parallel fill or
+// not.
+func TestAListWithoutTheHeaderCarriesNoTree(t *testing.T) {
+	for index, read := range commentReads(commentsToFill(), false) {
+		if read.BodyTree != nil {
+			t.Fatalf("row %d carries a tree without the header: %s", index, read.BodyTree)
+		}
+	}
+}
+
+// Several readers of one list at once are answered the same trees: the fill's goroutines write
+// only their own row, and one text is built once however many readers want it
+// (displayTreeBuilds). Run under -race, this is the check that the fill is safe.
+func TestReadersOfOneListAtOnceAreAnsweredTheSameTrees(t *testing.T) {
+	comments := commentsToFill()
+	want := commentReads(comments, true)
+	answers := make([][]commentRead, 8)
+	var readers sync.WaitGroup
+	for reader := range answers {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			answers[reader] = commentReads(comments, true)
+		}()
+	}
+	readers.Wait()
+	for reader, answer := range answers {
+		for index, read := range answer {
+			if !bytes.Equal(read.BodyTree, want[index].BodyTree) {
+				t.Fatalf("reader %d reads row %d as %s, want %s", reader, index, read.BodyTree, want[index].BodyTree)
+			}
+		}
 	}
 }
