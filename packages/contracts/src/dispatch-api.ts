@@ -1101,6 +1101,44 @@ export interface MyRepliesResponse {
   readonly as_of: string;
 }
 
+/** A priority the Inbox's Mark all read narrows to: `P0` to `P3` as the Inbox's filter writes
+ *  them, or `none` for a thread whose issue carries no priority, a thread on a project document,
+ *  which has no issue, and an Agent thread, which has neither. */
+export type MarkInboxReadPriority = "P0" | "P1" | "P2" | "P3" | "none";
+
+/** The body of `POST /api/v1/me/inbox/read`, the Inbox's Mark all read: it marks exactly the
+ *  threads `GET /api/v1/me/replies?state=unread` answers under the same narrowing whose newest
+ *  reply is at or before `read_through`, which is the list's own `as_of`. Each absent list means
+ *  every value, so a body of `read_through` alone marks the whole unread Inbox. A thread written
+ *  in since `read_through` stays unread, and a thread already read past it keeps its later mark.
+ *
+ *  An Agent thread carries no issue, document, project, priority or urgency, so `issue`,
+ *  `artifact`, and a `priority` or `project` list without `none`, each leave it out; a Reply
+ *  thread carries no urgency either, so an `urgency` list without `none` marks nothing at all. */
+export interface MarkInboxReadRequest {
+  /** RFC3339; stored as no later than now. Missing, unparsable or more than a minute ahead of
+   *  the server is 400 INVALID_STATE. */
+  readonly read_through: string;
+  /** Both kinds by default, unlike the list route's default of `reply` alone. */
+  readonly kind?: ("reply" | "agent")[];
+  readonly priority?: MarkInboxReadPriority[];
+  readonly urgency?: (AskUrgency | "none")[];
+  /** Project keys, and `none` for a thread with no project. */
+  readonly project?: string[];
+  /** One issue's threads. With `artifact` it is 400 INVALID_QUERY. */
+  readonly issue?: string;
+  /** One project document's threads, by document id. With `issue`, or when it is not a document
+   *  id, it is 400 INVALID_QUERY. */
+  readonly artifact?: string;
+}
+
+/** `POST /api/v1/me/inbox/read`'s answer: how many threads it marked - the Reply threads whose
+ *  mark moved plus the Agent threads whose replies it read. A request that moves nothing answers
+ *  0 and announces nothing. */
+export interface MarkInboxReadResponse {
+  readonly marked: number;
+}
+
 /** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
  *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
  *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it
@@ -2437,11 +2475,14 @@ export interface UserAgentStateUpdatedEventPayload {
   readonly session_id: string;
 }
 
-/** `user_thread_state.updated`: one viewer's read mark on one thread of the Replies page moved.
- *  It carries no state; the viewer's other tabs and devices refetch their replies. */
+/** `user_thread_state.updated`: one viewer's read of the Inbox's threads moved. It carries no
+ *  state; the viewer's other tabs and devices refetch theirs. `thread_id` names the thread when
+ *  one thread was marked (`PUT /api/v1/me/threads/{id}/read`); a mark-all
+ *  (`POST /api/v1/me/inbox/read`) names no thread, since one event stands for every thread it
+ *  marked in that project. */
 export interface UserThreadStateUpdatedEventPayload {
   readonly login: string;
-  readonly thread_id: string;
+  readonly thread_id?: string;
 }
 
 /**
