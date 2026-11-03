@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,6 +52,7 @@ import (
 // broker's log line is read last, so that against a broker without the fix the test fails on the
 // refusal the pods met rather than on a missing line.
 func TestABrokerOutageLongerThanALease(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")
@@ -63,14 +65,24 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		secretName   = "OUTAGE_TOKEN"
 		secretValue  = "outage-token-value"
 		// lease is BROKER_LEASE_SECONDS. A renewer renews once a third of it has passed, so a pod
-		// that renews holds at least two thirds of it.
-		lease = 45 * time.Second
+		// that renews holds at least two thirds of it. It is as short as the margins below leave
+		// room for, since this row waits a whole outage out in real time and an outage is longer
+		// than a lease (dispatch://INFRA-1075).
+		lease = 20 * time.Second
 		// notServing is the longest gap between two records that a broker serves which still
 		// counts as one serving: three sweeps of BROKER_SWEEP_SECONDS=1.
 		notServing = 3 * time.Second
-		// renewerLongestWait is agent-secrets renew's longest wait between two failed attempts
-		// (nextBackoff's cap), so a renewer whose broker is back renews within it.
-		renewerLongestWait = 10 * time.Second
+		// renewerLongestWait is agent-secrets renew's longest wait between two failed attempts,
+		// which the survivor's renewer is started with (--retry-cap), so a renewer whose broker
+		// is back renews within it. It is well inside a third of a lease, which is what (2)
+		// holds that renewal to.
+		renewerLongestWait = 3 * time.Second
+		// margin is how far short of a whole lease the survivor is held when the broker is
+		// stopped, and beat how much more than two thirds of one it must still hold. A ninth and
+		// a forty-fifth of a lease are the five seconds and the one second this row was written
+		// with when its lease was 45 s.
+		margin = lease / 9
+		beat   = lease / 45
 	)
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	fakeSecrets := `{"secrets": [
@@ -93,7 +105,7 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
 		"BROKER_SERVICE_LOGINS=" + service + "=" + loginAccount,
 		"BROKER_SERVICES=" + service + "=" + podAccount,
-		"BROKER_LEASE_SECONDS=45",
+		"BROKER_LEASE_SECONDS=" + strconv.Itoa(int(lease/time.Second)),
 		"BROKER_SWEEP_SECONDS=1",
 		"BROKER_DRAIN_SECONDS=0",
 	}
@@ -143,7 +155,7 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 	writeWhole(t, filepath.Join(keyDir, "enrollment"), survivorID+"\n")
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	writeWhole(t, tokenFile, podToken(survivorUID, podAccount))
-	renew := exec.Command(cli, "renew", "--pod-token-file", tokenFile)
+	renew := exec.Command(cli, "renew", "--pod-token-file", tokenFile, "--retry-cap", renewerLongestWait.String())
 	renew.Env = agentSecretsEnv(front.url, keyDir)
 	renewer := cmdtest.Start(t, "agent-secrets renew", renew)
 	renewerRunning := func(when string) {
@@ -197,25 +209,25 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 	}
 
 	// The margin: the broker is stopped while the survivor holds more than two thirds of its lease
-	// but renewed at least five seconds ago, between two of its renewals. The time given back
+	// but renewed at least a margin ago, between two of its renewals. The time given back
 	// restores the lease the survivor held at the first broker's last record that it served, at
 	// most one sweep before the stop, so the restored survivor holds at least two thirds of a
-	// lease, 30 s, less one beat, and its renewer, whose longest retry wait is 10 s, renews well
-	// inside that. And the lease given back runs at least four seconds short of a whole one from
+	// lease less one beat, and its renewer, whose longest retry wait is renewerLongestWait,
+	// renews well inside that. And the lease given back runs a margin short of a whole one from
 	// the restart, which is what tells the renewer's own renewal after the restart from it.
 	t.Log("--- the outage: the broker is stopped between two of the survivor's renewals")
 	for waited := time.Now(); ; {
 		expires, now := leaseOf(survivorID)
 		left := expires.Sub(now)
-		if left > lease*2/3+time.Second && left <= lease-5*time.Second {
+		if left > lease*2/3+beat && left <= lease-margin {
 			t.Logf("the survivor holds %s of its lease at the stop", left.Round(time.Millisecond))
 			break
 		}
 		if time.Since(waited) > lease {
 			t.Fatalf("the survivor's renewer has not renewed its lease in a whole lease (it holds %s):\n%s", left, renewer.Output.String())
 		}
-		if left > lease-5*time.Second {
-			time.Sleep(left - (lease - 5*time.Second) + 50*time.Millisecond)
+		if left > lease-margin {
+			time.Sleep(left - (lease - margin) + 50*time.Millisecond)
 		} else {
 			time.Sleep(250 * time.Millisecond)
 		}

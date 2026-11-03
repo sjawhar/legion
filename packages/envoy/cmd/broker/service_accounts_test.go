@@ -22,6 +22,7 @@ import (
 // once, naming no approver, and read its value; the pod running as an account no entry names is
 // denied it at once, with no grant, no record and no approver to ask.
 func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")

@@ -532,11 +532,17 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// nextBackoff advances the 2s -> 10s backoff every poll loop in this package uses.
-func nextBackoff(cur time.Duration) time.Duration {
+// retryCap is how far the 2 s backoff every poll loop in this package uses grows. renew takes it
+// as --retry-cap because it is the longest a renewer whose broker has come back can take to
+// renew: a test that drives a real broker outage waits that wait out, so it passes a short one
+// (cmd/broker/outage_test.go, dispatch://INFRA-1075).
+const retryCap = 10 * time.Second
+
+// nextBackoff advances the 2 s -> limit backoff every poll loop in this package uses.
+func nextBackoff(cur, limit time.Duration) time.Duration {
 	next := cur * 2
-	if next > 10*time.Second {
-		next = 10 * time.Second
+	if next > limit {
+		next = limit
 	}
 	return next
 }
@@ -605,11 +611,12 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // cannot succeed; every other refusal, POD_IDENTITY_MISMATCH, POD_TOKEN_EXPIRED,
 // VM_IDENTITY_MISMATCH and VM_TOKEN_EXPIRED among them, retries.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true, "audience": true})
+	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true, "audience": true, "retry-cap": true})
 	flags := newFlagSet("renew", stderr)
 	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
 	vmFlag := flags.Bool("vm", false, "a Google Cloud VM: ask the metadata server for a fresh identity token before every renewal")
 	audience := flags.String("audience", os.Getenv(vmAudienceVar), "--vm: the audience the broker verifies Google identity tokens for (default "+vmAudienceVar+")")
+	retryWait := flags.Duration("retry-cap", retryCap, "the longest wait between two failed renewals; the renewer backs off from 2s up to it")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -649,7 +656,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	case *vmFlag:
 		token = vmRenewToken(ctx, *audience)
 	}
-	return renewLoop(ctx, newClient(base), signer, enrollmentID, token, stderr, time.After)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, token, stderr, time.After, *retryWait)
 }
 
 // renewToken is the token each renewal carries: the body field the broker reads it as, what an
@@ -673,7 +680,7 @@ func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
 	return fmt.Sprintf("ERROR: enrollment %s cannot read its %s (%v); nothing was sent, so its lease lapses unless %s", enrollmentID, carry.what, err, carry.until)
 }
 
-func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time, retryLimit time.Duration) int {
 	backoff := 2 * time.Second
 	for {
 		var token string
@@ -709,7 +716,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return 0
 			case <-after(backoff):
 			}
-			backoff = nextBackoff(backoff)
+			backoff = nextBackoff(backoff, retryLimit)
 			continue
 		}
 		backoff = 2 * time.Second
@@ -1025,7 +1032,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 			state, grantID = status.State, status.GrantID
-			backoff = nextBackoff(backoff)
+			backoff = nextBackoff(backoff, retryCap)
 		}
 	}
 	switch state {

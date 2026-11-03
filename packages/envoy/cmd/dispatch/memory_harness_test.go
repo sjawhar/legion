@@ -54,7 +54,10 @@ func newMemoryHarness(t *testing.T) *memoryHarness {
 	if runtime.GOOS != "linux" {
 		t.Skip("the memory tests read a server's resident memory from /proc")
 	}
-	harness := &memoryHarness{t: t, database: storetest.Open(t)}
+	// OpenFresh: the harness hands the database to a server process of its own, which outlives
+	// the test's own cleanup, and these rows count what a server holds against a database no
+	// other test has written into (dispatch://INFRA-985).
+	harness := &memoryHarness{t: t, database: storetest.OpenFresh(t)}
 	server := harness.start(t)
 	for _, request := range []struct{ path, body string }{
 		{"/api/v1/projects", `{"key":"MEM","name":"Memory"}`},

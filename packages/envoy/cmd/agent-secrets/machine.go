@@ -21,14 +21,22 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
+// machineLoginPoll is how long machine login first waits between two reads of the login's state,
+// doubling from there up to retryCap. A person reads the code off this terminal and types it
+// somewhere else, so seconds is the right scale in production; a test that decides the login
+// itself passes --poll a short one (dispatch://INFRA-1075).
+const machineLoginPoll = 2 * time.Second
+
 // cmdMachineLogin implements "machine login". It asks agent-secrets-helper to start a machine
 // login, prints the broker's confirmation code and where to type it — AGENT_SECRETS_APPROVE_URL's
 // /credentials/machine when that is set, else the broker's verification_uri the helper relays,
 // else the Dispatch credential page by name — then polls the helper until the login reaches a
 // terminal state.
 func cmdMachineLogin(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, nil)
-	if err := newFlagSet("machine login", stderr).Parse(flagArgs); err != nil {
+	flagArgs, positional := splitArgs(args, map[string]bool{"poll": true})
+	flags := newFlagSet("machine login", stderr)
+	poll := flags.Duration("poll", machineLoginPoll, "how long to wait before the first re-read of the login's state; the wait doubles from it up to "+retryCap.String())
+	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	if len(positional) > 0 {
@@ -53,7 +61,7 @@ func cmdMachineLogin(args []string, stdout, stderr io.Writer) int {
 	} else {
 		fmt.Fprintln(stdout, "enter it on the Dispatch credential page")
 	}
-	backoff := 2 * time.Second
+	backoff := *poll
 	for {
 		resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
 		if err != nil {
@@ -72,7 +80,7 @@ func cmdMachineLogin(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		time.Sleep(backoff)
-		backoff = nextBackoff(backoff)
+		backoff = nextBackoff(backoff, retryCap)
 	}
 }
 

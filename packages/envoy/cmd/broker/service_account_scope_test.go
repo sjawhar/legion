@@ -21,6 +21,7 @@ import (
 // running as other-service's own account under its credential is granted that service's secret,
 // so the denials are the account check and not a service that cannot be served.
 func TestAnAccountProvesOnlyTheServiceItIsListedFor(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")

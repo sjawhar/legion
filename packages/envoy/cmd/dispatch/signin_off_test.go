@@ -14,6 +14,7 @@ import (
 // boots, serves its agent-token API, and tells a browser that sign-in is not configured. One
 // setting on its own is still half a sign-in, and refuses the boot naming the rest.
 func TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn(t *testing.T) {
+	t.Parallel()
 	boot, err := resolveBootConfig(envGetter(noSignInEnvironment(nil)))
 	if err != nil || boot.SignInIssuer != "" {
 		t.Fatalf("no sign-in setting: SignInIssuer = %q, err = %v, want a boot with no sign-in", boot.SignInIssuer, err)
@@ -43,6 +44,7 @@ func TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn(t *testing.T) {
 // still use Dispatch. GET /api/v1/whoami is the person-level API such a cookie would otherwise
 // reach, naming its person by cookie when no bearer names one.
 func TestABootWithNoSignInRefusesACookieIssuedWhileSignInWasOn(t *testing.T) {
+	t.Parallel()
 	boot, err := resolveBootConfig(envGetter(noSignInEnvironment(nil)))
 	if err != nil {
 		t.Fatalf("resolve boot config: %v", err)

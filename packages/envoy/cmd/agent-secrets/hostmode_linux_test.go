@@ -62,7 +62,7 @@ func fakeHelperWithPids(t *testing.T, canned helper.Response) (string, <-chan in
 // process image.
 func TestRegisterExecRunsTheCommandAsTheRegisteredPid(t *testing.T) {
 	sock, pids := fakeHelperWithPids(t, helper.Response{OK: true, State: "enrolling", RuntimeID: "h:1:1"})
-	cmd := exec.Command("go", "run", ".", "register", "--exec", "--", "sh", "-c", "echo $$")
+	cmd := exec.Command(buildAgentSecrets(t), "register", "--exec", "--", "sh", "-c", "echo $$")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock)
 	out, err := cmd.Output()
 	if err != nil {

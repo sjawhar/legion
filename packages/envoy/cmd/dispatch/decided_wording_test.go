@@ -22,6 +22,7 @@ import (
 // decision on the reworded question and opens its own ask at that settlement; a document holding
 // the block of an ask the boot left as it was owes none.
 func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	const (

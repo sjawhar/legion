@@ -15,6 +15,7 @@ import (
 // credentials; a config with no region is refused at startup rather than minting tokens RDS
 // would refuse at every sign-in.
 func TestRDSAuthTokensSignsAConnectRequestForTheEndpointAndUser(t *testing.T) {
+	t.Parallel()
 	creds := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
 		return aws.Credentials{AccessKeyID: "AKIDEXAMPLE", SecretAccessKey: "secret"}, nil
 	})

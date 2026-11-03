@@ -420,6 +420,7 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 // and every in-process rig leaves it: a process that never stops is never draining, so the ping
 // alone decides.
 func TestHealthzIsPublic(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	status, _ := ts.req(t, http.MethodGet, "/healthz", nil, nil)
 	if status != http.StatusOK {
@@ -434,6 +435,7 @@ func TestHealthzIsPublic(t *testing.T) {
 // pod goes on serving the requests still being routed to it: GET /v1/settings, a public route of
 // the same mux, must answer exactly as it always does while /healthz is refusing.
 func TestHealthzFailsWhileDrainingAndNothingElseDoes(t *testing.T) {
+	t.Parallel()
 	var draining atomic.Bool
 	ts := newTestServerWith(t, func(d *api.Deps) { d.Draining = draining.Load })
 
@@ -455,6 +457,7 @@ func TestHealthzFailsWhileDrainingAndNothingElseDoes(t *testing.T) {
 // does not name are each refused — never silently open. An expired token and one that lives
 // longer than an hour from its issue are refused too, each by its own code.
 func TestARouteDispatchCallsRefusesAnyOtherCredential(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	longLived := ts.podIssuer.Claims(dispatchAccount, podAudience)
 	longLived["iat"] = time.Now().Add(-time.Hour).Unix()
@@ -488,6 +491,7 @@ func TestARouteDispatchCallsRefusesAnyOtherCredential(t *testing.T) {
 // longer authenticates the enrollment routes at all: only a launcher proof (Proof header, "lid"
 // claim) does now.
 func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	status, body := ts.req(t, http.MethodPost, "/v1/enrollments",
 		map[string]string{"Authorization": "Bearer some-v8-style-launcher-token", "Content-Type": "application/json"},
@@ -565,6 +569,7 @@ func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host strin
 // proof merely because it verifies. Without this guard the handler would receive an empty
 // enroll.Credential and either fail differently downstream or, worse, succeed with the zero value.
 func TestSessionProofRejectedOnLauncherAuthRoute(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
@@ -584,6 +589,7 @@ func TestSessionProofRejectedOnLauncherAuthRoute(t *testing.T) {
 // launcher proof (an "lid" claim, signed by a live launcher credential's own key) is refused with
 // 401 PROOF_INVALID — it must never be treated as a session proof merely because it verifies.
 func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	credentialID, machineKey := ts.mintLauncherCredential(t, "sjawhar", "example-host-devbox")
 
@@ -605,6 +611,7 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 // approveRecord dispatching to the machine kind (refusing any login but the record's approver),
 // createEnrollment, and deleteEnrollment.
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
 	login := struct{ Code string }{ts.openMachineLogin(t, machineKey, testApprover, "example-host-devbox")}
@@ -689,6 +696,7 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 // while the routes Dispatch and the Legion daemon call under the same prefix still answer as they
 // did.
 func TestTheHandBuiltMachineLoginRoutesAreGone(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")
 	if status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": request}); status != http.StatusMethodNotAllowed {
@@ -716,6 +724,7 @@ func TestTheHandBuiltMachineLoginRoutesAreGone(t *testing.T) {
 // TestMachineLoginLookupUnknownCodeIsNoSuchCode pins the 404 NO_SUCH_CODE contract for a code that
 // names no pending machine login.
 func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	status, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": "ZZZZ-ZZZZ"})
 	if status != http.StatusNotFound {
@@ -730,6 +739,7 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 // TestApproveMachineRecordWithoutCodeIsCodeRequired pins the 400 CODE_REQUIRED contract: a machine
 // record cannot be decided without the confirmation code, even by its own approver.
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	login := struct{ Code string }{ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")}
 
@@ -754,6 +764,7 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 // session's own status/values reads, the UI's grant list, and human revocation, refused for any
 // login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
 
@@ -914,6 +925,7 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 // TestCreateRequestWithProofTypJWSIs400 pins that a proof (not a request object) in the "request"
 // field is refused: the two are disjoint JWS typ values by design.
 func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
@@ -932,6 +944,7 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 // naming a secret the policy does not serve is 400 UNKNOWN_SECRET at record time, not folded into
 // an ordinary deny decision.
 func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "NOT_A_REAL_SECRET")
@@ -947,6 +960,7 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 }
 
 func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	limited := policytest.KindSecret("LIMITED_KEY", testApprover, policy.TierAgent, policy.KindGoogleLogin, "value")
 	limited.Tags[policy.TagMaxGrant] = "1h"
@@ -972,6 +986,7 @@ func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
 // its person what to fix, rather than an opaque 500; and the broker logs it at ERROR for its
 // operator, naming the secret and the error's class, never the stored value.
 func TestAFailedMintIs502MintFailed(t *testing.T) {
+	t.Parallel()
 	logged := policytest.CaptureLog(t)
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		d.Machine.Minters = map[string]requests.Minter{
@@ -1016,6 +1031,7 @@ func TestAFailedMintIs502MintFailed(t *testing.T) {
 // testApprover's human-tier secret beside a shared human-tier one, whose approver is anyone, is
 // refused 400 MIXED_APPROVERS rather than recorded as one decision.
 func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need both", "DEEL_API_KEY", "SHARED_KEY")
@@ -1029,6 +1045,7 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 // TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending pins one pending request
 // per session and secret: changing --ttl cannot create another approver Inbox card.
 func TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	first := signAgentSecretRequestFor(t, sessionKey, ts.URL, "two minutes", 120, "DEEL_API_KEY")
@@ -1057,6 +1074,7 @@ func TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending(t *test
 // control-character, and the exact-128 boundary); this pins the same bound at the HTTP handler
 // boundary, the way UNKNOWN_SECRET and MIXED_APPROVERS are already covered above.
 func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "DEEL_API_KEY")
@@ -1082,6 +1100,7 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 // login with its code, and the secret request is decided on the broker's page, after which the
 // routes still refuse it.
 func TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
@@ -1158,6 +1177,7 @@ func TestEveryCallerDecidingASecretRequestGetsDecideOnBrokerPage(t *testing.T) {
 // /v1/requests/{id} carry it while the request is pending with a record, and neither does for a
 // request granted at once, one denied at once, or one no longer pending.
 func TestEveryAnswerNamingAPendingSecretRequestLinksItsPage(t *testing.T) {
+	t.Parallel()
 	// SERVICE_KEY is a service's own secret, which a person's session is denied at once.
 	ts := newApproverTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
@@ -1236,6 +1256,7 @@ func TestEveryAnswerNamingAPendingSecretRequestLinksItsPage(t *testing.T) {
 // The record this test reads back is one the store holds and the old route answered 200 for, so
 // what the 404 says is that the mux has no such route, not that the record is missing.
 func TestTheRecordReadRouteIsGone(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
@@ -1255,6 +1276,7 @@ func TestTheRecordReadRouteIsGone(t *testing.T) {
 // request's record and a pending machine login are both still listed and a denied machine login
 // is not.
 func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	create := func(reason string) wireCreateRequestResponse {
@@ -1313,6 +1335,7 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 // TestCancelRequestThenCancelAgainIsTerminal covers POST /v1/requests/{id}/cancel's happy path and
 // its own terminal guard.
 func TestCancelRequestThenCancelAgainIsTerminal(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
@@ -1342,6 +1365,7 @@ func TestCancelRequestThenCancelAgainIsTerminal(t *testing.T) {
 // TestRevokeGrantBySession covers session-authenticated POST /v1/grants/{id}/revoke — a session
 // ending its own grant, distinct from the UI's human revoke-by-approver route.
 func TestRevokeGrantBySession(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
@@ -1368,6 +1392,7 @@ func TestRevokeGrantBySession(t *testing.T) {
 // TestRenewAndReadSelf covers the two remaining session routes: renewing the caller's own lease
 // and reading its own enrollment plus live grants.
 func TestRenewAndReadSelf(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
@@ -1399,6 +1424,7 @@ func TestRenewAndReadSelf(t *testing.T) {
 // TestPathValidation pins that a record id must be a lowercase-hex sha256 hash (never a UUID) and
 // a grant id must be a UUID, each refused before any store read.
 func TestPathValidation(t *testing.T) {
+	t.Parallel()
 	ts := newTestServer(t)
 
 	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/not-a-valid-record-id/approve", map[string]any{"approver": testApprover})

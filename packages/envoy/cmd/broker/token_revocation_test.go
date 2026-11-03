@@ -54,6 +54,7 @@ const (
 // twice, and ending one under the optional access_token hint, are each answered 200 too. It
 // skips when BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
 func TestTheBinaryRevokesOneOfItsOwnAccessTokens(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	cluster, github := oidctest.New(t), oidctest.New(t)
 	clusterKey := cluster.PublishKey(t, "cluster-key")
@@ -139,6 +140,7 @@ func TestTheBinaryRevokesOneOfItsOwnAccessTokens(t *testing.T) {
 // presents that family's own refresh token, so revoking one token of a dev box session does not
 // log that machine out.
 func TestTheBinaryRevokesAMachineLoginsAccessTokenAndLeavesItsLogin(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	cluster, github := oidctest.New(t), oidctest.New(t)
 	clusterKey := cluster.PublishKey(t, "cluster-key")

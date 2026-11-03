@@ -89,6 +89,12 @@ func startContractHelper(t *testing.T, broker *brokertest.Rig, machineFile strin
 		PeerOf:   PeerOf,
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
+		// The broker here is a real one in this process, which answers at once, so the
+		// production enroll backoff and revoke wait would be the whole of a row's clock
+		// (server_test.go's testEnrollRetryMin).
+		EnrollRetryMin: testEnrollRetryMin,
+		EnrollRetryMax: testEnrollRetryMax,
+		RevokeRetry:    testRevokeRetry,
 	}
 	cr.sock = filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: cr.sock, Net: "unix"})

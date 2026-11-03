@@ -211,17 +211,26 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 }
 
 // TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential: a session registered while
-// the helper holds no credential keeps retrying its enrollment with a backoff that grows to a
-// minute. The login that installs a credential must wake that retry, so the session can sign
-// within about a second of the login instead of whenever its backoff comes round.
+// the helper holds no credential keeps retrying its enrollment with a backoff that grows. The
+// login that installs a credential must wake that retry, so the session can sign within about a
+// second of the login instead of whenever its backoff comes round.
+//
+// This row is the shape of the backoff, so it sets one of its own rather than taking the rig's
+// short default: a backoff whose next attempt is due inside the bound below would pass whether
+// or not the login woke anything. Its 400 ms first wait keeps the production ratios - attempts
+// at 0, 0.4, 1.2 and 2.8 s, and a bound of one second - at a tenth of the production minute's
+// clock (dispatch://INFRA-1075).
 func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testing.T) {
-	r := newRig(t, "")
+	r := newRig(t, "", func(s *Server) {
+		s.EnrollRetryMin = 400 * time.Millisecond
+		s.EnrollRetryMax = time.Minute
+	})
 	if reg := r.call(t, Request{Op: "register"}); !reg.OK || reg.Code != CodeNoCredential {
 		t.Fatalf("register with no credential: %+v", reg)
 	}
-	// Without a credential each attempt fails at once: at 0 s, 1 s and 3 s. The next is due at 7 s,
-	// well over the bound below, so only a wake can enroll the session in time.
-	time.Sleep(3500 * time.Millisecond)
+	// Without a credential each attempt fails at once: at 0, 0.4 s and 1.2 s. The next is due at
+	// 2.8 s, well over the bound below, so only a wake can enroll the session in time.
+	time.Sleep(1400 * time.Millisecond)
 	r.login(t)
 	loggedIn := time.Now()
 	for {

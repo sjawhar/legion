@@ -397,7 +397,7 @@ func TestRenewReadsAFreshMetadataTokenEachTime(t *testing.T) {
 	defer cancel()
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, vmRenewToken(ctx, testVMAudience), io.Discard, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, vmRenewToken(ctx, testVMAudience), io.Discard, after, retryCap)
 	}()
 	receive(t, first, "first renewal")
 	receive(t, waits, "wait for the next renewal") <- time.Now()

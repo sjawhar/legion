@@ -31,21 +31,26 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 )
+
+// TestMain hands the package's tests to storetest, which clones the ones that stand a broker up
+// (brokertest's rig) a database off the one migrated template, and drops the template and the
+// free list when the last test has ended.
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
 // enrollment file), and the id fakeBroker's GET /v1/enrollments/self echoes back — proof that
 // self round-trips whatever id was on disk rather than a hardcoded one.
 const testEnrollmentID = "enr-fake-1"
 
-// buildAgentSecrets compiles this package's binary into the test's temporary directory.
+// buildAgentSecrets compiles this package's binary. cmdtest.Build builds it once per test
+// process and keeps it, so the 75 tests that drive the binary pay for one compile between them
+// rather than one each.
 func buildAgentSecrets(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "agent-secrets")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build agent-secrets: %v\n%s", err, out)
-	}
-	return binary
+	return cmdtest.Build(t, "agent-secrets")
 }
 
 // shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
@@ -1156,7 +1161,7 @@ func TestMachineLoginPrintsTheCodeAndWaits(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"pending", "pending", "issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login", "--poll", "20ms")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1174,7 +1179,7 @@ func TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=https://dispatch.example/"},
-		"machine", "login")
+		"machine", "login", "--poll", "20ms")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1195,7 +1200,7 @@ func TestMachineLoginPrintsTheBrokersVerificationURI(t *testing.T) {
 		{"https://other.example", "machine login code: KQ7M-X4PZ\nenter it at https://other.example/credentials/machine — approve only if the code matches this terminal\n"},
 	} {
 		stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-			[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=" + tc.approve}, "machine", "login")
+			[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=" + tc.approve}, "machine", "login", "--poll", "20ms")
 		if exit != 0 || stdout != tc.want {
 			t.Fatalf("AGENT_SECRETS_APPROVE_URL=%q: exit %d stdout %q stderr %q; want %q", tc.approve, exit, stdout, stderr, tc.want)
 		}
@@ -1208,7 +1213,7 @@ func TestMachineLoginExitsOneOnDenied(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"denied"})
 	_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login", "--poll", "20ms")
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1: stderr=%q", exit, stderr)
 	}

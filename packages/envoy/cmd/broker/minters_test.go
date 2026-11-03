@@ -18,6 +18,7 @@ import (
 // endpoint of its own, so wiring a kind to the other kind's minter, which would refuse the value,
 // fails here.
 func TestEachKindReachesItsOwnMinter(t *testing.T) {
+	t.Parallel()
 	_, pemText := githubapptest.Key(t)
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

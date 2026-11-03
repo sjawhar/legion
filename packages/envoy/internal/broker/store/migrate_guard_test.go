@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,11 +42,11 @@ func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
 	}
 }
 
-// And to what every broker migration locks, applied in order to an empty schema
+// And to what every broker migration locks, applied in order to an empty database
 // (pgmigratetest.CheckTouchedTablesAgainstLocks).
 func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
 	ctx := context.Background()
-	s := emptySchemaStore(t)
+	s := emptyDatabaseStore(t)
 	conn, err := pgx.ConnectConfig(ctx, s.Pool.Config().ConnConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +61,7 @@ func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
 // files numbered 2 would apply the first, pass over the second as already applied, and commit.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {
 	ctx := context.Background()
-	s := emptySchemaStore(t)
+	s := emptyDatabaseStore(t)
 	set := fstest.MapFS{
 		"migrations/0001_first.up.sql":  {Data: []byte("create table guard_first (id integer)")},
 		"migrations/0002_second.up.sql": {Data: []byte("create table guard_second (id integer)")},
@@ -89,7 +90,7 @@ func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.
 func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 	lockTimeout := pgmigrate.LockTimeout
 	ctx := context.Background()
-	s := emptySchemaStore(t)
+	s := emptyDatabaseStore(t)
 	if _, err := s.Pool.Exec(ctx, "create table guard_held (id integer)"); err != nil {
 		t.Fatalf("create the held table: %v", err)
 	}
@@ -137,33 +138,76 @@ func TestMigrateBoundsTheWaitForALockAnotherTransactionHolds(t *testing.T) {
 	}
 }
 
-// emptySchemaStore opens a store on a schema of its own on the BROKER_TEST_DATABASE_URL server,
-// created empty and dropped when t ends. A test that migrates a set of its own needs one: the
-// server's shared schema already records the broker's real versions, which would pass over the
-// test set's numbers as applied.
-func emptySchemaStore(t *testing.T) *Store {
+// testDatabaseURL is the BROKER_TEST_DATABASE_URL server the rows below make their databases on,
+// skipping t when it is unset. The external test package reaches its databases through
+// storetest; these rows cannot, since they drive the unexported migrate and the embedded set,
+// and storetest imports this package, so they name the variable themselves.
+func testDatabaseURL(t *testing.T) string {
+	url := os.Getenv("BROKER_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres store tests")
+	}
+	return url
+}
+
+// emptyDatabaseStore opens a store on a database of its own on the BROKER_TEST_DATABASE_URL
+// server, created empty and dropped when t ends. A test that migrates a set of its own needs
+// one: a database already carrying the broker's real versions would pass over the test set's
+// numbers as applied. It is a database rather than a schema of a shared one because Migrate
+// takes its advisory lock database-wide, so two rows migrating their own schemas of one database
+// would still queue on each other, and because a row here holds a table lock until its own
+// migration gives up (dispatch://INFRA-1075).
+func emptyDatabaseStore(t *testing.T) *Store {
 	t.Helper()
 	raw := testDatabaseURL(t)
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random schema name: %v", err)
+		t.Fatalf("random database name: %v", err)
 	}
-	schema := "broker_migrate_test_" + hex.EncodeToString(suffix[:])
-	adminExec(t, raw, "create schema "+schema)
-	t.Cleanup(func() { adminExec(t, raw, "drop schema "+schema+" cascade") })
+	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
+	database := "broker_migrate_test_" + hex.EncodeToString(suffix[:])
+	adminExec(t, raw, "create database "+database+" strategy file_copy")
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		t.Fatalf("parse BROKER_TEST_DATABASE_URL: %v", err)
 	}
-	query := parsed.Query()
-	query.Set("search_path", schema)
-	parsed.RawQuery = query.Encode()
+	parsed.Path = "/" + database
 	s, err := Open(context.Background(), parsed.String())
 	if err != nil {
-		t.Fatalf("open the test schema: %v", err)
+		t.Fatalf("open the test database: %v", err)
 	}
-	t.Cleanup(s.Pool.Close)
+	// One cleanup, so the order is on the page: the pool closes, then the database is dropped.
+	// pgxpool.Close returns once it has asked its connections to go, and the server has not
+	// always finished closing the backend by then, so the drop is tried again for a moment
+	// rather than forced: a drop that terminates another session needs a privilege the server
+	// need not grant the test's role, and there is nothing here to terminate anyway.
+	t.Cleanup(func() {
+		s.Pool.Close()
+		var err error
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if err = adminTry(raw, "drop database "+database); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("drop database %s: %v", database, err)
+				return
+			}
+		}
+	})
 	return s
+}
+
+// adminTry runs statement on the BROKER_TEST_DATABASE_URL server and answers its error, for a
+// caller that retries rather than failing t at the first one.
+func adminTry(databaseURL, statement string) error {
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	_, err = conn.Exec(ctx, statement)
+	return err
 }
 
 func adminExec(t *testing.T, databaseURL, statement string) {

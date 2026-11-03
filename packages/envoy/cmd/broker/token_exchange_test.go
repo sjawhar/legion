@@ -80,6 +80,7 @@ const (
 // keep the credential-less path from being a way in for anyone else. It skips when
 // BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
 func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	// Two issuers the test controls: the cluster's, which mints every service-account token here,
 	// and GitHub's, which mints none but is what the broker reports its second exchange issuer on.
@@ -325,6 +326,7 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 // registered for nothing, is refused it, the refusal naming the session. Registering that third
 // pod is what then answers it.
 func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	cluster, github := oidctest.New(t), oidctest.New(t)
 	clusterKey := cluster.PublishKey(t, "cluster-key")

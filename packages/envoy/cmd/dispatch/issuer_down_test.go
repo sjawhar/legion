@@ -31,6 +31,7 @@ const discoveryRetryWindow = 45 * time.Second
 // past the hour their page and API requests are answered 503 with the same cookie, and 200 again
 // once the issuer answers. Before INFRA-555 the boot exited when either discovery failed.
 func TestAProcessStartedWhileTheSignInIssuerIsDownServesAgentTokensAndSignsInLater(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	signInIssuer := oidctest.New(t)
 	signInIssuer.EnableCodeFlow(signInIssuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)

@@ -73,6 +73,7 @@ func awaitClientCheck(t *testing.T, base string) (signInStatus, string) {
 // serves the broker's client, one that refuses its secret, and one that cannot be reached at
 // all. Each pass writes its own word and the time it was taken, and nothing else of the status.
 func TestClientCheckWritesWhatTheProviderAnsweredAboutTheClient(t *testing.T) {
+	t.Parallel()
 	st := storetest.Open(t)
 	ctx := context.Background()
 	issuer := oidctest.New(t)
@@ -122,6 +123,7 @@ func TestClientCheckWritesWhatTheProviderAnsweredAboutTheClient(t *testing.T) {
 // are gone - answers the same facts, which is what keeping them in Postgres is for. Nothing in
 // the answer names the person, the record or the secret.
 func TestTheBinaryAnswersSignInStatusFromPostgres(t *testing.T) {
+	t.Parallel()
 	f := newApprovalFixture(t)
 	databaseURL := storetest.URL(t)
 	public := newFront(t)
@@ -195,6 +197,7 @@ func TestTheBinaryAnswersSignInStatusFromPostgres(t *testing.T) {
 // in once `broker end-sessions ada@example.com` has printed that it ended it, while carol's
 // session stands. The subcommand binds nothing, and refuses an argument it does not know.
 func TestTheBinaryEndSessionsEndsALiveSession(t *testing.T) {
+	t.Parallel()
 	f := newApprovalFixture(t)
 	databaseURL := storetest.URL(t)
 	public := newFront(t)
@@ -272,6 +275,7 @@ func TestTheBinaryEndSessionsEndsALiveSession(t *testing.T) {
 // applied and brings nothing up to date itself, so an unmigrated database is an error rather
 // than a migration nobody asked for.
 func TestEndSessionsDoesNotMigrateTheDatabase(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.DatabaseURL(t)
 	out := runBrokerCommand(t, buildBroker(t), databaseURL, "http://127.0.0.1:9", 1, endSessionsCommand, ada)
 	t.Logf("broker %s against an unmigrated database = exit 1: %s", endSessionsCommand, strings.TrimSpace(out))

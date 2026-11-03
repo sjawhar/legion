@@ -45,6 +45,7 @@ const (
 // revocation among them — 403 ACCOUNT_LACKS_POWER naming itself and the route, and still reads a
 // token back; the dispatch caller reaches all ten.
 func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	cluster := oidctest.New(t)
 	clusterKey := cluster.PublishKey(t, "signing-key")

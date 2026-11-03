@@ -32,6 +32,7 @@ import (
 // by ada. Every request and answer is logged, with no proof, bearer or token, as the live run's
 // transcript.
 func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")

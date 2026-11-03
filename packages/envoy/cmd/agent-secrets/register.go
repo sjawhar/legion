@@ -21,13 +21,16 @@ import (
 
 // helperConnectPatience is how long cmdRegister retries connecting to a still-starting helper
 // before giving up (or, under --exec, warning and launching anyway) — the launch-ordering case
-// tmux-resurrect hits at boot.
+// tmux-resurrect hits at boot. It is the default of --connect-patience, which a test that starts
+// no helper at all passes a short one, since it waits the whole patience out
+// (dispatch://INFRA-1075).
 const helperConnectPatience = 10 * time.Second
 
 func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("register", stderr)
 	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
+	patience := flags.Duration("connect-patience", helperConnectPatience, "how long to retry connecting to a still-starting helper before giving up")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage(err)
 	}
@@ -50,7 +53,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	resp, err := registerWithPatience(sock, *wait, helperConnectPatience)
+	resp, err := registerWithPatience(sock, *wait, *patience)
 	if !*doExec {
 		if err != nil {
 			fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)

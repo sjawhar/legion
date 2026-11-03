@@ -45,18 +45,32 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
+// testEnrollRetryMin, testEnrollRetryMax and testRevokeRetry are the retry waits every rig here
+// gives its Server. These rows drive a fake broker in this process, which answers or refuses at
+// once, so the production second-to-a-minute enroll backoff and two-second revoke would be the
+// whole of a row's clock rather than anything it measures. A row whose subject is the shape of a
+// retry - that a login wakes one, that a backoff grows - passes tune and sets its own
+// (dispatch://INFRA-1075).
+const (
+	testEnrollRetryMin = 20 * time.Millisecond
+	testEnrollRetryMax = 100 * time.Millisecond
+	testRevokeRetry    = 20 * time.Millisecond
+)
+
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
-func newRig(t *testing.T, statePath string) *rig {
+// tune, when given, is applied to the Server before it serves, for a row that needs a setting of
+// its own.
+func newRig(t *testing.T, statePath string, tune ...func(*Server)) *rig {
 	t.Helper()
-	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)), tune...)
 }
 
 // newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
 // cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
-func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func(*Server)) *rig {
 	t.Helper()
 	f := newFakeBroker(t)
 	of := operatorFile(t, "ada@example.com")
@@ -65,11 +79,17 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		statePath = filepath.Join(t.TempDir(), "sessions.json")
 	}
 	r.srv = &Server{
-		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
-		Hostname: "testhost",
-		Log:      log,
-		MinRenew: 50 * time.Millisecond,
+		Registry:       NewRegistry(statePath),
+		Broker:         &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
+		Hostname:       "testhost",
+		Log:            log,
+		MinRenew:       50 * time.Millisecond,
+		EnrollRetryMin: testEnrollRetryMin,
+		EnrollRetryMax: testEnrollRetryMax,
+		RevokeRetry:    testRevokeRetry,
+	}
+	for _, set := range tune {
+		set(r.srv)
 	}
 	r.srv.Registry.parent = func(pid int) (int, error) {
 		if parent := r.parentOf.Load(); parent != nil {
@@ -130,9 +150,9 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 // holds a credential and ordinary session enrollment (Enroll) can succeed. Tests exercising the
 // pre-login state itself (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
 // TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot) call newRig directly instead.
-func startRig(t *testing.T, statePath string) *rig {
+func startRig(t *testing.T, statePath string, tune ...func(*Server)) *rig {
 	t.Helper()
-	r := newRig(t, statePath)
+	r := newRig(t, statePath, tune...)
 	r.login(t)
 	return r
 }
@@ -499,7 +519,8 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	// A second helper on the same state and the same fake broker.
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
 	}
@@ -620,7 +641,8 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
 	}
@@ -724,7 +746,8 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
-		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
+		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
+		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
 	}

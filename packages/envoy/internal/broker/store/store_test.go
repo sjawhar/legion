@@ -1,40 +1,30 @@
-package store
+package store_test
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres store tests")
-	}
-	return url
-}
-
 func TestMigrateIsIdempotentAndCreatesTables(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Pool.Close()
+	s := storetest.Open(t)
 	for range 2 {
 		if err := s.Migrate(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var n int
-	err = s.Pool.QueryRow(ctx, `select count(*) from information_schema.tables where table_schema='public' and table_name in
+	err := s.Pool.QueryRow(ctx, `select count(*) from information_schema.tables where table_schema='public' and table_name in
 		('launcher_credentials','enrollments','requests','request_secrets','grants','proof_jtis','audit',
 		 'credential_requests','credential_request_events',
 		 'oauth_device_codes','oauth_access_tokens','oauth_refresh_tokens','oauth_dpop_proofs',
@@ -59,15 +49,9 @@ func TestMigrateIsIdempotentAndCreatesTables(t *testing.T) {
 // naming an unrelated column such as `actor in (...)`) must fail this test on its own, not only
 // the sweeper and lock tests that happen to depend on the real predicate.
 func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Pool.Close()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
+	s := storetest.Open(t)
 	var definition string
 	if err := s.Pool.QueryRow(ctx, `select indexdef from pg_indexes where schemaname='public' and indexname='credential_request_decision'`).
 		Scan(&definition); err != nil {
@@ -89,15 +73,9 @@ func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
 }
 
 func TestMigrationFiveShapesTheRecordTables(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Pool.Close()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
+	s := storetest.Open(t)
 
 	// The whole test runs inside one transaction that is always rolled back, never committed, so
 	// the fixed record id below can never collide with a leftover row from a prior run against the
@@ -148,21 +126,18 @@ func TestMigrationFiveShapesTheRecordTables(t *testing.T) {
 }
 
 func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Pool.Close()
+	s := storetest.Open(t)
 
 	// Migration 0005 adds NOT NULL columns to launcher_credentials, a table migration 0001
 	// created, not 0005 itself. Postgres refuses ALTER TABLE ... ADD COLUMN ... NOT NULL with no
 	// DEFAULT the instant the table holds even one row - exactly the state every deployed v8
 	// launcher credential leaves behind. This applies 0001-0004 by hand inside an isolated
-	// schema (dropped on rollback, so it can never collide with the shared long-lived database's
-	// own already-migrated public schema), inserts a v8-shaped row against that schema, then
-	// runs 0005 and confirms it both succeeds and clears the table - the exact scenario every
-	// other test misses, since Migrate always starts from an empty database.
+	// schema (dropped on rollback, so it can never collide with the test database's own
+	// already-migrated public schema), inserts a v8-shaped row against that schema, then runs
+	// 0005 and confirms it both succeeds and clears the table - the exact scenario every other
+	// test misses, since Migrate always starts from an empty database.
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +157,7 @@ func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
 		"0003_enrollment_subject.up.sql",
 		"0004_ask_retraction.up.sql",
 	} {
-		sql, err := migrationFiles.ReadFile("migrations/" + version)
+		sql, err := store.MigrationFiles.ReadFile("migrations/" + version)
 		if err != nil {
 			t.Fatalf("read %s: %v", version, err)
 		}
@@ -195,7 +170,7 @@ func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
 		t.Fatalf("insert v8-shaped launcher_credentials row: %v", err)
 	}
 
-	sql, err := migrationFiles.ReadFile("migrations/0005_credential_requests.up.sql")
+	sql, err := store.MigrationFiles.ReadFile("migrations/0005_credential_requests.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,12 +193,9 @@ func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
 // rows keep their identity with the empty slot, a second slot of the same pod is a live row of its
 // own, and a second live row in one slot is still refused, by the new index and not the old one.
 func TestMigrationSevenKeysLiveEnrollmentsBySlot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Pool.Close()
+	s := storetest.Open(t)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -237,7 +209,7 @@ func TestMigrationSevenKeysLiveEnrollmentsBySlot(t *testing.T) {
 	}
 	apply := func(version string) {
 		t.Helper()
-		sql, err := migrationFiles.ReadFile("migrations/" + version)
+		sql, err := store.MigrationFiles.ReadFile("migrations/" + version)
 		if err != nil {
 			t.Fatalf("read %s: %v", version, err)
 		}
@@ -341,11 +313,8 @@ func TestMigrationSevenKeysLiveEnrollmentsBySlot(t *testing.T) {
 func migrationSchema(t *testing.T, schema string, below int) (tx pgx.Tx, apply func(file string)) {
 	t.Helper()
 	ctx := context.Background()
-	s, err := Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Pool.Close)
+	s := storetest.Open(t)
+	var err error
 	tx, err = s.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +328,7 @@ func migrationSchema(t *testing.T, schema string, below int) (tx pgx.Tx, apply f
 	}
 	apply = func(file string) {
 		t.Helper()
-		sql, err := migrationFiles.ReadFile("migrations/" + file)
+		sql, err := store.MigrationFiles.ReadFile("migrations/" + file)
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}
@@ -367,7 +336,7 @@ func migrationSchema(t *testing.T, schema string, below int) (tx pgx.Tx, apply f
 			t.Fatalf("apply %s: %v", file, err)
 		}
 	}
-	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	migrations, err := pgmigrate.Load(store.MigrationFiles, "migrations")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,6 +352,7 @@ func migrationSchema(t *testing.T, schema string, below int) (tx pgx.Tx, apply f
 // the way a broker before 0012 did, then runs 0012: the box and host rows read as kind session,
 // the pod row stays pod, and box and host are refused from then on.
 func TestMigrationTwelveMakesEveryMachineSessionOneKind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tx, apply := migrationSchema(t, "migration_twelve_kind", 12)
 	const credential = "00000000-0000-0000-0000-0000000000c1"
@@ -439,6 +409,7 @@ func TestMigrationTwelveMakesEveryMachineSessionOneKind(t *testing.T) {
 // request may name no lifetime and its grant no expiry, the shape of a grant that lasts until its
 // session ends, while a grant written with an expiry keeps it.
 func TestMigrationThirteenLetsAGrantLastUntilItsSessionEnds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tx, apply := migrationSchema(t, "migration_thirteen_lifetime", 13)
 	const credential, enrollment = "00000000-0000-0000-0000-0000000000c1", "00000000-0000-0000-0000-0000000000e1"
@@ -480,6 +451,7 @@ func TestMigrationThirteenLetsAGrantLastUntilItsSessionEnds(t *testing.T) {
 // refused before it and accepted after it, and enrollments_kind_check, under that name, admits
 // exactly session, pod and vm, so box, host and any other kind stay refused.
 func TestMigrationTwentyAdmitsAVMEnrollment(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tx, apply := migrationSchema(t, "migration_twenty_vm_kind", 20)
 	const credential = "00000000-0000-0000-0000-0000000000c1"
@@ -539,6 +511,7 @@ func TestMigrationTwentyAdmitsAVMEnrollment(t *testing.T) {
 // 0020 widened the check: session and pod alone pass under 0012's constraint, which would let an
 // empty 0020 file through.
 func TestTheBuildBeforeTwentyStillReadsAndWritesItsOwnKinds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tx, apply := migrationSchema(t, "migration_twenty_previous_build", 20)
 	const credential = "00000000-0000-0000-0000-0000000000c1"

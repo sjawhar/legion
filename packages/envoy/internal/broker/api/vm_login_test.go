@@ -165,6 +165,7 @@ func (ts *vmServer) renewVM(t *testing.T, key *ecdsa.PrivateKey, enrollmentID st
 // subject the VM's runtime id, expiring with the token. Its key enrolls the VM as kind vm, whose
 // session reads its own enrollment back as a vm with no operator.
 func TestAVMLogsInWithItsOwnTokenAndNoOneApproves(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	before := time.Now()
@@ -202,6 +203,7 @@ func TestAVMLogsInWithItsOwnTokenAndNoOneApproves(t *testing.T) {
 // request for it is denied. The release re-checks the VM's service (requests.Machine.Values), so
 // this is the whole path a VM's credential helper takes.
 func TestAVMReadsItsServicesSecretAtOnce(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	_, _, enrollmentID, sessionKey := ts.enrolled(t, member("example-zone-a", "1001"))
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
@@ -232,6 +234,7 @@ func TestAVMReadsItsServicesSecretAtOnce(t *testing.T) {
 // person revoking the first VM's machine login on Dispatch ends the first VM's enrollment alone, and
 // the second's renews.
 func TestTwoVMsOfOneAccountLogInInTurnAndEachEnrolsAndRevokes(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	one, two := member("example-zone-a", "1001"), member("example-zone-a", "1002")
 	oneCred, oneKey := ts.loggedIn(t, one)
@@ -272,6 +275,7 @@ func TestTwoVMsOfOneAccountLogInInTurnAndEachEnrolsAndRevokes(t *testing.T) {
 // project and a zone, so two VMs of one id in two zones log in as two subjects under two
 // credentials.
 func TestTwoVMsOfOneInstanceIdInDifferentZonesAreTwoCredentials(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	a, b := member("example-zone-a", "1001"), member("example-zone-b", "1001")
 	aCred, _ := ts.loggedIn(t, a)
@@ -289,6 +293,7 @@ func TestTwoVMsOfOneInstanceIdInDifferentZonesAreTwoCredentials(t *testing.T) {
 // account in another project, or under an instance name the fleet's glob does not match, is 403
 // ACCOUNT_NOT_LISTED, each naming what did not match, and no credential is issued.
 func TestAVMOfAnotherProjectOrInstanceNameIsRefused(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	otherProject := member("example-zone-a", "1001")
 	otherProject.project = "example-other-project"
@@ -319,6 +324,7 @@ func TestAVMOfAnotherProjectOrInstanceNameIsRefused(t *testing.T) {
 // under its own credential is 403 VM_IDENTITY_MISMATCH, and with an expired one 403
 // VM_TOKEN_EXPIRED.
 func TestAVMTokenThatDoesNotVerifyIsRefused(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	for _, tc := range []struct {
@@ -351,6 +357,7 @@ func TestAVMTokenThatDoesNotVerifyIsRefused(t *testing.T) {
 // TestAnUnlistedAccountIsRefusedOnABrokerThatListsAnother: a VM token of an account
 // BROKER_VM_SERVICES does not list is 403 ACCOUNT_NOT_LISTED naming the account and the setting.
 func TestAnUnlistedAccountIsRefusedOnABrokerThatListsAnother(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	stranger := member("example-zone-a", "1001")
 	stranger.account = strangerAccount
@@ -364,6 +371,7 @@ func TestAnUnlistedAccountIsRefusedOnABrokerThatListsAnother(t *testing.T) {
 // TestAVMLoginNamingAnotherServiceIsRefused: a fleet VM's request object naming another service
 // than its account's is 403 ACCOUNT_NOT_LISTED, as a Kubernetes account's is.
 func TestAVMLoginNamingAnotherServiceIsRefused(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	status, body := ts.tokenLogin(t, ts.current(t, vm), signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", vm.instance, "legion-daemon"))
@@ -376,6 +384,7 @@ func TestAVMLoginNamingAnotherServiceIsRefused(t *testing.T) {
 // identity token is the Kubernetes verifier's to judge, which refuses it 401 TOKEN_INVALID as a
 // token from another issuer, and kind vm is 400 INVALID_KIND.
 func TestAVMTokenIsRefusedWhenNoVMServiceIsConfigured(t *testing.T) {
+	t.Parallel()
 	vms := newVMTestServer(t)
 	plain := newTestServer(t)
 	vm := member("example-zone-a", "1001")
@@ -398,6 +407,7 @@ func TestAVMTokenIsRefusedWhenNoVMServiceIsConfigured(t *testing.T) {
 // credential cannot enroll a VM, and a token neither issuer issued, or the cluster's token for
 // another audience, is refused with exactly the answer a broker with no VM verifier gives.
 func TestTheKubernetesLoginIsUnchangedByTheVMPath(t *testing.T) {
+	t.Parallel()
 	vms := newVMTestServer(t)
 	plain := newTestServer(t)
 	credentialID, key := vms.mintServiceLauncherCredential(t)
@@ -447,6 +457,7 @@ func stripTimes(message string) string {
 // VM_IDENTITY_MISMATCH, with an expired one 403 VM_TOKEN_EXPIRED, and with both a pod and a VM token
 // 400 INVALID_RENEWAL. A machine session carrying a VM token is 403 VM_IDENTITY_MISMATCH.
 func TestAVMRenewsOnlyWithItsCurrentToken(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	_, _, enrollmentID, sessionKey := ts.enrolled(t, vm)
@@ -494,6 +505,7 @@ func (ts *vmServer) askAs(t *testing.T, key *ecdsa.PrivateKey, enrollmentID stri
 // agent tier) and of FLEET_KEY (its service's); once the fleet is narrowed past it, releasing
 // either is refused 401: the VM has no session identity left, whichever secret the grant holds.
 func TestANarrowedVMReleasesNoGrantItHolds(t *testing.T) {
+	t.Parallel()
 	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
 			ts := newVMTestServer(t)
@@ -522,6 +534,7 @@ func TestANarrowedVMReleasesNoGrantItHolds(t *testing.T) {
 // anyone may approve), WORKER_TOKEN (shared, agent tier) and FLEET_KEY (its service's). No request
 // row and no record is written.
 func TestANarrowedVMOpensNoRequest(t *testing.T) {
+	t.Parallel()
 	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
 			ts := newVMTestServer(t)
@@ -546,6 +559,7 @@ func TestANarrowedVMOpensNoRequest(t *testing.T) {
 // signed in to the broker, which is where a secret request is decided at all: the account route
 // refuses one for every caller (403 DECIDE_ON_BROKER_PAGE).
 func TestANarrowedVMsPendingRequestGrantsNothingWhenApproved(t *testing.T) {
+	t.Parallel()
 	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
 			ts := newVMTestServer(t)
@@ -572,6 +586,7 @@ func TestANarrowedVMsPendingRequestGrantsNothingWhenApproved(t *testing.T) {
 // renew` stops, its launcher credential no longer enrolls (401), and its next login is 403
 // ACCOUNT_NOT_LISTED.
 func TestANarrowedVMNeitherRenewsNorEnrolls(t *testing.T) {
+	t.Parallel()
 	for name, narrow := range narrowings {
 		t.Run(name, func(t *testing.T) {
 			ts := newVMTestServer(t)
@@ -603,6 +618,7 @@ func TestANarrowedVMNeitherRenewsNorEnrolls(t *testing.T) {
 // of its own and reads the fleet's secret. Removing the VM from the fleet's settings ends that too:
 // the copier's login is then 403 ACCOUNT_NOT_LISTED and its enrollment has no identity.
 func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	victimCred, _, enrollmentID, sessionKey := ts.enrolled(t, vm)
@@ -681,6 +697,7 @@ func TestACopiedTokenNeitherEndsNorTakesOverALiveVM(t *testing.T) {
 // and on a broker that trusts Google's issuer but no cluster's, the class authenticates no one,
 // 401 ACCOUNT_TOKENS_OFF, rather than reaching a handler that needs the cluster's verifier.
 func TestAVMTokenAuthenticatesNoDaemonRoute(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	vm := member("example-zone-a", "1001")
 	if status, body := ts.vmLogin(t, vm, ts.current(t, vm), newSigningKey(t)); status != http.StatusOK {
@@ -702,6 +719,7 @@ func TestAVMTokenAuthenticatesNoDaemonRoute(t *testing.T) {
 // cluster's signing keys, and the Legion daemon's never makes it read the VM issuer's, so a flood of
 // one issuer's tokens costs the other issuer nothing.
 func TestATokenGoesToItsOwnIssuersVerifierAlone(t *testing.T) {
+	t.Parallel()
 	ts := newVMTestServer(t)
 	cluster, google := ts.podIssuer.JWKSFetches(), ts.vmIssuer.JWKSFetches()
 	ts.loggedIn(t, member("example-zone-a", "1001"))

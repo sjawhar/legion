@@ -254,6 +254,7 @@ func (f *front) route(t *testing.T, p *brokerProcess) {
 // configuration, and finishes a sign-in begun on one process on another, whose session decides on
 // a third start of the binary.
 func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
+	t.Parallel()
 	f := newApprovalFixture(t)
 	databaseURL := storetest.URL(t)
 	public := newFront(t)
@@ -648,6 +649,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 // subcommand that only trimmed its argument would print "ended 0 sessions" and leave her able to
 // decide for the rest of the session's day.
 func TestTheBinaryEndSessionsEndsAMixedCaseLogin(t *testing.T) {
+	t.Parallel()
 	f := newApprovalFixture(t)
 	databaseURL := storetest.URL(t)
 	public := newFront(t)

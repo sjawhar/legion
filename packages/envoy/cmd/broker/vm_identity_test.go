@@ -148,6 +148,7 @@ func TestAGoogleAudienceDiscoversGooglesIssuer(t *testing.T) {
 // TestTheRequestMachineCarriesTheVMServices pins the one place the broker hands
 // BROKER_VM_SERVICES to the request decisions, without which no VM is ever its service's.
 func TestTheRequestMachineCarriesTheVMServices(t *testing.T) {
+	t.Parallel()
 	m := newRequestMachine(vmConfig(t, "example-vm-audience"), nil, nil, nil, nil)
 	if want := map[string]string{exampleVMAccount: "example-fleet"}; !maps.Equal(m.VMServicesByAccount, want) {
 		t.Fatalf("request Machine's VMServicesByAccount = %v, want %v", m.VMServicesByAccount, want)
@@ -161,6 +162,7 @@ func TestTheRequestMachineCarriesTheVMServices(t *testing.T) {
 // BROKER_VM_SERVICES', sorted and each once, so a secret a VM service owns is that service's and not
 // refused as owner-tag-malformed.
 func TestThePolicyServesTheVMServicesSecrets(t *testing.T) {
+	t.Parallel()
 	if got, want := serviceNames(vmConfig(t, "example-vm-audience")), []string{"example-fleet", "example-service"}; !slices.Equal(got, want) {
 		t.Fatalf("serviceNames = %v, want %v", got, want)
 	}
@@ -173,6 +175,7 @@ func TestThePolicyServesTheVMServicesSecrets(t *testing.T) {
 // VM service to bind refuses the boot, naming both settings, before the broker reaches its
 // database or binds.
 func TestAGoogleAudienceWithNoVMServicesIsRefusedAtBoot(t *testing.T) {
+	t.Parallel()
 	out := runRefusedBroker(t, buildBroker(t),
 		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
 		"BROKER_PUBLIC_URL=https://secrets.internal.example",
@@ -187,6 +190,7 @@ func TestAGoogleAudienceWithNoVMServicesIsRefusedAtBoot(t *testing.T) {
 // issuer and no Google audience: it boots, and its boot log names neither Google's issuer nor a VM
 // identity line.
 func TestWithNoGoogleAudienceTheBootLogHoldsNoGoogleLine(t *testing.T) {
+	t.Parallel()
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	issuer.PublishKey(t, "signing-key")

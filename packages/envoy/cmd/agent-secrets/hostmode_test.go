@@ -380,10 +380,12 @@ func TestRegisterExecWarnsWhenWaitedButNotEnrolled(t *testing.T) {
 // linux): it needs fakeHelperWithPids, which pins the connecting pid with helper.PeerOf
 // (SO_PEERPIDFD, Linux-only).
 
-// TestRegisterExecWithoutHelperWarnsAndStillExecs waits the client's 10 s connect patience; keep
-// it — it is the launch-ordering case tmux-resurrect hits at boot.
+// TestRegisterExecWithoutHelperWarnsAndStillExecs waits the client's connect patience out — it is
+// the launch-ordering case tmux-resurrect hits at boot — so it passes --connect-patience a short
+// one rather than the production ten seconds, and runs the binary cmdtest built once rather than
+// compiling one of its own with `go run`.
 func TestRegisterExecWithoutHelperWarnsAndStillExecs(t *testing.T) {
-	cmd := exec.Command("go", "run", ".", "register", "--exec", "--", "sh", "-c", "echo ran")
+	cmd := exec.Command(buildAgentSecrets(t), "register", "--exec", "--connect-patience", "100ms", "--", "sh", "-c", "echo ran")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+filepath.Join(shortTempDir(t), "absent.sock"))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
