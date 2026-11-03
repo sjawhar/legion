@@ -132,7 +132,7 @@ file. Mechanics and history: `worker-pane-shell-gotchas.md` §11,
 ## Three pane mechanics
 
 - **`legion gh -- pr create` fails from inside `$LEGION_WORKSPACE`** with `fatal: not a git
-  repository: …/repos/github.com/cybermonklabs/legion/.git/worktrees/legion-107` — the workspace's
+  repository: …/repos/github.com/sjawhar/legion/.git/worktrees/legion-107` — the workspace's
   `.git` file points at a worktree path that does not exist on this box, and `gh` consults it before
   using `--repo`. Run the command from a non-repository directory (`cd /tmp`) with `--repo
   <owner>/<repo> --head legion/<KEY> --base main`; the grant is the pane's, not the cwd's, so

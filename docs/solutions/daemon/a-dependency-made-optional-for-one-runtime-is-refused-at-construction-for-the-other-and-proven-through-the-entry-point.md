@@ -52,7 +52,7 @@ passing `run: runner`. Nothing objected: not the compiler (the field is optional
 on, every tmux tree close reached `workspaceCommandRunner` with `run` undefined and logged
 
 ```
-[legion] failed to remove the workspace of LEGION-6 (…/workspaces/cybermonklabs/legion/legion-6) at the close of tree LEGION-6: Error: runtime owns workspace cleanup but ProcessManager has no command runner
+[legion] failed to remove the workspace of LEGION-6 (…/workspaces/sjawhar/legion/legion-6) at the close of tree LEGION-6: Error: runtime owns workspace cleanup but ProcessManager has no command runner
 ```
 
 — once per close, never retried (LEGION-104's own rule), the workspace and its commits left in

@@ -47,7 +47,7 @@ related_issues:
   This is the second failure from the same cap. `delivery/reconcile_volume_test.go` records the
   first, on pages of workflow runs.
 - The tester dropped `Accept` in a proxy between Dispatch and GitHub. The sync then failed with
-  `commit for cybermonklabs/legion@main: GitHub answered no commit SHA (31100 bytes)` and kept
+  `commit for sjawhar/legion@main: GitHub answered no commit SHA (31100 bytes)` and kept
   `last_commit` and all 36 components.
 - A missing branch answered 422 under the SHA media type (the tester's run, and the planner's
   probe under JSON). Every Go fake answered 404 for a missing branch, so no test covered

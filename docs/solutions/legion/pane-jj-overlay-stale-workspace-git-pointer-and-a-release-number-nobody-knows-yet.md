@@ -52,7 +52,7 @@ inherit the process env; that is a fast-follow for whoever next touches the suit
 ## 2. `gh` follows the workspace's `.git` pointer, and on this box it points at a path that no longer exists
 
 Every issue workspace is a colocated jj workspace whose `.git` is a file:
-`gitdir: /home/ubuntu/.local/state/legion/sjawhar-legion/repos/github.com/cybermonklabs/legion/.git/worktrees/legion-109`.
+`gitdir: /home/ubuntu/.local/state/legion/sjawhar-legion/repos/github.com/sjawhar/legion/.git/worktrees/legion-109`.
 The box's home is now `/home/legion`; `jj -R "$LEGION_WORKSPACE"` reads its own store
 (`jj git root` → `/home/legion/.local/state/…/.git`) and is unaffected, but `gh` resolves the
 repository from the cwd's `.git` before it reads `--repo`, so

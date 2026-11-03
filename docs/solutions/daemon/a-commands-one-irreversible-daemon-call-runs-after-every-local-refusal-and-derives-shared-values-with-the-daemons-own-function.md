@@ -47,7 +47,7 @@ read-only `readDeploymentInstructions` split out of `materializeDeploymentInstru
 two regression tests asserting zero fetches. The reviewer answered `Still open:`: one more
 prerequisite ran late — `controllerToken(config.project)`, the first shape check on `project`
 (`/^[a-z0-9]+$/`), sat after the fetch, and `loadControllerStartConfig` only required `project`
-non-empty. With `project: cybermonklabs/legion` — the value the daemon's own `legion.yaml` carries,
+non-empty. With `project: sjawhar/legion` — the value the daemon's own `legion.yaml` carries,
 and the value an operator copies — every pre-fetch check passed, the secret was minted, and the
 command died on the raw token (review 5204985576). Round 3 closed it (386f3562).
 
@@ -67,11 +67,11 @@ config, environment, and disk, and make each one either computed or refused firs
 it can refuse on local grounds.
 
 **2. A value the daemon computes is computed on the client by the daemon's function.** The fix
-was not a CLI-side validator that accepts `cybermonklabs/legion`; it was extracting the daemon's own
+was not a CLI-side validator that accepts `sjawhar/legion`; it was extracting the daemon's own
 rule — lowercase, drop every non-alphanumeric, refuse an empty result — out of
 `resolveDaemonConfig` as `legionProjectToken(value, field)` (now in `@legion/contracts`,
 `legion-roles.ts`) and calling it from
-`loadControllerStartConfig`, so `cybermonklabs/legion` yields `sjawharlegion` on both sides: the same
+`loadControllerStartConfig`, so `sjawhar/legion` yields `sjawharlegion` on both sides: the same
 controller token, the same `secrets/legion-sjawharlegion-controller` file, the same
 `LEGION_PROJECT`, the same refusal text (`project must include at least one alphanumeric
 character`). A second implementation that "looks equivalent" is a drift the next edit to either

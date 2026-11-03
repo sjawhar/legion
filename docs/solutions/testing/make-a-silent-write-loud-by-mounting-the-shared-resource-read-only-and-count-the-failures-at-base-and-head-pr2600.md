@@ -53,12 +53,12 @@ unshare -Urm "$TMPDIR/ro.sh" <the directory that reproduces it> <the command>
 - The planner's first measurement, before any code moved: the `internal/workspace` test binary run
   from its package directory with `/legion/repos` read-only gave **61 test failures** and 96
   occurrences of `Internal error: Failed to determine the secure config for a repo` /
-  `Read-only file system (os error 30) at path "/legion/repos/github.com/cybermonklabs/legion/.jj/repo/.tmpXXXXXX"`;
+  `Read-only file system (os error 30) at path "/legion/repos/github.com/sjawhar/legion/.jj/repo/.tmpXXXXXX"`;
   the same binary from an empty directory outside any jj repository passed with 0 failures. That
   pair is what turned "the tests fail in a pod" into a located defect.
 
 - Base against head, the same binary shape both times: at the base commit, exit 1, **61** `--- FAIL`
-  lines and **192** lines naming `/legion/repos/github.com/cybermonklabs/legion`; at the head, exit 0,
+  lines and **192** lines naming `/legion/repos/github.com/sjawhar/legion`; at the head, exit 0,
   **0** and **0**.
 
 - The guard's own cost, recorded in the handoff so the next role does not read it as a regression:

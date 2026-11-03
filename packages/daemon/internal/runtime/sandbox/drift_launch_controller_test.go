@@ -142,20 +142,18 @@ func TestAControllerPodWhoseGhVolumeLacksAServedOwnerIsReplacedByItsNextLaunch(t
 // a daemon whose read of an installation GitHub did not answer, which leaves that repository out
 // for now and reads it again.
 //
-// When the project then gains its first owner, that pod is in exactly the state this issue is
-// about: /var/run/legion/gh holds no directory of that owner's name, the refresher's Update
-// reaches the Secret and never the projection, and every `gh` call of the controller against
-// that owner's repositories runs unauthenticated. movedGhOwners reads an empty gh directory as
-// lacking nothing, so nothing says so: driftedInPod is empty, the observation is Alive, and the
-// controller's next launch keeps the pod — for the life of the deployment, since only a new pod
-// projects an owner's files.
+// When the project then gains its first owner, that pod's /var/run/legion/gh holds no directory
+// of that owner's name: the refresher's Update reaches the Secret and never the projection, so
+// every `gh` call of the controller against that owner's repositories runs unauthenticated, and
+// only a new pod projects the owner's files.
 //
-// The controller's pod is the one pod no round covers and it holds no issue disk, so the remedy
-// is the one this issue already built: movedGhOwners must read a gh volume that is an empty
-// directory as holding no owner, so a served owner makes it a moved address and its next launch
-// replaces it. A pod with no gh volume at all is still no pod of this runtime's making and must
-// stay unmoved, and the comparison must stay one way: an owner the pod holds that the daemon no
-// longer serves is a stale directory and no reason to remake a pod.
+// So movedGhOwners reads a gh volume that is an empty directory as holding no owner: a served
+// owner makes it a moved address, and because the controller's pod is the one pod no round
+// covers and holds no issue disk, its next launch replaces it. Were the empty directory read as
+// lacking nothing, driftedInPod would be empty, the observation Alive, and every launch would
+// keep the pod for the life of the deployment. A pod with no gh volume at all is no pod of this
+// runtime's making and stays unmoved, and the comparison stays one way: an owner the pod holds
+// that the daemon no longer serves is a stale directory and no reason to remake a pod.
 func TestAnOwnerlessControllerPodIsReplacedOnceItsProjectGainsAnOwner(t *testing.T) {
 	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
