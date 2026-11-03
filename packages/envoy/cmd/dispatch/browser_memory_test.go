@@ -47,7 +47,10 @@ const (
 	// an allocation of tens of MiB is mapped whole before the cycle it triggers can sweep or
 	// scavenge anything back, so a step that allocates in large pieces reads past the limit by
 	// megabytes, and how far past depends on how much of the two processors the collector had
-	// while it did - which is why one run of a step says nothing about its worst.
+	// while it did - which is why one run of a step says nothing about its worst. The margin
+	// bounds that overshoot of the collector's soft limit and nothing else: no holder of heap
+	// stands behind it, since every holder a heap profile names at the heaviest step's peak is
+	// one a bound charges.
 	//
 	// Measured at the runtime's own ratio on 2026-10-29, over the drives that weigh a server
 	// against the pod: the rooms typed and pasted into stayed 2.1 GiB under the limit and the
@@ -77,6 +80,17 @@ const (
 	// make, which requireUnderThePod asserts against the pod itself and which no run of this drive
 	// has read above 3,840 MiB of the pod's 4,096.
 	podGoMemoryLimitMargin = 256 << 20
+	// podMemoryOutsideTheRuntime is the least of the pod a step within the margin must leave for
+	// the memory a pod is charged beyond what the Go runtime holds - the binary's mapped text and
+	// data, and what the kernel charges for the process outside the runtime's own count - which
+	// these steps read at 25 to 41 MiB, their charged peak less their held peak. 4,294,967,296
+	// less the limit and the margin leaves 161,061,274 bytes, 153 MiB, so this holds with 25 MiB
+	// to spare, and the limit and the margin can never grow into it unnoticed: the build refuses
+	// the constant below once they do.
+	podMemoryOutsideTheRuntime = 128 << 20
+	// A uint holds no negative constant, so this does not compile once the limit, the margin and
+	// the memory outside the runtime together pass the pod.
+	_ = uint(podMemory - podGoMemoryLimit - podGoMemoryLimitMargin - podMemoryOutsideTheRuntime)
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
 	// roomBudgetBytes, bytesOfHeapAnElement, roomCopies,
