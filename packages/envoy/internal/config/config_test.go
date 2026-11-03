@@ -50,13 +50,16 @@ func TestLoadTakesTheInheritedSocketsAddress(t *testing.T) {
 func TestLoadRefusesASettingThatIsNotTheInheritedSocketsAddress(t *testing.T) {
 	descriptor, addr := listeningDescriptor(t)
 	other := strconv.Itoa(addr.Port%65535 + 1)
-	for _, test := range []struct{ host, port, refused string }{
-		{host: "127.0.0.1", port: strconv.Itoa(addr.Port), refused: ""},
-		{host: "0.0.0.0", port: strconv.Itoa(addr.Port), refused: "ENVOY_LISTEN_HOST=0.0.0.0"},
-		{host: "127.0.0.1", port: "0", refused: "PORT=0"},
-		{host: "127.0.0.1", port: other, refused: "PORT=" + other},
+	// Each case is named for what it says rather than for the host and port it passes, because
+	// the socket's port is the kernel's choice and a subtest named after it is a different test
+	// in every run, which no before-and-after comparison of two runs can pair up.
+	for _, test := range []struct{ name, host, port, refused string }{
+		{name: "the socket's own host and port", host: "127.0.0.1", port: strconv.Itoa(addr.Port), refused: ""},
+		{name: "a wildcard host", host: "0.0.0.0", port: strconv.Itoa(addr.Port), refused: "ENVOY_LISTEN_HOST=0.0.0.0"},
+		{name: "port zero", host: "127.0.0.1", port: "0", refused: "PORT=0"},
+		{name: "another port", host: "127.0.0.1", port: other, refused: "PORT=" + other},
 	} {
-		t.Run(test.host+" "+test.port, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("ENVOY_MACHINE_ID", "test-machine")
 			t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
 			t.Setenv("ENVOY_LISTEN_HOST", test.host)
