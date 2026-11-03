@@ -371,19 +371,23 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 
 // writeDocumentVersion stores the document-version row uploads write directly, returning the same
 // decoded version the route returns to its caller. Uploads keep this separate from
-// docs.writeVersionTx because they own their artifact event and approval move.
-func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
+// docs.writeVersionTx because they own their artifact event and approval move. stamp is what the
+// markdown was rendered from (docs.Ledger.RenderStampOf), stored with the head this transaction's
+// own write left, so a text read of a document still standing there serves the stored markdown
+// rather than rendering the document again.
+func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, authors []model.Actor, summary *string, stamp docs.RenderStamp) (model.Version, error) {
 	encodedAuthors, err := json.Marshal(authors)
 	if err != nil {
 		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
 	}
 	var version model.Version
 	var authorsRaw []byte
-	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version)
-		values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
+	if err := tx.QueryRow(ctx, docs.RenderStampHead+`
+		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version, `+docs.RenderStampColumns+`)
+		values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0),
+			`+docs.RenderStampValues+`, $7, $8)
 		returning number, named, summary, authors, created_at, `+model.VersionSize+`
-	`, artifactID, number, markdown, encodedAuthors, summary != nil, summary).Scan(
+	`, artifactID, number, markdown, encodedAuthors, summary != nil, summary, stamp.Token, stamp.Renderer).Scan(
 		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt, &version.Size,
 	); err != nil {
 		return model.Version{}, fmt.Errorf("write document version: %w", err)
@@ -540,7 +544,7 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		version, err = writeDocumentVersion(r.Context(), tx, artifact.ID, nextNumber, documentMarkdown, []model.Actor{actor}, documentSummary)
+		version, err = writeDocumentVersion(r.Context(), tx, artifact.ID, nextNumber, documentMarkdown, []model.Actor{actor}, documentSummary, ledger.RenderStampOf(artifact.ID, documentMarkdown))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

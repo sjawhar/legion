@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -383,10 +384,15 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if _, err := tx.Exec(r.Context(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
-		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
-	`, artifactID, markdown, authors); err != nil {
+	// The seed's own rendering is what this row stores, so the row records what it was rendered
+	// from (docs.Ledger.RenderStampOf): a text read of a document still standing there serves the
+	// stored markdown rather than rendering the document again.
+	stamp := ledger.RenderStampOf(artifactID, markdown)
+	if _, err := tx.Exec(r.Context(), docs.RenderStampHead+`
+		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version, `+docs.RenderStampColumns+`)
+		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0),
+			`+docs.RenderStampValues+`, $4, $5)
+	`, artifactID, markdown, authors, stamp.Token, stamp.Renderer); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

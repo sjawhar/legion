@@ -265,6 +265,17 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
+	return s.applyLiveWritten(ctx, artifactID, actor, nil, mutate)
+}
+
+// applyLiveWritten is applyLive for a write that renders the tree it is about to write before it
+// writes it, an upload being the one such write (ReplaceText): written is that tree with the
+// rendering the write made of it, which this operation takes for the fork it leaves rather than
+// rendering the same text over again, and only where the fork reads back as that very tree,
+// block ids and marks included (writtenRendering). A write that put another tree in the fork -
+// an upload that marked its replacement with the anchors it carried over - renders the fork
+// here, as every other write does. written is nil for applyLive itself.
+func (s *Service) applyLiveWritten(ctx context.Context, artifactID string, actor model.Actor, written *renderedTree, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
@@ -334,7 +345,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	if err == nil {
-		markdown, offsets, err = documentMarkdownValidWithOffsets(tree)
+		markdown, offsets, err = writtenRendering(written, tree)
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -403,6 +414,19 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		mergeInto(&op.write.addedAskBlockIDs, added)
 	}
 	return nil
+}
+
+// writtenRendering is the rendering of tree, the fork as an operation left it: the one the write
+// made of the tree it wrote (applyLiveWritten's written), where the fork reads back as that very
+// tree - its content, its structure, its block ids, its attributes and its marks
+// (pmdoc.Node.EqualWithBlockIDs) - and a render of the fork otherwise. Rendering is deterministic
+// over one tree, so the write's rendering of an equal tree is the very string and the very
+// offsets this render would make.
+func writtenRendering(written *renderedTree, tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, error) {
+	if written != nil && written.tree != nil && written.tree.EqualWithBlockIDs(tree.Node()) {
+		return written.markdown, written.offsets, nil
+	}
+	return documentMarkdownValidWithOffsets(tree)
 }
 
 // applyMargin writes record as markID's margin record - a comment's or suggestion's, which a
@@ -601,7 +625,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	var canonical string
 	var read pmdoc.WrittenReadBack
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
+	// The rendering of the replacement, which this write makes to tell whether the upload changes
+	// the document and answers its caller with: the write leaves that very tree in the fork,
+	// unless it has anchors to carry over, so applyLive takes this rendering for the fork it
+	// leaves rather than rendering the same text again (writtenRendering).
+	var written renderedTree
+	err = s.applyLiveWritten(ctx, artifactID, actor, &written, func(doc *crdt.Doc, start pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		valid, err := startTree(start, doc)
 		current := valid.Node()
@@ -635,9 +664,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-		if canonical, err = renderTree(target); err != nil {
+		var offsets []pmdoc.BlockOffset
+		if canonical, offsets, err = renderTreeWithOffsets(target); err != nil {
 			return err
 		}
+		written = renderedTree{tree: target, markdown: canonical, offsets: offsets}
 		if !repairing && currentMarkdown == canonical {
 			unchanged = true
 			return nil
@@ -899,8 +930,15 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 }
 
 // TextWithToken returns canonical markdown and a token over its full Proof tree,
-// including inline marks that canonical Markdown does not render.
+// including inline marks that canonical Markdown does not render. It answers the markdown and
+// the token the document's latest version stored, without reading the document, where that
+// version is still the document's state (storedText); otherwise it reads the document and
+// renders it.
 func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
+	markdown, token, served, err := s.storedText(ctx, artifactID)
+	if err != nil || served {
+		return markdown, token, err
+	}
 	read, tree, err := s.readDocument(ctx, artifactID)
 	switch {
 	case err != nil:
@@ -2001,15 +2039,19 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if err != nil {
 		return versionWriteResult{}, fmt.Errorf("encode document version authors: %w", err)
 	}
+	// What the version's markdown was rendered from, so a text read of a document still standing
+	// there serves it rather than rendering the document again (storedText).
+	stamp := renderStampOf(artifactID, tree)
 	var version model.Version
 	var authorsRaw []byte
-	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version)
+	if err := tx.QueryRow(ctx, RenderStampHead+`
+		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version, `+RenderStampColumns+`)
 		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5,
-			coalesce($6, (select max(version) from doc_updates where artifact_id = $1), 0)
+			coalesce($6, (select max(version) from doc_updates where artifact_id = $1), 0),
+			`+RenderStampValues+`, $7, $8
 		from artifact_versions where artifact_id = $1
 		returning number, named, summary, authors, created_at, `+model.VersionSize+`
-	`, artifactID, markdown, encodedAuthors, write.named, write.summary, write.docUpdateVersion).Scan(
+	`, artifactID, markdown, encodedAuthors, write.named, write.summary, write.docUpdateVersion, stamp.Token, stamp.Renderer).Scan(
 		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt, &version.Size,
 	); err != nil {
 		return versionWriteResult{}, fmt.Errorf("write document version: %w", err)

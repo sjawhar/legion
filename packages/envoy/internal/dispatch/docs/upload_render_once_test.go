@@ -22,23 +22,24 @@ func countRenders(t *testing.T) func() uint64 {
 	return count.Load
 }
 
-// uploadRendersBase is how often an upload that changes the document renders it today, the base
-// this measurement records. All three renders are the write's own: ReplaceText renders the
-// document as it stands, to tell whether the upload changes it; it renders the replacement it
-// parsed (renderTree), which it answers its caller with; and applyLive renders the tree the write
-// left (documentMarkdownValidWithOffsets), the same text over again. Nothing else renders: the
-// warm room's replica holds the rendering of the state the fork was read from, so applyLive takes
-// that one rather than rendering the fork, and the room's update observer classifies the
-// published update by the rendering the write made of it.
+// uploadRenders is how often an upload that changes the document renders it: twice, both renders
+// the write's own. ReplaceText renders the document as it stands, to tell whether the upload
+// changes it, and renders the replacement it parsed (renderTreeWithOffsets), which it answers its
+// caller with; applyLive takes that second rendering for the tree the write left, which is the
+// very tree it rendered, rather than rendering the same text over again (writtenRendering).
+// Nothing else renders: the warm room's replica holds the rendering of the state the fork was
+// read from, so applyLive takes that one rather than rendering the fork, and the room's update
+// observer classifies the published update by the rendering the write made of it.
 //
-// Two of the three are of the new document, which is the number the acceptance counts: it asks
-// that an upload render the new document twice at the base and once at the head. The third is of
-// the document as it stands before the upload, which the upload needs and keeps. So the change's
-// commit lowers this total to two, one of the new document and one of the old.
-const uploadRendersBase = 3
+// Only one of the two is of the new document, which is the number the acceptance counts: it asks
+// that an upload render the new document twice at the base and once here. The other is of the
+// document as it stands before the upload, which the upload needs and keeps. The base was three:
+// applyLive rendered the tree the write left (documentMarkdownValidWithOffsets), the same text a
+// third time.
+const uploadRenders = 2
 
 // An upload that changes an existing document, written through the entry point every upload takes
-// (ReplaceText in a joined transaction), renders the document uploadRendersBase times.
+// (ReplaceText in a joined transaction), renders the document uploadRenders times.
 func TestUploadRenderOnceCountsTheRendersOfAnUpload(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -64,7 +65,7 @@ func TestUploadRenderOnceCountsTheRendersOfAnUpload(t *testing.T) {
 	if uploaded != "The quick brown dog.\n" {
 		t.Fatalf("the upload wrote %q, want the uploaded markdown", uploaded)
 	}
-	if counted != uploadRendersBase {
-		t.Fatalf("the upload rendered the document %d times, want %d", counted, uploadRendersBase)
+	if counted != uploadRenders {
+		t.Fatalf("the upload rendered the document %d times, want %d", counted, uploadRenders)
 	}
 }
