@@ -107,14 +107,16 @@ func (c *ServingClock) processID() string {
 // While a broker is serving (the latest row's gap is within its threshold, or there is no row)
 // one statement writes this process's row, locking that row alone: a beat held up on its own row
 // stalls no other broker's beat, and the others keep the latest row current. Otherwise no broker
-// served in between: the beat takes servingLock and reads the latest row again, and if the gap is
-// still there every unended lease that was still running at the latest row's beat gets that gap
-// back, moved on by it but no further than the enrollment lease past now, which a session that
-// renewed during the gap already holds. A second broker that waited on the lock reads the row the
-// first wrote and finds no gap, so the time is given back once. Either way this process's row
+// served in between: the beat takes servingLock and asks the rule again, and if the gap is still
+// there every unended lease that was still running at the latest row's beat gets that gap back,
+// moved on by it but no further than the enrollment lease past now, which a session that renewed
+// during the gap already holds. A second broker that waited on the lock reads the row the first
+// wrote and finds no gap, so the time is given back once. Both of those questions are the one
+// SQL rule, broker_outage_since (migration 0024), which enrollment_lease_live asks too, so what
+// a beat gives back and what a read holds live cannot disagree. Either way this process's row
 // moves to now, never backward, with this process's NotServingAfter, and rows more than
 // servingPrune behind the latest are deleted, skipping any another transaction holds.
-// enrollment_lease_live reads the rows without a lock, so no read of a lease ever waits on a beat.
+// broker_outage_since reads the rows without a lock, so no read of a lease ever waits on a beat.
 //
 // Last, in the same transaction and after this process's row is written, the beat counts the
 // rows still beating - those whose gap since their own last beat is within their own threshold -
@@ -134,12 +136,10 @@ func (c *ServingClock) Beat(ctx context.Context) error {
 		set_config('idle_in_transaction_session_timeout', $1, true)`, bound); err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx, `with latest as (
-			select last_serving_at, not_serving_after from broker_serving order by last_serving_at desc limit 1
-		), beat as (select clock_timestamp() at)
+	tag, err := tx.Exec(ctx, `with beat as (select clock_timestamp() at)
 		insert into broker_serving (process, last_serving_at, not_serving_after)
 		select $1, beat.at, $2::interval from beat
-		where not exists (select from latest where beat.at - latest.last_serving_at > latest.not_serving_after)
+		where broker_outage_since(beat.at) is null
 		on conflict (process) do update set
 			last_serving_at = greatest(broker_serving.last_serving_at, excluded.last_serving_at),
 			not_serving_after = excluded.not_serving_after`, process, c.NotServingAfter)
@@ -154,21 +154,19 @@ func (c *ServingClock) Beat(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, servingLock); err != nil {
 			return err
 		}
-		// Read the latest row and the clock only now the lock is held, so a beat that waited on
-		// another reads the row that one wrote.
+		// Read the clock and the rule only now the lock is held, so a beat that waited on another
+		// reads the row that one wrote: broker_outage_since answers when a broker last served
+		// while the gap since is still an outage, and null once the other beat closed it.
 		var at time.Time
-		var lastAt *time.Time
-		var gapAt *time.Duration
-		if err := tx.QueryRow(ctx, `select beat.at, latest.last_serving_at, beat.at - latest.last_serving_at,
-				coalesce(beat.at - latest.last_serving_at > latest.not_serving_after, false)
-			from (select clock_timestamp() at) beat
-			left join lateral (
-				select last_serving_at, not_serving_after from broker_serving order by last_serving_at desc limit 1
-			) latest on true`).Scan(&at, &lastAt, &gapAt, &gaveBack); err != nil {
+		var outageSince *time.Time
+		if err := tx.QueryRow(ctx, `select beat.at, broker_outage_since(beat.at)
+			from (select clock_timestamp() at) beat`).Scan(&at, &outageSince); err != nil {
 			return err
 		}
+		gaveBack = outageSince != nil
 		if gaveBack {
-			last, gap = *lastAt, *gapAt
+			last = *outageSince
+			gap = at.Sub(last)
 			tag, err := tx.Exec(ctx, `update enrollments set lease_expires_at = least(lease_expires_at + $1::interval, $2::timestamptz + $3::interval)
 				where revoked_at is null and lease_expires_at > $4::timestamptz`, gap, at, c.Enrollments.Lease, last)
 			if err != nil {
