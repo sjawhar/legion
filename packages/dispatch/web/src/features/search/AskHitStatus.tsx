@@ -8,6 +8,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AskResolutionLine } from "../refs/AgentName";
+import { actorActText } from "../refs/actor";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { markdownHead } from "../refs/markdown-fragment";
 import { Timestamp } from "../refs/Timestamp";
@@ -48,7 +49,7 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
           <span
             className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
           >
-            {answer.user} · <Timestamp at={answer.at} /> ·{" "}
+            {actorActText(answer.user, answer.act)} · <Timestamp at={answer.at} /> ·{" "}
             {answer.selected.length === 0
               ? "No option chosen"
               : `Chose ${answer.selected.join(", ")}`}

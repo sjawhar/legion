@@ -39,6 +39,7 @@ import type {
   CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
+  CreateAgentTokenInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateBroadcastInput,
@@ -915,8 +916,18 @@ export class DispatchApiClient {
     return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
   }
 
-  createAgentToken(input: { name: string }, bounds: WriteBounds): Promise<CreatedAgentToken> {
+  createAgentToken(input: CreateAgentTokenInput, bounds: WriteBounds): Promise<CreatedAgentToken> {
     return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
+  }
+
+  /** `PATCH /api/v1/me/agent-tokens/{id}`: the whole set of scopes the token is to hold, which
+   *  replaces the set it holds now, answering the updated token. A scope the caller does not hold
+   *  itself is refused, as it is at the mint. */
+  setAgentTokenScopes(id: string, scopes: string[], bounds: WriteBounds): Promise<AgentToken> {
+    return this.send<AgentToken>(
+      { body: { scopes }, method: "PATCH", path: `/api/v1/me/agent-tokens/${pathSegment(id)}` },
+      bounds
+    );
   }
 
   async revokeAgentToken(id: string, bounds: WriteBounds): Promise<void> {

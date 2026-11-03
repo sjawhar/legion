@@ -67,7 +67,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
-import { actorText } from "./actor-text";
+import { actorActText, actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
@@ -2536,7 +2536,7 @@ function askSummary(
     ...(answer === null
       ? ["- none"]
       : [
-          `- By: ${answer.user}`,
+          `- By: ${actorActText(answer.user, answer.act)}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
@@ -2547,7 +2547,8 @@ function askSummary(
       : [
           "Earlier answers:",
           ...earlierAnswers.map(
-            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+            (earlier) =>
+              `- ${earlier.at} · ${actorActText(earlier.user, earlier.act)} · ${askAnswerText(earlier)}`
           ),
         ]),
     ...(ask.resolution === undefined

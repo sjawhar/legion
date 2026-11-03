@@ -109,6 +109,26 @@ describe("renderSessionAnswers", () => {
     );
   });
 
+  // An agent that answers for its person is recorded as the person, so the item names the agent
+  // beside them: a session reading its list must not take an agent's answer for the person's
+  // own words.
+  test("an item an agent wrote for its person names the agent beside the person", () => {
+    const throughSession = {
+      ...answer,
+      author: { ...answer.author, act: { session: "0123456789abcdef", scopes: ["person"] } },
+    };
+    expect(renderSessionAnswerItem(throughSession)).toStartWith(
+      "2026-10-27T11:00:00Z · user ana@example.com, acting through session 0123456789abcdef · answered your ask"
+    );
+    const throughToken = {
+      ...answer,
+      author: { ...answer.author, act: { token_id: "token-1", token_name: "architect" } },
+    };
+    expect(renderSessionAnswerItem(throughToken)).toStartWith(
+      "2026-10-27T11:00:00Z · user ana@example.com, acting through token architect · answered your ask"
+    );
+  });
+
   test("an answer that chose nothing says Selected: none; one that replaced another says so; a long question is cut at 200", () => {
     const question = `${"q".repeat(199)}rest of the question`;
     expect(
@@ -279,6 +299,23 @@ describe("sessionAnswersWords", () => {
       ask: { id: "ask-1", question: "Which format, now?" },
     };
     expect(isNew([answer], [retitled])).toBe(false);
+  });
+
+  // The key tells what the person wrote from what their agent wrote for them: the same answer
+  // under an act is a different item, so a host carries it rather than passing over it as one
+  // it has already shown.
+  test("the same answer with and without an act are two different keys", () => {
+    const throughToken = {
+      ...answer,
+      author: { ...answer.author, act: { token_id: "token-1", token_name: "architect" } },
+    };
+    const throughSession = {
+      ...answer,
+      author: { ...answer.author, act: { session: "0123456789abcdef" } },
+    };
+    expect(sessionAnswersWords([answer])).not.toEqual(sessionAnswersWords([throughToken]));
+    expect(sessionAnswersWords([throughToken])).not.toEqual(sessionAnswersWords([throughSession]));
+    expect(isNew([answer], [throughToken])).toBe(true);
   });
 
   // The words are those of the items the list shows: an item the cap left out was never seen.

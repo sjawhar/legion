@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
+import { actorActText } from "./actor-text";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import { DispatchClient, isNoRoute } from "./dispatch-http";
 import { ownerTitle } from "./dispatch-owner";
@@ -73,15 +74,16 @@ export function isNoAnswersRoute(error: unknown): boolean {
 
 /**
  * One item as both the per-request list and `dispatch answers` print it, in this order: the time
- * the person wrote it, the person and what it is to the session (with `replaces an earlier answer`
- * on an answer that replaced one, and `edited <time>` on an edited comment); its `dispatch://`
- * reference and its issue or document, or that it is a direct message; the ask's question, cut to
- * 200 characters, on an answer and a reply in an ask's thread; on an answer, `Selected:` with the
+ * the person wrote it, the person (with the agent that wrote it for them, through
+ * `actorActText`) and what it is to the session (with `replaces an earlier answer` on an answer
+ * that replaced one, and `edited <time>` on an edited comment); its `dispatch://` reference and
+ * its issue or document, or that it is a direct message; the ask's question, cut to 200
+ * characters, on an answer and a reply in an ask's thread; on an answer, `Selected:` with the
  * options chosen or `none`; then the person's words in full.
  */
 export function renderSessionAnswerItem(item: SessionAnswer): string {
   const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
-  const head = [item.at, `user ${item.author.id}`, relation];
+  const head = [item.at, actorActText(`user ${item.author.id}`, item.author.act), relation];
   if (item.edited_at !== undefined) head.push(`edited ${item.edited_at}`);
   const owner = item.owner === null ? undefined : ownerTitle(item.owner);
   const where =
@@ -117,13 +119,17 @@ function withinWindow(items: readonly SessionAnswer[], now: number): SessionAnsw
  * a host comparing two reads' sets tells a new item shown, or an answer or comment a person
  * changed, from a list that only lost items or changed what the session or Dispatch says around
  * them (an issue's title, an ask's question, a cached list's header).
+ *
+ * The author is the rendered act (`actorActText`), not the person's id alone, so the same words
+ * from the person themselves and from an agent acting for them are two different items: a host
+ * that compared ids would carry the second as if the person had written it.
  */
 export function sessionAnswersWords(items: readonly SessionAnswer[]): string[] {
   return items.map((item) =>
     JSON.stringify([
       item.kind,
       item.id,
-      item.author.id,
+      actorActText(item.author.id, item.author.act),
       item.at,
       item.edited_at ?? null,
       item.selected ?? null,

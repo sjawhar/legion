@@ -17,7 +17,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AgentName, AskResolutionLine } from "../refs/AgentName";
-import { askResolutionBadge, askResolutionReason } from "../refs/actor";
+import { actorActText, askResolutionBadge, askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -86,7 +86,7 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
                 <MarkdownBody markdown={previous.text} />
               )}
               <p className="mt-1">
-                {previous.user} · <Timestamp at={previous.at} />
+                {actorActText(previous.user, previous.act)} · <Timestamp at={previous.at} />
               </p>
             </div>
           ))}
@@ -195,7 +195,8 @@ function AnsweredAsk({
       ) : (
         <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
           Asked <Timestamp at={ask.created_at} /> · Answered by{" "}
-          <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
+          <span className="font-semibold">{actorActText(answer.user, answer.act)}</span>{" "}
+          <Timestamp at={answer.at} />
         </p>
       )}
       <AskAnswerHistory answers={answers} />

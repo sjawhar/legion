@@ -1,5 +1,6 @@
 export type {
   Actor,
+  ActorAct,
   ActorOrigin,
   Agent,
   AgentLiveView,
@@ -65,6 +66,7 @@ export type {
   CommentMention,
   CommentRead,
   CreateAgentMessageInput,
+  CreateAgentTokenInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateBroadcastInput,
