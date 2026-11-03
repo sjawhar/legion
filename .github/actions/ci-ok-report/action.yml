@@ -8,7 +8,12 @@ description: >-
 
   A fork pull request's run gets a read-only token, which can post no check run, so on one this
   action does nothing and the pull request gets no ci-ok: this repository takes no fork pull
-  requests (their runs wait for an approval nobody gives).
+  requests (their runs wait for an approval nobody gives). "Not a fork" is read as
+  `github.event.pull_request.head.repo.id == github.repository_id`, never by comparing
+  `head.repo.full_name` with `github.repository`: a run re-run after the repository was
+  transferred to another owner carries the name the payload held when the event was sent, while
+  `github.repository` holds the name now, so the two differ for the repository's own branch and
+  every job reports nothing. An id survives a rename and a fork's still differs.
 
 inputs:
   job:
@@ -25,14 +30,14 @@ runs:
   using: composite
   steps:
     - name: Write this job's result
-      if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id)
       shell: bash
       env:
         STATUS: ${{ inputs.job-status }}
       run: printf '%s\n' "$STATUS" > "$RUNNER_TEMP/ci-ok-report"
 
     # The artifact's name is the report; its file only gives the upload something to carry.
-    - if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    - if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id)
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ci-ok-${{ inputs.job }}-${{ github.run_attempt }}-${{ inputs.job-status }}
@@ -41,7 +46,7 @@ runs:
         if-no-files-found: error
 
     - name: Post ci-ok when every job that runs has reported
-      if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.repository_id)
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

@@ -1369,7 +1369,8 @@ jobs:
       # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
       # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
       # check further down cannot keep pr-title from the head; a fork pull request's read-only
-      # token posts nothing (.github/actions/ci-ok-report says why that is no loss here).
+      # token posts nothing, read by repository id rather than by name (.github/actions/
+      # ci-ok-report says why that is no loss here, and why the id).
       - name: Check the pull request's title, body, branch name, commits, comments and reviews
         id: pr-text
         if: github.event_name == 'pull_request'
@@ -1378,7 +1379,7 @@ jobs:
         run: .github/scripts/check-pr-text.sh
 
       - name: Post pr-title on the head
-        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.full_name == github.repository
+        if: always() && steps.pr-text.outcome != 'skipped' && github.event.pull_request.head.repo.id == github.repository_id
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -1555,7 +1556,7 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then reads the
+  # Copies every row .github/ci-images.yaml names into ghcr.io/cybermonklabs/legion/ci, then reads the
   # package to check that it holds every row. The order is the point: the read fails a row the
   # package does not hold, so the copy for this change runs first. The ci_images filter selects
   # this job, and names the files that decide what its two steps do: the rows, the two scripts,
@@ -1669,8 +1670,8 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1921,7 +1922,7 @@ jobs:
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
   # site to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the repository
-  # it runs in (https://sjawhar.github.io/legion/ today), one push at a time in push order.
+  # it runs in (https://cybermonklabs.github.io/legion/ today), one push at a time in push order.
   # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
   # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
   # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
@@ -2013,13 +2014,13 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
         # pulls the image here, and does not call .github/actions/pull-test-images: that action
         # reads a Go `const` line, and this image is a TypeScript constant
         # (packages/envoy-client/src/__tests__/nats-server.ts:9-10). The registry is this
         # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
         # it.
-        run: docker pull ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        run: docker pull ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -2076,8 +2077,8 @@ jobs:
     # pinned by digest as this file's other service images are.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2151,8 +2152,8 @@ jobs:
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2167,7 +2168,7 @@ jobs:
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
-      # Docker. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+      # Docker. Every image a CI job fetches is a copy in ghcr.io/cybermonklabs/legion/ci, named by
       # digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - id: setup-go
@@ -2248,8 +2249,8 @@ jobs:
     timeout-minutes: 155
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2320,7 +2321,7 @@ jobs:
           bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
       # The file store the step below starts, pulled first for the reason the action gives. The
-      # image comes from ghcr.io/sjawhar/legion/ci, a registry this repository publishes, so a
+      # image comes from ghcr.io/cybermonklabs/legion/ci, a registry this repository publishes, so a
       # failed pull is a fault of this repository. The action must show it, not retry it.
       - name: Pull the file store image
         uses: ./.github/actions/pull-test-images
@@ -2384,8 +2385,8 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2515,8 +2516,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2777,8 +2778,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2855,8 +2856,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2906,8 +2907,8 @@ jobs:
     timeout-minutes: 70
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2966,8 +2967,8 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3013,8 +3014,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3120,8 +3121,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3299,7 +3300,7 @@ jobs:
       # build step). That workflow runs on main alone, so this build is what proves the stamp
       # before a merge, and it proves it under the name the transfer gives the repository rather
       # than today's: a provider.go that pinned the address instead of taking the -X would still
-      # serve sjawhar/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
+      # serve cybermonklabs/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
       # install, so the URL is compared literally. The step runs in the module, so the script is
       # reached by its path from the repository root, and the binary goes under $RUNNER_TEMP as
       # the docker provider's tarball above does.
