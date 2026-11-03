@@ -192,7 +192,7 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 		}
 		_ = json.Unmarshal(response.Body.Bytes(), &body)
 		switch body.Code {
-		case codeScopeRequired, "HUMAN_ONLY", "REPLY_FORBIDDEN", "ACCEPT_FORBIDDEN", "HANDOFF_FORBIDDEN":
+		case codeScopeRequired, "REPLY_FORBIDDEN", "ACCEPT_FORBIDDEN", "HANDOFF_FORBIDDEN":
 			return true, "403 " + body.Code
 		}
 	}

@@ -158,21 +158,16 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 	}
 }
 
-// A session's own conversation is for a person watching it: a bearer's socket is refused the view,
-// and a caller with no credential never gets a socket at all.
-func TestAgentStreamRefusesEveryCallerButAHuman(t *testing.T) {
+// A caller with no credential never gets a socket at all, so it never reaches the session it
+// asked about. What a credential that does resolve may watch is the scope it holds, which
+// TestAnAgentViewIsServedToThePersonScopeAndRefusedWithoutIt below decides.
+func TestAgentStreamRefusesAViewerWithNoCredential(t *testing.T) {
 	source := agentstream.NewMemory()
 	rig := newLiveSocketRig(t, testServerOptions{agentStream: source}, nil)
 
 	if status := rig.refused(t, nil); status != http.StatusUnauthorized {
 		t.Fatalf("an anonymous viewer's upgrade answered %d, want 401", status)
 	}
-	bearer := rig.dial(t, withBearer("agent-token"))
-	bearer.subscribeAgent(t, "agent", plannerSessionID)
-	bearer.refusal(t, agentFeedWait, "agent", "HUMAN_ONLY")
-	bearer.quiet(t, 300*time.Millisecond, "after the bearer's agent view was refused")
-	// A refused caller never reached the session: it was never told a viewer is attached, so
-	// the session it asked about stays silent.
 	if got := source.Watches(plannerSessionID); got != 0 {
 		t.Fatalf("a refused viewer armed the session %d times, want 0", got)
 	}

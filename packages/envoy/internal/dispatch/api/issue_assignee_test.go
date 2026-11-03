@@ -276,10 +276,11 @@ func TestListIssuesSummariesCarryAssignee(t *testing.T) {
 	expectAssignee(t, byTitle["Nobody's"], "")
 }
 
-// GET /users is the picker's option list: everyone who has signed in (`people`), sorted, humans
-// only.
-func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
-	handler := newTestHandler(t)
+// GET /users is the picker's option list: everyone who has signed in (`people`), sorted. It needs
+// the person scope, so the deployment's shared token is turned away and a person's own token
+// reads the same list their browser reads.
+func TestListUsersReturnsSignedInPeopleToThePersonScope(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("list users: status=%d body=%s", response.Code, response.Body.String())
@@ -293,8 +294,13 @@ func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
 		t.Fatalf("users = %#v, want alice then bob", users)
 	}
 	denied := agentRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "agent-token")
-	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer lists users: status=%d body=%s", denied.Code, denied.Body.String())
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token lists users: status=%d body=%s, want 403 %s", denied.Code, denied.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/users", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK || !strings.Contains(own.Body.String(), `"login":"alice"`) {
+		t.Fatalf("a person's own token lists users: status=%d body=%s", own.Code, own.Body.String())
 	}
 }
 
