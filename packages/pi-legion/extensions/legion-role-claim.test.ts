@@ -3,6 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
+import {
+  HEARTBEAT_RETRY_MAX_MS,
+  HEARTBEAT_RETRY_MIN_MS,
+} from "@legion/envoy-client/envoy-settings";
 import type { ZodNumberProperty } from "@legion/pi-shared/pi-types";
 
 /** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
@@ -93,6 +97,7 @@ type Context = {
     readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     readonly onTerminalInput: (handler: () => void) => () => void;
@@ -137,6 +142,11 @@ afterEach(() => {
 test("keeps a Legion role claimant fresh regardless of extension initialization order", async () => {
   const handlers = new Map<string, Handler[]>();
   const intervals: (() => void)[] = [];
+  // The extra heartbeat call a failed pass arms on the host's managed timer, as the host would
+  // hold it: recorded rather than run, so a test runs it when it means to.
+  const retries: { readonly callback: () => void | Promise<void>; readonly delayMs: number }[] = [];
+  // The warning the pane shows when a heartbeat pass fails, which also names the retry it armed.
+  const heartbeatOutage = Promise.withResolvers<string>();
   const registrations: { readonly session_id: string; readonly topics: readonly string[] }[] = [];
   const heartbeatRegistration = Promise.withResolvers<void>();
   const tree = "REPO-42";
@@ -227,8 +237,11 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       getEntries: () => [],
     },
     setInterval: (callback) => intervals.push(callback),
+    setTimeout: (callback, delayMs) => retries.push({ callback, delayMs }),
     ui: {
-      notify: () => undefined,
+      notify: (message) => {
+        if (message.includes("registry heartbeat failed")) heartbeatOutage.resolve(message);
+      },
       onTerminalInput: () => () => undefined,
       getEditorText: () => "",
     },
@@ -256,4 +269,14 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     session_id: sessionID,
     topics: [agentSubject(sessionID)],
   });
+  // The heartbeat pass reads the role back, which this listener stub answers with no record, so
+  // the pass fails: the pane arms the one extra call a failed heartbeat buys on the host's
+  // managed timer, at the shared draw, and says so — rather than throwing for want of one.
+  expect(await heartbeatOutage.promise).toContain("retrying once in");
+  expect(retries).toHaveLength(1);
+  expect(retries[0]?.delayMs).toBeGreaterThanOrEqual(HEARTBEAT_RETRY_MIN_MS);
+  expect(retries[0]?.delayMs).toBeLessThanOrEqual(HEARTBEAT_RETRY_MAX_MS);
+  // What that call then does is pi-envoy's to pin (`envoy.test.ts`, "a registration that times
+  // out is retried once inside forty seconds"); here it is enough that the pane armed it on the
+  // host rather than throwing inside the heartbeat.
 });

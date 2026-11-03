@@ -509,7 +509,14 @@ func main() {
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+	)
+	// The holds beside the failures: a role-routed event whose holder is not answering is waiting
+	// for that session, with nothing sent and nothing failed, so it is counted here rather than
+	// under the publish failures an operator alerts on (outbox.Deps.RoleForwardsHeld).
+	outboxRoleForwardsHeld := met.NewCounter(
+		"envoy_dispatch_outbox_role_forwards_held_total",
+		"Role forwards an event's holder resolution held pending with nothing sent, by the holder's state: unresponsive (the holder is past the live window), undated (nothing dates the holder) or unresolved (the role claim or the holder's session could not be read)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -522,13 +529,14 @@ func main() {
 		// by the windows this deployment gave its listeners (roleHolderWindows).
 		holders := roles.NewBuckets(natsClient, boot.RoleHolderWindows)
 		outboxPublisher = outbox.New(outbox.Deps{
-			Store:           &store.Store{Pool: outboxPool},
-			Publisher:       natsClient,
-			Broker:          broker,
-			Listen:          database.Pool.Listener,
-			RoleClaims:      holders,
-			Sessions:        holders,
-			PublishFailures: outboxPublishFailures,
+			Store:            &store.Store{Pool: outboxPool},
+			Publisher:        natsClient,
+			Broker:           broker,
+			Listen:           database.Pool.Listener,
+			RoleClaims:       holders,
+			Sessions:         holders,
+			PublishFailures:  outboxPublishFailures,
+			RoleForwardsHeld: outboxRoleForwardsHeld,
 		})
 		outboxStopped = make(chan struct{})
 		go func() {

@@ -196,7 +196,10 @@ type Watcher struct {
 	following     bool
 	staleSince    time.Time
 	// reading is set while the current generation's read is under way: installed, its scan not yet
-	// ended, and nothing has taken from it the right to complete (Check, Disconnected).
+	// ended, and nothing has taken from it the right to complete (Check, Disconnected). Start sets
+	// it before it arms the first watch, which is a read under way from the moment it is ordered:
+	// until that watch installs its own read or fails, the copy is one a Rewatch would repair
+	// nothing of, and NeedsRead must not report it.
 	reading bool
 	// disconnects counts the disconnects Disconnected has reported, and readDisconnects is the
 	// count when the current generation's watch began. A read a disconnect overlapped completes
@@ -265,7 +268,18 @@ func (w *Watcher) logger() *slog.Logger {
 // and that watcher releases readiness once it has delivered every existing key. An operator is
 // paged for a cache nothing feeds, not for a failed watch a repair has already taken over, and the
 // end of a replaced watcher is silent on the other path too (consume).
+//
+// The read it orders is under way from here, not from the moment its watch takes the locks: a
+// caller's Open returns as soon as this returns, and until the watch has installed its read or
+// failed, the copy is one no Rewatch would repair, so NeedsRead must not report it. Without that
+// the listener's self-health check reads a cache it has just opened as one to rebuild
+// (cmd/listener/main.go, errCacheNeedsRead).
 func (w *Watcher) Start() {
+	w.mu.Lock()
+	if !w.stopped {
+		w.reading = true
+	}
+	w.mu.Unlock()
 	go func() {
 		err := w.watch(w.first, 0)
 		if err == nil {
@@ -275,6 +289,10 @@ func (w *Watcher) Start() {
 		current := w.watcher != nil
 		if !current && !w.stopped {
 			w.err = err
+			// The read this ordered never began, and nothing but a Rewatch will start one: the
+			// copy needs a read again (NeedsRead), which is how the listener's self-health
+			// rebuild finds a watcher whose own watch left it with nothing feeding the cache.
+			w.reading = false
 			// Nothing will complete a scan for this watcher until a Rewatch, so a caller waiting
 			// for a complete view reads this error rather than waiting its own ctx out.
 			w.wakeComplete()
@@ -700,10 +718,15 @@ func (w *Watcher) completeRead(generation uint64, read Read) {
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
 	w.mu.Lock()
-	if generation == w.generation {
+	completes = w.completes(generation)
+	// The read stays under way across CompleteRead: that call is the cache's own work, it is made
+	// with mu released, and a reader asking in between would otherwise find a copy that neither
+	// follows its bucket nor is being read - a copy NeedsRead reports, and the listener's
+	// self-health check rebuilds (cmd/listener/main.go, errCacheNeedsRead), while nothing at all
+	// is wrong with it. A read that cannot complete ends here instead, and clears it now.
+	if !completes && generation == w.generation {
 		w.reading = false
 	}
-	completes = w.completes(generation)
 	w.mu.Unlock()
 	if !completes {
 		return
@@ -711,6 +734,9 @@ func (w *Watcher) completeRead(generation uint64, read Read) {
 	w.cache.CompleteRead(read)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if generation == w.generation {
+		w.reading = false
+	}
 	if w.completes(generation) {
 		w.following = true
 		w.completedOnce = true

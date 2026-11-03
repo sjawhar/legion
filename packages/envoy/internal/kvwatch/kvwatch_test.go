@@ -434,6 +434,56 @@ func TestAFailedFirstStartIsReadyAndRecordsItsError(t *testing.T) {
 	}
 }
 
+// The listener's self-health check rebuilds a cache whose copy needs a read (cmd/listener,
+// errCacheNeedsRead), so the window between a store's Open and its first watch installing that
+// read must not read as one: the read is under way from Start. Only a first watch that failed
+// leaves a copy nothing but a Rewatch repairs, and that one does report it.
+func TestAStartedWatcherNeedsNoReadUntilItsFirstWatchFails(t *testing.T) {
+	t.Run("while the first watch is still starting", func(t *testing.T) {
+		uri := testnats.URL(t)
+		_, kv := bucket(t, uri)
+		held := holdWatch(kv)
+		w := kvwatch.New("test cache", held.handle(), newSeen())
+		t.Cleanup(w.Stop)
+
+		w.Start()
+		select {
+		case <-held.watched:
+		case <-time.After(5 * time.Second):
+			close(held.release)
+			t.Fatal("the watch never armed its watcher")
+		}
+		// Read while the watch is held inside its KV Watch, before it takes the watcher's locks:
+		// the state a self-health probe would find in the window this test is about.
+		needsRead := w.NeedsRead()
+		close(held.release)
+		if needsRead {
+			t.Fatal("a watcher whose first watch is still starting reports a copy that needs a read")
+		}
+		eventually(t, "the first read to complete", func() bool { return w.Following() })
+		if w.NeedsRead() {
+			t.Fatal("a copy that follows its bucket reports it needs a read")
+		}
+	})
+
+	t.Run("after the first watch failed", func(t *testing.T) {
+		uri := testnats.URL(t)
+		conn, kv := bucket(t, uri)
+		conn.Close()
+		w := kvwatch.New("test cache", kv, newSeen())
+
+		w.Start()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := w.WaitReady(ctx); err != nil {
+			t.Fatalf("WaitReady after a failed first start: %v", err)
+		}
+		if !w.NeedsRead() {
+			t.Fatal("a copy whose first watch failed reports no read is needed; nothing would rebuild it")
+		}
+	})
+}
+
 // A first start that fails after a Rewatch has armed a live watcher records nothing: the error is
 // the first start's, not the current watcher's, and recording it would mark a live cache dead.
 func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T) {

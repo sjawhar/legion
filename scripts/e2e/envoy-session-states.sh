@@ -1328,6 +1328,7 @@ outbox_event_is() { [ "$(outbox_event "$1" "$2" "$3")" = "$4" ]; }
 
 check_role_route_reaches_its_holder() {
   local role=ess-roleroute-$$ issue marker reached record claimed_at live held resumed attempts
+  local event_id held_lines
   [ -n "$omp_pid" ] || omp_start || return 1
   [ -n "$omp_session" ] || omp_session=$(omp_session_id)
   wait_until 180 "the Oh My Pi session to be live" state_is "$port_a" "$omp_session" '' live || return 1
@@ -1391,12 +1392,16 @@ check_role_route_reaches_its_holder() {
     refuse "the role lookup for the stalled holder answered $(head -c 200 "$answer")" || return 1
   jq -e --arg h "$omp_session" '.holder == $h and .holder_state == "unresponsive" and .claim_released == false' "$answer" >/dev/null ||
     refuse "the role lookup does not name the stalled holder, its state and its kept claim: $(head -c 300 "$answer")" || return 1
-  # It answers again, and the held event is forwarded — once. The outbox doubles its wait from a
-  # second between attempts (internal/dispatch/retry), so the forward follows the heartbeat by up
-  # to the delay the attempts of the stall had reached.
+  # It answers again, and the held event is forwarded — once, after the back-off its own attempts
+  # reached rather than at the heartbeat that made the holder live: the nth attempt waits
+  # retry.Delay(n), 2^(n-1) seconds capped at retry.MaxDelay of five minutes
+  # (internal/dispatch/retry), so a stall that reached its ninth attempt waits 256s after the
+  # holder answers again and one at the ceiling a full five minutes. The window is fifteen
+  # minutes — three such ceilings, with the scan's own wake on top — so a slow resume is a wait
+  # here and never a failure.
   kill -CONT "$omp_pid" || refuse "could not continue Oh My Pi" || return 1
   wait_until 180 "the holder to be live again" state_is "$port_a" "$omp_session" '' live || return 1
-  wait_until 600 "the held event to be forwarded once the holder answers again" \
+  wait_until 900 "the held event to be forwarded once the holder answers again" \
     role_forwards_at_least "stalled $marker" 1 || return 1
   sleep 30
   resumed=$(role_forwards "stalled $marker")
@@ -1413,8 +1418,22 @@ check_role_route_reaches_its_holder() {
     refuse "the held event was tried $attempts times, the dead-letter threshold the outbox gives an event up at" || return 1
   ! grep -qE 'agent delivery failed|deferred|given up' "$evidence/logs/listener_a.log" ||
     refuse "the listener's log names a failed, deferred or given-up delivery for a held role forward" || return 1
-  ! grep -qE 'given up|delivery failed|forward refused' "$evidence/logs/dispatch.log" ||
-    refuse "Dispatch's log names a failed, given-up or refused delivery: $(grep -m1 -E 'given up|delivery failed|forward refused' "$evidence/logs/dispatch.log" | head -c 200)" || return 1
+  # Dispatch's own log, in the words that code writes (internal/dispatch/outbox): the held event's
+  # back-off is `dispatch outbox: event waits for its role's holder` at INFO, naming the holder it
+  # waits on and that holder's state (waitForHolders, publisher.go), and nothing of this event is
+  # at ERROR — neither `dispatch outbox: publish event`, the line a send NATS failed writes
+  # (backOff), nor `dispatch outbox: event reached dead-letter threshold`, the give-up
+  # (backOffAttempt). Every line is matched on the event's own id, since this one log holds every
+  # event of every check.
+  event_id=$(outbox_event "$issue" "stalled $marker" id)
+  [ -n "$event_id" ] ||
+    refuse "Dispatch's database names no event for 'stalled $marker'" || return 1
+  held_lines=$(grep -E "(^|[[:space:]])event_id=$event_id([[:space:]]|$)" "$evidence/logs/dispatch.log") ||
+    refuse "Dispatch's log holds no line for the held event $event_id" || return 1
+  grep -qE "msg=\"dispatch outbox: event waits for its role's holder\".*holder=$omp_session holder_state=unresponsive" <<<"$held_lines" ||
+    refuse "Dispatch's log does not say event $event_id waited for its unresponsive holder: $(head -c 300 <<<"$held_lines")" || return 1
+  ! grep -qE 'level=ERROR|reached dead-letter threshold' <<<"$held_lines" ||
+    refuse "Dispatch's log reports the held event as a failure: $(grep -m1 -E 'level=ERROR|reached dead-letter threshold' <<<"$held_lines" | head -c 200)" || return 1
   [ ! -s "$work/exceptions.jsonl" ] ||
     refuse "an exception landed on notifications.envoy.exceptions.*: $(head -c 200 "$work/exceptions.jsonl")" || return 1
   note "held through the stall over $attempts attempts, the role forward arrived once after SIGCONT with the claim untouched"

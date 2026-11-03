@@ -33,8 +33,9 @@ var errNoRoleReaders = errors.New("the outbox has no role-claim or session reade
 //     the claim's holder is gone - its own last registration is past the gone horizon - or the
 //     holder is the event's own actor (the listener's echo skip);
 //   - err names why the destination stays pending, backed off with an attempt counted and
-//     retried: the claim or the holder's session could not be read, the holder is unresponsive,
-//     or nothing dates the holder at all;
+//     retried, with heldState naming the holder's state behind it: the claim or the holder's
+//     session could not be read (heldStateUnresolved), the holder is unresponsive
+//     (session.Unresponsive), or nothing dates the holder at all (heldStateUndated);
 //   - otherwise the envelope is forwarded to holder with a Request (sendChains).
 //
 // No arm of it takes anything from the holder: a claim stands until the listener's role-claim
@@ -48,7 +49,19 @@ type roleForward struct {
 	streamAck bool
 	skip      string
 	err       error
+	heldState string
 }
+
+// The states a forward is held on that are no session state of the holder's: the resolution never
+// reached one. They are label values of the hold counter (Deps.RoleForwardsHeld) and words of the
+// line a held event's back-off writes (waitForHolders), so they stay short and lower case, as
+// session.State's own words are.
+const (
+	// heldStateUndated: the holder has no session record and nothing dates it.
+	heldStateUndated = "undated"
+	// heldStateUnresolved: the claim or the holder's session could not be read.
+	heldStateUnresolved = "unresolved"
+)
 
 // roleResolution is one role's holder as a batch resolved it.
 type roleResolution struct {
@@ -131,7 +144,8 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 // send that every holder takes.
 func forwardOf(item contracts.Envelope, resolution roles.Resolution, err error) *roleForward {
 	if err != nil {
-		return &roleForward{holder: resolution.Holder, err: fmt.Errorf("resolve the role's holder: %w", err)}
+		return &roleForward{holder: resolution.Holder, heldState: heldStateUnresolved,
+			err: fmt.Errorf("resolve the role's holder: %w", err)}
 	}
 	holder := resolution.Holder
 	switch resolution.State {
@@ -139,13 +153,13 @@ func forwardOf(item contracts.Envelope, resolution roles.Resolution, err error) 
 		return &roleForward{skip: "the role has no claim"}
 	case roles.Lapsed:
 		if resolution.LastSeen == 0 {
-			return &roleForward{holder: holder, err: fmt.Errorf(
+			return &roleForward{holder: holder, heldState: heldStateUndated, err: fmt.Errorf(
 				"the role's holder %s has no session record and nothing dates it", holder)}
 		}
 		if resolution.HolderState == session.Gone {
 			return &roleForward{holder: holder, skip: "the role's holder is gone"}
 		}
-		return &roleForward{holder: holder, err: fmt.Errorf(
+		return &roleForward{holder: holder, heldState: string(resolution.HolderState), err: fmt.Errorf(
 			"the role's holder %s is %s: it has not heartbeated since %s",
 			holder, resolution.HolderState, time.UnixMilli(resolution.LastSeen).UTC().Format(time.RFC3339))}
 	}

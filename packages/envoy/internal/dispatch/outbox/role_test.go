@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
@@ -204,18 +206,22 @@ func (r *roleRig) roleClaim(t *testing.T, role string) envoystore.RoleClaim {
 	return claim
 }
 
-// countingDeps is the rig's dependencies with a publish-failure counter on a registry of its own,
-// so a test can read which reason a send that was not reached was counted under.
+// countingDeps is the rig's dependencies with the outbox's two counters on a registry of its own,
+// so a test can read which reason a send that was not reached was counted under, and which holder
+// state a forward held pending was counted on.
 func (r *roleRig) countingDeps(t *testing.T) (Deps, *metrics.Registry) {
 	t.Helper()
 	registry := metrics.New()
 	deps := r.deps()
 	deps.PublishFailures = registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
 		"Destinations of an outbox publish attempt that were not reached")
+	deps.RoleForwardsHeld = registry.NewCounter("envoy_dispatch_outbox_role_forwards_held_total",
+		"Role forwards a holder's resolution held pending with nothing sent")
 	return deps, registry
 }
 
-// failureReasons is what /metrics serves of registry, the counted reasons among it.
+// failureReasons is what /metrics serves of registry, the counted reasons and holder states among
+// it.
 func failureReasons(t *testing.T, registry *metrics.Registry) string {
 	t.Helper()
 	response := httptest.NewRecorder()
@@ -711,13 +717,15 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 	}
 }
 
-// A role forward its holder's resolution held pending is counted under the holder, not as a
-// publish failure: nothing was sent, so NATS neither refused nor dropped it, while `failed` is
-// what tells an operator the bus failed a send. The holder here is registered and past the live
-// window; a holder nothing dates and a read that failed hold a forward pending the same way
-// (forwardOf), and the event is backed off as
-// TestARoleRouteToAnUnresponsiveHolderStaysPending holds.
-func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T) {
+// A role forward its holder's resolution held pending is a wait, not a failure: it is counted on
+// the outbox's hold counter under the state its holder was held on, never on the publish-failure
+// counter, and its event's back-off is logged below ERROR naming that holder and that state.
+// Nothing was sent, so NATS neither refused nor dropped it, while a publish failure and an ERROR
+// line are what tell an operator the bus failed a send. The holder here is registered and past the
+// live window; a holder nothing dates and a read that failed hold a forward pending the same way
+// (forwardOf), and the event is backed off as TestARoleRouteToAnUnresponsiveHolderStaysPending
+// holds.
+func TestAForwardHeldByItsHoldersResolutionIsAWaitNotAFailure(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale_counted"
 	rig.claimRegisteredAt(t, role, holder, session.LiveWindow+time.Minute)
@@ -725,6 +733,8 @@ func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T)
 	rig.silent(t, contracts.AgentSubject(holder))
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
 	deps, registry := rig.countingDeps(t)
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	holding(t, deps).scan(context.Background(), unfenced{})
 
@@ -732,11 +742,19 @@ func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T)
 		t.Fatal("the event whose role forward stayed pending was published")
 	}
 	body := failureReasons(t, registry)
-	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="holder"} 1`) {
-		t.Fatalf("/metrics body = %q, want the pending forward counted under its holder", body)
+	if !strings.Contains(body, `envoy_dispatch_outbox_role_forwards_held_total{holder_state="unresponsive"} 1`) {
+		t.Fatalf("/metrics body = %q, want the pending forward counted a hold under its holder's state", body)
 	}
-	if strings.Contains(body, `reason="failed"`) {
+	if strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{`) {
 		t.Fatalf("/metrics body = %q counts a forward that sent nothing as a publish failure", body)
+	}
+	logged := logs.Lines(fmt.Sprintf("event_id=%d ", event.ID))
+	if !strings.Contains(logged, `level=INFO msg="dispatch outbox: event waits for its role's holder"`) ||
+		!strings.Contains(logged, " holder="+holder+" ") || !strings.Contains(logged, " holder_state=unresponsive ") {
+		t.Fatalf("the held event logged %q, want its back-off below ERROR, naming its holder and that holder's state", logged)
+	}
+	if strings.Contains(logged, "level=ERROR") {
+		t.Fatalf("the held event logged %q, want nothing of it at ERROR: a hold is a wait, not a failure", logged)
 	}
 }
 
