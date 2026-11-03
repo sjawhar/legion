@@ -328,11 +328,11 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	lifetime := obj.LifetimeSeconds
 	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
 	if err != nil {
 		return Request{}, err
 	}
+	lifetime := defaultLifetime(set, names, obj.LifetimeSeconds)
 	for _, name := range names {
 		if limit, over := overMaxGrant(set, name, lifetime); over {
 			return Request{}, fmt.Errorf("%w: %s allows at most %s; ask with agent-secrets --ttl %s", ErrGrantRequiresLifetime, name, limit, limit)
@@ -437,6 +437,26 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 		set = m.Policy.Get()
 	}
 	return set, nil
+}
+
+// DefaultGrantLifetime is how long a grant lasts when its request names no lifetime, unless every
+// name it grants carries default-grant=session (policy.TagDefaultGrant).
+const DefaultGrantLifetime = 12 * time.Hour
+
+// defaultLifetime is the lifetime a request's grant lasts: the one it signed, else
+// DefaultGrantLifetime, else nil (until its session ends) when every name opts out with
+// default-grant=session. A name the set does not serve is left to evaluate, which refuses it.
+func defaultLifetime(set *policy.Set, names []string, signed *int) *int {
+	if signed != nil {
+		return signed
+	}
+	for _, name := range names {
+		if secret, ok := set.Secrets[name]; ok && !secret.SessionDefault {
+			seconds := int(DefaultGrantLifetime / time.Second)
+			return &seconds
+		}
+	}
+	return nil
 }
 
 // overMaxGrant reports whether a request signing lifetime (nil: until its session ends) asks for
