@@ -625,6 +625,35 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
   });
 
+  // A refusal that joins the document-owner rule to another rule names only the parts the call
+  // broke: a call with a valid owner is never told its owner is wrong.
+  test("owner-plus-rule refusals name only the broken part", () => {
+    const turn =
+      "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+    const precondition = "A precondition selects exactly one of document or blocks.";
+    const source = "Exactly one of path or content is required.";
+    const artifactOwner =
+      "Exactly one of issue and project is required; with project, artifact names the document.";
+    const edit = { artifact: "spec.md", ops: [{ op: "delete", find: "x" }] };
+    for (const [tool, args, refusal] of [
+      ["dispatch_comment", { issue: "DSP-1", body: "y", turn: "agent" }, turn],
+      ["dispatch_comment", { body: "y", turn: "agent" }, `${artifactOwner} ${turn}`],
+      ["dispatch_comment", { body: "y" }, artifactOwner],
+      ["dispatch_doc_edit", { issue: "DSP-1", ...edit, precondition: {} }, precondition],
+      ["dispatch_doc_edit", { ...edit }, artifactOwner],
+      ["dispatch_artifact", { issue: "DSP-1", name: "n" }, source],
+      ["dispatch_artifact", { name: "n", content: "c" }, artifactOwner],
+      ["dispatch_artifact", { name: "n" }, `${artifactOwner} ${source}`],
+    ] as const) {
+      const result = schemaFor(tool).safeParse(args);
+      expect(result.success, `${tool} ${JSON.stringify(args)}`).toBe(false);
+      expect(
+        result.error?.issues.map((issue) => issue.message),
+        `${tool} ${JSON.stringify(args)}`
+      ).toEqual([refusal]);
+    }
+  });
+
   // A closed issue refuses messages, comments, and artifacts, so the reason an issue closed can
   // only be written before the close: the tool takes it in the same call and refuses the close
   // without it.

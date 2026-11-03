@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    A `dispatch_comment` call with `turn` and no `reply_to_ask` is now refused with only the
+    turn rule and what to do: pass `reply_to_ask` with the open ask's id, or drop `turn`. The
+    refusal also named the document-owner rule first, even when the call gave exactly one
+    issue. `dispatch_doc_edit`'s precondition refusal and `dispatch_artifact`'s path-or-content
+    refusal likewise name the owner rule only when the owner is wrong.
+time: 2026-11-03T12:20:00.000000000Z
+custom:
+    Issue: turn-refusal
