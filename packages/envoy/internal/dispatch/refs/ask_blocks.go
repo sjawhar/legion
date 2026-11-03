@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // The type of each part of an ask, its ask_blocks.type and the salt of its identity hash
@@ -143,11 +142,13 @@ func askPartsSum(parts []itemblocks.Block) string {
 // askPartPairs is each distinct link the parts hold, from the part that holds it. A part is its
 // own text, so each part's mentions are read from that text alone and paired to it, with no
 // offset arithmetic into one body (blockPairs over the one part). An ask's text is prose, never
-// a typed block, so a part holds no block pointer and the pairs are its mentions alone.
-func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []blockPair {
+// a typed block, so a part holds no block pointer and the pairs are its mentions alone. Every
+// part is read through the one resolver the ask's write built, so the question and the parts
+// resolve a bare key, a `#id` and a short id alike and the database answers once per kind.
+func askPartPairs(parts []itemblocks.Block, ids []string, r *resolver) []blockPair {
 	var pairs []blockPair
 	for index, part := range parts {
-		located := text.ExtractAt(part.Text, serverURL)
+		located := r.mentions(part.Text)
 		if len(located) == 0 {
 			continue
 		}
@@ -167,8 +168,15 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 //
 // It returns the targets of the part mentions it moved, which the caller's event counts.
 func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
+	return indexAskPartsWith(ctx, tx, ask, newResolver(ctx, tx, string(ItemAsk), ask.ID, serverURL), at)
+}
+
+// indexAskPartsWith is IndexAskParts through a resolver the caller holds already, which a write
+// that reads the ask's own text through it passes on (ReindexOwedItem), so one write asks the
+// database once per kind for the question and its parts together.
+func indexAskPartsWith(ctx context.Context, tx pgx.Tx, ask model.Ask, r *resolver, at time.Time) ([]Target, error) {
 	parts := AskParts(ask)
-	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), serverURL, at)
+	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), r, at)
 }
 
 // IndexAskPartsCounted is IndexAskParts for a writer that appends an event: it indexes the ask's
@@ -199,7 +207,7 @@ func IndexAskPartsCounted(
 }
 
 // indexAskParts is IndexAskParts over parts the caller has already read and summed.
-func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum, serverURL string, at time.Time) ([]Target, error) {
+func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum string, r *resolver, at time.Time) ([]Target, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
 		return nil, err
@@ -213,7 +221,7 @@ func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itembl
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {
-			return askPartPairs(next, ids, serverURL)
+			return askPartPairs(next, ids, r)
 		},
 	})
 }
@@ -281,7 +289,8 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 	if stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
-	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, serverURL, writtenAt); err != nil {
+	resolve := newResolver(ctx, tx, string(ItemAsk), askID, serverURL)
+	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, resolve, writtenAt); err != nil {
 		return false, fmt.Errorf("index the parts of ask %s: %w", askID, err)
 	}
 	return true, nil

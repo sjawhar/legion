@@ -36,13 +36,15 @@ type Rebuild struct {
 	ItemsOwed int
 }
 
-// RebuildAll reparses every reference source and reconciles refs with it, one transaction per
-// source, so the index converges on what the live write paths produce: the latest version of
-// every document, every ask question, every comment body, and every issue message (issue-less
-// messages are never indexed), each read by sourceText. An edge that survives keeps its
-// created_at and source_seq; one the rebuild introduces has no source_seq, since no event
-// introduced it, and no current excerpt: a document mention's excerpt is cut from the document's
-// tree, which only the document service reads, so its reconciliation
+// RebuildAll reparses every reference source with this build's whole grammar, the bare issue
+// keys, `#id`s and short ids it resolves against the database included (Mentions), and
+// reconciles refs with it, one transaction per source, so the index converges on what the live
+// write paths produce: the latest version of every document, every ask question, every comment
+// body, and every issue message (issue-less messages are never indexed), each read by
+// sourceText. An edge that survives keeps its created_at and source_seq; one the rebuild
+// introduces has no source_seq, since no event introduced it, and no current excerpt: a
+// document mention's excerpt is cut from the document's tree, which only the document service
+// reads, so its reconciliation
 // (docs.Service.RunReferenceExcerptReconciliation) stores it. An edge that survives keeps its
 // payload, but StoredExcerpts hides it until the row has a current excerpt_version.
 //
@@ -151,7 +153,7 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 	if err != nil || !found {
 		return false, err
 	}
-	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil); err != nil {
+	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL)), nil); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -247,7 +249,8 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	if found {
-		located := text.ExtractAt(body, serverURL)
+		resolve := newResolver(ctx, tx, item.Kind, item.ID, serverURL)
+		located := resolve.mentions(body)
 		switch kind := ItemKind(item.Kind); kind {
 		case ItemComment, ItemMessage:
 			if _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
@@ -261,7 +264,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 				return err
 			}
 			if found {
-				if _, err := IndexAskParts(ctx, tx, ask, serverURL, writtenAt); err != nil {
+				if _, err := indexAskPartsWith(ctx, tx, ask, resolve, writtenAt); err != nil {
 					return fmt.Errorf("index the parts of ask %s: %w", item.ID, err)
 				}
 			}

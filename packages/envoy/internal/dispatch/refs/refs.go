@@ -36,9 +36,10 @@ type Target struct {
 	ID   string
 }
 
-// ReplaceCounted reconciles one source's references and resolves the counted targets the event
-// that source appends has to name. Every write that indexes a body goes through it or one of its
-// variants, so no producer can reconcile the graph without holding what moved: replaceRefs itself
+// ReplaceCounted reconciles one source's references, read with the whole grammar over the
+// write's transaction (Mentions), and resolves the counted targets the event that source appends
+// has to name. Every write that indexes a body goes through it or one of its variants, so no
+// producer can reconcile the graph without holding what moved: replaceRefs itself
 // is unexported. It names the targets whose edges it inserted or deleted, which is all a first
 // write of a body moves; an edit whose event names what it moved goes through ReplaceCountedEdit
 // (ReplaceCountedItemEdit for a comment), and a document's version through
@@ -49,7 +50,8 @@ func ReplaceCounted(
 	tx pgx.Tx,
 	fromKind, fromID, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	changed, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, serverURL), nil)
+	found := text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL))
+	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -64,7 +66,7 @@ func ReplaceCountedEdit(
 	tx pgx.Tx,
 	fromKind, fromID, previous, body, serverURL string,
 ) (model.ReferenceChanges, error) {
-	found := text.Extract(body, serverURL)
+	found := text.Refs(Mentions(ctx, tx, fromKind, fromID, body, serverURL))
 	changed, err := replaceRefs(ctx, tx, fromKind, fromID, found, nil)
 	if err != nil {
 		return model.ReferenceChanges{}, err

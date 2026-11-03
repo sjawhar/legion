@@ -27,7 +27,7 @@ type Execer interface {
 // text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
 // (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
 // still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.
-// located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
+// located is Mentions of markdown, the one reading a version's index takes.
 func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
 	starts := make([]int, len(located))
 	for i, mention := range located {

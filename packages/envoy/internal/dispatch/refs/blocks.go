@@ -29,10 +29,12 @@ type Pointer struct {
 // graph nodes, and each mention written inside a block as an edge out of the innermost block
 // holding its start, in the caller's transaction, which holds the document's owner row. blocks
 // are the version's rendered blocks in document order, each parent before its children; the first
-// holder of a repeated id is the node. located must be text.ExtractAt(markdown, …). A block whose
-// id is longer than text.MaxBlockIDBytes, which no key of the index can hold, is no node: a
-// mention inside it starts at the innermost node holding it, if any, and the indexing logs a
-// warning naming the document, the longest such id's length and the bound.
+// holder of a repeated id is the node. located must be Mentions of the document's text, the one
+// reading of it a version's index takes, so a mention's offset places it in the block holding it
+// however the text wrote the reference. A block whose id is longer than text.MaxBlockIDBytes,
+// which no key of the index can hold, is no node: a mention inside it starts at the innermost
+// node holding it, if any, and the indexing logs a warning naming the document, the longest
+// such id's length and the bound.
 //
 // pointers are the version's `block[]` values (pmdoc.BlockPointers, which lists none of a typed
 // block repeating the id of a typed block before it): each whose block is a node is an edge of its
