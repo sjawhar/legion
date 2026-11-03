@@ -74,6 +74,97 @@ form then reads the key dir as a box's or a pod's.
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 
+## Install
+
+Each `legion-envoy-v*` release of this repository ships the client. The release tag names the Envoy
+package, not `agent-secrets`, and the repository's newest release can be another package's, so
+look the tag up rather than reading `releases/latest`. These commands need `curl`, `tar` and
+`sha256sum` (on Ubuntu: `apt-get install -y curl ca-certificates`), and install into
+`~/.local/bin`:
+
+```sh
+tag=$(curl -fsSL 'https://api.github.com/repos/sjawhar/legion/releases?per_page=100' \
+  | grep -o '"tag_name": *"legion-envoy-v[^"]*"' | head -n 1 | cut -d '"' -f 4)
+asset=agent-secrets-amd64.tar.gz   # or agent-secrets-arm64.tar.gz; on macOS agent-secrets-darwin-arm64.tar.gz
+base=https://github.com/sjawhar/legion/releases/download/$tag
+curl -fsSLO "$base/$asset"
+curl -fsSLO "$base/SHA256SUMS"
+grep " $asset\$" SHA256SUMS | sha256sum -c -
+tar -xzf "$asset"
+mkdir -p ~/.local/bin
+install -m 0755 agent-secrets/bin/* ~/.local/bin/
+agent-secrets --version
+```
+
+`sha256sum -c` must print `<asset>: OK`; stop if it does not. On macOS use `shasum -a 256 -c -`.
+The Linux archives hold `agent-secrets` and `agent-secrets-helper`; the macOS archives hold
+`agent-secrets` alone. `agent-secrets --version` prints the release tag, such as
+`agent-secrets legion-envoy-v28.1.1`. To also check who built the archive, run
+`gh attestation verify "$asset" --repo sjawhar/legion`.
+
+## Give a new machine access
+
+A machine that runs agent sessions needs the helper and a machine login that its operator (the
+person whose agents it runs) approves in Dispatch. The helper runs on Linux only, as a
+`systemd --user` service. Replace `<broker URL>` with your deployment's broker address and
+`<you@example.com>` with your Dispatch login:
+
+```sh
+export AGENT_SECRETS_URL=<broker URL>
+mkdir -p ~/.config/agent-secrets
+echo '<you@example.com>' > ~/.config/agent-secrets/operator
+agent-secrets-helper install --url "$AGENT_SECRETS_URL"
+agent-secrets machine login
+```
+
+`agent-secrets machine login` prints a confirmation code and waits. Open Dispatch's machine-login
+page (`/credentials/machine`; set `AGENT_SECRETS_APPROVE_URL` to Dispatch's address and the
+command prints the full link), type the code, check that it matches your terminal, and approve. The
+command then exits 0. Only the person named in the operator file can approve. The helper keeps the
+login in `~/.config/agent-secrets/machine.json` and refreshes it itself, so you log a machine in
+once; `agent-secrets machine login-status` prints `issued` while it holds the login.
+
+Put `export AGENT_SECRETS_URL=<broker URL>` in the profile your shells and agents start from, and
+start each agent as a machine session, so the helper signs for it:
+
+```sh
+agent-secrets register --wait 10 --exec -- <agent command>
+```
+
+A Kubernetes pod or a Google Cloud VM does not use the helper or a person's approval: the Legion
+daemon enrolls its pods with their service-account tokens, and a VM enrolls itself (above). The
+docs site's [Log a machine in](https://sjawhar.github.io/legion/broker/guides/log-a-machine-in/)
+guide covers each step in full.
+
+## Common commands
+
+Each grant is for one session, and lasts until that session ends or for `--ttl`. An agent-tier
+secret its session's owner holds is granted at once; a human-tier one waits for its approver on the
+broker's approval page, which their Dispatch Inbox links to.
+
+```sh
+agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh  # get a secret and run a command with it
+agent-secrets request DEMO_API_KEY --reason "Deploy" --ttl 1h                    # ask without running anything
+agent-secrets status <request_id>                                                # a request's state
+agent-secrets self                                                               # this session's enrollment and live grants
+agent-secrets revoke <grant_id>                                                  # end one of this session's grants
+```
+
+From your own shell (outside every agent session), under this machine's login:
+
+```sh
+agent-secrets machine list            # your machines' logins
+agent-secrets machine revoke <credential_id>
+agent-secrets grant list              # live grants of your sessions and those you approved
+agent-secrets grant revoke <grant_id>
+agent-secrets-helper sessions         # the sessions this machine's helper holds
+```
+
+Owners manage the secrets themselves under their own cloud sign-in, with no helper:
+`agent-secrets secret list`, `secret show NAME`, `secret create NAME --owner me --tier agent`,
+`secret set NAME`, `secret retag NAME`, `secret delete NAME` and `secret restore NAME`.
+`agent-secrets --help` and `agent-secrets-helper --help` list every form and environment variable.
+
 ## Build
 
 ```sh
