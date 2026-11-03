@@ -248,11 +248,6 @@ func main() {
 	// it sends a pod would reread every secret it just reread on behalf of a caller. Both halves of
 	// the fan-out take it: the notifier stamps it, and the listener drops what carries it.
 	senderID := uuid.NewString()
-	// The live policy, which two of the boot's own collaborators reach: the catch-up reloads it,
-	// and the reread listener refreshes one name in it. Neither of them exists before the first
-	// load has answered, so the load writes it here - on the boot's own goroutine, before the
-	// boot reaches either - and everything after the boot reads it as started.Policy.
-	var loaded *policy.Current
 	started, err := boot(ctx, brokerBoot{
 		// The policy and its five-minute reload, on serving rather than on ctx so the backstop
 		// the fan-out leans on goes on reloading while the pod drains: stopped at the signal it
@@ -275,9 +270,7 @@ func main() {
 		// from `again` and answers with os.Exit(1) (measured: gone within 30 ms of that signal),
 		// or the kubelet's SIGKILL at the end of the grace period.
 		LoadPolicy: func(serving context.Context) (*policy.Current, error) {
-			var err error
-			loaded, err = policy.NewCurrent(serving, loader, policyRefresh)
-			return loaded, err
+			return policy.NewCurrent(serving, loader, policyRefresh)
 		},
 		// The receiving half of the reread fan-out, started after the first policy load (it
 		// rereads into that policy) and before the bind, so a pod that cannot hold a LISTEN
@@ -289,20 +282,20 @@ func main() {
 		// still a pod a peer's reread has to reach, and a listener stopped at the signal would
 		// leave that pod serving the tags it read before the retag for the whole of its drain.
 		// The shutdown ends it instead.
-		StartListener: func(serving context.Context, onConnected func()) {
+		StartListener: func(serving context.Context, current *policy.Current, onConnected func()) {
 			go (&reread.Listener{
 				Sender:      senderID,
 				Dial:        st.Listener,
 				OnConnected: onConnected,
 				Refresh: func(ctx context.Context, name string) error {
-					_, err := loaded.RefreshOne(ctx, name)
+					_, err := current.RefreshOne(ctx, name)
 					return err
 				},
 			}).Run(serving)
 		},
 		Listen:     listenTCP(cfg.ListenAddr),
 		ListenWait: rereadListenWait,
-		Catchup:    func(serving context.Context) error { return loaded.Refresh(serving) },
+		Catchup:    func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
 		Log:        slog.Default(),
 	})
 	fatal(err)

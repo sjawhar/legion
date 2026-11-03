@@ -306,39 +306,40 @@ var GCPRereadOverallLimit = RereadOverallFor(GCPRereadFleetBudget, MinReplicas)
 type RereadRate struct {
 	budget ratelimit.Limit
 	log    *slog.Logger
-
-	// mu guards the replica count the rates are derived at and the two buckets Mount gave:
-	// Register mounts them before the serving clock runs, and the clock's own goroutine is
-	// what calls SetReplicas after that.
-	mu         sync.Mutex
-	replicas   int
+	// perAddress and shared are the two live buckets POST /v1/secrets/{name}/reread is served
+	// from, built here at MinReplicas and handed to Register (Buckets). Nothing replaces either
+	// of them, so they are read without the lock; what changes under it is the rates they run
+	// at.
 	perAddress *ratelimit.Keyed
 	shared     *ratelimit.Bucket
+
+	// mu guards the replica count those rates are derived at: Register takes the buckets before
+	// the serving clock runs, and the clock's own goroutine is what calls SetReplicas after
+	// that.
+	mu       sync.Mutex
+	replicas int
 }
 
 // NewRereadRate is the reread rate of a process whose store's whole fleet budget is budget
-// (DefaultRereadFleetBudget or GCPRereadFleetBudget). It logs each rate it derives to log, which
-// is required.
+// (DefaultRereadFleetBudget or GCPRereadFleetBudget). Its two buckets are built here at
+// MinReplicas, which is the sizing the process serves at until its first beat counts the fleet.
+// It logs each rate it derives to log, which is required.
 func NewRereadRate(budget ratelimit.Limit, log *slog.Logger) *RereadRate {
-	return &RereadRate{budget: budget, log: log}
+	overall := RereadOverallFor(budget, MinReplicas)
+	return &RereadRate{
+		budget:     budget,
+		log:        log,
+		perAddress: ratelimit.NewKeyed(RereadLimitFor(overall)),
+		shared:     ratelimit.NewBucket(overall),
+	}
 }
 
-// Overall is the shared reread limit r derives now: its budget at MinReplicas until the first
-// SetReplicas. Register builds this process's two reread buckets from it and hands them to
-// Mount.
-func (r *RereadRate) Overall() ratelimit.Limit {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return RereadOverallFor(r.budget, r.replicas)
-}
-
-// Mount gives r the two live buckets POST /v1/secrets/{name}/reread is served from, so that a
-// change of the replica count moves the rates that route really runs at rather than only the
-// log line.
-func (r *RereadRate) Mount(perAddress *ratelimit.Keyed, shared *ratelimit.Bucket) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.perAddress, r.shared = perAddress, shared
+// Buckets are the two live buckets POST /v1/secrets/{name}/reread is served from: one per
+// source address and one every caller shares. Register serves that route from this pair for a
+// Deps that carries a rate, so a change of the replica count moves the rates the route really
+// runs at rather than only the log line.
+func (r *RereadRate) Buckets() (perAddress *ratelimit.Keyed, shared *ratelimit.Bucket) {
+	return r.perAddress, r.shared
 }
 
 // SetReplicas moves this process's reread rates to the sizing for n pods, counting fewer than
@@ -358,9 +359,7 @@ func (r *RereadRate) SetReplicas(n int) {
 	}
 	r.replicas = n
 	overall := RereadOverallFor(r.budget, n)
-	if r.perAddress != nil {
-		r.perAddress.SetRatesAt(time.Now(), RereadLimitFor(overall), r.shared, overall)
-	}
+	r.perAddress.SetRatesAt(time.Now(), RereadLimitFor(overall), r.shared, overall)
 	r.log.Info("broker reread rate", "replicas", n, "every", overall.Every, "burst", overall.Burst)
 	if n > MaxSupportedReplicas {
 		r.log.Warn("broker reread rate above the replica count this sizing supports",

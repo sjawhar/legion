@@ -245,13 +245,6 @@ func startBrokerPair(t *testing.T, binary string) *brokerFleet {
 	return startBrokerFleet(t, binary, make([]time.Duration, 2))
 }
 
-// startBrokerPairDraining is startBrokerPair with a BROKER_DRAIN_SECONDS of its own for each
-// process, for the row about what a pod that is stopping still hears while it goes on serving.
-func startBrokerPairDraining(t *testing.T, binary string, drains [2]time.Duration) *brokerFleet {
-	t.Helper()
-	return startBrokerFleet(t, binary, drains[:])
-}
-
 // startBrokerFleet starts one broker per entry of drains, each with that entry as its
 // BROKER_DRAIN_SECONDS and all of them with env besides whatever every process of this file
 // gets, on one database of this test's own, and returns once every one has logged the address
@@ -649,10 +642,10 @@ func race[T any](fleet *brokerFleet, step func(client *brokertest.Client) T) []T
 // start what they need. Two processes migrating a database neither has migrated yet take a pair
 // of their own on a fresh database; the reread row retags the pair's shared secret store and
 // leaves it retagged, which only the reread rate-limit row after it reads, and that row reads
-// the buckets rather than the tags; and the drain row takes a process and a database of its own.
-// The last three rows each take a fleet and a database of their own, at the replica count they
-// are about, because what they measure is what a pod derives from the pods it counts and a
-// shared pair is two of them for ever. The binary is built once for every row here.
+// the buckets rather than the tags; and the two drain rows each take processes and a database of
+// their own. What a pod derives from the pods it counts is in none of them: a pair is two pods
+// for ever, so TestABrokerFleetDerivesItsRereadRate drives that at fleets of its own. The binary
+// is built once for every row here.
 func TestTwoBrokers(t *testing.T) {
 	binary := buildBroker(t)
 	pair := startBrokerPair(t, binary)
@@ -902,10 +895,11 @@ func TestTwoBrokers(t *testing.T) {
 	// policy's writer lock for one store read, so the public route is capped broker-wide as well
 	// as per address. Each pod divides its store's whole fleet budget by the pods it counts
 	// (api.RereadOverallFor), which at the two this pair runs is a burst of ten with one back
-	// every second, since one accepted reread costs a store read on every pod — the sizing row 7
-	// below measures. That arithmetic holds only if a reread another pod's notification drives
-	// takes nothing from the receiving pod's bucket: otherwise one caller hammering one pod would
-	// refuse every other pod's callers too, and the fleet would spend twice what the figure says.
+	// every second, since one accepted reread costs a store read on every pod — the sizing
+	// TestABrokerFleetDerivesItsRereadRate's first row measures. That arithmetic holds only if a
+	// reread another pod's notification drives takes nothing from the receiving pod's bucket:
+	// otherwise one caller hammering one pod would refuse every other pod's callers too, and the
+	// fleet would spend twice what the figure says.
 	//
 	// So the row empties A's broker-wide bucket with a burst — which is also a burst of
 	// notifications at B — and then asks B for a reread of its own, which must be answered 200
@@ -1094,6 +1088,82 @@ func TestTwoBrokers(t *testing.T) {
 		}
 	})
 
+	// A pod that is stopping still takes the other pods' rereads. The drain exists because new
+	// requests are still routed to a pod for a while after its SIGTERM, so for that whole window
+	// it is one of the pods "serving the same database" that a reread has to reach: a retag that
+	// narrows who may have a secret must be in force there too, or the one pod the load balancer
+	// is still choosing goes on releasing the secret under the old tags.
+	//
+	// Its control is row 4: the same two processes, the same fixture and the same call, with
+	// neither of them signalled, put the retag on the peer within milliseconds. What this row
+	// changes is the signal, and nothing else.
+	t.Run("7_ADrainingPodStillTakesAPeersReread", func(t *testing.T) {
+		const (
+			// drain is long enough to hold the whole observation inside the window in which the
+			// pod is still being sent traffic, which is what the row is about.
+			drain = 30 * time.Second
+			// observeWithin bounds each observation taken against the signalled process.
+			observeWithin = 2 * time.Second
+			// fanOutWithin bounds the wait for the peer's reread, as row 4 bounds its own: far
+			// inside the five-minute reload, so only the fan-out could have driven one.
+			fanOutWithin = 10 * time.Second
+		)
+		stopping := startBrokerFleet(t, binary, []time.Duration{0, drain})
+		serving, draining := stopping.Processes[0], stopping.Processes[1]
+		writeFakeSecretsWithNoOwner(t, stopping.FakeSecretsFile)
+
+		signalled := draining.Terminate(t)
+		for {
+			status, body := mustRequest(t, draining.Addr, "/healthz")
+			if status == http.StatusServiceUnavailable && errorCode(t, body) == "SHUTTING_DOWN" {
+				break
+			}
+			if time.Since(signalled) > observeWithin {
+				t.Fatalf("GET /healthz at the signalled process %s answered %d %s for %s; the row needs it draining before it asks what a draining pod hears",
+					draining.Addr, status, body, observeWithin)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if status, body := mustRequest(t, draining.Addr, "/v1/settings"); status != http.StatusOK {
+			t.Fatalf("GET /v1/settings at the draining process %s = %d %s; the row is about a pod that is still serving, and this one is not",
+				draining.Addr, status, body)
+		}
+
+		before := [2]int{storeReads(serving), storeReads(draining)}
+		status, body := stopping.Clients[0].Req(t, http.MethodPost, "/v1/secrets/"+multiprocessSecret+"/reread", nil, nil)
+		if status != http.StatusOK {
+			t.Fatalf("POST /v1/secrets/%s/reread at %s = %d %s; want the 200 that fans out",
+				multiprocessSecret, stopping.Clients[0].Addr, status, body)
+		}
+		rereadAt := time.Now()
+		for storeReads(draining) == before[1] {
+			if time.Since(rereadAt) > fanOutWithin {
+				if storeReads(serving) == before[0] {
+					t.Fatalf("%s after the reread, the process that served it (%s) had not read the store either; the row cannot say what the draining pod missed when the call itself did nothing",
+						fanOutWithin, stopping.Clients[0].Addr)
+				}
+				still, body := mustRequest(t, draining.Addr, "/v1/settings")
+				t.Fatalf("%s and %s after its SIGTERM, the draining process %s had not reread %s, which %s was told to reread and did — while %s still answered GET /v1/settings %d %s. A pod is still being sent requests for the whole of its %s drain, so a retag that narrows who may have the secret is unenforced there until it stops accepting.",
+					fanOutWithin, time.Since(signalled).Round(time.Millisecond), draining.Addr, multiprocessSecret,
+					stopping.Clients[0].Addr, draining.Addr, still, body, drain)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Logf("the draining process %s reread %s %s after its SIGTERM, told by %s",
+			draining.Addr, multiprocessSecret, time.Since(signalled).Round(time.Millisecond), stopping.Clients[0].Addr)
+	})
+}
+
+// TestABrokerFleetDerivesItsRereadRate drives the one property of a broker fleet that two
+// processes alone cannot show: the share of the fleet's reread budget each pod derives from the
+// pods it counts, and what an accepted reread then costs the secret store. Every row starts a
+// fleet and a database of its own at the replica count it is about — the two pods the Deployment
+// runs, the three every roll of them passes through, or the four a clean roll counts — because a
+// pair is two pods for ever and each of these sizings is a function of the count. The binary is
+// built once for every row here.
+func TestABrokerFleetDerivesItsRereadRate(t *testing.T) {
+	binary := buildBroker(t)
+
 	// What the fleet spends of the secret store, measured rather than asserted from the
 	// constants alone. Every accepted reread now costs the fleet one store read per pod — its
 	// own, plus the one the fan-out drives on each peer — where before the fan-out existed it
@@ -1118,7 +1188,7 @@ func TestTwoBrokers(t *testing.T) {
 	// product budget — the share of someone else's quota this route is allowed — not an
 	// implementation detail, which is why they are written here rather than read from the
 	// package whose sizing is under test.
-	t.Run("7_TheFleetsStoreTrafficStaysInsideWhatOnePodWasAllowed", func(t *testing.T) {
+	t.Run("1_TheFleetsStoreTrafficStaysInsideWhatOnePodWasAllowed", func(t *testing.T) {
 		const (
 			onePodRereadsPerSecond    = 4.0
 			onePodGCPRereadsPerSecond = 1.0
@@ -1200,71 +1270,6 @@ func TestTwoBrokers(t *testing.T) {
 		}
 	})
 
-	// A pod that is stopping still takes the other pods' rereads. The drain exists because new
-	// requests are still routed to a pod for a while after its SIGTERM, so for that whole window
-	// it is one of the pods "serving the same database" that a reread has to reach: a retag that
-	// narrows who may have a secret must be in force there too, or the one pod the load balancer
-	// is still choosing goes on releasing the secret under the old tags.
-	//
-	// Its control is the row above and row 4: the same two processes, the same fixture and the
-	// same call, with neither of them signalled, put the retag on the peer within milliseconds.
-	// What this row changes is the signal, and nothing else.
-	t.Run("8_ADrainingPodStillTakesAPeersReread", func(t *testing.T) {
-		const (
-			// drain is long enough to hold the whole observation inside the window in which the
-			// pod is still being sent traffic, which is what the row is about.
-			drain = 30 * time.Second
-			// observeWithin bounds each observation taken against the signalled process.
-			observeWithin = 2 * time.Second
-			// fanOutWithin bounds the wait for the peer's reread, as row 4 bounds its own: far
-			// inside the five-minute reload, so only the fan-out could have driven one.
-			fanOutWithin = 10 * time.Second
-		)
-		stopping := startBrokerPairDraining(t, binary, [2]time.Duration{0, drain})
-		serving, draining := stopping.Processes[0], stopping.Processes[1]
-		writeFakeSecretsWithNoOwner(t, stopping.FakeSecretsFile)
-
-		signalled := draining.Terminate(t)
-		for {
-			status, body := mustRequest(t, draining.Addr, "/healthz")
-			if status == http.StatusServiceUnavailable && errorCode(t, body) == "SHUTTING_DOWN" {
-				break
-			}
-			if time.Since(signalled) > observeWithin {
-				t.Fatalf("GET /healthz at the signalled process %s answered %d %s for %s; the row needs it draining before it asks what a draining pod hears",
-					draining.Addr, status, body, observeWithin)
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		if status, body := mustRequest(t, draining.Addr, "/v1/settings"); status != http.StatusOK {
-			t.Fatalf("GET /v1/settings at the draining process %s = %d %s; the row is about a pod that is still serving, and this one is not",
-				draining.Addr, status, body)
-		}
-
-		before := [2]int{storeReads(serving), storeReads(draining)}
-		status, body := stopping.Clients[0].Req(t, http.MethodPost, "/v1/secrets/"+multiprocessSecret+"/reread", nil, nil)
-		if status != http.StatusOK {
-			t.Fatalf("POST /v1/secrets/%s/reread at %s = %d %s; want the 200 that fans out",
-				multiprocessSecret, stopping.Clients[0].Addr, status, body)
-		}
-		rereadAt := time.Now()
-		for storeReads(draining) == before[1] {
-			if time.Since(rereadAt) > fanOutWithin {
-				if storeReads(serving) == before[0] {
-					t.Fatalf("%s after the reread, the process that served it (%s) had not read the store either; the row cannot say what the draining pod missed when the call itself did nothing",
-						fanOutWithin, stopping.Clients[0].Addr)
-				}
-				still, body := mustRequest(t, draining.Addr, "/v1/settings")
-				t.Fatalf("%s and %s after its SIGTERM, the draining process %s had not reread %s, which %s was told to reread and did — while %s still answered GET /v1/settings %d %s. A pod is still being sent requests for the whole of its %s drain, so a retag that narrows who may have the secret is unenforced there until it stops accepting.",
-					fanOutWithin, time.Since(signalled).Round(time.Millisecond), draining.Addr, multiprocessSecret,
-					stopping.Clients[0].Addr, draining.Addr, still, body, drain)
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Logf("the draining process %s reread %s %s after its SIGTERM, told by %s",
-			draining.Addr, multiprocessSecret, time.Since(signalled).Round(time.Millisecond), stopping.Clients[0].Addr)
-	})
-
 	// What a pod accepts once its burst is spent is the rate it derived, and not a rate written
 	// down anywhere. At three pods the shared bucket refills one reread every 2.25 s, so a
 	// twenty-second window carries eight of them; at the two-pod rate the same window would
@@ -1280,7 +1285,7 @@ func TestTwoBrokers(t *testing.T) {
 	// one every 4.5 s while the shared one starts at 10 and gains one every 2.25 s, so the
 	// shared bucket has handed out fewer tokens for the first 90 seconds, and this row takes
 	// about 25.
-	t.Run("9_AtThreePodsAPodAcceptsRereadsAtTheRateItDerived", func(t *testing.T) {
+	t.Run("2_AtThreePodsAPodAcceptsRereadsAtTheRateItDerived", func(t *testing.T) {
 		const (
 			replicas = 3
 			// window is the span the accepted rereads are counted over: long enough that the
@@ -1344,7 +1349,7 @@ func TestTwoBrokers(t *testing.T) {
 	// (leasetime.NotServingSweeps sweeps) and each surviving pod has to beat once more. At
 	// BROKER_SWEEP_SECONDS=1 that is about four seconds, and the wait ends on the surviving
 	// pods' own log lines rather than on a clock.
-	t.Run("10_TheRereadRefusalFollowsThePodCountUpAndBackDown", func(t *testing.T) {
+	t.Run("3_TheRereadRefusalFollowsThePodCountUpAndBackDown", func(t *testing.T) {
 		const (
 			// atThreePods is 2.25 s rounded up, and atTwoPods the one second
 			// api.DefaultRereadOverallLimit, the default store's sizing at two pods, refills at.

@@ -24,8 +24,10 @@ import (
 // lease, is the most a given-back lease may run ahead of the beat that gives it back. Interval is
 // how often it beats, and also how long one beat may take. NotServingAfter is the longest gap
 // after a beat that still counts as a broker serving; it must be well past Interval, so a beat
-// that is merely late is not an outage, and well short of the part of its lease a renewing session
-// always holds, so no live session's lease runs out inside a gap the clock tolerates.
+// that is merely late is not an outage. What bounds it from above is no longer a fraction of
+// the lease: none of a gap this long is given back, so a session has to outlive one and then be
+// renewed, and config.Load refuses a lease that cannot by walking each renewer's own retry
+// schedule across such a gap (leasetime.Model.Survives).
 //
 // OnReplicas, when it is set, is called after each beat commits with the number of broker
 // processes beating at that beat's instant, this one included; the broker derives its reread
@@ -188,6 +190,11 @@ func (c *ServingClock) Beat(ctx context.Context) error {
 		return err
 	}
 	var replicas int
+	// The complement of the comparison inside broker_outage_since (migration 0024): that
+	// function asks whether the latest row's gap has run PAST its threshold, and this asks, of
+	// every row, whether its gap is still WITHIN its own. One rule, so the two comparisons move
+	// together - an edit of either > or <= that leaves the other alone makes a pod count itself
+	// as serving at an instant the outage rule reads as an outage, or the reverse.
 	if err := tx.QueryRow(ctx, `select count(*) from broker_serving where clock_timestamp() - last_serving_at <= not_serving_after`).Scan(&replicas); err != nil {
 		return err
 	}

@@ -227,9 +227,9 @@ func (c *Client) Login(ctx context.Context) (time.Time, error) {
 
 // tokenLogin is one POST /v1/launcher-credentials/token, answering the credential the broker
 // issued. A POST the broker gave no HTTP answer to, while ctx has not ended, or one answered with a
-// 5xx, fails with a *brokerUnavailableError; the 5xx one wraps the answer's *APIError. A POST a
-// fault on the daemon's own side ended (daemonSideFault) fails with the transport's own error
-// instead, so the login loop waits the long schedule rather than asking again in seconds.
+// 5xx, fails with a *brokerUnavailableError; the 5xx one wraps the answer's *APIError. A transport
+// failure that is a fault on the daemon's own side is wrapped the same way, and classify reads it
+// out of the wrapper, so the login loop waits the long schedule for that one.
 func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	raw, err := os.ReadFile(c.TokenFile)
 	if err != nil {
@@ -252,10 +252,10 @@ func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	}
 	status, body, err := c.do(ctx, http.MethodPost, "/v1/launcher-credentials/token", map[string]string{"token": token, "request": request}, nil)
 	if err != nil {
-		if ctx.Err() != nil || daemonSideFault(err) {
-			return nil, err
+		if ctx.Err() == nil {
+			return nil, &brokerUnavailableError{err: err}
 		}
-		return nil, &brokerUnavailableError{err: err}
+		return nil, err
 	}
 	if status >= 500 && status <= 599 {
 		return nil, &brokerUnavailableError{err: refusal(status, body)}
@@ -543,16 +543,19 @@ const (
 	loginNotMade loginClass = "login-not-made"
 )
 
-// classify sorts a failed login into its class. A 5xx is a *brokerUnavailableError around the
-// answer's *APIError, so the broker's absence is read before its refusal.
+// classify sorts a failed login into its class. A fault on the daemon's own side is read first:
+// tokenLogin wraps every transport failure that was not ctx ending as a *brokerUnavailableError,
+// and daemonSideFault reads such a fault out of that wrapper, since errors.As walks Unwrap. A 5xx
+// is a *brokerUnavailableError around the answer's *APIError, so the broker's absence is read
+// before its refusal.
 func classify(err error) loginClass {
 	var unavailable *brokerUnavailableError
 	var refused *APIError
 	switch {
-	case errors.As(err, &unavailable):
-		return brokerUnavailable
 	case daemonSideFault(err):
 		return daemonSide
+	case errors.As(err, &unavailable):
+		return brokerUnavailable
 	case errors.As(err, &refused):
 		return brokerRefusal
 	default:
@@ -560,36 +563,46 @@ func classify(err error) loginClass {
 	}
 }
 
-// schedule names the schedule c takes, the word the log line carries: the short one only for a
-// broker that was not there to decide.
+// shortSchedule and longSchedule are the two schedules a failed login takes, the word its log
+// line carries and the name loginRetry's two backoffs go by.
+const (
+	shortSchedule = "short"
+	longSchedule  = "long"
+)
+
+// schedule names the schedule c takes: the short one only for a broker that was not there to
+// decide.
 func (c loginClass) schedule() string {
 	if c == brokerUnavailable {
-		return "short"
+		return shortSchedule
 	}
-	return "long"
+	return longSchedule
 }
 
 // failed records a login that failed with err and answers its class and the wait before the next.
+// The class's schedule names which of the two backoffs counts the failure, so that one branch
+// decides the schedule; the other kind's run has ended, and starts fresh when it comes again.
 func (r *loginRetry) failed(err error) (loginClass, time.Duration) {
 	class := classify(err)
-	if class == brokerUnavailable {
-		r.long.failed = 0
-		r.short.failed++
-		return class, r.short.wait()
+	taken, ended := &r.long, &r.short
+	if class.schedule() == shortSchedule {
+		taken, ended = &r.short, &r.long
 	}
-	r.short.failed = 0
-	r.long.failed++
-	return class, r.long.wait()
+	ended.failed = 0
+	taken.failed++
+	return class, taken.wait()
 }
 
 // won records a login that won a credential.
 func (r *loginRetry) won() { r.short.failed, r.long.failed = 0, 0 }
 
-// brokerUnavailableError is a token login the broker was not there to decide: the POST failed
-// before a response came back, or while it was read, with no fault on the daemon's own side
-// (daemonSideFault), or it was answered with a 5xx, by the broker or by a front door with no
-// broker behind it. err is the transport's error, which names the route and never the token or the
-// request object, or the 5xx answer's *APIError; its message is err's.
+// brokerUnavailableError is a token login the broker gave no answer this client could read: the
+// POST failed before a response came back, or while it was read, or it was answered with a 5xx,
+// by the broker or by a front door with no broker behind it. err is the transport's error, which
+// names the route and never the token or the request object, or the 5xx answer's *APIError; its
+// message is err's. A transport failure that is a fault on the daemon's own side comes wrapped in
+// one of these too, and classify reads it out again (daemonSideFault), so it is no sign on its
+// own that waiting a few seconds is what the login needs.
 type brokerUnavailableError struct{ err error }
 
 func (e *brokerUnavailableError) Error() string { return e.err.Error() }

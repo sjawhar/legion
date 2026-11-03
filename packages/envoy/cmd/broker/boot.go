@@ -11,19 +11,25 @@ import (
 
 // brokerBoot is what the boot sequence does its work through: each collaborator a function field,
 // so that a test drives the sequence - the first policy load, the reread listener, the wait on
-// its first LISTEN, the catch-up load and the bind - against fakes of its own, with no store, no
-// socket and no clock to wait on. main fills every field from the configuration it has loaded;
-// boot calls each one exactly where main used to do that work itself.
+// its first LISTEN, the catch-up load and the bind - against fakes of its own and reads back the
+// order it ran them in. A row makes real only what the thing it pins is about: ordering_test.go's
+// two boot rows each bind 127.0.0.1:0, and the catch-up row drives a real reread listener on a
+// real Postgres, because the race it pins is one Postgres itself decides. main fills every field
+// from the configuration it has loaded; boot calls each one exactly where main used to do that
+// work itself.
 type brokerBoot struct {
 	// LoadPolicy takes the first whole-namespace policy load and starts the five-minute reload
 	// behind it, on the serving context boot hands it. In production:
 	// policy.NewCurrent(serving, loader, policyRefresh).
 	LoadPolicy func(ctx context.Context) (*policy.Current, error)
 	// StartListener starts the receiving half of the reread fan-out on ctx and returns at once,
-	// the listener redialing behind it for the life of the process. onConnected is what it calls
-	// once each LISTEN statement has returned; the first of those calls is what the wait below
-	// is for. In production: go (&reread.Listener{...}).Run(serving).
-	StartListener func(ctx context.Context, onConnected func())
+	// the listener redialing behind it for the life of the process. current is the live policy
+	// LoadPolicy answered, the one a reread refreshes a single name in: boot hands it over
+	// rather than leaving a caller to carry it out of its own LoadPolicy, so nothing here
+	// depends on the order boot calls these in. onConnected is what it calls once each LISTEN
+	// statement has returned; the first of those calls is what the wait below is for. In
+	// production: go (&reread.Listener{...}).Run(serving).
+	StartListener func(ctx context.Context, current *policy.Current, onConnected func())
 	// Listen binds the address callers reach this broker on. In production:
 	// net.Listen("tcp", cfg.ListenAddr).
 	Listen func() (net.Listener, error)
@@ -31,8 +37,9 @@ type brokerBoot struct {
 	// rereadListenWait, whose own comment says what the bound is for and what reaching it costs.
 	ListenWait time.Duration
 	// Catchup takes the catch-up load, the one more whole-namespace load the boot takes once the
-	// LISTEN is in place. In production: Refresh on the policy LoadPolicy answered.
-	Catchup func(ctx context.Context) error
+	// LISTEN is in place, into current, the same policy StartListener is given. In production:
+	// current.Refresh.
+	Catchup func(ctx context.Context, current *policy.Current) error
 	// Log is where every line this sequence logs goes. In production: slog.Default().
 	Log *slog.Logger
 }
@@ -107,7 +114,7 @@ func boot(ctx context.Context, b brokerBoot) (booted, error) {
 	// blocking and the channel is never drained again, so every redial behind the boot costs the
 	// listener nothing.
 	firstListen := make(chan struct{}, 1)
-	b.StartListener(serving, func() {
+	b.StartListener(serving, current, func() {
 		select {
 		case firstListen <- struct{}{}:
 		default:
@@ -149,7 +156,7 @@ func boot(ctx context.Context, b brokerBoot) (booted, error) {
 		// 500 or 503. It runs on serving, as the first load does and for the same reasons, so
 		// what the first load's comment writes down about one signal holds here too: a store
 		// that never answers holds the boot until a second signal or the kubelet's SIGKILL.
-		if err := b.Catchup(serving); err != nil {
+		if err := b.Catchup(serving, current); err != nil {
 			b.Log.Warn("broker: serving without the boot's catch-up policy load, so a retag another pod served while this one was starting may not be in force here until its five-minute reload", "error", err)
 		}
 		// The same check as the one after the first load, for the same reason: a process

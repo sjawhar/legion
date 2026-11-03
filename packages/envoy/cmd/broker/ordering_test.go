@@ -3,10 +3,11 @@
 // The broker's boot and its stop are two orders, and each step of each one is where it is
 // because the step before it has to have happened first. boot.go holds both as functions whose
 // collaborators are fields (brokerBoot, brokerStop), so every row here drives the real sequence
-// against collaborators of its own and reads back the order the sequence ran them in. Four rows
-// need nothing real at all; the first needs a real Postgres, because the race it pins is one
-// Postgres itself decides. Each row's comment names the one edit to boot.go that turns that row
-// red, which is how these five are measured.
+// against collaborators of its own and reads back the order the sequence ran them in. The three
+// stop rows need nothing real at all; the two boot rows each bind 127.0.0.1:0, since the bind is
+// one of the steps they order, and the first of them needs a real Postgres besides, because the
+// race it pins is one Postgres itself decides. Each row's comment names the one edit to boot.go
+// that turns that row red, which is how these five are measured.
 //
 // No row waits on the clock to decide an order: the sequences call each collaborator on one
 // goroutine, so a step recorded as it runs is the order itself, and the one row that does read a
@@ -68,6 +69,11 @@ func (s *steps) order() []string {
 // is reports whether the steps recorded are exactly want.
 func (s *steps) is(want ...string) bool { return slices.Equal(s.order(), want) }
 
+// has reports whether step has run, which a fake reads to fail the moment a step it depends on
+// has already happened - a dependency the recorded order alone cannot show, since a sequence
+// that ran that step on a goroutine of its own could still record the expected order.
+func (s *steps) has(step string) bool { return slices.Contains(s.order(), step) }
+
 // String renders the order for a failure message.
 func (s *steps) String() string { return strings.Join(s.order(), " -> ") }
 
@@ -113,10 +119,6 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 	secretStore := secrets.NewLocal(policytest.Secret(retaggedWhileBooting, policy.OwnerShared, policy.TierAgent, "v1"))
 	loader := policytest.Loader(secretStore)
 
-	// loaded is the live policy, written by the first load on boot's own goroutine before boot
-	// reaches either of its two readers - the catch-up and the listener's reread - exactly as
-	// main writes it.
-	var loaded *policy.Current
 	readTheStore := make(chan struct{})    // the first load has read the secret store
 	releaseTheLoad := make(chan struct{})  // the row has committed the retag and the notification
 	listening := make(chan struct{})       // the listener's first LISTEN has succeeded
@@ -137,7 +139,6 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 			// yet.
 			LoadPolicy: func(ctx context.Context) (*policy.Current, error) {
 				cur, err := policy.NewCurrent(ctx, loader, time.Hour)
-				loaded = cur
 				close(readTheStore)
 				<-releaseTheLoad
 				return cur, err
@@ -148,14 +149,14 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 			// here is dropped as this pod's own reread: if Postgres did deliver the
 			// notification, this listener would reread the secret and the row would pass with
 			// the catch-up gone, which is why the revert run is measured too.
-			StartListener: func(ctx context.Context, onConnected func()) {
+			StartListener: func(ctx context.Context, current *policy.Current, onConnected func()) {
 				go func() {
 					defer close(listenerStopped)
 					(&reread.Listener{
 						Sender: "this-pod",
 						Dial:   st.Listener,
 						Refresh: func(ctx context.Context, name string) error {
-							_, err := loaded.RefreshOne(ctx, name)
+							_, err := current.RefreshOne(ctx, name)
 							return err
 						},
 						OnConnected: func() {
@@ -167,7 +168,7 @@ func TestBootLoadsThePolicyAgainAfterTheFirstListen(t *testing.T) {
 			},
 			Listen:     func() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") },
 			ListenWait: bootListenWait,
-			Catchup:    func(ctx context.Context) error { return loaded.Refresh(ctx) },
+			Catchup:    func(ctx context.Context, current *policy.Current) error { return current.Refresh(ctx) },
 			Log:        orderingLog(),
 		})
 		done <- finished{started, err}
@@ -229,13 +230,13 @@ func TestBootBindsOnlyAfterTheCatchUp(t *testing.T) {
 		},
 		// The first LISTEN, answered at once: this row is about what the boot does after it, not
 		// about the wait itself.
-		StartListener: func(_ context.Context, onConnected func()) { onConnected() },
+		StartListener: func(_ context.Context, _ *policy.Current, onConnected func()) { onConnected() },
 		Listen: func() (net.Listener, error) {
 			ran.record(theBind)
 			return net.Listen("tcp", "127.0.0.1:0")
 		},
 		ListenWait: bootListenWait,
-		Catchup: func(context.Context) error {
+		Catchup: func(context.Context, *policy.Current) error {
 			ran.record(theCatchUpReturned)
 			return nil
 		},
@@ -305,9 +306,15 @@ func TestStopEndsServingOnlyAfterShutdownReturns(t *testing.T) {
 		DrainNow: make(chan struct{}),
 		Draining: func(bool) {},
 		// Both ends of the shutdown are recorded, so the order says "after it returned" and not
-		// merely "after it was called".
+		// merely "after it was called". The fake also asks whether the serving context has
+		// already ended, as TestStopClosesTheStoreOnlyAfterServingEnds asks inside its
+		// CloseStore: a stop that ended it on a goroutine of its own, before or during the
+		// shutdown, would leave the three records below in the order this row wants.
 		Shutdown: func(context.Context) error {
 			ran.record(theShutdownBegan)
+			if ran.has(theServingEnded) {
+				t.Error("the stop ended the serving context before its shutdown returned: the reread listener and the five-minute policy reload stop under requests the broker is still answering, so the last callers of a draining pod are served tags a retag has already changed")
+			}
 			ran.record(theShutdownReturned)
 			return nil
 		},

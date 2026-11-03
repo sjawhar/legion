@@ -27,17 +27,6 @@ var rereadBudgets = []struct {
 	{"gcp", api.GCPRereadFleetBudget, 9 * time.Second, 18 * time.Second},
 }
 
-// mountRereadBuckets builds a process's two reread buckets from rate and hands them back to it:
-// the two lines api.Register runs for a Deps that carries one. A row below drives this pair at
-// instants of its own; that Register runs those lines too is what
-// TestARereadRefusalCarriesTheRateOfTheReplicaCountNow reads off a real server's answer.
-func mountRereadBuckets(rate *api.RereadRate) (*ratelimit.Keyed, *ratelimit.Bucket) {
-	overall := rate.Overall()
-	perAddress, shared := ratelimit.NewKeyed(api.RereadLimitFor(overall)), ratelimit.NewBucket(overall)
-	rate.Mount(perAddress, shared)
-	return perAddress, shared
-}
-
 // newRereadRate is a rate on budget, with the buffer its log lines are written to.
 func newRereadRate(budget ratelimit.Limit) (*api.RereadRate, *bytes.Buffer) {
 	var logged bytes.Buffer
@@ -82,20 +71,15 @@ func TestRereadOverallForDividesTheBudgetAmongThePods(t *testing.T) {
 // meaning to change them goes red here.
 func TestTheMountedRereadLimitsAreTheBudgetAtTwoPods(t *testing.T) {
 	for _, row := range []struct {
-		name   string
-		got    ratelimit.Limit
-		want   ratelimit.Limit
-		budget ratelimit.Limit
+		name string
+		got  ratelimit.Limit
+		want ratelimit.Limit
 	}{
-		{"DefaultRereadOverallLimit", api.DefaultRereadOverallLimit, ratelimit.Limit{Every: time.Second, Burst: 10}, api.DefaultRereadFleetBudget},
-		{"GCPRereadOverallLimit", api.GCPRereadOverallLimit, ratelimit.Limit{Every: 4 * time.Second, Burst: 10}, api.GCPRereadFleetBudget},
+		{"DefaultRereadOverallLimit", api.DefaultRereadOverallLimit, ratelimit.Limit{Every: time.Second, Burst: 10}},
+		{"GCPRereadOverallLimit", api.GCPRereadOverallLimit, ratelimit.Limit{Every: 4 * time.Second, Burst: 10}},
 	} {
 		if row.got != row.want {
 			t.Errorf("%s = %+v, want %+v unchanged", row.name, row.got, row.want)
-		}
-		if derived := api.RereadOverallFor(row.budget, api.MinReplicas); derived != row.want {
-			t.Errorf("its budget at %d pods = %+v, want %+v: %s is that budget's share at MinReplicas and nothing else",
-				api.MinReplicas, derived, row.want, row.name)
 		}
 	}
 }
@@ -110,7 +94,7 @@ func TestSetReplicasMovesTheLiveRereadBuckets(t *testing.T) {
 	for _, budget := range rereadBudgets {
 		t.Run(budget.name, func(t *testing.T) {
 			rate, _ := newRereadRate(budget.budget)
-			perAddress, shared := mountRereadBuckets(rate)
+			perAddress, shared := rate.Buckets()
 			rate.SetReplicas(3)
 			// At or after the instant SetReplicas moved the rates at, so both buckets are
 			// full: every instant below is this one plus an exact offset.
@@ -158,7 +142,7 @@ func TestABucketSpentBeforeASetReplicasKeepsItsRereads(t *testing.T) {
 	const address = "203.0.113.9"
 	const spent = 5
 	rate, _ := newRereadRate(api.DefaultRereadFleetBudget)
-	perAddress, _ := mountRereadBuckets(rate)
+	perAddress, _ := rate.Buckets()
 	before := time.Now()
 	for sent := range spent {
 		if !perAddress.AllowAt(address, before) {
@@ -225,7 +209,6 @@ func TestARereadRefusalCarriesTheRateOfTheReplicaCountNow(t *testing.T) {
 // words and keys are the thing asserted.
 func TestSetReplicasLogsEachRateOnceAndWarnsAboveFour(t *testing.T) {
 	rate, logged := newRereadRate(api.DefaultRereadFleetBudget)
-	mountRereadBuckets(rate)
 
 	rate.SetReplicas(2)
 	first := lines(t, logged)
