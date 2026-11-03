@@ -109,17 +109,19 @@ type approvedVersion struct {
 // the events it appends - the open approval request's ask.answered, when one is open, then
 // artifact.approved - and appends nothing when the version carries no approval. It reads
 // rendered.tree and never changes it: the tree is the live document's. Every read and both rules
-// run where it is called, each reading what this transaction's own queued writes leave: the newest
-// review (transactionNewestReview), the ask rows (loadAskBlocks), the approved version's text
-// (restoresApprovedText) and the request (openApprovalAsk). The answer and the review are written
-// through write, so a transaction whose writes are queued runs them in its write phase, after the
-// version they carry to.
+// run where it is called: the newest review (NewestReview), the ask rows (loadAskBlocks), the
+// approved version's text (restoresApprovedText) and the request (openApprovalAsk). The newest
+// review and the approved version's text are stored reads, since only a carry earlier in the same
+// transaction could queue either and no route carries an approval twice in one transaction; the
+// ask rows and the request are read as this transaction's own queued writes leave them. The
+// answer and the review are written through write, so a transaction whose writes are queued runs
+// them in its write phase, after the version they carry to.
 func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID string, version model.Version, rendered renderedTree, sink func(model.Event)) error {
 	// Every version write runs this: anything past the newest review is read only once a carry is
 	// possible at all, which needs an approval still standing. A newer request for changes than
 	// every approval leaves none: the answer carry's candidates each fail on it, and the restore
 	// reads the newest review alone.
-	newest, err := transactionNewestReview(ctx, tx, artifactID)
+	newest, err := NewestReview(ctx, tx, artifactID)
 	if err != nil || newest == nil || newest.State != "approved" {
 		return err
 	}
@@ -145,7 +147,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 // appends reach the ledger of the transaction it runs in (eventSink), which publishes them after
 // its Commit, beside the version move's own.
 func CarryRestoredApproval(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, number int, markdown string, tree *pmdoc.Node, serverURL string) error {
-	newest, err := transactionNewestReview(ctx, tx, artifactID)
+	newest, err := NewestReview(ctx, tx, artifactID)
 	if err != nil || newest == nil || newest.State != "approved" {
 		return err
 	}
@@ -219,8 +221,9 @@ func writeCarriedReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, a
 		return err
 	}
 	// The carry's own approval is this document's newest review from here on, and no read of the
-	// table sees it until the write phase runs, so a read of the newest review later in this
-	// transaction (supersededApprovalAdvice, transactionNewestReview) takes it off the ledger.
+	// table sees it until the write phase runs, so the read of the newest review that the write
+	// advice makes later in this transaction (supersededApprovalAdvice) takes it off the ledger.
+	// The carry makes no such read itself: it runs once in a transaction.
 	recordPendingReview(ctx, tx, artifactID, model.ArtifactReview{
 		ArtifactID: artifactID,
 		Version:    number,
@@ -252,35 +255,15 @@ func (s *Service) answerCarriedReview(ctx context.Context, tx pgx.Tx, artifactID
 	return s.carriedReview(ctx, tx, artifactID, number, rendered.markdown, blocks)
 }
 
-// transactionNewestReview is NewestReview as the transaction's queued writes leave the document's
-// reviews: the review this transaction has queued (QueueReview, recordPendingReview), which is
-// newer than every stored one and which no read of artifact_reviews answers until the write phase
-// has run, else the newest stored one. A carry reads it, so a second version write of the same
-// transaction follows the approval the first one carried rather than the one it superseded.
-func transactionNewestReview(ctx context.Context, tx pgx.Tx, artifactID string) (*model.ArtifactReview, error) {
-	if ledger := queueFor(ctx, tx); ledger != nil {
-		if review, queued := ledger.PendingReview(artifactID); queued {
-			return &review, nil
-		}
-	}
-	return NewestReview(ctx, tx, artifactID)
-}
-
 // restoresApprovedText reports whether markdown, the text a version of artifactID was just
 // written with, is byte for byte the text of version approved. The text compared against it is
 // the caller's own, which it holds already - the version it just wrote or queued - so only the
-// approved version is read. That version is a stored one unless this transaction queued it
-// itself and carried an approval to it (recordPendingReview, which transactionNewestReview then
-// answers with), where artifact_versions holds the row only once the write phase has run and the
-// ledger holds the text instead (Ledger.PendingVersionMarkdown). Of a stored version only a text
-// of the same size is read, so the write of any other text reads no document; octet_length reads
-// a stored text's size without decompressing it.
+// approved version is read. That version is always a stored one: only a second carry in the same
+// transaction could make it a version this transaction has merely queued, and no route writes two
+// versions in one transaction. Of a stored version only a text of the same size is read, so the
+// write of any other text reads no document; octet_length reads a stored text's size without
+// decompressing it.
 func restoresApprovedText(ctx context.Context, tx pgx.Tx, artifactID string, approved int, markdown string) (bool, error) {
-	if ledger := queueFor(ctx, tx); ledger != nil {
-		if queued, pending := ledger.PendingVersionMarkdown(artifactID, approved); pending {
-			return queued == markdown, nil
-		}
-	}
 	var stored string
 	err := tx.QueryRow(ctx, `
 		select markdown from artifact_versions
