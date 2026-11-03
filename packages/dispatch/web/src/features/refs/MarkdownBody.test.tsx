@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type {
   AskRead,
@@ -834,7 +835,11 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
   );
 
   try {
-    const link = await within(view.container).findByRole("link", { name: "CORE-1 ask" });
+    // Until the ask is read the link shows the reference as its author wrote it, never a short
+    // form of it: a target that never resolves then reads as the words on the page.
+    const link = await within(view.container).findByRole("link", {
+      name: "dispatch://CORE-1/ask/ask-1",
+    });
     expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     await waitFor(() => expect(link.textContent).toBe("Ship it?"));
     expect(within(view.container).getAllByRole("link")).toHaveLength(1);

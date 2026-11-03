@@ -8,7 +8,9 @@ import { type ReactNode, useRef } from "react";
 
 import { markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
+import type { TextSource } from "./text-references";
 import { type PaintMarkdown, type SliceYield, useRenderedMarkdown } from "./useRenderedMarkdown";
+import { useTextReferences } from "./useTextReferences";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
  * every textblock after it, joined with a single space - see `flattenInline`. */
@@ -292,11 +294,17 @@ function* paintBlockInSlices(
  * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
  * never reach the page in one task. A preview that must clamp its rendered line is
  * `MarkdownPreview`, which parses with the same engine.
+ *
+ * A bare issue key, and a `#` and the id of a question block of `source`, read as references
+ * too, and link where they name something (`useTextReferences`). A caller whose text belongs to
+ * a document names it in `source`; one whose text belongs to none passes nothing and gets no
+ * `#id` links, which is right.
  */
 export function MarkdownBody({
   markdown,
   onRendered,
   softBreaks = "space",
+  source,
   variant = "block",
 }: {
   markdown: string;
@@ -305,12 +313,16 @@ export function MarkdownBody({
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
    *  as a model's streamed turn (`SoftBreaks`). */
   softBreaks?: SoftBreaks;
+  /** The document this text belongs to, which its `#id`s name a question block of
+   *  (`TextSource`); none for text of no document. */
+  source?: TextSource;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const inline = variant === "inline";
+  const references = useTextReferences(markdown, source);
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
@@ -319,6 +331,7 @@ export function MarkdownBody({
       pictures: variant,
       onRendered,
       paintInSlices: inline ? undefined : paintBlockInSlices,
+      references,
       softBreaks,
     }
   );

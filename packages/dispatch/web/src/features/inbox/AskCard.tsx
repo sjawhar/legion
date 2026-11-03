@@ -45,6 +45,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { issueSource } from "../refs/text-references";
 import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
@@ -244,6 +245,18 @@ export function AskCard({
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
+  // Where a `#id` in the ask's own text resolves: the document the margin's Comments tab asked
+  // it on, else the issue's spec.
+  const askDocument = displayedAsk.block_artifact?.id ?? displayedAsk.artifact_id ?? undefined;
+  const source =
+    owner !== undefined && askDocument !== undefined
+      ? ({
+          artifactId: askDocument,
+          kind: "document",
+          project: owner.project,
+          slug: owner.slug,
+        } as const)
+      : issueSource(displayedAsk.issue_key);
   // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
   // ask's issue, or the project of the document it was asked on.
   const documentProject = (displayedAsk.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
@@ -567,7 +580,7 @@ export function AskCard({
         ) : null}
         {inBlock ? null : (
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
+            <MarkdownBody markdown={displayedAsk.question} source={source} />
           </div>
         )}
         {/* A request to approve again names the approval it follows, under the question (the

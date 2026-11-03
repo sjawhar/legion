@@ -21,6 +21,7 @@ import { AskOwnerLink } from "../inbox/AskOwnerLink";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
+import { issueSource } from "../refs/text-references";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 
 const PAGE_SIZE = 50;
@@ -52,6 +53,9 @@ function AnswerRow({
   onChange: () => void;
   row: MyAnswerRow;
 }): ReactNode {
+  // A row the reader answered on a project document names no document id (`InboxDocument` is
+  // its project, slug and name), so its text resolves no `#id`.
+  const source = "issue" in row.owner ? issueSource(row.owner.issue.key) : undefined;
   const changeable =
     row.kind === "answer" &&
     row.current &&
@@ -70,6 +74,7 @@ function AnswerRow({
         fullTitle
         lines={2}
         markdown={row.question}
+        source={source}
       />
       {row.kind === "answer" && row.answer !== undefined ? (
         <div className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
@@ -84,7 +89,7 @@ function AnswerRow({
           )}
           {row.answer.text === null || row.answer.text === "" ? null : (
             <div className="mt-1">
-              <MarkdownBody markdown={row.answer.text} />
+              <MarkdownBody markdown={row.answer.text} source={source} />
             </div>
           )}
         </div>
@@ -92,7 +97,7 @@ function AnswerRow({
       {row.kind === "reply" && row.reply !== undefined ? (
         <p className={`mt-2 text-sm ${textPrimaryOnCanvas}`}>
           <span className={`font-medium ${textMutedOnCanvas}`}>Replied:</span>{" "}
-          <MarkdownBody markdown={row.reply.body} variant="inline" />
+          <MarkdownBody markdown={row.reply.body} source={source} variant="inline" />
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">

@@ -21,6 +21,7 @@ import { AskOwnerLink } from "../inbox/AskOwnerLink";
 import { AgentName } from "../refs/AgentName";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
+import { issueSource } from "../refs/text-references";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
@@ -61,6 +62,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         fullTitle
         lines={2}
         markdown={row.reply.first_line}
+        source={issueSource(row.issue?.key)}
       />
       <MarkdownPreview
         className={`mt-1 text-xs ${textMutedOnCanvas}`}
@@ -68,6 +70,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         lead="In "
         lines={1}
         markdown={row.subject}
+        source={issueSource(row.issue?.key)}
       />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
         {/* The server's `ref` names the thread's root, never the reply: an anchored root redirects

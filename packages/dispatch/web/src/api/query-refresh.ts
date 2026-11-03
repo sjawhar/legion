@@ -1,9 +1,17 @@
 import type { Query, QueryClient, QueryKey } from "@tanstack/react-query";
 
+import { ApiError } from "./client";
+
 /** Whether a query is owned by a live socket subscription (a delivery view) rather than refreshed
  *  by events. */
 export function isLiveQuery(query: Pick<Query, "meta">): boolean {
   return query.meta?.live === true;
+}
+
+/** Whether a query's last answer was a 404: the record it reads does not exist. A refresh that
+ *  only the event creating that record could change asks it no further (`RefreshTarget.when`). */
+export function answeredNotFound(query: Pick<Query, "state">): boolean {
+  return query.state.error instanceof ApiError && query.state.error.status === 404;
 }
 
 /**
@@ -29,21 +37,25 @@ export const MIN_REFETCH_INTERVAL_MS = 1_000;
 
 /**
  * Which queries a refresh reaches: every query `queryKey` matches (by prefix unless `exact`), and,
- * with `when`, only those whose data it accepts. `when` runs against the query's data at the
+ * with `when`, only those whose answer it accepts. `when` runs against the query's data at the
  * flush, and against `undefined` for a query that holds none and is not fetching (an error, a
- * query never fetched). For a query with a fetch out - a first load or a refetch - it runs on the
- * response that lands, not on the data that response replaces, which is then fetched again if
- * `when` accepts it; a body composed after the event is not.
+ * query never fetched); the query itself is beside it, for a test on the answer rather than the
+ * body, such as a 404 a later event cannot change (`answeredNotFound`). For a query with a fetch
+ * out - a first load or a refetch - it runs on the response that lands, not on the data that
+ * response replaces, which is then fetched again if `when` accepts it; a body composed after the
+ * event is not.
  */
 export interface RefreshTarget {
   readonly queryKey: QueryKey;
   readonly exact?: boolean;
-  readonly when?: (data: unknown) => boolean;
+  readonly when?: RefreshCheck;
 }
+
+export type RefreshCheck = (data: unknown, query: Query) => boolean;
 
 interface DeferredCheck {
   readonly requestedAt: number;
-  readonly when: readonly ((data: unknown) => boolean)[];
+  readonly when: readonly RefreshCheck[];
 }
 
 // Per QueryClient, keyed by query hash: when each query's last fetch began (from the cache's
@@ -99,7 +111,7 @@ function schedulerFor(queryClient: QueryClient): SchedulerState {
       const check = state.deferred.get(hash);
       state.deferred.delete(hash);
       const data = query.state.data;
-      if (data !== undefined && check?.when.some((when) => when(data)) === true) {
+      if (data !== undefined && check?.when.some((when) => when(data, query)) === true) {
         owe(state, query, check.requestedAt);
       }
     }
@@ -109,7 +121,7 @@ function schedulerFor(queryClient: QueryClient): SchedulerState {
         state.deferred.delete(hash);
         const started = state.started.get(hash);
         const composedAfter = started !== undefined && started > check.requestedAt;
-        if (!composedAfter && check.when.some((when) => when(query.state.data))) {
+        if (!composedAfter && check.when.some((when) => when(query.state.data, query))) {
           owe(state, query, check.requestedAt);
         }
       }
@@ -211,7 +223,7 @@ export function refreshQueries(queryClient: QueryClient, targets?: readonly Refr
   const requestedAt = Date.now();
   // One entry per query, however many targets reach it: `true` when one reaches it whatever its
   // data, else every predicate that does.
-  const reached = new Map<Query, true | ((data: unknown) => boolean)[]>();
+  const reached = new Map<Query, true | RefreshCheck[]>();
   if (targets === undefined) {
     for (const query of cache.getAll()) {
       reached.set(query, true);
@@ -241,7 +253,7 @@ export function refreshQueries(queryClient: QueryClient, targets?: readonly Refr
         });
         continue;
       }
-      if (!condition.some((when) => when(query.state.data))) {
+      if (!condition.some((when) => when(query.state.data, query))) {
         continue;
       }
     }

@@ -94,7 +94,10 @@ function ReviewsDialog({
                   </p>
                   {review.reason === null ? null : (
                     <div className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
-                      <MarkdownBody markdown={review.reason} />
+                      <MarkdownBody
+                        markdown={review.reason}
+                        source={{ artifactId, kind: "document" }}
+                      />
                     </div>
                   )}
                 </li>

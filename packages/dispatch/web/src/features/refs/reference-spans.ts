@@ -1,5 +1,9 @@
 export interface ReferenceSpan {
   start: number;
+  /** Where the span the pattern matched ends, before `trimReference` cut what trails it in
+   *  prose: the gap a bare key or `#id` may stand in starts here (`text-references.ts`), as the
+   *  server's `Mentions` reads the gaps between the same matches. */
+  end: number;
   value: string;
 }
 
@@ -25,7 +29,11 @@ export function referenceSpans(text: string, prefix = ""): ReferenceSpan[] {
   const spans: ReferenceSpan[] = [];
   for (const match of text.matchAll(referencePattern)) {
     if (match[0].startsWith(prefix)) {
-      spans.push({ start: match.index, value: trimReference(match[0]) });
+      spans.push({
+        end: match.index + match[0].length,
+        start: match.index,
+        value: trimReference(match[0]),
+      });
     }
   }
   return spans;

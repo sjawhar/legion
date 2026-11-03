@@ -10,7 +10,7 @@ import {
   userAgentStateQuery,
   userStateQuery,
 } from "./queries";
-import type { RefreshTarget } from "./query-refresh";
+import { answeredNotFound, type RefreshTarget } from "./query-refresh";
 import type {
   ArchitectureTree,
   ArchitectureTreeComponent,
@@ -86,6 +86,24 @@ function pinnedRow(key: string): RefreshTarget {
     queryKey: pinnedKey,
     when: (data) => rowsOf<IssueSummary>(data).some((issue) => issue.key === key),
   };
+}
+
+/**
+ * The issue summary read behind every reference to `key`: the title and status a link to the
+ * issue shows, the name and version of each of its documents, and the one read that says
+ * whether a key a body writes bare names an issue at all (`useTextReferences`).
+ *
+ * A 404 is that last answer - no issue holds the key - and it is final: a key-shaped word a body
+ * writes (`UTF-8`, a key of another workspace) names no issue until someone creates one, so an
+ * update, a close or a document version asks nothing about it, where each would otherwise cost
+ * one request per such word on screen. `issue.created` asks whatever the last answer was, and so
+ * does the whole-cache refresh the stream's reconnect runs (`refreshQueries` with no targets).
+ */
+function issueSummaryOf(key: string, event: Event): RefreshTarget {
+  const target = { exact: true, queryKey: ["issue-summary", key] } as const;
+  return event.type === "issue.created"
+    ? target
+    : { ...target, when: (_data, query) => !answeredNotFound(query) };
 }
 
 /** Every Inbox read (the Inbox and a project's) that holds a row of issue `key`'s open asks. */
@@ -482,7 +500,7 @@ function issueWriteTargets(
   const titleOrStatus = moved("title") || moved("status");
   // A reference to the issue, or to one of its documents, shows its title and status.
   if (titleOrStatus) {
-    targets.push({ exact: true, queryKey: ["issue-summary", key] });
+    targets.push(issueSummaryOf(key, event));
   }
   // The Reference picker's project list and the Agents page's open-issue picker list titles and
   // whether an issue is open.
@@ -757,7 +775,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       { queryKey: ["artifacts", key] },
       { queryKey: ["comments", key] },
       // A reference to one of the issue's documents shows its name, kind and latest version.
-      { exact: true, queryKey: ["issue-summary", key] }
+      issueSummaryOf(key, event)
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });

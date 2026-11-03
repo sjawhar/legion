@@ -2,11 +2,13 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useCallback, useRef } from "react";
 
 import { markdownClassName, useMarkdownHeadline } from "./markdown-engine";
+import type { TextSource } from "./text-references";
 import {
   type DecorateMarkdown,
   type PaintMarkdown,
   useRenderedMarkdown,
 } from "./useRenderedMarkdown";
+import { useTextReferences } from "./useTextReferences";
 
 /** How many rendered lines a preview shows before the browser cuts it. Tailwind's `line-clamp-N`
  *  utilities are literal class names here so its scanner emits each rule. Each sets the
@@ -260,6 +262,9 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * its own text, clamped, marked `data-markdown-pending`, until the parse worker answers
  * (`markdown-engine.ts`); and when the engine cannot load, the literal source renders as text
  * with `data-markdown-fallback`, as `MarkdownBody` does.
+ *
+ * A bare issue key, and a `#` and the id of a question block of `source`, read as references
+ * too, and link where they name something (`useTextReferences`), as they do in a full body.
  */
 export function MarkdownPreview({
   className = "",
@@ -270,6 +275,7 @@ export function MarkdownPreview({
   lines,
   links = "inert",
   markdown,
+  source,
 }: {
   className?: string;
   /** Whether a pointer reader sees the whole text on hover, for a surface whose text is long
@@ -285,6 +291,9 @@ export function MarkdownPreview({
    *  a host whose own control is a toggle. */
   links?: "inert" | "live";
   markdown: string;
+  /** The document this text belongs to, which its `#id`s name a question block of
+   *  (`TextSource`); none for text of no document. */
+  source?: TextSource;
 }): ReactNode {
   const root = useRef<HTMLSpanElement>(null);
   // Keyed on the phrases' joined text, so a caller handing a fresh array each render with the
@@ -319,9 +328,11 @@ export function MarkdownPreview({
     },
     [highlightClassName, highlightKey, lead, links]
   );
+  const references = useTextReferences(markdown, source);
   const { isFallback, isPending, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
     pictures: "inline",
     decorate,
+    references,
   });
   const title = useMarkdownHeadline(fullTitle ? markdown : undefined, Number.POSITIVE_INFINITY);
 
