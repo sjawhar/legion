@@ -128,10 +128,17 @@ func ParseRef(value, serverURL string) (Ref, bool) {
 // extractAt is ExtractAt, holding what each reference names to the bounds the index keys when
 // bounded (Extract's reading of text, inBound) and not when not (ParseRef's of a request).
 func extractAt(body, serverURL string, bounded bool) []Located {
+	return extractSpans(body, serverURL, referencePattern.FindAllStringIndex(body, -1), bounded)
+}
+
+// extractSpans is extractAt over spans, body's reference spans (referencePattern) already found,
+// so a reader that walks the gaps between them as well - Mentions, reading what a text writes
+// bare - scans body for them once.
+func extractSpans(body, serverURL string, spans [][]int, bounded bool) []Located {
 	refs := []Located{}
 	var base *url.URL
 	baseParsed := false
-	for _, span := range referencePattern.FindAllStringIndex(body, -1) {
+	for _, span := range spans {
 		raw := trimReference(body[span[0]:span[1]])
 		if raw == "" {
 			continue

@@ -164,6 +164,77 @@ func blockFragment(ref Ref) string {
 	return fragment
 }
 
+// Mentions' half of the shared text table: every row, the grammar rows included, cites what its
+// row lists, read with a resolver built from the row's `issues`, `questions` and `items` - the
+// issue keys that exist, the question map of the row's document, and the items and blocks a short
+// id can name. A row that writes no bare key, no `#id` and no short id cites what Extract cites,
+// so the two readers agree on every row.
+func TestMentionsMatchesTheSharedTextTable(t *testing.T) {
+	raw, err := os.ReadFile("testdata/dispatch-text-references.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		Body      string            `json:"body"`
+		Origin    string            `json:"origin"`
+		Refs      []string          `json:"refs"`
+		Grammar   bool              `json:"grammar"`
+		Issues    []string          `json:"issues"`
+		Questions map[string]string `json:"questions"`
+		Items     map[string]string `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared text table is empty")
+	}
+
+	for _, row := range rows {
+		t.Run(row.Body, func(t *testing.T) {
+			server := row.Origin
+			if server == "" {
+				server = "https://dispatch.test"
+			}
+			resolver := mapResolver{issues: map[string]bool{}, questions: map[string]Ref{}}
+			for _, key := range row.Issues {
+				resolver.issues[key] = true
+			}
+			for id, written := range row.Questions {
+				ref, ok := ParseRef(written, server)
+				if !ok {
+					t.Fatalf("question %s names %s, which is no reference", id, written)
+				}
+				resolver.questions[id] = ref
+			}
+			for id := range row.Items {
+				resolver.items = append(resolver.items, id)
+			}
+			want := []Ref{}
+			for _, ref := range row.Refs {
+				parsed := Extract(ref, server)
+				if len(parsed) != 1 || parsed[0].Kind == "url" {
+					t.Fatalf("%s is not a reference: %#v", ref, parsed)
+				}
+				want = append(want, parsed[0])
+			}
+			located, err := Mentions(row.Body, server, resolver)
+			if err != nil {
+				t.Fatalf("Mentions() error: %v", err)
+			}
+			got := []Ref{}
+			for _, ref := range Refs(located) {
+				if ref.Kind != "url" && !slices.Contains(got, ref) {
+					got = append(got, ref)
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Mentions() cites %#v; want %#v", got, want)
+			}
+		})
+	}
+}
+
 // Every writer of a `#b-` fragment writes the block id one way, the way the contracts' table
 // says; the table is generated from `DISPATCH_BLOCK_ID_ENCODINGS` in `@legion/contracts`, which
 // `packages/contracts/src/dispatch-block-ref.test.ts` holds this file to.
