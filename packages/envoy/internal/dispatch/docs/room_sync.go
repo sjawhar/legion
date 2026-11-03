@@ -223,6 +223,14 @@ func (r *roomSync) connected(ctx context.Context) {
 // register registers every handler's channels on hub and returns what runs the lanes. Each handler
 // gets a lane of its own, and what the hub calls - on its own goroutine, which must not block -
 // only queues work there.
+//
+// Each lane runs on a context with a pool hold mark of its own (store.ForConcurrentWorker). The
+// pool's one-connection guard is per mark, so lanes sharing one would refuse each other: while
+// the catch-up lane held a transaction or an open cursor, the issue-open lane's read of the
+// issue would be taken for the same caller's second connection and refused, and the close or
+// reopen it was handling would reach no room here. The caller runs this off the process's
+// lifetime, outside any transaction of the shared pool, which is what a fresh mark per lane
+// needs.
 func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 	handlers := r.handlers()
 	lanes := make([]*roomSyncLane, 0, len(handlers))
@@ -243,13 +251,13 @@ func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 		}
 	}
 	return func(ctx context.Context) {
-		ctx = store.WithTransactionTracking(ctx)
 		var running sync.WaitGroup
 		for _, lane := range lanes {
+			laneCtx := store.ForConcurrentWorker(ctx)
 			running.Add(1)
 			go func() {
 				defer running.Done()
-				lane.run(ctx)
+				lane.run(laneCtx)
 			}()
 		}
 		running.Wait()

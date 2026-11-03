@@ -248,6 +248,37 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 	}
 }
 
+// A goroutine that runs on beside the caller that started it - room sync's lanes, a broadcast's
+// detached delivery - takes a hold mark of its own, which nothing its starter does can set: a
+// transaction the starter opens later, on the mark the goroutine would otherwise have shared,
+// must not refuse that goroutine a connection.
+func TestAConcurrentWorkerKeepsAMarkOfItsOwn(t *testing.T) {
+	database := openTestStore(t)
+	starter := WithTransactionTracking(context.Background())
+
+	worker := ForConcurrentWorker(starter)
+	tx, err := database.Pool.Begin(starter)
+	if err != nil {
+		t.Fatalf("the starter's transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	var one int
+	if err := database.Pool.QueryRow(worker, "select 1").Scan(&one); err != nil {
+		t.Fatalf("the worker's read beside its starter's transaction: %v, want it served", err)
+	}
+	if _, err := ForConcurrentRead(worker); err != nil {
+		t.Fatalf("a read of the worker's own: %v, want it served", err)
+	}
+	workerTx, err := database.Pool.Begin(worker)
+	if err != nil {
+		t.Fatalf("the worker's own transaction: %v", err)
+	}
+	defer workerTx.Rollback(context.Background())
+	if err := database.Pool.QueryRow(worker, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("a second connection under the worker's own transaction: %v, want ErrNestedAcquire", err)
+	}
+}
+
 // Listener hands out a connection of its own, outside the shared pool: one taken while every shared
 // connection is held is still served, it receives notifications, and once it is closed the next
 // call is served too. The shared pool here holds four connections rather than sharedPoolSize's:

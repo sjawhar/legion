@@ -494,6 +494,16 @@ func (s *server) writeBroadcast(
 // resumeOwedDeliveries), or a repeat under the send's key (sendOwedBroadcastRecipients), resumes
 // once the claim lease has passed.
 func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, delivery string, actor model.Actor) {
+	// A hold mark of this delivery's own (store.ForConcurrentWorker). ctx is the request's,
+	// detached from its cancellation but not from its mark, and the request goroutine lives on
+	// past the hand-off: the keyed layer records the answer and releases the key through that
+	// same mark once the handler has returned (settleRequestKey, releaseRequestKey), beside the
+	// workers below. On the shared mark a worker's ForConcurrentRead would be refused while that
+	// bookkeeping held its connection, and that recipient's send would be left to the delivery
+	// sweep. Both callers hand the delivery over with no connection of their own held - the
+	// create's transaction committed before it detached, and a repeat's reads are closed before
+	// it resumes anyone - which is what a mark of its own needs.
+	ctx = store.ForConcurrentWorker(ctx)
 	workers := min(broadcastDeliveryWorkers, len(sends))
 	pending := make(chan broadcastSend)
 	var wait sync.WaitGroup
@@ -503,9 +513,8 @@ func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, de
 			defer wait.Done()
 			for send := range pending {
 				// A mark of this worker's own: workers sharing one would refuse each other a
-				// connection (store.ErrNestedAcquire), and the caller holds none by now - the
-				// create's transaction committed before it detached this delivery, and a
-				// repeat's reads are closed before it resumes anyone.
+				// connection (store.ErrNestedAcquire), and nothing but this delivery's own
+				// workers holds the mark it runs on.
 				sending, err := store.ForConcurrentRead(ctx)
 				if err != nil {
 					slog.Error("dispatch: broadcast delivery",

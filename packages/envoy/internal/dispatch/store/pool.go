@@ -105,6 +105,24 @@ func ForConcurrentRead(ctx context.Context) (context.Context, error) {
 	return context.WithValue(ctx, holdingKey{}, &holding{}), nil
 }
 
+// ForConcurrentWorker returns a context for one of a caller's goroutines that run side by side
+// for as long as the caller lives: ctx's deadline, cancellation and values, with a hold mark of
+// its own, always a fresh one. A worker that takes a connection - a transaction, a cursor - marks
+// only itself, so its siblings are still free to take theirs, and the pool still refuses each
+// worker a second connection of its own.
+//
+// It differs from the other two marks by never reusing ctx's: WithTransactionTracking hands back
+// the mark ctx already carries, which siblings sharing it would set and clear under each other,
+// and ForConcurrentRead refuses a caller that holds a connection. A worker's mark is its own
+// whatever the parent carries, so the caller must start these goroutines outside any transaction
+// or connection of this pool's: a process-lifetime context, as room sync's lanes run off
+// (docs.Service.RegisterRoomSync), or a request's once its write has committed, as a broadcast's
+// detached delivery runs on (api.server.deliverBroadcast). A fresh mark cannot see a connection
+// the parent holds.
+func ForConcurrentWorker(ctx context.Context) context.Context {
+	return context.WithValue(ctx, holdingKey{}, &holding{})
+}
+
 // loggedSites remembers the call sites that have already logged a refusal, so a caller that
 // trips the guard in a loop reports its stack once instead of flooding the log. The error
 // itself is returned to every caller, every time.
