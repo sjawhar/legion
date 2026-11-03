@@ -18,6 +18,7 @@ import {
   rejectSuggestion,
   requestApproval,
 } from "./api";
+import { bodyOf } from "./bodies";
 import { documentEditor, needsYouCards, openSpecAndAwaitHeadingIds } from "./editor";
 import { askControls, hasReadingPane, inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
@@ -147,6 +148,52 @@ test("a spec's approval is a human review pinned to its version: requested by th
       reason: "Name the rollback path.",
       ask_id: null,
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reason longer than the server takes shows the server's own refusal in the Request changes dialog", async ({
+  browser,
+}) => {
+  await createProject({ key: "LONGREASON", name: "Long reason" });
+  const issue = await createIssue({
+    project: "LONGREASON",
+    spec: "The plan.",
+    title: "Reason past the bound",
+  });
+  const artifactID = issue.primary_artifact_id;
+  await requestApproval(artifactID, {}, session);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { exact: true, name: "Request changes" }).click();
+    const dialog = page.getByRole("dialog", { name: "Request changes" });
+    const field = dialog.getByLabel("Reason");
+    await expect(field).toBeVisible();
+
+    // One UTF-16 unit past the bound the server holds a review's reason to. `fill` puts the
+    // whole text in through the page's own editing pipeline, the path a paste takes, and the
+    // last character is not whitespace, so the server's trim leaves the length as written.
+    const reason = `${bodyOf(DISPATCH_EVENT_BODY_MAX)}x`;
+    await field.fill(reason);
+    await expect.poll(async () => (await field.inputValue()).length).toBe(reason.length);
+
+    await dialog.getByRole("button", { exact: true, name: "Request changes" }).click();
+
+    // What the reader is shown is the server's refusal, which names the field and the bound,
+    // in place of the sentence the dialog says for a failure it cannot read.
+    await expect(dialog.getByRole("alert")).toHaveText(
+      `reason is 1 characters over the ${DISPATCH_EVENT_BODY_MAX}-character limit ` +
+        `(${reason.length}/${DISPATCH_EVENT_BODY_MAX})`
+    );
+    await expect(dialog.getByText("Could not request changes. Try again.")).toHaveCount(0);
+
+    // The draft stays in the field, and no review was written.
+    await expect(field).toHaveValue(reason);
+    expect((await getArtifact(artifactID, { login: "alice" })).approval?.state).toBe("awaiting");
   } finally {
     await alice.close();
   }
@@ -470,17 +517,27 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
     // The question's own card is where the Inbox shows the question itself: the row's card
     // below 1280 px, and the drawer's from there up, since the Inbox page's reading column
     // shows an approval as the document under review rather than a card (INFRA-575) and its
-    // short row gives the question one line on purpose. Whole is the card's promise, so the
-    // window is made tall enough to hold the whole card: what is left to flag is a clip, not
-    // a surface scrolling as it is meant to.
-    const viewport = page.viewportSize();
-    if (viewport !== null && hasReadingPane(page)) {
-      await page.setViewportSize({ height: 2600, width: viewport.width });
-    }
+    // short row gives the question one line on purpose.
     const card = await approvalCard(page, requested.ask.id);
     await expect(card).toBeVisible();
     const question = card.locator("p", { hasText: ending });
     await expect(question).toHaveText(requested.ask.question);
+    // Whole is the card's promise, so the window is made tall enough to hold the whole card:
+    // what is left to flag is a clip, not a surface scrolling as it is meant to. A summary at
+    // this bound is thousands of lines, past any height a person's window has, so the height
+    // is the one the card itself reports rather than a number written here.
+    const viewport = page.viewportSize();
+    if (viewport !== null && hasReadingPane(page)) {
+      const needed = await question.evaluate((element) => {
+        let height = element.scrollHeight;
+        for (let node: Element | null = element; node !== null; node = node.parentElement) {
+          height = Math.max(height, node.scrollHeight);
+        }
+        return height;
+      });
+      await page.setViewportSize({ height: needed + 100, width: viewport.width });
+      await expect(question).toHaveText(requested.ask.question);
+    }
     // Whole means nothing between the question and its card clips it: no clamp, ellipsis or box
     // shorter or narrower than the text it holds.
     await assertWhole(question);
