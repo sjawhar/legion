@@ -1674,7 +1674,8 @@ export default function envoyExtension(pi: PiApi): void {
     Number(process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS ?? "") || 10_000;
 
   // The connections that have not answered a round trip since they last did. A background
-  // confirmation asks each of them for that answer and clears the mark when it comes; a reconnect
+  // confirmation asks each of them for that answer and clears the mark however it ends - on the
+  // answer, on a connection closed for good, on a shutdown, or at its cap; a reconnect
   // clears it too (`watchReconnects`), since a reconnected connection answers again and nats.js
   // has sent every live subscription on it afresh. While a mark stands, an open on that connection
   // pays no bound at all: the reconcile pass opens the agent subject, the relay, the control
@@ -1807,10 +1808,10 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  // How long a round trip the connection answers nowhere is left to run in the background before
-  // it is asked again, and the ceiling on that waiting: a session that has been away this long
-  // has had many heartbeats, each of which registers again, so there is nothing left for the
-  // confirmation to be first to.
+  // How long the background confirmation goes on asking a connection that answers nowhere; it
+  // asks again every RESUBSCRIBE_DELAY_MS until then. Reaching it ends the loop, which clears the
+  // connection's mark on its way out as every other exit does, so the next open pays a bound of
+  // its own rather than going on unconfirmed for the life of a connection that never answers.
   const BACKGROUND_CONFIRM_CAP_MS = 10 * 60_000;
 
   // The round trip that makes a subject this session asked for live rather than merely written:
@@ -1847,8 +1848,9 @@ export default function envoyExtension(pi: PiApi): void {
       await within(connection.flush(), SUBSCRIBE_FLUSH_TIMEOUT_MS, `confirming ${what}`);
     } catch (error) {
       if (shuttingDown || connection.isClosed()) throw error;
-      // Marked before the asking starts, since a background confirmation that gives up at once
-      // clears the mark on its way out and must not clear one set after it.
+      // Marked before the loop starts, which is the order its own clear assumes: the loop clears
+      // the mark however it ends, and this line is reached only with the connection open and the
+      // session running, so its first sleep always comes before that clear.
       unanswered.add(connection);
       void confirmInBackground(connection, what);
     }

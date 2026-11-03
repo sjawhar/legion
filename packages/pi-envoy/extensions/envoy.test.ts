@@ -452,7 +452,10 @@ afterEach(async () => {
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
+  // Both are read when an extension instance is created, and a row aborted at Bun's own timeout
+  // never runs its `finally`, so a row that sets either must not decide a later row's timings.
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+  delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
   natsState.closedNames.length = 0;
@@ -5892,7 +5895,12 @@ console.log(JSON.stringify(args));
     // The first open that goes unanswered marks the connection, and the rest go on at once.
     process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
     // Long enough that the background confirmation takes no round trip while this row counts them.
+    // It is also why this row ends its session: the loop sleeps that long on a connection this
+    // suite's mock never closes, so a row that left the session open would have the loop take a
+    // round trip a minute later, inside whichever row was running then, and every row that counts
+    // `natsState.flushes` exactly would fail at random.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "60000";
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       const recovered = [1, 2, 3, 4, 5, 6].map(
         (n) => `notifications.github.acme.widgets.issue.${n}`
@@ -5922,6 +5930,7 @@ console.log(JSON.stringify(args));
         ...base,
         sessionManager: { ...base.sessionManager, getBranch: () => [{}] },
       };
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, resumed);
       const started = fixture.handlers.get("session_start")?.({}, resumed);
       started?.catch(() => undefined);
       for (let tick = 0; tick < 300 && !paths.includes("/v1/interests/subscribe"); tick += 1) {
@@ -5937,6 +5946,8 @@ console.log(JSON.stringify(args));
       natsState.heldFlush = undefined;
       await started;
     } finally {
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
@@ -5950,6 +5961,8 @@ console.log(JSON.stringify(args));
     // Long enough that the background confirmation does not clear the mark for this row: the
     // reconnect is what clears it here.
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "60000";
+    const context = sessionContext("ses_reconnect_mark");
+    let stop: (() => Promise<unknown>) | undefined;
     try {
       globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
       const { default: envoyExtension } = await import("./envoy.ts?reconnect-clears-mark");
@@ -5957,7 +5970,8 @@ console.log(JSON.stringify(args));
       envoyExtension(fixture.pi);
 
       natsState.heldFlush = new Promise<void>(() => undefined);
-      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_reconnect_mark"));
+      stop = async () => fixture.handlers.get("session_shutdown")?.({}, context);
+      await fixture.handlers.get("session_start")?.({}, context);
       const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
       if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
 
@@ -5975,6 +5989,10 @@ console.log(JSON.stringify(args));
       await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.32"] });
       expect(natsState.flushes.length).toBeGreaterThan(0);
     } finally {
+      // As the row above: a session left open here would have its background confirmation flush
+      // the shared mock a minute later, inside another row.
+      natsState.heldFlush = undefined;
+      await stop?.();
       delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
@@ -6010,6 +6028,45 @@ console.log(JSON.stringify(args));
       await subscribeTool.execute("", { topics: ["notifications.github.acme.widgets.pr.42"] });
       expect(natsState.flushes.length).toBeGreaterThan(0);
     } finally {
+      delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  }, 30_000);
+
+  test("a session's shutdown stops the background confirmation", async () => {
+    // The loop outliving its session is a defect of this suite and of the process: on a real
+    // connection it keeps asking a connection nobody is using, and here it would flush the shared
+    // mock inside whichever row ran when its sleep ended, so every row that counts
+    // `natsState.flushes` exactly would fail at random. The delay is short, so this row sees in
+    // half a second what a 60 s row would take a minute to show.
+    process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS = "50";
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "50";
+    const context = sessionContext("ses_shutdown_stops_asking");
+    try {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+      const { default: envoyExtension } = await import("./envoy.ts?shutdown-stops-asking");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      natsState.heldFlush = new Promise<void>(() => undefined);
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      // The loop is running: it asks again every delay while the connection answers nowhere.
+      natsState.flushes.length = 0;
+      for (let tick = 0; tick < 100 && natsState.flushes.length === 0; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(natsState.flushes.length).toBeGreaterThan(0);
+
+      natsState.heldFlush = undefined;
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+
+      // Ten delays after the session ended, nothing of it has asked again.
+      natsState.flushes.length = 0;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(natsState.flushes).toEqual([]);
+    } finally {
+      natsState.heldFlush = undefined;
       delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
       delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
     }
