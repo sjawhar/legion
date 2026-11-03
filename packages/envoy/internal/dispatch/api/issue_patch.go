@@ -451,10 +451,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		eventType = "issue.closed"
 	}
 	after.LastSeq++
-	// What the write changed, the issue's ancestors, and, for a status move, whose Replies count
-	// it can move, all read in this transaction. A retitle keeps the issue's child_of and
-	// blocked_by edges but moves the excerpt they show, so it names their targets; a blocked_by
-	// change moves the count of each blocker it added or removed, so it names those.
+	// What the write changed, the issue's ancestors, and, for a status or an assignee move, whose
+	// Inbox rows it can move, all read in this transaction. A retitle keeps the issue's child_of
+	// and blocked_by edges but moves the excerpt they show, so it names their targets; a
+	// blocked_by change moves the count of each blocker it added or removed, so it names those.
 	changedFields := issueChangedFields(before, after)
 	edgeChanges, err := issueEdgeChanges(r.Context(), tx, before, after, slices.Contains(changedFields, "title"))
 	if err != nil {
@@ -466,8 +466,16 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if statusChanged {
-		payload.ThreadLogins, err = issueThreadLogins(r.Context(), tx, key, slices.Contains(changedFields, "closed_at"))
+	// nil on a write that left the assignee alone, which is what tells issueWriteThreadLogins to
+	// name the status move's logins and nobody else.
+	var movedAssignees []*string
+	if slices.Contains(changedFields, "assignee") {
+		movedAssignees = []*string{before.Assignee, after.Assignee}
+	}
+	if statusChanged || movedAssignees != nil {
+		payload.ThreadLogins, err = issueWriteThreadLogins(
+			r.Context(), tx, key, statusChanged, slices.Contains(changedFields, "closed_at"), movedAssignees,
+		)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

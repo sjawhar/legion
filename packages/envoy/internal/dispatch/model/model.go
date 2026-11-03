@@ -980,8 +980,8 @@ type AskEventPayload struct {
 	Restored bool `json:"restored,omitempty"`
 	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
 	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
-	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
-	// moved. Absent on every other ask event; [] when nobody has a row.
+	// transaction (events.ThreadLogins), so a viewer knows whether their Inbox can have moved.
+	// Absent on every other ask event; [] when nobody has a row.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
@@ -1020,10 +1020,12 @@ type AskAnsweredEventPayload struct {
 // for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
 // blocked_by, external_links; for issue.created every field the new issue holds a value in),
 // Ancestors the issue's parent chain,
-// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
-// whose Replies count the move can change: for a close or a reopen every login with a Replies row
-// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
-// Each is absent from an event written before them.
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status or the
+// assignee moved, whose Inbox rows the write can move (api.issueWriteThreadLogins): for a close
+// or a reopen every login with a Replies row on one of the issue's open asks
+// (events.IssueThreadLogins), for an assignee move the assignee the issue was taken from and the
+// one it was given to, for the two together the sorted union of both, and for any other status
+// move []. Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
@@ -1629,10 +1631,12 @@ type MessageEventPayload struct {
 	ThreadTarget string `json:"thread_target,omitempty"`
 	// ReferenceChangesPayload carries the same signal comment events do.
 	ReferenceChangesPayload
-	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
-	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
-	// Carried by an issue message's message.created and message.answered; absent on a direct
-	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	// ThreadLogins is every login whose Inbox the message can have moved, read in its own
+	// transaction. On an issue message it is every login with a Replies row on the message's
+	// thread (its root, up in_reply_to, events.ThreadLogins); on a direct (issue-less)
+	// conversation's, which keeps no Replies row, it is the thread root author's login, the one
+	// Inbox an Agent row of that thread sits in, and [] when no person opened the thread. Carried
+	// by message.created and message.answered; absent on a delivery frame.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 

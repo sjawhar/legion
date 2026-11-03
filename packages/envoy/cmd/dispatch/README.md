@@ -800,7 +800,7 @@ Migration `0094_issue_links` creates `issue_links`, the issues each issue waits 
 The table's two foreign keys take `SHARE ROW EXCLUSIVE` on `issues` for the migration's short transaction, so an issue write waits behind it while an issue read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too.
 It touches no row; its census answers `0`.
 
-Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the table behind the Replies page (`packages/envoy/AGENTS.md`).
+Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the table behind the Inbox's Reply rows (`packages/envoy/AGENTS.md`), which `0151` adds the second of its two indexes to.
 `0095` creates the table, its partial index `user_threads_unread` and its `(thread_id)` index, the functions `user_threads_login`, `user_threads_record`, `user_threads_comment` and `user_threads_message`, and the trigger on `comments`;
 `0096` adds the trigger on `asks` (`insert or update of answer`); `0097` attaches `user_threads_message` to `messages`.
 Each trigger is its own migration, so its transaction holds that one table's `SHARE ROW EXCLUSIVE` alone:
@@ -1104,6 +1104,14 @@ Migration `0150_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449
 A caller presenting an access token the secrets broker issued signs a fresh proof of that token's key for each request (`internal/brokertoken`), and the row keyed on the proof's `jti` and normalized `htu` is what refuses the same proof presented twice;
 the maintenance pass deletes every record past its proof's acceptance window beside the idempotency-key sweep.
 It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
+
+Migration `0151_user_threads_login_replied` creates `user_threads_login_replied` on `user_threads (login, replied_at desc, thread_id desc) where replied_at is not null`, the index behind the Inbox's `?state=all` read of a person's threads (`api/replies.go`, `myRepliesEverything`).
+`user_threads_unread` (`0095`) is partial on the stored `unread` flag and does not cover that state, so without this index the read is a scan of `user_threads`;
+the column order is the read's own, the login it narrows to and then the order it answers in, so one index scan answers it.
+Building it takes `SHARE` on `user_threads`, so the writes its triggers make wait for the build;
+the table is small (727 unread rows across every person on 2026-10-31), the build rewrites no row and refuses none, so the window is milliseconds and its census answers `0`.
+Migrations run in one transaction, so `create index concurrently` is impossible here, as for `0148`.
+The release before it never reads the index and serves beside it unchanged.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1789,17 +1797,29 @@ Each item below names a path with its method and identity, then its purpose.
   Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row.
   `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`.
 
-- `/api/v1/me/replies?limit=&offset=&issue=|artifact=` (GET; cookie or trusted header (human only))
+- `/api/v1/me/replies?kind=&state=&limit=&offset=&issue=|artifact=` (GET; cookie or trusted header (human only))
 
-  List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists.
-  A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time.
-  `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50).
+  List the caller's Inbox threads, newest reply first, of the kinds `kind` names:
+  `reply`, the default, the threads they wrote in (an ask, a comment thread, an issue message thread) where somebody else has written since they last read it, less an open ask the Inbox already lists on an open issue assigned to them;
+  `agent`, their one-off messages to an agent session (a BTW, a broadcast's copy, or a Send or an Aside the session did not take as a turn of its live conversation) holding a reply from that session;
+  `reply,agent`, both in one order.
+  `state` is `unread` (the default) or `all`, which lists read threads too, each drawn as read.
+  A row names the thread, its owner, its issue's priority, its project, its subject, its root's deep link, the newest reply's author, first line and time, the caller's read mark, whether it is unread and how many writes they have not read.
+  `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`, and either leaves out every agent row, which has neither).
+  An absent `limit` is every row, which is what the Inbox reads; a `limit` the caller names is 1–200.
+  The answer carries `as_of`, the database time of the one snapshot every row was read in, which is what Mark all read passes back as its read mark.
 
 - `/api/v1/me/threads/{id}/read` (PUT; cookie or trusted header (human only))
 
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
   Answers `204`, writing nothing for a thread the caller never wrote in.
+
+- `/api/v1/me/inbox/read` (POST; cookie or trusted header (human only))
+
+  Mark every unread Inbox thread read in one write: `{read_through}` (RFC3339, required; missing, unparsable or more than a minute ahead of the server is `400 INVALID_STATE`), with the Inbox's own narrowing — `kind` (`reply`, `agent`; both by default), `priority` (`P0`, `P1`, `P2`, `P3` and `none`), `urgency` (`low`, `med`, `high`, `blocking` and `none`), `project` (a project key and `none`), and `issue` or `artifact` — each absent list meaning every value.
+  It marks exactly the threads `GET /api/v1/me/replies?state=unread` answers under that narrowing whose newest reply is at or before `read_through`, so a thread written in since stays unread and one already read past the mark keeps its later mark.
+  Answers `{marked}`, how many threads it moved.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 
@@ -2346,11 +2366,17 @@ Each item below names a path with its method and identity, then its purpose.
 An event's payload says what its write moved, so a reader can refresh only what it shows (the dashboard's rules are `packages/dispatch/web/src/api/event-refresh.ts`).
 `issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value the write moved (`title`, `status`, `closed_at` for a close or a reopen, `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo`, `components`, `blocked_by`, `external_links`;
 on `issue.created` every field the new issue holds a value in), and `ancestors`, the issue's parent chain, parent first up to the root (`[]` for a root).
-`thread_logins`, every login with a Replies row on the write's thread once the write is in, is on `comment.created` and `comment.answered`, on an issue message's `message.created` and `message.answered` (a direct conversation has no Replies thread and carries none), on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or `issue.closed` that moved the status:
-for a close or a reopen, the logins with a row on the issue's open asks; for any other status move, `[]`.
+`thread_logins`, every login whose Inbox the write can have moved, is on `comment.created` and `comment.answered`, on `message.created` and `message.answered`, on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or `issue.closed` that moved the status or the assignee.
+On a comment, an ask or an issue message it is the logins with a Replies row on the write's thread once the write is in;
+on a direct (issue-less) conversation's message, which keeps no Replies row, it is the thread root's author, the one person whose Inbox holds that conversation's agent row, and `[]` when no person opened the thread.
+On an issue event it is the sorted union of two sets, naming a login in both of them once:
+for a close or a reopen the logins with a row on the issue's open asks, which the Inbox leaves out of their Replies while the issue is open and assigned to them, and `[]` for any other status move;
+for an assignee move the assignee the issue was taken from and the one it was given to, whose rows that same rule moves.
 `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`PUT` or `DELETE /api/v1/me/asks/{id}/snooze`, which append it only when the row moved).
 A snooze's payload is exactly `{login, changed: ["snoozed"]}`:
 every signed-in caller's event feed on the live socket replays it, so it names neither the ask nor the writer's issue state, and the writer's other tabs and devices refetch their whole Inbox.
+`user_thread_state.updated` says that one viewer's read of the Inbox's threads moved, and carries `thread_id` only when one thread was marked (`PUT /api/v1/me/threads/{id}/read`):
+a mark-all (`POST /api/v1/me/inbox/read`) names none, since one event per project stands for every thread it marked there.
 `references_changed` names the targets whose inbound edges the write moved that a reader refreshes by name: an issue (`{kind:
 "issue", id}`), an ask (`{kind: "ask", id, issue_key?, artifact_id?}`, with the issue or document whose ask list holds its row) and a document or file (`{kind: "artifact", id, ref}`:
 its uuid, the node id `GET /api/v1/references` reports for it, and the `dispatch://` address its Referenced by panel is opened on, `ref` absent when its owner names no address), and a block of a document (`{kind: "block", id, ref, artifact_id}`:

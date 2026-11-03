@@ -1263,11 +1263,13 @@ export interface ReferenceChangesPayload {
   readonly references_changed_truncated_kinds?: ChangedReference["kind"][];
 }
 
-/** Whose Replies count a write can have moved, mirroring the server's `ThreadLogins` payload
- *  field: every login with a Replies row (the server's `user_threads`) on the write's thread once
- *  the write is in, sorted, `[]` when nobody has one. Each payload family names the event types
- *  that carry it; it is absent from every other type and from every event written before the
- *  field existed, which a reader takes as "anyone's count may have moved". */
+/** Whose Inbox a write can have moved, mirroring the server's `ThreadLogins` payload field:
+ *  sorted, `[]` when the write moves nobody's. On a comment, an ask or an issue message it is
+ *  every login with a Replies row (the server's `user_threads`) on the write's thread once the
+ *  write is in; on a direct (issue-less) message, which keeps no Replies row, it is the thread
+ *  root author's login, the one Inbox that conversation's Agent row sits in. Each payload family
+ *  names the event types that carry it; it is absent from every other type and from every event
+ *  written before the field existed, which a reader takes as "anyone's Inbox may have moved". */
 export interface ThreadLoginsPayload {
   readonly thread_logins?: string[];
 }
@@ -1283,8 +1285,10 @@ export interface IssueEventChanges {
   readonly changed?: string[];
   /** The issue's parent chain after the write, parent first up to the root; `[]` for a root. */
   readonly ancestors?: string[];
-  /** Present only when the status moved: for a close or a reopen every login with a Replies row
-   *  on one of the issue's open asks, for any other status move `[]`. */
+  /** Present only when the status or the assignee moved: for a close or a reopen every login
+   *  with a Replies row on one of the issue's open asks, for an assignee move the assignee the
+   *  issue was taken from and the one it was given to, for the two together the sorted union of
+   *  both, and for any other status move `[]`. */
   readonly thread_logins?: string[];
 }
 
@@ -1809,9 +1813,10 @@ export interface ChangedReference {
   readonly ref?: string;
 }
 
-/** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
- *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
- *  thread, so its messages carry none. */
+/** `thread_logins` is carried by `message.created` and `message.answered`: on an issue message
+ *  the logins with a Replies row on its thread root (up `in_reply_to`), and on a direct
+ *  (issue-less) conversation's message, which keeps no Replies row, the thread root author's
+ *  login, the one Inbox that conversation's Agent row sits in (`[]` when no person opened it). */
 export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
   /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
    *  empty otherwise. */

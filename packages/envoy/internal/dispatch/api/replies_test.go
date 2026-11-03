@@ -627,21 +627,30 @@ func TestReplyEventsNameTheThreadsParticipants(t *testing.T) {
 	requireThreadLogins(t, database, "ask.resolved", bobsAsk.ID, "bob")
 }
 
-// A direct conversation has no Replies thread, so its messages carry no thread_logins; a
-// session's reply to an issue message through the same reply route names the issue thread's
-// writers.
-func TestSessionRepliesNameThreadLoginsOnlyOnAnIssue(t *testing.T) {
-	handler, database, root, reply, _ := directConversationFrom(t, "alice")
-	if logins, carried := threadLoginsOf(t, database, "message.created", root.ID); carried {
-		t.Fatalf("a direct message's message.created carries thread_logins %#v, want none", logins)
-	}
+// A direct conversation keeps no Replies row, so its messages name the Inbox the Agent row of
+// that conversation sits in: the canonical login of the person who opened the thread, and nobody
+// when no person opened it. A session's reply to an issue message through the same reply route
+// still names the issue thread's writers.
+func TestDirectMessagesNameTheThreadRootsAuthor(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "Alice")
+	requireThreadLogins(t, database, "message.created", root.ID, "alice")
 	direct := reply("On it.")
 	if direct.Code != http.StatusCreated {
 		t.Fatalf("direct reply: status=%d body=%s", direct.Code, direct.Body.String())
 	}
-	if logins, carried := threadLoginsOf(t, database, "message.answered", decodeBody[model.Message](t, direct).ID); carried {
-		t.Fatalf("a direct reply's message.answered carries thread_logins %#v, want none", logins)
+	requireThreadLogins(t, database, "message.answered", decodeBody[model.Message](t, direct).ID, "alice")
+
+	// No Agent row holds a thread no person opened, so a reply in one names nobody, as [].
+	if _, err := database.Pool.Exec(context.Background(), `
+		update messages set author = jsonb_build_object('kind', 'session', 'id', 's0') where id = $1
+	`, root.ID); err != nil {
+		t.Fatalf("rewrite the thread root's author: %v", err)
 	}
+	followUp := reply("And the logs are clean.")
+	if followUp.Code != http.StatusCreated {
+		t.Fatalf("follow-up reply: status=%d body=%s", followUp.Code, followUp.Body.String())
+	}
+	requireThreadLogins(t, database, "message.answered", decodeBody[model.Message](t, followUp).ID)
 
 	issue := createInteractionIssue(t, handler, "TEST", "Targeted", "A spec")
 	targeted := createIssueMessage(t, handler, issue.Key, map[string]any{
