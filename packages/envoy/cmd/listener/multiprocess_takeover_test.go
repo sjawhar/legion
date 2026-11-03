@@ -1001,3 +1001,48 @@ func TestTwoPodsARelayedPushInFlightWhenTheTermEndsIsNotPushedAgainByTheSuccesso
 	serving.requireOnce(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
+
+// A push the active pod's relay has at the session's port past the stopping relay's settle bound
+// (relaySettleGrace, 3 s) is still pushed once in all. The relay's push is held, unanswered, when
+// the pod's receive connection alone is cut; the pod releases the lease and its relays stop, and
+// the port goes on holding the push past the 3 s the stopping relay settles it for, then takes it
+// (204) 6 s after the take-over, beyond the 4 s the pod taking over defers the released holder's
+// attempt (leaseFormerSettle). The session must take the message exactly once. At bcdf6369 the
+// settle bound cancels the push with nothing recorded and the attempt standing, the pod taking over
+// pushes the message once its deferral ends, and the port then takes the held push too: twice
+// (INFRA-557 tester's round 28, the architect's edge (2)).
+func TestTwoPodsARelayedPushHeldPastTheStoppingRelaysSettleBoundIsTakenOnce(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	const sessionID = "ses_mp_relay_past_settle_once"
+	a.registerPort(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived, release := serving.gate(sessionID)
+	t.Cleanup(release)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never pushed %s to the session's port", a.instance, m.event)
+	}
+
+	heal := a.lanes.cut(mpReceiveConnection(a.instance))
+	t.Cleanup(heal)
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	time.Sleep(relaySettleGrace + 3*time.Second) // past the stopping relay's settle and the successor's deferral
+	release()                                    // the port takes the held push
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
+}
