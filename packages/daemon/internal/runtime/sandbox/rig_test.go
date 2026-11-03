@@ -152,8 +152,8 @@ const addedOwner = "globex"
 
 // servedOwners are the owners a daemon servingAddedOwner serves, sorted: staticOwners with
 // addedOwner among them, which is what appauth.GitHubOwners answers once the mapping names a
-// repository of that owner.
-var servedOwners = []string{"acme", addedOwner, "sjawhar"}
+// repository of that owner. It is derived, so a staticOwners this package edits moves it too.
+var servedOwners = slices.Sorted(slices.Values(append(slices.Clone(staticOwners), addedOwner)))
 
 // servingAddedOwner is a restarted daemon serving one owner more: GitHubOwners answers
 // servedOwners, and every bundle it renders holds addedOwner's read-only files beside the

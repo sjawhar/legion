@@ -414,11 +414,12 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 		t.Fatalf("the round kept the pod %s, whose gh volume names no directory for %s", testerLoc.Sandbox.PodUID, addedOwner)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
-	if held := ghItems(t, pod, claim.RoleTester); !slices.Equal(held, ghItemsFor(servedOwners...)) {
+	held := ghItems(t, pod, claim.RoleTester)
+	if !slices.Equal(held, ghItemsFor(servedOwners...)) {
 		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedOwners)
 	}
 	for _, want := range ghItemsFor(addedOwner) {
-		if !slices.Contains(ghItems(t, pod, claim.RoleTester), want) {
+		if !slices.Contains(held, want) {
 			t.Errorf("the replaced pod's gh volume does not project %s at %s", want.Key, want.Path)
 		}
 	}

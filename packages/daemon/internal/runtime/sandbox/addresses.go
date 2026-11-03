@@ -407,7 +407,8 @@ func (r *Runtime) movedGhOwners(pod corev1.PodSpec, role claim.Role) (movedAddre
 		}
 	}
 	served := r.gitHubOwners()
-	if !slices.ContainsFunc(served, func(owner string) bool { return !slices.Contains(held, owner) }) {
+	lacking := slices.ContainsFunc(served, func(owner string) bool { return !slices.Contains(held, owner) })
+	if !lacking {
 		return movedAddress{}, false
 	}
 	slices.Sort(held)
