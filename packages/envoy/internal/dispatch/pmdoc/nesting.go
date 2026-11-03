@@ -222,12 +222,17 @@ func markNesting(root ast.Node, measured map[*ast.Image]int) int {
 	}
 }
 
+// displayParseKey marks a parse the display reader runs (markdownReader.read).
+var displayParseKey = parser.NewContextKey()
+
 // nestingRefusal is the refusal of root, parsed from source with pc, for markdown nested past a
 // bound, or nil: the block nestingGuard refused, since goldmark opens every block before it reads
 // any inline markdown, and otherwise the first textblock whose inline marks nest past
-// maxInlineNesting, an image imageNesting measured past it among them.
+// maxInlineNesting, an image imageNesting measured past it among them. A display parse keeps no
+// refusal of the guard's: the opener it declined is the paragraph text the browser's tokenizer
+// reads it as, which is what a reader is shown (ReadForDisplay).
 func nestingRefusal(root ast.Node, source []byte, pc parser.Context) error {
-	if refused, ok := pc.Get(nestingRefusalKey).(nestingError); ok {
+	if refused, ok := pc.Get(nestingRefusalKey).(nestingError); ok && pc.Get(displayParseKey) == nil {
 		return refused
 	}
 	measured, _ := pc.Get(imageNestingKey).(map[*ast.Image]int)

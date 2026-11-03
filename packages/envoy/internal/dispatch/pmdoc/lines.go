@@ -60,11 +60,15 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 // read is goldmark's tree of source, its tables padded and its elements counted on budget, the
 // source's first server bytes the server's (origin), with the count and the parser context it
 // kept, or the refusal of markdown nested past either of parseSource's bounds, before anything else
-// refuses it.
+// refuses it. A display reader's parse is marked as one (displayParseKey), since a block nested
+// past a bound is no refusal there (nestingRefusal).
 func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *WriteBudget, server int) (ast.Node, *parseCount, parser.Context, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
+	}
+	if reader.display {
+		pc.Set(displayParseKey, true)
 	}
 	pc.Set(writeBudgetKey, budget)
 	count := budget.elements.countParse(pc, server)

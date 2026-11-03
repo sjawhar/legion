@@ -59,7 +59,11 @@ func (n *unsupportedDirective) Kind() ast.NodeKind {
 	return kindUnsupportedDirective
 }
 
-type typedDirectiveParser struct{}
+// typedDirectiveParser opens a typed block. display reads an opening line as the browser's
+// tokenizer reads a container directive rather than as a typed block a caller may write
+// (parseDisplayDirectiveOpen): the display read draws every container the schema refuses, so it
+// has to open them all.
+type typedDirectiveParser struct{ display bool }
 
 func (p *typedDirectiveParser) Trigger() []byte {
 	return []byte{':'}
@@ -71,7 +75,12 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 	if indent >= 4 || offset >= len(line) {
 		return nil, parser.NoChildren
 	}
-	name, attrs, ok := parseTypedDirectiveOpen(strings.TrimRight(string(line[offset:]), "\n"))
+	opening := strings.TrimRight(string(line[offset:]), "\n")
+	read := parseTypedDirectiveOpen
+	if p.display {
+		read = parseDisplayDirectiveOpen
+	}
+	name, attrs, ok := read(opening)
 	if !ok {
 		return nil, parser.NoChildren
 	}
