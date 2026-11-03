@@ -94,6 +94,7 @@ func wantNoSignal(t *testing.T, signal <-chan struct{}, what string) {
 // is also signalled once the first LISTEN succeeds, the catch-up every subscriber gets after a
 // connect.
 func TestAHubNotificationSignalsItsChannelsWakes(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	dialer := &hubDialer{database: database}
 	hub := &Hub{Owner: "test hub", Dial: dialer.dial}
@@ -142,6 +143,7 @@ func TestAHubNotificationSignalsItsChannelsWakes(t *testing.T) {
 // subscriber catches up what was committed while nothing listened; notifications signal their
 // wakes on the new connection.
 func TestAHubSignalsEveryWakeAgainAfterAReconnect(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	dialer := &hubDialer{database: database}
 	hub := &Hub{Owner: "test hub", Dial: dialer.dial, Backoff: func(int) time.Duration { return 10 * time.Millisecond }}
@@ -170,6 +172,7 @@ func TestAHubSignalsEveryWakeAgainAfterAReconnect(t *testing.T) {
 // Registration is closed once Run has started: a channel added later would be missing from the
 // LISTEN statement already sent and never heard.
 func TestAHubRefusesRegistrationAfterRun(t *testing.T) {
+	t.Parallel()
 	hub := &Hub{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

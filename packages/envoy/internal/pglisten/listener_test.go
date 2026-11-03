@@ -170,6 +170,7 @@ func waitBackendGone(t *testing.T, database *store.Store, pid uint32, within tim
 }
 
 func TestTheListenerReconnectsAfterItsBackendIsKilled(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -301,6 +302,7 @@ func databaseAddress(database *store.Store) string {
 // replaced: one dial, one OnConnected, the backend's last statement the ping, and a notification
 // still reaches OnNotify on it.
 func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
@@ -332,6 +334,7 @@ func TestTheListenerKeepsAHealthyIdleConnection(t *testing.T) {
 }
 
 func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	proxy := newBlindingProxy(t, databaseAddress(database))
 	probe := newListenerProbe()
@@ -358,6 +361,7 @@ func TestTheListenerReplacesAHalfOpenConnection(t *testing.T) {
 // OnNotify gets each of the listener's three channels' payloads exactly as sent, in the order
 // sent, and nothing from a channel the listener does not listen on.
 func TestTheListenerPassesEachPayloadUnchanged(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -391,6 +395,7 @@ func TestTheListenerPassesEachPayloadUnchanged(t *testing.T) {
 // A listener listens on the channels it names and no others, and needs no OnConnected: that is
 // the document rooms' evictor, which listens on one channel and catches nothing up (docs).
 func TestAListenerOnOneChannelWithoutAnOnConnectedHearsThatChannelAlone(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := &Listener{
@@ -438,6 +443,7 @@ func TestAListenerOnOneChannelWithoutAnOnConnectedHearsThatChannelAlone(t *testi
 // notifies delivery_changes and delivery_freshness (migration 0100) and an event insert
 // dispatch_events (migration 0107).
 func TestTheListenerHearsTheTriggersItListensFor(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	runListener(t, probe, probe.listener(database.Pool.Listener))
@@ -675,6 +681,7 @@ func TestAListenerWokenShorterThanItsIdlePeriodIsStillPinged(t *testing.T) {
 // the first wait NextWake ended called a nil func, and the panic took the whole process with it
 // - the delivery hub's listener and the event stream relay's included, since they run in it.
 func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)
@@ -710,6 +717,7 @@ func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 // process with it - the delivery hub's listener and the event stream relay's included, since
 // they run in it.
 func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	probe := newListenerProbe()
 	listener := probe.listener(database.Pool.Listener)

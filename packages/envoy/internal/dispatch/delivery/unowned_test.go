@@ -41,6 +41,7 @@ type unownedSeed struct {
 }
 
 func TestListUnownedP0(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	p0, p1 := 0, 1
 	route := "role:dora"
@@ -61,17 +62,12 @@ func TestListUnownedP0(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUnownedP0: %v", err)
 	}
-	// Other packages' tests can leave issues in the shared database; the rule is checked on the
-	// projects this test owns, which the query returns in project-then-number order like any other.
-	ours := slices.DeleteFunc(slices.Clone(unowned), func(issue UnownedIssue) bool {
-		return !slices.Contains([]string{"ACME-2", "ACME-103", "ACME-104", "ACME-105", "ACME-106", "ACME-107", "ACMEB-1"}, issue.Key)
-	})
 	want := []UnownedIssue{
 		{Key: "ACME-2", Title: "an earlier unowned P0"},
 		{Key: "ACME-103", Title: "Production deploy gate flakes"},
 		{Key: "ACMEB-1", Title: "another project's unowned P0"},
 	}
-	if !slices.Equal(ours, want) {
-		t.Fatalf("ListUnownedP0 = %+v, want %+v (open, P0, neither claimed nor routed; project then number)", ours, want)
+	if !slices.Equal(unowned, want) {
+		t.Fatalf("ListUnownedP0 = %+v, want %+v (open, P0, neither claimed nor routed; project then number)", unowned, want)
 	}
 }

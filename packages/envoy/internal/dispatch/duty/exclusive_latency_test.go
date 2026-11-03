@@ -40,7 +40,9 @@ func TestExclusiveCountsATickStalledAfterItsMeasureInThePeriodItWasDueIn(t *test
 	database := storetest.Open(t)
 	ctx := context.Background()
 	const name = "suggestion-outcomes"
-	const period = time.Second
+	// The test's own period, shortened: the stall is delay, which is unchanged
+	// (dispatch://INFRA-1075).
+	const period = 400 * time.Millisecond
 	const early, delay = 50 * time.Millisecond, 100 * time.Millisecond
 
 	var slow atomic.Bool

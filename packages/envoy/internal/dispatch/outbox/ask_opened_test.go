@@ -12,6 +12,7 @@ import (
 )
 
 func TestRunPublishesPersistedAskOpenedEventID(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)

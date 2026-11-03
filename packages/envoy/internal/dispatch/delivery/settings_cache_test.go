@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // settingsWake runs a pglisten.Hub on pool's listener connection until the test ends, as the
@@ -89,11 +88,12 @@ func countedDeliveryPool(t *testing.T, pool *store.Pool) (*store.Pool, *settings
 // all -- at the cache's start and on the hub's signal after its LISTEN -- and then not once over
 // three seconds: no timer reads it.
 func TestTheIntakesReadNoSettingsWhileNothingChanges(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	counted, counter := countedDeliveryPool(t, pool)
 	wake := settingsWake(t, counted)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -127,6 +127,7 @@ func TestTheIntakesReadNoSettingsWhileNothingChanges(t *testing.T) {
 // Ten job events of a tracked deploy run are checked against the cached settings: none of them
 // reads delivery_settings, and they still schedule the run's read.
 func TestJobEventsReadNoSettings(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedRunningDeployRun(t, ctx, pool)
@@ -150,6 +151,7 @@ func TestJobEventsReadNoSettings(t *testing.T) {
 // written are stored and close the channel Changed handed out before them; a later read whose
 // deploy repository is malformed keeps the settings before it.
 func TestTheSettingsCacheKeepsTheLastValidSettings(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	cache := newSettingsCache(pool, nil)
 	changed := cache.Changed()

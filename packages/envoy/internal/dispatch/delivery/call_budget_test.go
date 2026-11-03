@@ -10,6 +10,7 @@ import (
 // holds a reservation waits for it to settle, takes what the settle gave back, and a read that does
 // not fit once nothing is in flight gives up at once rather than waiting forever.
 func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
+	t.Parallel()
 	budget := newCallBudget(10)
 	if !budget.reserve(6) {
 		t.Fatal("the first reservation of 6 from 10 was refused")
@@ -55,6 +56,7 @@ func TestACallBudgetWaitsForAReservationThenGivesUpOnceSpent(t *testing.T) {
 // until the test releases them, so the rest must wait. Each makes 2 calls: exactly 8 are granted
 // (the ninth would need 6 with 4 left), the other two give up, and no more than 20 calls are made.
 func TestConcurrentReadsNeverOverspendACallBudget(t *testing.T) {
+	t.Parallel()
 	const reads, cost, used, allowance = 10, 6, 2, 20
 	budget := newCallBudget(allowance)
 	gate := make(chan struct{})

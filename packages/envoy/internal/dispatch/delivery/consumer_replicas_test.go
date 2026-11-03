@@ -13,6 +13,7 @@ import (
 // replica count), follow the stream when a start raises it from one copy to the deployment's three:
 // a durable left on one copy would lose its place with that one server.
 func TestDispatchDurablesMoveToThreeCopiesWhenAStartRaisesTheStream(t *testing.T) {
+	t.Parallel()
 	cluster := testnats.StartCluster(t, 3)
 	start := func(replicas int) *bus.Client {
 		t.Helper()

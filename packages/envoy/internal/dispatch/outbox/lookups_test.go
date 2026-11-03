@@ -20,6 +20,7 @@ import (
 // issue: a document that is not primary credits no session here, and an issue with no primary
 // document, or with no row, has no entry.
 func TestLoadPrimaryDocumentAuthorsReadsEveryIssueOfABatchInOneQuery(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	seedSecondIssue(t, database, "T-2")
@@ -48,6 +49,7 @@ func TestLoadPrimaryDocumentAuthorsReadsEveryIssueOfABatchInOneQuery(t *testing.
 // with no row gives none, and a cyclic reply_to chain ends at the depth bound rather than
 // spinning, with the authors of the comments the walk visited.
 func TestLoadCommentRecipientsReadsEveryThreadOfABatchInOneQuery(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -140,6 +142,7 @@ func refusingServer(t *testing.T, code string) string {
 // alike, and so is no refused statement; nor is any error once ctx ended. invalid_parameter_value,
 // what jsonb_array_elements answers a credit list that is no array with, is.
 func TestARefusedConnectionOrAFailingServerIsNoRefusedStatement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	host, port, err := net.SplitHostPort(refusingServer(t, "53300"))
 	if err != nil {

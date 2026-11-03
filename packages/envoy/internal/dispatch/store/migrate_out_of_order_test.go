@@ -114,6 +114,7 @@ func databaseFromBeforeTheWidening(t *testing.T, store *Store) {
 // those above the highest it does. That is what lets two authors take timestamps and merge in
 // either order.
 func TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, oooSet(oooNumbered, oooT2)); err != nil {
@@ -149,6 +150,7 @@ func TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied(t *testing.T)
 // A database that sees both timestamped migrations for the first time applies each once, in
 // version order, so it ends where the database that took them one merge at a time ended.
 func TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, oooSet(oooNumbered, oooT1, oooT2)); err != nil {
@@ -165,6 +167,7 @@ func TestMigrateAppliesBothTimestampedMigrationsOnceOnAFreshDatabase(t *testing.
 // bigint under the runner's own lock, keeping the versions already recorded, and then records a
 // timestamped one; a boot after that finds it widened and alters nothing.
 func TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	databaseFromBeforeTheWidening(t, store)
@@ -222,6 +225,7 @@ func versionColumnType(t *testing.T, store *Store) string {
 // plan must not change result type", which is a /healthz failure on every running process that a
 // deploy's first boot of this change widens under.
 func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	databaseFromBeforeTheWidening(t, store)
@@ -250,6 +254,7 @@ func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
 // The column is widened when the first timestamped migration applies, by which time every running
 // process reads it cast.
 func TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	databaseFromBeforeTheWidening(t, store)

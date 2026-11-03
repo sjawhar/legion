@@ -100,6 +100,7 @@ func createProject(t *testing.T, handler http.Handler, key string) {
 // GET /auth/whoami carries event_head, the decimal id of the newest committed event, read after the
 // sign-in check: "0" on an empty log, and the third event's id once three have committed.
 func TestWhoamiCarriesTheNewestEventID(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	if answer := askWhoami(t, handler); answer.EventHead != "0" {
@@ -137,6 +138,7 @@ func TestWhoamiCarriesTheNewestEventID(t *testing.T) {
 // answer, before the subscription -- reaches it during catch-up, and the subscription's
 // events_start names that head.
 func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	server := httptest.NewServer(handler)
@@ -209,6 +211,7 @@ func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testi
 // EVENT_HEAD_UNAVAILABLE, which the page asks again for without limit: a database that does not
 // answer must end at the page's error, not keep it loading for ever.
 func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
+	t.Parallel()
 	for name, build := range map[string]func(t *testing.T) AppContextOptions{
 		"a router with no store": func(*testing.T) AppContextOptions { return AppContextOptions{} },
 		"a database that stopped answering": func(t *testing.T) AppContextOptions {
@@ -250,6 +253,7 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 // and the head is not read for it: a 503 there would have a signed-out page retry a server that
 // only needs its sign-in. The same router signed in is answered the 503.
 func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing.T) {
+	t.Parallel()
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
 		SigningKey: testSigningKey,
@@ -302,6 +306,7 @@ func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing
 // on its own once the open event insert does. The same error wrapped is answered the same, and a
 // failed read is EVENT_HEAD_READ_FAILED.
 func TestWhoamiAnswersEventHeadUnavailableOnlyWhileNoHeadIsProven(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		err  error
 		code string
@@ -462,6 +467,7 @@ func holdClusterTransactionID(t *testing.T, hold time.Duration) (release func())
 // still open, which stands below the open id. Once that write
 // commits, it answers at least the higher id.
 func TestWhoamiEventHeadStaysBelowAnEventStillOpen(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	createProject(t, handler, "ONE")
@@ -537,6 +543,7 @@ func TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen(t *testing.T) {
 // first 120 s and had not reached the newest. Every event that committed before that write took its
 // id is final, so event_head may stand below the open write but not below those.
 func TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpen(t *testing.T) {
+	t.Parallel()
 	const committed = 1000
 	database := storetest.Open(t)
 	ctx := t.Context()

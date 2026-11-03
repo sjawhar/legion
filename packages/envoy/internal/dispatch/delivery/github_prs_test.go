@@ -179,6 +179,7 @@ func ptrTime(s string) *time.Time {
 }
 
 func TestFetchPullRequestMapsEveryField(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/pulls/42", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, map[string]any{
@@ -239,6 +240,7 @@ func TestFetchPullRequestMapsEveryField(t *testing.T) {
 }
 
 func TestFetchPullRequestUsesCommitterDateWhenAuthorIsAbsent(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/pulls/7", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, map[string]any{
@@ -263,6 +265,7 @@ func TestFetchPullRequestUsesCommitterDateWhenAuthorIsAbsent(t *testing.T) {
 }
 
 func TestFetchPullRequestNoCommitsIsAnError(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/pulls/9", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, map[string]any{"number": 9, "title": "x", "html_url": "u", "user": map[string]any{"login": "a"}})
@@ -279,6 +282,7 @@ func TestFetchPullRequestNoCommitsIsAnError(t *testing.T) {
 }
 
 func TestFetchPullRequestUpstream404IsWrappedNotPanic(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/pulls/404", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -293,6 +297,7 @@ func TestFetchPullRequestUpstream404IsWrappedNotPanic(t *testing.T) {
 }
 
 func TestFetchPullRequestUpstream500IsWrapped(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/pulls/500", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -347,6 +352,7 @@ func searchResponseJSON(issueCount int, nodes []map[string]any, hasNextPage bool
 }
 
 func TestSearchMergedPullRequestsBuildsTheQuery(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	var gotQuery string
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +376,7 @@ func TestSearchMergedPullRequestsBuildsTheQuery(t *testing.T) {
 }
 
 func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.installationRepos = []string{"acme/widgets", "acme/other-widgets"}
 	var gotQuery string
@@ -402,6 +409,7 @@ func TestSearchMergedPullRequestsAcrossInstallationScopesToInstallationRepos(t *
 // LEGION-294's population rule names no installation boundary, and Rev measured roughly a quarter
 // of the real population living outside the deploy repository's own installation.
 func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.installations = []fakeInstallation{
 		{id: 1, repos: []string{"acme/widgets"}},
@@ -440,6 +448,7 @@ func TestSearchMergedPullRequestsAcrossInstallationSearchesEveryInstallation(t *
 }
 
 func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	var cursorsSeen []string
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
@@ -480,6 +489,7 @@ func TestSearchMergedPullRequestsPaginatesAcrossPages(t *testing.T) {
 // maxCommitPages of them, each ask for a token, so a page answered after the previous page's
 // token expired is asked for with a new one.
 func TestFetchCommitMessagesAsksForATokenPerPage(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	refuse, expired := expiringTokens(t, fake)
 	fake.handle("GET /repos/acme/widgets/pulls/7/commits", func(w http.ResponseWriter, r *http.Request) {
@@ -512,6 +522,7 @@ func TestFetchCommitMessagesAsksForATokenPerPage(t *testing.T) {
 // client.Token) reconciles each window's pull requests between pages, so it asks for a token per
 // page, and a page answered after the previous page's token expired is asked for with a new one.
 func TestSearchMergedPullRequestsAcrossInstallationAsksForATokenPerPage(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	refuse, expired := expiringTokens(t, fake)
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
@@ -546,6 +557,7 @@ func repeatSearchNodes(n, startNumber int) []map[string]any {
 }
 
 func TestSearchMergedPullRequestsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	type window struct{ since, until string }
 	var windows []window
@@ -634,6 +646,7 @@ func assertPullRequestsEqual(t *testing.T, got, want FetchedPullRequest) {
 }
 
 func TestSearchMergedPullRequestsLeavesCompletingFieldsNil(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, searchResponseJSON(1, []map[string]any{searchNodeJSON(5, "t", "alice", "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z")}, false, ""))
@@ -665,6 +678,7 @@ func TestSearchMergedPullRequestsLeavesCompletingFieldsNil(t *testing.T) {
 // REST's form, so an un-normalized GraphQL result never matches and reconcile.reconcilePullRequest
 // calls DeletePullRequest on every bot-authored population PR the search finds.
 func TestSearchMergedPullRequestsNormalizesABotAuthorToRESTForm(t *testing.T) {
+	t.Parallel()
 	fake := newFakeGitHub(t)
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
 		node := map[string]any{

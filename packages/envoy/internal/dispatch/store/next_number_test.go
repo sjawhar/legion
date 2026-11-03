@@ -15,6 +15,7 @@ import (
 // its own: the clash would show only once the second merged, which is the conflict timestamps
 // exist to remove. The set is read the way TestMigrationSetTakesNumbersThenTimestamps reads it.
 func TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet(t *testing.T) {
+	t.Parallel()
 	shipped, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
 		t.Fatal(err)

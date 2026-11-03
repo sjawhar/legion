@@ -57,6 +57,7 @@ func resolvedKey(t *testing.T, ctx context.Context, pool *store.Pool, facts attr
 // TestAttributionFallsBackToAnExternalLinkNamingThePullRequest: source (a), an issue whose
 // external link is the pull request's own URL.
 func TestAttributionFallsBackToAnExternalLinkNamingThePullRequest(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-101"}, map[string][]string{
 		"ATTR-101": {"https://github.com/acme/widgets/pull/101"},
@@ -72,6 +73,7 @@ func TestAttributionFallsBackToAnExternalLinkNamingThePullRequest(t *testing.T) 
 // TestAttributionIgnoresAnExternalLinkNamingAnotherPullRequest: a link to pull/103 credits
 // nothing to pull/102, though the URLs share a prefix.
 func TestAttributionIgnoresAnExternalLinkNamingAnotherPullRequest(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-103"}, map[string][]string{
 		"ATTR-103": {"https://github.com/acme/widgets/pull/1030"},
@@ -89,6 +91,7 @@ func TestAttributionIgnoresAnExternalLinkNamingAnotherPullRequest(t *testing.T) 
 // cites, a full URL or a bare #N in the pull request's own repository, that an issue's external
 // link names.
 func TestAttributionFallsBackToACitedGitHubIssue(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-111", "ATTR-112", "ATTR-113"}, map[string][]string{
 		"ATTR-111": {"https://github.com/acme/widgets/issues/77"},
@@ -120,6 +123,7 @@ func TestAttributionFallsBackToACitedGitHubIssue(t *testing.T) {
 // TestAttributionFallsBackToTheHeadBranch: source (c), a key in the branch name, matched
 // whatever its case.
 func TestAttributionFallsBackToTheHeadBranch(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-121"}, nil)
 	key, source := resolvedKey(t, ctx, pool, attributionFacts{
@@ -133,6 +137,7 @@ func TestAttributionFallsBackToTheHeadBranch(t *testing.T) {
 // TestAttributionFallsBackToCommitMessages: source (d), the first known key across the commit
 // messages in commit order.
 func TestAttributionFallsBackToCommitMessages(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-131", "ATTR-132"}, nil)
 	key, source := resolvedKey(t, ctx, pool, attributionFacts{
@@ -147,6 +152,7 @@ func TestAttributionFallsBackToCommitMessages(t *testing.T) {
 // TestAttributionTakesTheSourcesInOrder: title/body, then (a), (b), (c), (d); each source is
 // tried only when every earlier one found nothing.
 func TestAttributionTakesTheSourcesInOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	prURL := "https://github.com/acme/widgets/pull/140"
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-141", "ATTR-142", "ATTR-143", "ATTR-144", "ATTR-145"}, map[string][]string{
@@ -182,6 +188,7 @@ func TestAttributionTakesTheSourcesInOrder(t *testing.T) {
 // TestAttributionRefusesAKeyDispatchDoesNotHave: a key-shaped string in every source that names
 // no stored issue credits nothing.
 func TestAttributionRefusesAKeyDispatchDoesNotHave(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	key, source := resolvedKey(t, ctx, pool, attributionFacts{
 		Repo: "acme/widgets", URL: "https://github.com/acme/widgets/pull/150",
@@ -198,6 +205,7 @@ func TestAttributionRefusesAKeyDispatchDoesNotHave(t *testing.T) {
 // reads only what the attribution needs: the pull request once and its commits once (one page),
 // never FetchPullRequest's first-commit read, which a complete row already answered.
 func TestReconcileBackfillsAttributionInputsOnce(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-161"}, nil)
@@ -275,6 +283,7 @@ func TestReconcileBackfillsAttributionInputsOnce(t *testing.T) {
 // no sessions and no attribution inputs rather than recording them short for good, and the next
 // pass completes it once the commits answer.
 func TestCompletingAPullRequestWhoseCommitsFailLeavesItPartial(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-181"}, nil)
@@ -343,6 +352,7 @@ func TestCompletingAPullRequestWhoseCommitsFailLeavesItPartial(t *testing.T) {
 // stored rows, those checked longest ago first, so the walk comes round to every row and an
 // issue that links a pull request credits it within one walk of the table.
 func TestAttributingStoredPullRequestsWalksTheTableInBatches(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-191"}, nil)
 	if _, err := pool.Exec(ctx, `delete from issue_external_links where url like 'https://github.com/acme/widgets/pull/19_'`); err != nil {
@@ -397,13 +407,10 @@ func TestAttributingStoredPullRequestsWalksTheTableInBatches(t *testing.T) {
 // TestReconcileCreditsAPullRequestAnIssueLinksLater: a pull request stored with no issue is
 // credited once an issue's external link names it, by the next pass and with no GitHub call.
 func TestReconcileCreditsAPullRequestAnIssueLinksLater(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedAttributionIssues(t, ctx, pool, []string{"ATTR-171"}, nil)
-	// deliveryTestPool clears only the delivery tables: drop the link an earlier run added.
-	if _, err := pool.Exec(ctx, `delete from issue_external_links where url = 'https://github.com/acme/widgets/pull/170'`); err != nil {
-		t.Fatalf("clear an earlier run's link: %v", err)
-	}
 	merged := time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)
 	if err := UpsertPullRequest(ctx, pool, DeliveryPullRequest{
 		Repo: "acme/widgets", Number: 170, Title: "feat: unlinked", URL: "https://github.com/acme/widgets/pull/170",

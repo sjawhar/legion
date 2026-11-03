@@ -39,6 +39,7 @@ func (r *roleRig) laterEvent(t *testing.T, key string, actor model.Actor) model.
 // this covers two owners in one, which only a per-owner release reaches. Both issues' events are
 // committed before the outbox runs, so its first batch reads both owners.
 func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T) {
+	t.Parallel()
 	const (
 		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 		liveRole, liveHolder     = "live-reviewer", "ses_answers"
@@ -89,6 +90,7 @@ func TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds(t *testing.T
 // a holder that never answers, the batch keeps that owner in flight, so no batch beside it reads
 // the owner's second event and the holder receives the first forward alone.
 func TestAnOwnersSecondEventDoesNotOvertakeItsFirstWhileItsHolderIsSilent(t *testing.T) {
+	t.Parallel()
 	const silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	rig := newRoleRig(t)
@@ -146,6 +148,7 @@ func backOffIn(t *testing.T, database *store.Store, id int64, attempts int, wait
 // owner is settled before its batch ends and neither release wakes the scan; with the second
 // event unread, the scan's retry timer is armed to the two back-offs alone, minutes out.
 func TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack(t *testing.T) {
+	t.Parallel()
 	const (
 		silentRole, silentHolder = "silent-reviewer", "ses_never_answers"
 		// The attempt count both events carry: their next back-off is retry.Delay(7), 64 s, so a

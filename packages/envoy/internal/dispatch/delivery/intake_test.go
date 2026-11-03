@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -24,45 +23,59 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// TestMain removes the NATS server the package's tests share (testnats.Main).
-func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
+// TestMain prepares the migrated template every deliveryTestPool clones from and drops the
+// databases the tests leave (storetest.Main). Each test's NATS server is its own
+// (testnats.Start), so this package has no shared server to shut down.
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
-// deliveryTestPool opens a real Postgres pool from DISPATCH_TEST_DATABASE_URL, migrates it, and
-// returns it; a test that needs it skips (not fails) when the variable is unset, matching every
+// deliveryTestPool opens a migrated Postgres database of this test's own and returns its pool; a
+// test that needs it skips (not fails) when DISPATCH_TEST_DATABASE_URL is unset, matching every
 // other Postgres-backed test in this module's convention.
+//
+// It used to open the server's own database, run every migration and delete the rows of six
+// delivery tables before each test, which put all 123 of this package's Postgres tests in one
+// database the whole module's tests share: every one of them paid for a migration check and six
+// deletes, each had to work around rows the others left in the tables the deletes did not reach,
+// and duty_passes had to be cleared too because a pass an earlier run recorded inside
+// ReconcileInterval would make this run's pass skip (dispatch://INFRA-1075).
 func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	t.Helper()
-	url := os.Getenv("DISPATCH_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres-backed delivery tests")
+	return storetest.Open(t).Pool, t.Context()
+}
+
+// deliveryNATS holds the one NATS server each test has, so a test that asks twice - once for the
+// URL its intakes connect to, once through intakeTestClient - reaches the same server and the
+// same stream.
+var deliveryNATS = struct {
+	mu      sync.Mutex
+	servers map[*testing.T]string
+}{servers: map[*testing.T]string{}}
+
+// deliveryTestNATS is this test's NATS server, started at the first call and the same for every
+// later one. The package's tests took an account on one server the package shared
+// (testnats.URL), which needs testnats.Main as the package's TestMain; storetest.Main is this
+// package's TestMain now and m.Run runs once, so each test starts a server of its own, as
+// internal/dispatch/outbox's tests do.
+func deliveryTestNATS(t *testing.T) string {
+	t.Helper()
+	deliveryNATS.mu.Lock()
+	defer deliveryNATS.mu.Unlock()
+	if url, held := deliveryNATS.servers[t]; held {
+		return url
 	}
-	ctx := t.Context()
-	pgxPool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
-	t.Cleanup(pgxPool.Close)
-	pool := store.NewPool(pgxPool)
-	st := &store.Store{Pool: pool}
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	// Every delivery table is truncated before the test, not after: a failed previous run's rows
-	// (useful to inspect) are cleared by the next run that needs a clean slate, not hidden by one
-	// that crashes before its own cleanup runs. duty_passes is cleared with them: this database
-	// is the server's own and outlives the run, where storetest's clones do not, so a reconcile
-	// pass an earlier run recorded inside ReconcileInterval would make this run's pass skip for
-	// a period it did not serve (duty.Exclusive).
-	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
-		if _, err := pool.Exec(ctx, "delete from "+table); err != nil {
-			t.Fatalf("truncate %s: %v", table, err)
-		}
-	}
-	return pool, ctx
+	_, url := testnats.Start(t)
+	deliveryNATS.servers[t] = url
+	t.Cleanup(func() {
+		deliveryNATS.mu.Lock()
+		defer deliveryNATS.mu.Unlock()
+		delete(deliveryNATS.servers, t)
+	})
+	return url
 }
 
 // deliveryTestLeases is the lease pool an intake reconciles its durable under (duty.Exclusive on
@@ -276,7 +289,7 @@ func startIntake(t *testing.T, intake *Intake) {
 // intakeTestClient connects one NATS client for an intake test and closes it with the test.
 func intakeTestClient(t *testing.T) *bus.Client {
 	t.Helper()
-	natsClient, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	natsClient, err := bus.ConnectOwningStream([]string{deliveryTestNATS(t)})
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
 	}

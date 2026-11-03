@@ -64,6 +64,7 @@ func readVectors(t *testing.T, ctx context.Context, store *Store, queries map[st
 // exactly as the generated columns indexed the same shapes before it, and the one row whose text
 // holds a run of sixteen underscore-joined segments is re-indexed by the new expression.
 func TestSearchTextMigrationKeepsEveryRowShapesVector(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 55)

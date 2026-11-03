@@ -149,6 +149,7 @@ func forceEligible(t *testing.T, database *store.Store, kind, id string) {
 // pending embeddings row with no vector, and ProcessBatch fills it in from the Embedder, without
 // any application code calling embeddings_enqueue directly.
 func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "EMBQ", "EMBQ-1", "A title to embed")
 	if got := pendingCount(t, database); got != 1 {
@@ -185,6 +186,7 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 // criterion: a write never fails because the embedder did, and a failed attempt leaves the row
 // pending, retried later rather than lost.
 func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "RETR", "RETR-1", "A title")
 	embedder := &fakeEmbedder{err: errors.New("bedrock: simulated outage")}
@@ -224,6 +226,7 @@ func TestProcessBatchRetriesWithBackoffOnEmbedFailure(t *testing.T) {
 // sustained throttle episode outlasting retry.DeadLetterAttempts cycles must still be retrying
 // afterward, not permanently abandoned.
 func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "THRO", "THRO-1", "A title")
 	embedder := &fakeEmbedder{err: embedtest.FakeThrottleError{Code: "ThrottlingException"}}
@@ -263,6 +266,7 @@ func TestProcessBatchNeverDeadLettersAThrottledBatchHoweverManyTimesItRecurs(t *
 // guard: if the row's text changes between the scan and the commit (another write re-enqueued
 // it), the stale embedding must not be recorded as current.
 func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "STAL", "STAL-1", "Original title")
 	ctx := context.Background()
@@ -302,6 +306,7 @@ func TestProcessBatchRefusesToMarkStaleContentEmbedded(t *testing.T) {
 // retrying with a five-minute ceiling forever, records the identity it died under, and is still
 // visible and still recoverable (a text change clears dead and dead_model).
 func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "DEAD", "DEAD-1", "A title")
 	ctx := context.Background()
@@ -379,6 +384,7 @@ func (p *poisonTextEmbedder) Embed(_ context.Context, texts []string, _ embed.In
 // the offending row's attempt_count incremented (not yet dead - that still takes
 // retry.DeadLetterAttempts worth of calls, exactly as any permanent failure does).
 func TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "BSCT", "BSCT-1", "A good title one")
 	seedIssue(t, database, "BSCT", "BSCT-2", "The poisoned title")
@@ -456,6 +462,7 @@ func TestProcessBatchBisectsANonThrottledFailureToIsolateTheOffendingRow(t *test
 // is true, so the caller still backs off its batch cadence exactly as an outright-throttled whole
 // batch would.
 func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "BSCA", "BSCA-1", "A good title one")
 	seedIssue(t, database, "BSCA", "BSCA-2", "The poisoned title")
@@ -491,6 +498,7 @@ func TestProcessBatchBisectionAbortsOnAThrottleMidway(t *testing.T) {
 // including every confirmSoloFailure canary probe, so none of it is ever confirmed as any row's
 // own content. Driven for more cycles than retry.DeadLetterAttempts, after which nothing is dead.
 func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimesItRecurs(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"UNIF-1", "UNIF-2", "UNIF-3", "UNIF-4", "UNIF-5", "UNIF-6", "UNIF-7", "UNIF-8"}
 	for _, id := range ids {
@@ -554,6 +562,7 @@ func (e *cancelAfterNCallsEmbedder) Embed(_ context.Context, _ []string, _ embed
 // ended while it was in flight is never evidence about any row's content, independent of whether
 // some other row already succeeded.
 func TestProcessBatchNeverMarksARowPermanentWhenItsContextEndsMidBisection(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"CNCL-1", "CNCL-2", "CNCL-3", "CNCL-4"}
 	for i, id := range ids {
@@ -619,6 +628,7 @@ func TestClaimRenewalExtendsNextAttemptAtPastClaimWindow(t *testing.T) {
 // processes, which share nothing else - draw from, and wait out debt against, the very same
 // budget.
 func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	const ceiling = 120 // tokens/minute = 2 tokens/second, so a small deficit waits a short, deterministic time
@@ -650,6 +660,7 @@ func TestReserveTokensSharesItsBudgetAcrossConnections(t *testing.T) {
 // one minute so the test itself takes a little over a second, not several minutes, while
 // exercising the identical loop.
 func TestWaitOutDebtRenewsTheClaimMidWaitSoNoSecondWorkerClaimsIt(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "LONG", "LONG-1", "A title")
 	ctx := context.Background()
@@ -785,6 +796,7 @@ func (e *countingGroupEmbedder) Embed(_ context.Context, texts []string, _ embed
 // poisoned row is isolated to one - never once per row or once per bisection level), carrying 26
 // real rows plus the one canary.
 func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyOnce(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	const healthyCount = 25                    // 25 * 8,000 = 200,000 = Bedrock's BackgroundTokensPerMinute exactly
 	healthyTitle := strings.Repeat("h", 32000) // embed.maxInputChars (unexported): truncates to exactly 8,000 estimated tokens
@@ -874,6 +886,7 @@ func (e *sequencedEmbedder) Embed(_ context.Context, texts []string, _ embed.Inp
 // systemic outage: each solo failure is decided by its own fresh canary probe, run at the
 // instant of that failure, never by anything an earlier row in the same call did.
 func TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	healthyIDs := []string{"FLAP-1", "FLAP-2", "FLAP-3", "FLAP-4"}
 	outageIDs := []string{"FLAP-5", "FLAP-6", "FLAP-7", "FLAP-8"}
@@ -931,6 +944,7 @@ func TestProcessBatchANewOutageAfterAnEarlierSuccessNeverConfirmsAnything(t *tes
 // and is never confirmed; the outage clearing from the 5th real call on lets everything else
 // through.
 func TestProcessBatchRevRound6ProbeStillGreen(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"REV6-1", "REV6-2", "REV6-3", "REV6-4", "REV6-5", "REV6-6", "REV6-7", "REV6-8"}
 	for i, id := range ids {
@@ -982,6 +996,7 @@ func TestProcessBatchRevRound6ProbeStillGreen(t *testing.T) {
 // that third one keeps failing. Neither row's own content is ever at fault; a genuine flap must
 // never be mistaken for one.
 func TestProcessBatchDeepsFlappingProbeNeverWronglyConfirms(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"DEEP-1", "DEEP-2"}
 	for i, id := range ids {
@@ -1014,6 +1029,7 @@ func TestProcessBatchDeepsFlappingProbeNeverWronglyConfirms(t *testing.T) {
 // TestProcessBatchQualsFlappingProbeNeverWronglyConfirms is Qual's own probe: call 1 fails, call
 // 2 succeeds, every later call fails.
 func TestProcessBatchQualsFlappingProbeNeverWronglyConfirms(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ids := []string{"QUAL-1", "QUAL-2"}
 	for i, id := range ids {
@@ -1047,6 +1063,7 @@ func TestProcessBatchQualsFlappingProbeNeverWronglyConfirms(t *testing.T) {
 // directly: a single row whose own call fails, and whose canary also fails, must never be
 // confirmed permanent - it goes back to retry, exactly like any other systemic failure.
 func TestProcessBatchACanaryThatFailsMarksNothing(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "CNRY", "CNRY-1", "A title")
 	embedder := &canaryAwareEmbedder{
@@ -1082,6 +1099,7 @@ func TestProcessBatchACanaryThatFailsMarksNothing(t *testing.T) {
 // genuinely, repeatedly breaks the embed call, confirmed each time by a successful canary probe
 // proving the service itself works, still crosses the dead-letter threshold.
 func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	healthyIDs := []string{"POIS-1", "POIS-2", "POIS-3"}
 	for i, id := range healthyIDs {
@@ -1135,6 +1153,7 @@ func TestProcessBatchStillDeadLettersAGenuinelyPoisonedRowAmongHealthyOnes(t *te
 // pending beside it, is confirmed by its own canary exactly as a row bisection isolated to one
 // would be, and dead-letters once confirmed_failures reaches retry.DeadLetterAttempts.
 func TestProcessBatchALonePoisonedRowWithNoBatchSiblingsStillDeadLetters(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "LONE", "LONE-1", "the poisoned title")
 	embedder := &canaryAwareEmbedder{
@@ -1174,6 +1193,7 @@ func TestProcessBatchALonePoisonedRowWithNoBatchSiblingsStillDeadLetters(t *test
 // dead-letters, however many cycles it runs for - run here for more cycles than
 // retry.DeadLetterAttempts would take to confirm a genuinely poisoned row.
 func TestProcessBatchALoneHealthyRowDuringAnOutageNeverDeadLetters(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "LONE", "LONE-2", "a perfectly good title")
 	embedder := &canaryAwareEmbedder{
@@ -1213,6 +1233,7 @@ func TestProcessBatchALoneHealthyRowDuringAnOutageNeverDeadLetters(t *testing.T)
 // exactly as systemic as a throttled row - and ProcessBatch reports throttled so the caller backs
 // off its own cadence exactly as an outright-throttled call would.
 func TestProcessBatchACanaryThatIsItselfThrottledNeverConfirmsAndPropagatesThrottled(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "CNRY", "CNRY-2", "a title")
 	deps := Deps{Store: database, Embedder: canaryThrottledEmbedder{}}
@@ -1338,6 +1359,7 @@ func TestProcessBatchActuallyCallsRenewalAndReservesTokens(t *testing.T) {
 // backing[2:3]) - detectable only by reading the shared backing array again afterward, exactly
 // what claimRenewal.rows does for as long as a bisection runs.
 func TestMergeBisectResultsCopiesIntoFreshSlicesNotTheSharedBackingArray(t *testing.T) {
+	t.Parallel()
 	backing := make([]pendingRow, 4, 8)
 	for i := range backing {
 		backing[i] = pendingRow{kind: "issue", id: fmt.Sprintf("ALIAS-%d", i)}
@@ -1455,21 +1477,60 @@ func insertComment(t *testing.T, q querier, issueKey, body string) {
 
 // Once Run has embedded what was pending at boot and its coverage pass has added and the queue
 // embedded what no trigger saw, nothing changes, so Run makes no statement at all: no scan
-// timer, no due time, no coverage pass. The window is longer than the 5-second period the scan
-// ticker ran at before.
+// timer, no due time, no coverage pass.
+//
+// It waits for the two ends of Run's own work, which Run reports, rather than for a window in
+// which nothing happened to be running. The coverage loop has returned, so it will write no more
+// rows and signal no more wakes; and the scan loop has reached the state the woken shape exists
+// for - nothing owed, nothing due, no timer armed, no wake waiting (duty.WokenLoop.Idle) - with
+// that report made after the coverage loop's last write, since an idle report held from before
+// it is drained first. Neither can come early: the coverage loop's return is its last act, and
+// the scan loop reports idle only from the top of its wait, after a pass that found nothing
+// pending. That is stronger than the quiet window this waited for, which failed at random on
+// main because a wake Cover left in the buffer earned a pass five seconds (retryInterval) into
+// the window the test had already called quiet (dispatch://INFRA-1075). The second below is no
+// longer what rules a period out - the idle report does that - but a guard on anything else in
+// the process that might still make a statement.
 func TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "IDLE", "IDLE-1", "Enqueued by its trigger")
 	withTriggersOff(t, database, func(q querier) { insertComment(t, q, "IDLE-1", "Written with the triggers off") })
 	counter := &storetest.StatementCounter{}
 	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
-	runQueue(t, Deps{Store: counted, Embedder: newSyncEmbedder(configuredIdentity)})
-	eventually(t, 15*time.Second, "both items current", func() bool {
-		items, current, _, _, _ := coverage(t, database, configuredIdentity)
-		return items == 2 && current == 2
+	coverageEnded := make(chan struct{})
+	idle := make(chan struct{}, 1)
+	runQueue(t, Deps{
+		Store:         counted,
+		Embedder:      newSyncEmbedder(configuredIdentity),
+		coverageEnded: sync.OnceFunc(func() { close(coverageEnded) }),
+		idle: func() {
+			select {
+			case idle <- struct{}{}:
+			default:
+			}
+		},
 	})
-	storetest.AwaitQuiet(t, counter, time.Second, 10*time.Second)
-	storetest.RequireNoStatements(t, counter, 7*time.Second, "Run with nothing pending and nothing changing")
+	select {
+	case <-coverageEnded:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run's coverage loop did not finish within 30s")
+	}
+	// An idle report made before the coverage loop's last write says nothing about the rows it
+	// wrote: take the one this waits for after that write.
+	select {
+	case <-idle:
+	default:
+	}
+	select {
+	case <-idle:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run's scan loop did not go idle within 30s of the coverage pass ending")
+	}
+	items, current, _, _, _ := coverage(t, database, configuredIdentity)
+	if items != 2 || current != 2 {
+		t.Fatalf("coverage = %d items, %d current; want both items embedded once Run is idle", items, current)
+	}
+	storetest.RequireNoStatements(t, counter, time.Second, "Run with nothing pending and nothing changing")
 }
 
 // A write's notification wakes the idle queue, through a real pglisten.Hub on WakeChannel: a
@@ -1539,6 +1600,7 @@ func TestAClaimLeftByAnotherProcessIsTakenWhenItLapses(t *testing.T) {
 // sooner, and not for a row already due that another process holds under skip locked, which the
 // scan could not claim and an immediate rescan would not either.
 func TestScanPassReturnsWhenThePendingRowsFallDue(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	seedIssue(t, database, "DUE", "DUE-1", "Drained at once")
@@ -1602,6 +1664,7 @@ func TestAThrottledScanWaitsAtLeastRetryIntervalBeforeItsNextBatch(t *testing.T)
 // embeddings_enqueue announces on WakeChannel when its upsert writes a row - a new item, or a
 // changed text - and not when the text is the one the row already holds.
 func TestEnqueueNotifiesOnlyWhenItWritesARow(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	listener, err := database.Pool.Listener(ctx)

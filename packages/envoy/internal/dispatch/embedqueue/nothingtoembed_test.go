@@ -118,6 +118,7 @@ func requireOnlyTheIssueCounted(t *testing.T, database *store.Store, identity st
 // never reach the embedder, never go dead, and are settled with no vector; Coverage counts none
 // of them, and the coverage pass adds and changes nothing for them.
 func TestNothingToEmbedNeverReachesTheEmbedderAndIsNotCovered(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	documentID, commentID, messageID := seedNothingToEmbed(t, database.Pool, "BLNK")
 	embedder := newPlaceEmbedder(configuredIdentity)
@@ -152,6 +153,7 @@ func TestNothingToEmbedNeverReachesTheEmbedderAndIsNotCovered(t *testing.T) {
 // The coverage pass adds no row for an item no trigger saw whose text has nothing to embed, and
 // Coverage never counts it as lacking.
 func TestCoverAddsNoRowForAnItemWithNothingToEmbed(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	withTriggersOff(t, database, func(q querier) { seedNothingToEmbed(t, q, "BLNO") })
 	embedder := newPlaceEmbedder(configuredIdentity)
@@ -173,6 +175,7 @@ func TestCoverAddsNoRowForAnItemWithNothingToEmbed(t *testing.T) {
 // One empty row among two real ones in a batch is settled, and the two real rows embed in exactly
 // one Embed call in the same ProcessBatch, which counts all three done.
 func TestABatchWithAnEmptyRowEmbedsTheRealRowsInOneCall(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "MIXD", "MIXD-1", "First real title")
 	seedIssue(t, database, "MIXD", "MIXD-2", "")
@@ -205,6 +208,7 @@ func TestABatchWithAnEmptyRowEmbedsTheRealRowsInOneCall(t *testing.T) {
 // A text that changes from real to empty loses its vector with no model call, and one that then
 // changes back to real is embedded normally and counted current.
 func TestATextThatChangesBetweenEmptyAndRealIsSettledThenEmbedded(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	seedIssue(t, database, "FLIP", "FLIP-1", "Real at first")
@@ -239,6 +243,7 @@ func TestATextThatChangesBetweenEmptyAndRealIsSettledThenEmbedded(t *testing.T) 
 // takes the empty text and is settled, so the vector of the text the item no longer holds goes
 // and search cannot rank the item by it.
 func TestCoverRepairsAnItemWhoseTextBecameEmptyWithTheTriggerOff(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "GONE", "GONE-1", "A title that will vanish")
 	embedder := newPlaceEmbedder(configuredIdentity)
@@ -264,6 +269,7 @@ func TestCoverRepairsAnItemWhoseTextBecameEmptyWithTheTriggerOff(t *testing.T) {
 // replacing, the write's transaction still open, is skipped, and once the write commits the row
 // is embedded at the new text.
 func TestSettlingSkipsARowAWriteIsChanging(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	seedIssue(t, database, "RACE", "RACE-1", "")
@@ -303,6 +309,7 @@ func TestSettlingSkipsARowAWriteIsChanging(t *testing.T) {
 // identity, which readmitForeignDead leaves dead, or under none - is settled by the coverage pass
 // with no model call: not dead, and not counted as failed or at all.
 func TestCoverSettlesADeadRowWithNothingToEmbed(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "DBLK", "DBLK-1", "")
 	seedIssue(t, database, "DBLK", "DBLK-2", whitespaceOnly)

@@ -14,6 +14,7 @@ import (
 // - the other envoy-dispatch process, inside a pass of its own - this process's pass asks GitHub
 // for nothing and leaves the settings' freshness untouched.
 func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	leases := deliveryTestLeases(t, pool)
 	seedDeliverySettings(t, ctx, pool)

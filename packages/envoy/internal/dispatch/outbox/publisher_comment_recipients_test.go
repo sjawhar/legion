@@ -95,6 +95,7 @@ type recipientCheck struct {
 // event reached. The claim and the route come from the issue's row, as the outbox reads them. The
 // claimant's copy is #2225's (addClaimantRoute); the thread's sessions are #2366's.
 func TestAPersonsCommentReachesTheClaimantAndTheThreadsSessions(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
@@ -263,6 +264,7 @@ func seedSpec(t *testing.T, database *store.Store, issueKey string, creator mode
 // credits session-spec (its creator) and session-editor, and also a person and a session credit
 // with no id, which have no topic.
 func TestAPersonsCommentOnAnIssueNobodyRoutesOrClaimsReachesItsSpecsSessions(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	specWriter := model.Actor{Kind: "session", ID: "session-spec"}
@@ -441,6 +443,7 @@ func appendIssueMessage(t *testing.T, database *store.Store, broker *events.Brok
 // published and recorded first, so the issue's subject still gets the event in id order and the
 // retry sends only the rest. The batch's other events publish as they would have.
 func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTopic(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
@@ -511,6 +514,7 @@ func TestAFailedRecipientQueryBacksOffOnlyTheEventsThatNeededItAfterTheirOwnerTo
 // the reply is published to its owner topic, its route and its claimant, with no attempt counted,
 // and holds nothing back.
 func TestAReplyToAnIDThatIsNoUUIDReachesNoThreadSessionAndPublishes(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
 	database := storetest.Open(t)
@@ -567,6 +571,7 @@ func makeDue(t *testing.T, database *store.Store, events ...model.Event) {
 // the three recipient reads: a reply's thread sessions, the sessions of the primary document of an
 // issue nobody routes or claims, and the sessions of the document a comment is anchored on.
 func TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBeforeIt(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	rooter := model.Actor{Kind: "session", ID: "session-rooter"}
 	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
@@ -681,6 +686,7 @@ func TestALaterEventReachesNoSessionTheFailedRecipientReadOfAnEarlierOneMissedBe
 // the same statement as the broken document's (loadRecipients runs that statement again in halves,
 // here each id alone, once Postgres refuses it).
 func TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopies(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	claimant := model.Actor{Kind: "session", ID: "session-claimant"}
@@ -753,6 +759,7 @@ func TestABrokenCreditListBacksOffItsEventAndHoldsOnlyItsOwnersLaterSessionCopie
 // publishes, and so does the broken reply's issue's message, bound for the claimant the broken
 // reply names.
 func TestABrokenRowOfAnEventThatIsNotDueFailsNoOtherOwnersRecipientRead(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	other := model.Actor{Kind: "session", ID: "session-other"}
@@ -820,6 +827,7 @@ func waitOut(t *testing.T, database *store.Store, event model.Event, reached ...
 // later event reaches every other session at once. Each later event replies in a thread of its
 // own, so no due event asks the earlier event's recipient read.
 func TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOwe(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	reached := model.Actor{Kind: "session", ID: "session-reached"}
 	unreached := model.Actor{Kind: "session", ID: "session-unreached"}
@@ -922,6 +930,7 @@ func TestAnEventBehindAnotherThatIsNotDueIsHeldOnlyOnTheKeysTheOtherCouldStillOw
 // held back from the current holder until the earlier event's retry, its role forward included,
 // even though the earlier event's role route is resolved to that same holder in the batch.
 func TestAnEarlierEventsReachedRoleRouteDoesNotNameTheRolesCurrentHolder(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	holder := model.Actor{Kind: "session", ID: roleHolder}
 	database := storetest.Open(t)
@@ -971,6 +980,7 @@ func TestAnEarlierEventsReachedRoleRouteDoesNotNameTheRolesCurrentHolder(t *test
 // failed the query or the query failed in the store and the stop came while the batch's answers
 // were still due.
 func TestAStoppingBatchReleasesTheEventsWhoseRecipientQueryFailed(t *testing.T) {
+	t.Parallel()
 	sami := model.Actor{Kind: "user", ID: "sami"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
 	assertReleased := func(t *testing.T, database *store.Store, events ...model.Event) {

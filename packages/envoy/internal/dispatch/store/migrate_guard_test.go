@@ -18,6 +18,7 @@ import (
 // it, two `create table if not exists` race on the catalog and the loser exits on pg_type's unique
 // index.
 func TestMigrateFromSeveralProcessesAtOnceOnAnEmptyDatabase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	first := openEmptyTestStore(t)
 	const processes = 4
@@ -61,6 +62,7 @@ func TestMigrateFromSeveralProcessesAtOnceOnAnEmptyDatabase(t *testing.T) {
 // created rather than its own; the refusal is the same, since the runner reads the identifier and
 // not the name beside it.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		set  fstest.MapFS

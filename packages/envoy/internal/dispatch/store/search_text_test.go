@@ -77,6 +77,7 @@ func TestSearchIndexesAPathologicalBodyInBoundedTime(t *testing.T) {
 // identifiers, paths and URLs; of 3,336 documents (the repository's and production's), none
 // changed its vector when the function was chosen.
 func TestSearchTextKeepsEveryLexeme(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.Migrate(ctx); err != nil {

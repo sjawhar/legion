@@ -393,17 +393,30 @@ func (r *throughputRig) roleArrivals() []int64 {
 // count of destinations is checked last, so a publisher that reaches fewer still reports its rate
 // and order.
 //
-// The burst cases put a batch of messages on one issue, the shape whose events share every
-// destination, so each destination takes them one round trip after another, and log the drain
-// time: from the outbox's start until every event is marked published. They hold no rate floor;
+// The burst case puts a batch of messages on one issue, the shape whose events share every
+// destination, so each destination takes them one round trip after another, and logs the drain
+// time: from the outbox's start until every event is marked published. It holds no rate floor;
 // the drain time is the reading.
+//
+// One round-trip time, one busy case and one burst. The matrix this test once ran - two latencies
+// times idle, busy and burst for each load, fourteen sub-runs over 2*batchSize events each - cost
+// 55 s of the package's 248 s in CI run 41703055842 and read nothing the cases kept here do not
+// (dispatch://INFRA-1075). What each dropped sub-run checked, and where it is still checked:
+// the 50 ms latency read the same rate floor and the same per-destination order as 150 ms does,
+// one round trip apart, and 150 ms is the harsher of the two; the busy pool, which is the pool
+// contention the outbox must publish through, is kept once, on the messages load, since the pool
+// the batches queue on is the same whatever the load seeds; and the burst's second latency read
+// the same single-issue serialization at another round trip. The backlog is well under
+// 2*batchSize, so a scan still reads more than one batch of some owners while it drains.
 func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	const (
 		backlogIssues = 20
-		backlogCount  = 2 * batchSize
-		burstCount    = batchSize
+		backlogCount  = 60
+		burstCount    = 40
 		minRate       = 25.0
 		waitTime      = 3 * time.Minute
+		// rtt is a remote hub's round trip, the latency this test is about.
+		rtt = 150 * time.Millisecond
 	)
 	for _, load := range []struct {
 		name string
@@ -428,21 +441,17 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 	} {
 		t.Run(load.name, func(t *testing.T) {
 			for _, tc := range []struct {
-				rtt   time.Duration
 				busy  bool
 				burst bool
 			}{
-				{50 * time.Millisecond, false, false},
-				{50 * time.Millisecond, true, false},
-				{50 * time.Millisecond, false, true},
-				{150 * time.Millisecond, false, false},
-				{150 * time.Millisecond, true, false},
-				{150 * time.Millisecond, false, true},
+				{false, false},
+				{true, false},
+				{false, true},
 			} {
-				if tc.burst && !load.burst {
+				if (tc.burst || tc.busy) && !load.burst {
 					continue
 				}
-				rtt := tc.rtt
+
 				shape := rtt.String() + " idle pool"
 				if tc.busy {
 					shape = rtt.String() + " busy pool"
@@ -562,11 +571,38 @@ func logDestinations(t *testing.T, name string, seeded []model.Event, stream []i
 // the returned func stops it.
 func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *events.Broker) func() {
 	t.Helper()
+	return runOutboxThrough(t, database, client, client, broker)
+}
+
+// runOutboxThrough is runOutbox publishing through publisher, which wraps client so a test can
+// count or stall the sends; the role holders are still resolved on client's connection, as
+// production resolves them on the publisher's own.
+func runOutboxThrough(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) func() {
+	t.Helper()
+	_, stop := runningOutbox(t, database, client, publisher, broker)
+	return stop
+}
+
+// runningOutbox is runOutboxThrough with the Outbox itself, for a test that reads its state - an
+// outbox that gave the publisher hold up is one that stopped publishing (Publishing).
+func runningOutbox(t *testing.T, database *store.Store, client *bus.Client, publisher Publisher, broker *events.Broker) (*Outbox, func()) {
+	t.Helper()
 	pool, err := database.Pool.Outbox()
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
 	holders := roles.NewBuckets(client)
-	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener,
-		RoleClaims: holders, Sessions: holders}, 10*time.Second)
+	outbox := New(Deps{Store: &store.Store{Pool: pool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener,
+		RoleClaims: holders, Sessions: holders})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { outbox.Run(ctx); close(done) }()
+	return outbox, func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("outbox did not stop")
+		}
+	}
 }

@@ -21,6 +21,7 @@ const deliveryDropProductionJobNameVersion = 111
 // list and the apply step reads back as written, the list's check still refuses an empty list, and a
 // write naming the dropped column (a task older than the release that added 0109) is refused.
 func TestMigrationDropsTheProductionJobName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryDropProductionJobNameVersion-1)); err != nil {
@@ -93,6 +94,7 @@ func TestMigrationDropsTheProductionJobName(t *testing.T) {
 // whose column differs from it, the value the drop would lose, answers 1 and refuses the deploy.
 // The row lists two names, so a census reading another element than the first counts the kept row.
 func TestCensusRefusesTheDropOverARowWhoseColumnDriftedFromTheList(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryDropProductionJobNameVersion-1)); err != nil {

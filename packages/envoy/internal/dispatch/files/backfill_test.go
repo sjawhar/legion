@@ -110,6 +110,7 @@ func (a altering) Get(ctx context.Context, sha string) (*files.Object, error) {
 }
 
 func TestBackfillMovesEveryRowItCanAndNamesTheRowsItCannot(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	firstBody, secondBody, thirdBody := bytes.Repeat([]byte("a"), 1000), bytes.Repeat([]byte("b"), 2000), bytes.Repeat([]byte("c"), 3000)
@@ -173,6 +174,7 @@ func TestBackfillMovesEveryRowItCanAndNamesTheRowsItCannot(t *testing.T) {
 // A row whose bytes do not hash to its recorded hash is named and passed over, and keeps its bytes:
 // moving it would store the bytes under a hash that is not theirs.
 func TestBackfillPassesOverARowWhoseBytesDoNotMatchTheirHash(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	corrupt := seedFileVersion(t, database, "corrupt", []byte("stored bytes"))
@@ -196,6 +198,7 @@ func TestBackfillPassesOverARowWhoseBytesDoNotMatchTheirHash(t *testing.T) {
 // The schema lets a version's sha256 and mime be null. A row with no type is moved under the
 // upload route's default; a row with no hash is named and keeps its bytes.
 func TestBackfillNamesARowWithNoHashAndMovesARowWithNoType(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	untyped := seedFileVersion(t, database, "untyped", []byte("untyped bytes"))
@@ -225,6 +228,7 @@ func TestBackfillNamesARowWithNoHashAndMovesARowWithNoType(t *testing.T) {
 // A row's bytes are its only copy until the store reads them back under their hash, so a store that
 // acknowledged a write it did not keep must leave the row as it was.
 func TestBackfillKeepsARowsBytesUntilTheStoreReadsThemBack(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	id := seedFileVersion(t, database, "kept", []byte("the only copy"))
@@ -239,6 +243,7 @@ func TestBackfillKeepsARowsBytesUntilTheStoreReadsThemBack(t *testing.T) {
 }
 
 func TestVerifyNamesARowWhoseObjectIsMissingOrWrong(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	seedFileVersion(t, database, "kept", []byte("kept bytes"))
@@ -270,6 +275,7 @@ func TestVerifyNamesARowWhoseObjectIsMissingOrWrong(t *testing.T) {
 // server with no store serves them from the row again; a row whose object is gone is named and
 // left empty; the objects stay, and a later backfill moves the rows out once more.
 func TestRestoreWritesTheBytesBackIntoEveryRowWhoseObjectReadsBack(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	kept := seedFileVersion(t, database, "kept", []byte("kept bytes"))
@@ -306,6 +312,7 @@ func TestRestoreWritesTheBytesBackIntoEveryRowWhoseObjectReadsBack(t *testing.T)
 
 // Two passes started together do not work the same rows in lockstep: the second is refused while
 func TestASecondPassIsRefusedWhileOneHoldsTheLock(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	ctx := context.Background()
 	seedFileVersion(t, database, "one", []byte("one"))

@@ -20,7 +20,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
@@ -47,7 +46,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	natsClient, err := bus.ConnectOwningStream([]string{natsURL})
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)

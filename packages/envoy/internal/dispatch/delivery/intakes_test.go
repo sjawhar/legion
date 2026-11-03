@@ -15,7 +15,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // TestBothIntakesKeepTheirSubscriptions starts the two intakes as cmd/dispatch does (StartIntakes,
@@ -24,10 +23,11 @@ import (
 // keeps one JetStream subscription, so two intakes binding through one client leave whichever bound
 // first with its durable unbound: its messages stay pending and its handler never runs.
 func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedRunningDeployRun(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newJobsFake(t)
 
@@ -133,7 +133,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newFakeGitHub(t)
 	entered, held := make(chan struct{}), make(chan struct{})
@@ -221,7 +221,7 @@ func TestAHandlerTheStopGivesUpIsRedeliveredAtOnce(t *testing.T) {
 	t.Cleanup(func() { intakeStopBudget = budget })
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	publisher := intakeTestClient(t)
 	fake := newFakeGitHub(t)
 	held := holdPullRequestOneUntilAbandoned(fake)
@@ -266,6 +266,7 @@ func TestAHandlerTheStopGivesUpIsRedeliveredAtOnce(t *testing.T) {
 // TestIntakesWithoutTheAppConnectNothing: with no GitHub App neither intake reads anything, so
 // StartIntakes opens no connection and its stop returns at once.
 func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
+	t.Parallel()
 	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
@@ -288,11 +289,12 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 // TestIntakesWhoseSecondConnectFailsStartNeither: the job intake's connect failing returns its
 // error with neither intake started and the intake's client closed, so no durable is bound.
 func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
+	t.Parallel()
 	// A real pool rather than none: StartIntakes opens the lease pool its intakes reconcile
 	// their durables under before it connects anything.
 	pool, _ := deliveryTestPool(t)
 	publisher := intakeTestClient(t)
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	var first *bus.Client
 	refused := errors.New("refused")
 	_, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {

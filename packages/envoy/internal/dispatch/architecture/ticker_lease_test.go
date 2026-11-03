@@ -25,6 +25,7 @@ func architectureLeases(t *testing.T, database *store.Store) duty.Leases {
 // another caller - the other envoy-dispatch process, inside an import of its own - this process's
 // pass reads nothing from GitHub and writes no component.
 func TestAnImportPassWhoseLeaseIsHeldElsewhereReadsNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: map[string]string{"core.md": "# Core\n"}}
 	importer, database := newImporterFixture(t, fake)

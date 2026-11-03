@@ -59,22 +59,41 @@ func (c *sendCounter) of(event int64) (total, most int) {
 	return total, most
 }
 
-// countingClient is a bus client whose windows count every envelope they send.
+// attempts is how many envelopes were handed to a window in all, whether the window wrote them or
+// answered without writing: how many sends the outbox has tried.
+func (c *sendCounter) attempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total := 0
+	for _, count := range c.sends {
+		total += count
+	}
+	return total
+}
+
+// countingClient is a bus client whose windows count every envelope they send, and run before,
+// when set, ahead of the first of them: a test that must act once the outbox has taken the
+// publisher hold and read its batch acts there rather than on a clock of its own.
 type countingClient struct {
 	*bus.Client
 	counter *sendCounter
+	before  func()
 }
 
 func (c countingClient) WindowUntil(deadline func() time.Time) bus.Sender {
-	return countingSender{Sender: c.Client.WindowUntil(deadline), counter: c.counter}
+	return countingSender{Sender: c.Client.WindowUntil(deadline), counter: c.counter, before: c.before}
 }
 
 type countingSender struct {
 	bus.Sender
 	counter *sendCounter
+	before  func()
 }
 
 func (s countingSender) PublishAsync(item contracts.Envelope) <-chan error {
+	if s.before != nil {
+		s.before()
+	}
 	s.counter.add(item)
 	return s.Sender.PublishAsync(item)
 }
@@ -183,11 +202,17 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 
 	waitFor(t, 5*time.Second, "the outbox taking the publisher hold", outbox.Publishing)
 	// The first scan and the LISTEN connection's catch-up run as the hold is taken.
-	time.Sleep(time.Second)
+	time.Sleep(500 * time.Millisecond)
 	idleFrom := outbox.claims.Load()
-	time.Sleep(12 * time.Second)
+	// idleWindow is longer than every duration a holding outbox names, so a period hidden in any
+	// of them would scan inside it: the publisher hold's renewal (publisherHoldOptions.Renew, 2 s),
+	// the standby's holdRetry (1 s), natsLossGrace (3 s), mentionPendingDelay (2 s) and
+	// recordTimeout (5 s), the longest. The twelve seconds this slept for named none of them
+	// (dispatch://INFRA-1075).
+	const idleWindow = 5 * time.Second
+	time.Sleep(idleWindow)
 	if claims := outbox.claims.Load() - idleFrom; claims != 0 {
-		t.Fatalf("an idle outbox ran %d claims in 12 s, want 0", claims)
+		t.Fatalf("an idle outbox ran %d claims in %s, want 0", claims, idleWindow)
 	}
 
 	// Committed on another process's pool, and published to no broker this outbox hears.
@@ -205,25 +230,28 @@ func TestTheOutboxDoesNotScanWhileIdle(t *testing.T) {
 	t.Logf("the event another process committed was claimed %s after its commit", time.Since(committed).Round(time.Millisecond))
 	waitFor(t, time.Second, "the other process's event published", func() bool { return publishedAt(t, database, fresh.ID) != nil })
 
-	// A back-off due in 3 s, committed by the other process: its insert wakes the outbox, whose scan
-	// finds nothing due and arms the retry timer.
-	backedOff := appendBackedOffEvent(t, other, 3*time.Second)
+	// A back-off due in backOff, committed by the other process: its insert wakes the outbox, whose
+	// scan finds nothing due and arms the retry timer. The wait for it is a second idle window of
+	// its own, with a timer armed rather than none: the loop below fails on any claim before the
+	// back-off falls due.
+	const backOff = time.Second
+	backedOff := appendBackedOffEvent(t, other, backOff)
 	inserted := time.Now()
-	time.Sleep(time.Second)
+	time.Sleep(200 * time.Millisecond)
 	armedAt := outbox.claims.Load()
 	for publishedAt(t, database, backedOff.ID) == nil {
-		if time.Since(inserted) > 3200*time.Millisecond {
-			t.Fatal("a back-off due in 3 s was not published within 3.2 s")
+		if time.Since(inserted) > backOff+200*time.Millisecond {
+			t.Fatalf("a back-off due in %s was not published within %s", backOff, backOff+200*time.Millisecond)
 		}
-		if time.Since(inserted) < 2800*time.Millisecond && outbox.claims.Load() != armedAt {
+		if time.Since(inserted) < backOff-200*time.Millisecond && outbox.claims.Load() != armedAt {
 			t.Fatalf("the outbox claimed %d times before the back-off fell due, want 0", outbox.claims.Load()-armedAt)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if elapsed := time.Since(inserted); elapsed < 2500*time.Millisecond {
-		t.Fatalf("the back-off due in 3 s was published %s after its insert", elapsed)
+	if elapsed := time.Since(inserted); elapsed < backOff/2 {
+		t.Fatalf("the back-off due in %s was published %s after its insert", backOff, elapsed)
 	}
-	t.Logf("the back-off due in 3 s was published %s after its insert", time.Since(inserted).Round(time.Millisecond))
+	t.Logf("the back-off due in %s was published %s after its insert", backOff, time.Since(inserted).Round(time.Millisecond))
 }
 
 // appendBackedOffEvent commits an event on database whose next attempt is due after wait on the
@@ -256,6 +284,7 @@ func appendBackedOffEvent(t *testing.T, database *store.Store, wait time.Duratio
 // Two processes' outboxes on one database: exactly one publishes at every moment, and every event
 // either process writes is sent once, by whichever holds the publisher hold.
 func TestOnlyOneOutboxPublishesAtATime(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
@@ -284,6 +313,7 @@ func TestOnlyOneOutboxPublishesAtATime(t *testing.T) {
 // A process that stops gracefully releases the publisher hold, and the other takes it over at once
 // rather than when the hold would have lapsed.
 func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
@@ -308,6 +338,7 @@ func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
 // for natsLossGrace, and the other process, whose NATS works, takes the hold and publishes what is
 // written after the cut.
 func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	proxy := testnats.StartProxy(t, url)
 	proxied := proxy.URL()
@@ -337,6 +368,7 @@ func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 // still reports itself connected: the other process, whose NATS works, takes it and publishes the
 // event, within 10 s of the silence.
 func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	proxy := testnats.StartProxy(t, url)
 	database := storetest.Open(t)
@@ -370,6 +402,7 @@ func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
 // lapse 6 s on), not one take and one read per event, which would put a write on duty_holds for
 // every event on every standby.
 func TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites(t *testing.T) {
+	t.Parallel()
 	_, url := testnats.Start(t)
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
@@ -444,6 +477,7 @@ func (p *fenceAfterFirstSend) Deadline() time.Time {
 // deadline has passed it sends nothing more, counts no attempt, writes nothing, and reports the
 // hold lost.
 func TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -497,6 +531,7 @@ func (p *reconnectedQuietly) WindowUntil(deadline func() time.Time) bus.Sender {
 // connection event came: it reads the client's status as the grace ends, keeps the hold and scans,
 // rather than giving the hold up for a loss that is over.
 func TestAHolderConnectedAgainWhenTheGraceEndsKeepsTheHold(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	publisher := &reconnectedQuietly{}
 	outbox := New(Deps{Store: database, Publisher: publisher})

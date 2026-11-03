@@ -24,7 +24,10 @@ func TestRunLeasedServesEveryPeriodOfALoneLoopWhosePassesTakeTime(t *testing.T) 
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	const name = "document-compaction"
-	const interval, passTime = time.Second, 400 * time.Millisecond
+	// The interval and the pass are shortened together, keeping their ratio: what this reads is
+	// that a pass taking most of an interval still serves every period, which is a property of
+	// the ratio and not of the second the interval once was (dispatch://INFRA-1075).
+	const interval, passTime = 300 * time.Millisecond, 120 * time.Millisecond
 	const passes = 7
 
 	// Each pass reads the period the pass before it recorded: Exclusive writes a pass's record once

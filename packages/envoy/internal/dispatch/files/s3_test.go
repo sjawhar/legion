@@ -27,6 +27,7 @@ func s3Store(t *testing.T, bucket string) (*files.S3, *filestest.S3) {
 }
 
 func TestS3StoresAFileOnceByItsHashAndReadsItBack(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, testBucket)
 	ctx := context.Background()
 	body := bytes.Repeat([]byte("dispatch "), 100_000)
@@ -74,6 +75,7 @@ func TestS3StoresAFileOnceByItsHashAndReadsItBack(t *testing.T) {
 }
 
 func TestS3AnswersNotFoundForAHashItDoesNotHold(t *testing.T) {
+	t.Parallel()
 	store, _ := s3Store(t, testBucket)
 	_, err := store.Get(context.Background(), strings.Repeat("ab", 32))
 	if !errors.Is(err, files.ErrNotFound) {
@@ -85,6 +87,7 @@ func TestS3AnswersNotFoundForAHashItDoesNotHold(t *testing.T) {
 // with no grant for any key: a store failure, which the version route answers 502, never an
 // absent object, which it answers 500 FILE_MISSING and a backfill would read as a lost file.
 func TestS3ReadsAccessDeniedAsAFailureNotAnAbsence(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, testBucket)
 	fake.Deny()
 	ctx := context.Background()
@@ -106,6 +109,7 @@ func TestS3ReadsAccessDeniedAsAFailureNotAnAbsence(t *testing.T) {
 // A body that answers (0, nil) without ending would keep the reader's loop, and the response
 // copying from it, spinning; after bufio's hundred empty reads it fails with io.ErrNoProgress.
 func TestVerifyingReaderFailsABodyThatMakesNoProgress(t *testing.T) {
+	t.Parallel()
 	reader := files.NewVerifyingReader(io.NopCloser(stuck{}), files.SHA256([]byte("never")), 5)
 	n, err := reader.Read(make([]byte, 8))
 	if n != 0 || !errors.Is(err, io.ErrNoProgress) {
@@ -122,6 +126,7 @@ type stuck struct{}
 func (stuck) Read([]byte) (int, error) { return 0, nil }
 
 func TestS3SendsTheHashAsTheObjectsChecksum(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, testBucket)
 	body := []byte("the bytes")
 	wrong := files.SHA256([]byte("other bytes"))
@@ -136,6 +141,7 @@ func TestS3SendsTheHashAsTheObjectsChecksum(t *testing.T) {
 }
 
 func TestS3RefusesAnObjectPastTheSizeLimit(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, testBucket)
 	sha := strings.Repeat("cd", 32)
 	fake.SetObject(files.Key(sha), "application/octet-stream", make([]byte, files.MaxObjectSize+1))
@@ -152,6 +158,7 @@ func TestS3RefusesAnObjectPastTheSizeLimit(t *testing.T) {
 // object holds before it says so: a caller copying it to a client with a Content-Length leaves
 // that client short, which every HTTP client reports, rather than whole with the wrong bytes.
 func TestS3RefusesABodyThatDoesNotHashToItsKey(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, testBucket)
 	same := bytes.Repeat([]byte("x"), 200_000)
 	sha := files.SHA256(same)
@@ -181,6 +188,7 @@ func TestS3RefusesABodyThatDoesNotHashToItsKey(t *testing.T) {
 }
 
 func TestS3HealthyFailsForABucketThatDoesNotExist(t *testing.T) {
+	t.Parallel()
 	store, fake := s3Store(t, "no-such-bucket")
 	if err := store.Healthy(context.Background()); err == nil {
 		t.Fatal("Healthy answered nil for a bucket that does not exist")

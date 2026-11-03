@@ -282,6 +282,7 @@ func dueNow(t *testing.T, database *store.Store, id int64) {
 // stream, which captures the holder's subject, holds one copy of the forward however often it was
 // sent. Nothing crosses the role's topic.
 func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_self_subscribed"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
@@ -344,6 +345,7 @@ func TestARoleRouteIsForwardedToASelfSubscribedHolderAndPublishedOnItsReceipt(t 
 // request, so the stream's acknowledgement of that copy is the receipt: the event is published with
 // nobody subscribed to the holder's subject, and the stream holds the forward once.
 func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgement(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_serving"
 	rig.claim(t, role, holder, session.SessionEntry{Port: 40123})
@@ -364,6 +366,7 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 // A role nobody claims has no holder: its route counts as reached, the event is published, and
 // nothing is sent to any session.
 func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -388,6 +391,7 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
 // due again, the role, which nobody claims, is its only unreached destination, and the batch that
 // publishes it reports nothing sent.
 func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
@@ -421,6 +425,7 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
 // A claim whose holder's session is gone is released, with the listener's compare and set, and the
 // role then has no holder: the event is published with nothing sent, and the claim is gone.
 func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
 	if _, err := rig.registry.SetRole(holder, "test-machine", role, false); err != nil {
@@ -445,6 +450,7 @@ func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T)
 // claim, and the event stays unpublished, backed off with its attempt and the reason, to be
 // retried.
 func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale"
 	rig.claimStale(t, role, holder)
@@ -475,6 +481,7 @@ func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
 // event as one that notifies nobody (events.Broker.Notify), which leaves it no route at all, so the
 // row is marked to notify here: the echo is what keeps such a row from reaching its own actor.
 func TestARoleRouteWhoseHolderIsTheActorIsPublishedWithoutAForward(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_actor"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
@@ -565,6 +572,7 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 // read that failed hold a forward pending the same way (forwardOf), and the event is backed off
 // as TestARoleRouteToAStaleHolderStaysPending holds.
 func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale_counted"
 	rig.claimStale(t, role, holder)
@@ -592,6 +600,7 @@ func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T)
 // holder here is registered and self-subscribed, as a session plugin registers it, with nothing
 // subscribed to its agent subject, which is the shape a holder that stopped reading has.
 func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
+	t.Parallel()
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_silent"
 	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})

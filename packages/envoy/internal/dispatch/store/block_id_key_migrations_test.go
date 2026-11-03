@@ -68,6 +68,7 @@ func sqlState(err error) (string, string) {
 // the indexes, (block_artifact_id, block_id) stays unique, a row main wrote takes an edit, and ids
 // differing only in a backslash or a non-ASCII character are different keys.
 func TestTheBlockIDKeyIndexesHoldIDsPastTheKeyLimit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, beforeBlockIDKey)

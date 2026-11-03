@@ -109,11 +109,12 @@ func tracedStore(t *testing.T, database *store.Store, tracer *statementTracer) *
 	return &store.Store{Pool: pool}
 }
 
-// sendClock is a bus client whose windows record when the first envelope was sent.
+// sendClock is a bus client whose windows report each send's answer to onAnswer as it comes back,
+// before the outbox sees it: a test that must act the moment a send is decided waits on that
+// rather than on a clock of its own.
 type sendClock struct {
 	*bus.Client
-	once  sync.Once
-	first chan struct{}
+	onAnswer func()
 }
 
 func (c *sendClock) WindowUntil(deadline func() time.Time) bus.Sender {
@@ -126,8 +127,14 @@ type sendClockSender struct {
 }
 
 func (s sendClockSender) PublishAsync(item contracts.Envelope) <-chan error {
-	s.clock.once.Do(func() { close(s.clock.first) })
-	return s.Sender.PublishAsync(item)
+	answer := s.Sender.PublishAsync(item)
+	relayed := make(chan error, 1)
+	go func() {
+		err := <-answer
+		s.clock.onAnswer()
+		relayed <- err
+	}()
+	return relayed
 }
 
 // An issue's events each go to its topic family and to session S. S's destination fails for the
@@ -137,6 +144,7 @@ func (s sendClockSender) PublishAsync(item contracts.Envelope) <-chan error {
 // capturing agent subjects, so NATS answers its publish with no responders; and as the holder of
 // the issue's role, to which the first event's forward fails because S withholds its receipt.
 func TestABackedOffEventHoldsBackOnlyItsDestination(t *testing.T) {
+	t.Parallel()
 	t.Run("a session route the stream does not take", holdsBackASessionRouteTheStreamRefuses)
 	t.Run("a role holder that withholds its receipt", holdsBackARoleHolderThatWithholdsItsReceipt)
 }
@@ -354,6 +362,7 @@ func shiftedClock(t *testing.T, database *store.Store) *store.Store {
 // connection that is lost instead releases the event with no attempt, and it is sent once NATS is
 // back.
 func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
+	t.Parallel()
 	seed := func(t *testing.T, database *store.Store) model.Event {
 		t.Helper()
 		seedIssue(t, database, "T-1", nil)
@@ -420,19 +429,13 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 		t.Cleanup(client.Close)
 		database := storetest.Open(t)
 		event := seed(t, database)
-		clock := &sendClock{Client: client, first: make(chan struct{})}
 		thaw := server.Freeze(t)
-		thawed := make(chan struct{})
-		go func() {
-			defer close(thawed)
-			<-clock.first
-			// Past the five seconds the window waits for an acknowledgement, and well inside
-			// the flush probe that follows, so the connection answers that probe.
-			time.Sleep(5*time.Second + 300*time.Millisecond)
-			thaw()
-		}()
+		// The send's own answer is the thaw's cue: the window gave the acknowledgement up, and the
+		// flush probe that follows has not run yet, so the probe finds the connection answering.
+		// Sleeping past the window's five seconds waited for this same moment by the clock
+		// (dispatch://INFRA-1075).
+		clock := &sendClock{Client: client, onAnswer: sync.OnceFunc(thaw)}
 		holding(t, Deps{Store: database, Publisher: clock}).scan(context.Background(), unfenced{})
-		<-thawed
 		backedOff(t, database, event, bus.ErrNotAcknowledged.Error())
 	})
 
@@ -484,6 +487,7 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 // issue's claim (readBatch). A document's writers are one kind, whether a comment on it or an edit
 // of it asks for them, so the edits add no statement.
 func TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostSevenStatements(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
@@ -586,6 +590,7 @@ func TestTheBatchResolvesFollowersAuthorsRecipientsAndMentionDeliveriesInAtMostS
 // refused half's halves down to that id alone (loadRecipients): at most 2*ceil(log2(n)) more
 // statements for n ids, where a run of each id alone would cost n.
 func TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving(t *testing.T) {
+	t.Parallel()
 	const n = 64
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -643,6 +648,7 @@ func TestOneBrokenRowOfARecipientReadCostsTheBatchAboutTwoStatementsPerHalving(t
 // An event is written once, when its batch records it: reading the batch writes nothing, so however
 // many destinations it has, a published event costs its row exactly one update.
 func TestAPublishedEventIsWrittenOnce(t *testing.T) {
+	t.Parallel()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for _, tc := range []struct {
 		destinations int
@@ -840,6 +846,7 @@ func TestTheClaimSkipsPendingCommandsAndBackedOffRows(t *testing.T) {
 // destinations its events reached, and the events that reached all of them published - and
 // schedules nothing: no back-off, no attempt, no error, no hold-back.
 func TestARecordFromAProcessThatLostTheHoldWritesNoBackOff(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	database := storetest.Open(t)
 	broker := events.NewBroker()

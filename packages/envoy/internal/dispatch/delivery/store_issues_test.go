@@ -62,6 +62,7 @@ func keysOf(set map[string]struct{}) []string { return slices.Sorted(maps.Keys(s
 // OpenP0Keys is every open P0 across every project: a P0 in any status but done, and no P1, no
 // unset priority and no done P0.
 func TestOpenP0KeysListsOpenP0sOnly(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	p0, p1 := 0, 1
 	seedIssues(t, ctx, pool, "LIVEP", []issueSeed{
@@ -108,6 +109,7 @@ func TestOpenP0KeysListsOpenP0sOnly(t *testing.T) {
 // IssueAncestors walks every key's parent chain to its root: a three-deep chain returns each
 // ancestor, keys that share a chain return it once, and a root or an unknown key adds nothing.
 func TestIssueAncestorsReturnsEveryAncestor(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedIssues(t, ctx, pool, "LIVEA", []issueSeed{
 		{key: "LIVEA-1"},
@@ -147,6 +149,7 @@ func TestIssueAncestorsReturnsEveryAncestor(t *testing.T) {
 // it, and a cycle, which the API refuses to write but a raced reparent could commit, ends at the
 // cap too. In a cycle a key is its own ancestor, so it is in the answer.
 func TestIssueAncestorsStopsAtTheDepthCap(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedIssues(t, ctx, pool, "LIVEC", []issueSeed{
 		{key: "LIVEC-0"},

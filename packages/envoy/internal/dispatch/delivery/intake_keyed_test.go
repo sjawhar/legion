@@ -126,6 +126,7 @@ func runIntake(t *testing.T, intake *Intake) (stop func()) {
 // acknowledged, and a second message of pull request 1 waits behind the first: it starts only
 // once the first has ended.
 func TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -166,6 +167,7 @@ func TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages(t *testing.T) {
 // with no decode: a comment and a review on a pull request, its checks, an issue and a job event.
 // The pull request's own message is decoded, once.
 func TestSubjectsTheIntakeDoesNotWantAreAcknowledgedWithoutADecode(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	var decodes atomic.Int64
@@ -202,6 +204,7 @@ func TestSubjectsTheIntakeDoesNotWantAreAcknowledgedWithoutADecode(t *testing.T)
 // process to bind the durable is handed it at once rather than after the ack wait; the message in
 // its handler then finishes and is acknowledged by the stopping intake.
 func TestAMessageQueuedBehindItsKeyAtStopIsRedeliveredAtOnce(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -285,6 +288,7 @@ func holdPullRequestOneUntilAbandoned(fake *fakeGitHub) *heldPullRequests {
 // stopping intake gives back reaches the standby only once its handler of that key has ended or
 // given up its GitHub call.
 func TestAHandOverKeepsAPullRequestsMessagesInOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
@@ -464,6 +468,7 @@ func TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal(t *testing.
 // yet routed when the intake stops, is negatively acknowledged rather than handled, and the next
 // process to bind the durable handles it.
 func TestAMessageInTheClientBufferAtStopIsGivenBack(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	// The first decode, the workflow run's in the callback, waits until unblock: the messages
@@ -534,6 +539,7 @@ func TestAMessageInTheClientBufferAtStopIsGivenBack(t *testing.T) {
 // looking it up, as a process taking the durable over after recreating it does; StopDelivering
 // ends that subscription, and a second call returns at once.
 func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	natsClient := intakeTestClient(t)
@@ -574,6 +580,7 @@ func TestAnIntakeSubscribesAtTheDeliverSubjectItIsGiven(t *testing.T) {
 // back. A subscribe afterwards on the same client, at the deliver subject of the durable created
 // again, as a process that lost and regained the durable does, binds it and handles its messages.
 func TestAStoppedIntakeStaysStoppedAcrossAReconnectAndSubscribesAgain(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	natsClient := intakeTestClient(t)

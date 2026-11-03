@@ -81,6 +81,7 @@ func anchorOn(artifactID string) map[string]any {
 // TestACommentOnADocumentReachesTheSessionsThatWroteIt publishes comment events whose Notify the
 // broker's own rule decides, as the outbox does, and reads which sessions' own topics they reached.
 func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
+	t.Parallel()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
@@ -289,6 +290,7 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 // The author routes skip the event's own actor wherever they find it, so a writer is never told
 // of its own comment even should an agent's comment notify.
 func TestAddAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	writer := model.Actor{Kind: "session", ID: "session-writer"}
@@ -311,6 +313,7 @@ func TestAddAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing.T) 
 // own actor is skipped. The event names its document by the payload's artifact_id, as the notice
 // sweep writes it (docs.sendEditNotice).
 func TestAPersonsSpecEditReachesEachSessionThatWroteTheSpecOnce(t *testing.T) {
+	t.Parallel()
 	database := storetest.Open(t)
 	route := "role:reviewer"
 	seedIssue(t, database, "T-1", &route)

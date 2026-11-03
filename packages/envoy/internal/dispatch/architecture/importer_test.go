@@ -434,6 +434,7 @@ func validFiles() map[string]string {
 }
 
 func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -481,6 +482,7 @@ func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
 // re-projected, no event — which is also what bounds a caller looping the
 // sync route.
 func TestSyncSameCommitIsIdempotentEventlessAndFetchesNothing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -523,6 +525,7 @@ func TestSyncSameCommitIsIdempotentEventlessAndFetchesNothing(t *testing.T) {
 // the repository): the subtree sha matches, so the new commit is recorded
 // without a blob read, a snapshot, a re-projection, or an event.
 func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -571,6 +574,7 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 }
 
 func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -600,6 +604,7 @@ func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
 }
 
 func TestSyncRepeatedIdenticalFailureEmitsOneEventAndRecoveryEmitsSynced(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, branchMissing: true, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -634,6 +639,7 @@ func TestSyncRepeatedIdenticalFailureEmitsOneEventAndRecoveryEmitsSynced(t *test
 }
 
 func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -668,6 +674,7 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 // GitHub call, and an uncached one — so it joins the flight before any head
 // is read.
 func TestTwoConcurrentImportsOfOneSourceShareOneGitHubSync(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	files := validFiles()
 	fake := &fakeSource{t: t, files: files, holdInstallations: true}
@@ -720,6 +727,7 @@ func TestTwoConcurrentImportsOfOneSourceShareOneGitHubSync(t *testing.T) {
 // transaction, where a slow GitHub would hold a connection of the shared
 // pool for as long as it took.
 func TestASlowSourceDoesNotBlockAnotherSourceOfItsProject(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSource{t: t, files: validFiles(), holdArchBlobs: true}
 	importer, database := newImporterFixture(t, fake)
 	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
@@ -755,6 +763,7 @@ func TestASlowSourceDoesNotBlockAnotherSourceOfItsProject(t *testing.T) {
 // outstanding, returns once the last one ends, and refuses every flight that
 // begins after it, so a goroutine that starts late does nothing.
 func TestTheFlightCounterWaitsForEveryFlightAndThenRefusesMore(t *testing.T) {
+	t.Parallel()
 	var flights syncCount
 	if !flights.begin() {
 		t.Fatal("the first flight was refused by a counter nobody has stopped")
@@ -833,6 +842,7 @@ func TestCloseWaitsForTheSyncItLeftRunning(t *testing.T) {
 // succeeds, and the projection is always one whole snapshot's worth of
 // components.
 func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	files := map[string]string{}
 	for n := range 60 {
@@ -899,6 +909,7 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 // one is mid-fetch: the sync finds the row changed under its lock and writes
 // nothing — no old-repo commit on the new row, no error recorded against it.
 func TestSyncAbortsWhenTheSourceMovedMidFetch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11}
 	var moved atomic.Bool
@@ -944,6 +955,7 @@ func TestSyncAbortsWhenTheSourceMovedMidFetch(t *testing.T) {
 // named model problem on the row (the drift rule), not an internal error
 // escaping the projection transaction.
 func TestSyncRejectsBinaryFilesOnTheRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for name, content := range map[string]string{
 		"nul.md":  "---\ntitle: z\n---\nbody\x00here",
@@ -976,6 +988,7 @@ func TestSyncRejectsBinaryFilesOnTheRow(t *testing.T) {
 // projection. An unknown key reaches KnownFields before that check, so recordFailure writes its
 // error through text.StorableReplacement before it reaches last_error or the sync_failed event.
 func TestSyncRejectsAFrontMatterNulOnTheRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, test := range []struct {
 		field, matter, want string
@@ -1018,6 +1031,7 @@ func TestSyncRejectsAFrontMatterNulOnTheRow(t *testing.T) {
 // source says why the import stopped, one sync_failed event says so, and the previous projection
 // stays, rather than an error that records nothing.
 func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1049,6 +1063,7 @@ func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
 // What one failure writes — last_error, the sync_failed payload, the
 // Settings row — is capped: the first problems and a count of the rest.
 func TestRecordedFailureIsCapped(t *testing.T) {
+	t.Parallel()
 	files := map[string][]byte{}
 	const members = 5000
 	for n := range members {
@@ -1089,6 +1104,7 @@ func TestRecordedFailureIsCapped(t *testing.T) {
 // (project_key, commit): the import reuses that snapshot instead of recording
 // an error, and the row keeps its clean state.
 func TestSyncReusesAnExistingSnapshotForTheSameCommit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1126,6 +1142,7 @@ func TestSyncReusesAnExistingSnapshotForTheSameCommit(t *testing.T) {
 }
 
 func TestSyncUpstreamFailureAndMissingSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, treeFailure: true, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1145,6 +1162,7 @@ func TestSyncUpstreamFailureAndMissingSource(t *testing.T) {
 }
 
 func TestSyncMissingBranchIsAnAccessFailure(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSource{t: t, branchMissing: true, files: validFiles()}
 	importer, _ := newImporterFixture(t, fake)
 
@@ -1156,6 +1174,7 @@ func TestSyncMissingBranchIsAnAccessFailure(t *testing.T) {
 // The stored installation id is a cache: a sync re-resolves it and records the
 // new one when GitHub moved the installation.
 func TestSyncRecordsAReResolvedInstallation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1174,6 +1193,7 @@ func TestSyncRecordsAReResolvedInstallation(t *testing.T) {
 // ListEnabled names every enabled source as its project and repository, ordered by project and
 // then by the order the project's sources were added (not by repository name).
 func TestListEnabledNamesEveryEnabledSource(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	importer, database := newImporterFixture(t, &fakeSource{t: t, files: validFiles()})
 	if _, err := database.Pool.Exec(ctx, `
@@ -1200,6 +1220,7 @@ func TestListEnabledNamesEveryEnabledSource(t *testing.T) {
 // depends_on from component_depends, both with node kind 'component' addressed
 // '<project>/<id>' — and never a row in refs.
 func TestGraphEdgesCarriesTheComponentArms(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	importer, database := newImporterFixture(t, &fakeSource{t: t, files: validFiles()})
 	if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
@@ -1289,6 +1310,7 @@ func componentFacts(t *testing.T, database *store.Store) map[string]componentFac
 // made again, and a component stored before its times were recorded (the migration's null row)
 // keeps them unrecorded through an import that leaves it unchanged and gains its digest.
 func TestComponentFactsRecordWhenAComponentWasMadeAndChanged(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	const platform = "---\ntitle: Platform\n---\nThe platform.\n"
 	tree := func(web string) map[string]string {
@@ -1460,6 +1482,7 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 // its load, and starts again from the load, which takes the unchanged-head
 // refresh — one snapshot, one architecture.synced.
 func TestSyncAcrossProcessesEmitsOneEventForOneHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne}
 	// Gate the first two head lookups so both processes are mid-fetch at once:
@@ -1642,6 +1665,7 @@ func sourceEvents(t *testing.T, database *store.Store) []string {
 // define it, each source's edges stand, and each source's synced event names its repository and
 // branch. A second import of both records the same heads, fetches no file and changes nothing.
 func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1705,6 +1729,7 @@ func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
 // source is untouched, the other source importing as usual. The failed event names the failing
 // source's repository and branch, and the same failure on the next import emits nothing more.
 func TestOneSourcesFailedImportKeepsEverySourcesProjection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1745,6 +1770,7 @@ func TestOneSourcesFailedImportKeepsEverySourcesProjection(t *testing.T) {
 // previous projections stay. Once the holder drops the ids, the failed source's next import (a
 // full one, as its row carries an error) takes them.
 func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1800,6 +1826,7 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 // rows, so one import succeeds and the other fails naming the winner's repository - never a
 // primary-key error from both inserting the id.
 func TestACollisionRacedAcrossProcessesFailsOneSourceByName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{
 		t: t, installationID: 11, commit: commitArch,
@@ -1869,6 +1896,7 @@ func TestACollisionRacedAcrossProcessesFailsOneSourceByName(t *testing.T) {
 // of a deleted source reads it as retired, and once another source of the project imports that id
 // the attachment is live again, now on that source.
 func TestAnIDAnotherSourceImportsRevivesItsAttachment(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
@@ -1906,6 +1934,7 @@ func TestAnIDAnotherSourceImportsRevivesItsAttachment(t *testing.T) {
 // takes the unchanged-head shortcut like any healthy source: the freshness stamp moves, no tree or
 // blob is read, its components stay as they were, and no event is emitted.
 func TestTheLegacySourceResyncsThroughTheUnchangedHeadShortcut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11}
 	client := newGitHubClient(t, fake.handler())
@@ -1946,6 +1975,7 @@ func TestTheLegacySourceResyncsThroughTheUnchangedHeadShortcut(t *testing.T) {
 // SyncProject leaves out a source deleted while it runs, and a project with no source is
 // ErrNoSource.
 func TestSyncProjectLeavesOutASourceDeletedMidCall(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11,
 		repos: map[string]*fakeRepo{infraRepo: {commit: commitInfraOne, files: infraFiles()}}}
@@ -2203,6 +2233,7 @@ var infraComponents = []string{archRepo + " infra", archRepo + " infra-db", arch
 // the newer head: once released, the held process never projects its older head over the newer
 // one, and the newer head's synced event is the only one.
 func TestAProcessHeldAtAnOlderHeadNeverProjectsItOverTheNewer(t *testing.T) {
+	t.Parallel()
 	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
 	branch.holdBlobs(commitOne)
 	a, b, database := twoProcesses(t, branch)
@@ -2222,6 +2253,7 @@ func TestAProcessHeldAtAnOlderHeadNeverProjectsItOverTheNewer(t *testing.T) {
 // another process imported a newer head: its freshness write never records the older commit over
 // the newer projection.
 func TestAStaleUnchangedHeadNeverRecordsTheOlderCommit(t *testing.T) {
+	t.Parallel()
 	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
 	a, b, database := twoProcesses(t, branch)
 	if _, err := a.Sync(context.Background(), "CORE", archRepo); err != nil {
@@ -2244,6 +2276,7 @@ func TestAStaleUnchangedHeadNeverRecordsTheOlderCommit(t *testing.T) {
 // A failure a process met at a head the branch has since left, while another process imported
 // the newer head: the healthy source is never marked failed, and no sync_failed event is emitted.
 func TestAFailureMetBeforeAnotherProcessesImportNeverMarksTheSourceFailed(t *testing.T) {
+	t.Parallel()
 	branch := newMovingBranch(t, commitOne, map[string]map[string]string{
 		commitOne:    validFiles(),
 		commitBroken: {"api.md": "x\n", "API.md": "duplicate\n"},
@@ -2274,6 +2307,7 @@ func TestAFailureMetBeforeAnotherProcessesImportNeverMarksTheSourceFailed(t *tes
 // answer. One importer with two callers is the case that matters, since two processes never
 // share a flight.
 func TestACallerAfterTheHeadWasReadIsNotToldTheOlderHead(t *testing.T) {
+	t.Parallel()
 	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
 	branch.holdBlobs(commitOne)
 	process, _, database := twoProcesses(t, branch)

@@ -23,7 +23,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft holds what bind does to the
@@ -37,7 +36,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
 
-	natsURL := testnats.URL(t)
+	natsURL := deliveryTestNATS(t)
 	natsClient, err := bus.ConnectOwningStream([]string{natsURL})
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)

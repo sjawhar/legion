@@ -386,8 +386,10 @@ func TestExclusiveCountsALateTickInThePeriodItWasDueIn(t *testing.T) {
 	leases := leasesOf(t, database)
 	ctx := context.Background()
 	const name = "suggestion-outcomes"
-	const period = time.Second
-	const early, delay = 200 * time.Millisecond, 400 * time.Millisecond
+	// The period is the test's own: early and delay are the fractions of it that make the tick
+	// late, so a shorter period reads the same late tick in less time (dispatch://INFRA-1075).
+	const period = 400 * time.Millisecond
+	const early, delay = 100 * time.Millisecond, 150 * time.Millisecond
 
 	due := beforeNextBoundary(t, period, early)
 	time.Sleep(time.Until(due))

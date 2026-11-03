@@ -30,6 +30,7 @@ func plannedPools(t *testing.T, pool *store.Pool) []*store.Pool {
 // TestARunsJobsComeBackInOneOrder: a run's jobs come back by when each started, a job that never
 // started last, then by name, from both job reads.
 func TestARunsJobsComeBackInOneOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	started := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
 	earlier := started.Add(-time.Minute)
@@ -109,6 +110,7 @@ func TestARunsJobsComeBackInOneOrder(t *testing.T) {
 // then by id ("owner/repo#N" in byte order, the order applyDelta.ts's ORDERS.prs keeps), which
 // decides each run's prs and the waiting list.
 func TestPullRequestsMergedTogetherComeBackInOneOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	merged := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
 	earlier := merged.Add(-time.Hour)
@@ -168,6 +170,7 @@ func TestPullRequestsMergedTogetherComeBackInOneOrder(t *testing.T) {
 // TestRunsStartedTogetherComeBackInOneOrder: ListRunsStartedIn answers runs that started in one
 // instant by run id, which decides the Pipeline's last failing run of a job.
 func TestRunsStartedTogetherComeBackInOneOrder(t *testing.T) {
+	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	started := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
 	from, to := started.Add(-time.Hour), started.Add(time.Hour)

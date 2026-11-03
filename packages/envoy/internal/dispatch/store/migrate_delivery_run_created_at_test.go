@@ -15,6 +15,7 @@ const deliveryRunCreatedAtVersion = 108
 // and the head-commit index gone, and the change log records nothing for a migration that rewrote
 // no row.
 func TestMigrationAddsRunCreatedAt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, deliveryRunCreatedAtVersion-1)); err != nil {

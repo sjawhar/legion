@@ -19,6 +19,7 @@ import (
 // import fails - here the second of CORE's, before OPS's - records its failure and leaves the
 // sources after it to import.
 func TestAnImportPassSyncsEverySourceAndGoesOnPastAFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), repos: map[string]*fakeRepo{
 		"acme/broken": {commit: commitAcmeBroken, branchMissing: true},
@@ -76,6 +77,7 @@ var touchStatement = regexp.MustCompile(`(?is)^\s*update\s+architecture_sources\
 // writes each source's freshness stamp once (touch) and nothing else - here over three sources of
 // two projects, read through a pool of its own whose every statement is recorded.
 func TestAnImportPassOverUnchangedHeadsFetchesNothingAndTouchesEachSourceOnce(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), repos: map[string]*fakeRepo{
 		"acme/infra": {commit: commitInfraOne, files: map[string]string{"infra.md": "---\ntitle: Infrastructure\n---\nClusters.\n"}},

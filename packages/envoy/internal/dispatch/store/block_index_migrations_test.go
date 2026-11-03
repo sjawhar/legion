@@ -95,6 +95,7 @@ func seedBlockIndexIssue(t *testing.T, store *Store) {
 // nothing. A block-aware build's own index, in the version's transaction, leaves the document
 // indexed, and the owed reads are served by their indexes.
 func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.Migrate(ctx); err != nil {
@@ -224,6 +225,7 @@ func TestTheBlockIndexTriggersOweWhatAnyBuildWrites(t *testing.T) {
 // document, and 0126 owes each comment, ask and issue message whose text holds `#b-`, and nothing
 // else. A row a trigger already owed before the seed ran keeps its enqueued_at.
 func TestTheBlockGrammarSeedOwesOlderText(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, beforeBlockGraph)
