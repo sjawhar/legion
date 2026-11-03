@@ -197,7 +197,9 @@ export interface MentionFieldHandle {
  * The body field of a draft and its `@` picker: one textarea, the mentions accepted in it, and
  * the listbox of agents and roles that `@` opens. The host holds the draft - the text and the
  * accepted mentions reach it through `onChange`, and come back as props - because the host is
- * what sends it; the field holds only what the picker is showing.
+ * what sends it; the field holds only what the picker is showing. Two hosts mount it: the
+ * Conversation tab's composer (`MentionComposer.tsx`) and an ask's answer area
+ * (`features/inbox/AskAnswerArea.tsx`), so both give one picker with one set of rules.
  *
  * While the picker is open it owns ArrowDown, ArrowUp, Enter and Escape, and none of the four
  * reaches anything around the field: the Inbox binds the arrows and Enter as its own hotkeys
@@ -206,7 +208,9 @@ export interface MentionFieldHandle {
  */
 export function MentionField({
   body,
+  disabled = false,
   fieldRef,
+  handle,
   inline = false,
   label,
   labelHidden = false,
@@ -218,9 +222,17 @@ export function MentionField({
   onPaste,
   onPickerOpenChange,
   options,
+  placeholder,
 }: {
   readonly body: string;
+  /** Takes no typing: a draft whose own send is out, which the host shows the reader rather than
+   *  letting them write over what is already on the wire (`AskAnswerArea`). */
+  readonly disabled?: boolean;
   readonly fieldRef: RefObject<MentionFieldHandle | null>;
+  /** A bare `data-` attribute written on the textarea itself, the one handle a host outside the
+   *  draft reaches the box by: the Inbox's answer keys find the selected ask's answer box by
+   *  `data-ask-answer` and move the focus into it (`features/inbox/Inbox.tsx`). */
+  readonly handle?: string;
   /** A one-line field that grows with what is typed, as a reply's does. */
   readonly inline?: boolean;
   /** The field's accessible name, shown above it unless `labelHidden`. */
@@ -242,6 +254,9 @@ export function MentionField({
    *  mention at all - an edit, or a message that already reaches its one session - and the field
    *  is then a plain textarea; empty while the registry names nobody, and the picker says so. */
   readonly options?: readonly MentionOption[];
+  /** What the empty box says it takes, where the host has words for it (an ask's answer box
+   *  names what the picked option asks of the reader). */
+  readonly placeholder?: string;
 }): ReactNode {
   const element = useRef<HTMLTextAreaElement | null>(null);
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number }>();
@@ -426,6 +441,7 @@ export function MentionField({
           aria-controls={open ? listboxId : undefined}
           aria-label={label}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
+          disabled={disabled}
           maxLength={maxLength}
           onChange={(event) => changed(event.target.value, event.target.selectionStart)}
           onDrop={onDrop}
@@ -439,9 +455,11 @@ export function MentionField({
           }
           onKeyDown={onKeyDown}
           onPaste={onPaste}
+          placeholder={placeholder}
           ref={bodyFieldRef}
           rows={1}
           value={body}
+          {...(handle === undefined ? {} : { [handle]: "" })}
         />
       </label>
       {activeMentions.length === 0 ? null : (

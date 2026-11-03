@@ -15,6 +15,7 @@ import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api
 import { seedUnread } from "../replies/replies-fixture";
 import { AskCard } from "./AskCard";
 import { answerDraft } from "./answer-drafts";
+import { draftEmpty } from "./draft-store";
 
 let whoAmI: Mock<typeof api.whoAmI>;
 let getReferences: Mock<typeof api.getReferences>;
@@ -295,7 +296,7 @@ test("Change answer then Cancel leaves the recorded answer alone and no draft be
     expect(card.queryByTestId("ask-unsent-answer")).toBeNull();
     // Nor is any of it left in the draft every card for this ask reads, and the Inbox's reading
     // column holds the question in the column by (`pane-selection.ts`, `paneAsk`).
-    expect(answerDraft(mine.id)).toBe("");
+    expect(draftEmpty(answerDraft(mine.id))).toBe(true);
   } finally {
     view.unmount();
   }

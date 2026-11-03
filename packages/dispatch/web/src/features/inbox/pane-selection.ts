@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import type { InboxRow } from "../../api/types";
 import { buildInboxPath, type InboxRoute } from "../refs/routes";
 import { answerDraft } from "./answer-drafts";
+import { draftEmpty } from "./draft-store";
 import { ROW_ATTRIBUTE } from "./inbox-row";
 import { answerOutstanding } from "./outstanding-answers";
 import type { InboxSection } from "./sections";
@@ -204,7 +205,8 @@ export function usePaneSelection({
       paneSubject.current = undefined;
       return undefined;
     }
-    const kept = subject.kept || answerOutstanding(selectedId) || answerDraft(selectedId) !== "";
+    const kept =
+      subject.kept || answerOutstanding(selectedId) || !draftEmpty(answerDraft(selectedId));
     paneSubject.current = kept ? { ask: subject.ask, kept: true } : undefined;
     return kept ? subject.ask : undefined;
   };

@@ -15,12 +15,14 @@ import type {
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { isViewer } from "../refs/actor";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { ANSWER_MENTION_REFUSAL, draftTargets, EMPTY_DRAFT_REFUSAL } from "./AskAnswerArea";
 import { answerAskInput } from "./answer-ask";
 import { useAnswerDraft } from "./answer-drafts";
 import {
   clearPendingAskThreadInvalidation,
   hasPendingAskThreadInvalidation,
 } from "./ask-thread-freshness";
+import { type Draft, EMPTY_DRAFT } from "./draft-store";
 import { markAnswerOutstanding } from "./outstanding-answers";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
@@ -49,6 +51,17 @@ interface AskAnswerFailure {
   /** False for a refusal the same answer never gets past. */
   retryable: boolean;
 }
+
+/** What one Ask back puts on the wire: the words, and the targets picked in them. Both are
+ *  frozen when the press starts, so a keystroke after it cannot change what is being sent. */
+interface ClarificationInput {
+  readonly body: string;
+  readonly mentions: readonly string[];
+}
+
+/** Why Answer refuses a draft that is neither an option picked nor words written: the two ways
+ *  an ask is answered, and the box holds neither. */
+export const ANSWER_REFUSAL = "Pick an option or write an answer.";
 
 /**
  * The refusals the same answer is refused with again however often it is sent, and what the card
@@ -120,19 +133,21 @@ export function useAskAnswerForm({
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const [askChanged, setAskChanged] = useState(false);
   const [changing, setChanging] = useState(false);
-  // The reader's unsent answer, which outlives this form: the ask's own Inbox row can leave
-  // under it (withdrawn, resolved, or answered by somebody else), and the reading column then
-  // keeps the question with this text under it rather than taking both off the screen.
+  // The reader's unsent answer - what they typed and the sessions they picked in it - which
+  // outlives this form: the ask's own Inbox row can leave under it (withdrawn, resolved, or
+  // answered by somebody else), and the reading column then keeps the question with this text
+  // under it rather than taking both off the screen.
   const [draftAnswer, setDraftAnswer] = useAnswerDraft(ask.id);
-  // The text of a recorded answer the reader is changing. It is this form's own and never the
+  // The recorded answer the reader is changing. It is this form's own and never the
   // shared draft: an answer the server has recorded is not unsent text, so a change they cancel
   // or walk away from leaves nothing behind for another card to show them as one
   // (`unsentAnswer`) or for the reading column to hold the question by (`pane-selection.ts`,
   // `paneAsk`).
   // Cancelling is what puts the draft that stood before the change back in the box.
-  const [changeAnswer, setChangeAnswer] = useState("");
-  const answerText = changing ? changeAnswer : draftAnswer;
-  const setAnswerText = changing ? setChangeAnswer : setDraftAnswer;
+  const [changeAnswer, setChangeAnswer] = useState<Draft>(EMPTY_DRAFT);
+  const answerDraft = changing ? changeAnswer : draftAnswer;
+  const setAnswerDraft = changing ? setChangeAnswer : setDraftAnswer;
+  const answerText = answerDraft.text;
   const replacing = useRef<AskAnswer | undefined>(undefined);
   const initialChangeConsumed = useRef(false);
   const submitGuard = useSubmitGuard();
@@ -208,7 +223,7 @@ export function useAskAnswerForm({
       setChanging(false);
       // The text is the recorded answer now, not an unsent draft: a later card for this ask
       // starts empty, and nothing offers to copy what the server already took.
-      setAnswerText("");
+      setAnswerDraft(EMPTY_DRAFT);
       // Answered either way; with no answer to give, the card reads the ask afresh instead of
       // showing the one Dispatch would have handed back.
       setJustAnswered(updatedAsk);
@@ -242,21 +257,24 @@ export function useAskAnswerForm({
   const clarification = useKeyedWrite({
     inline: true,
     label: () => `Question back on “${ask.question}”`,
-    write: (text: string, bounds) => {
+    // The clarification is a comment, so the sessions the reader picked ride with it and each
+    // one gets the comment; the targets are frozen with the attempt, as the text is.
+    write: ({ body, mentions }: ClarificationInput, bounds) => {
+      const input: CreateCommentInput = {
+        ask_id: ask.id,
+        body,
+        ...(mentions.length === 0 ? {} : { mentions: mentions.map((target) => ({ target })) }),
+      };
       if (ask.issue_key === null) {
-        return api.createArtifactComment(
-          documentArtifactId(),
-          { ask_id: ask.id, body: text },
-          bounds
-        );
+        return api.createArtifactComment(documentArtifactId(), input, bounds);
       }
-      return createReply(ask.issue_key, { ask_id: ask.id, body: text }, bounds);
+      return createReply(ask.issue_key, input, bounds);
     },
     onSettled: () => {
       submitGuard.release();
     },
     onSuccess: () => {
-      setAnswerText("");
+      setAnswerDraft(EMPTY_DRAFT);
       setQuestionChoice(false);
       void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
       // A clarification hands the turn to the asker: every surface that renders this ask from
@@ -311,8 +329,9 @@ export function useAskAnswerForm({
     setSelected(realSelected);
     setOtherSelected(realSelected.length === 0 && current.text !== null && current.text !== "");
     // `changing` is still false this render, so the recorded text goes straight to the form's
-    // own state rather than through `setAnswerText` into the shared draft.
-    setChangeAnswer(current.text ?? "");
+    // own state rather than through `setAnswerDraft` into the shared draft. A recorded answer
+    // carries no mentions, since no answer ever could.
+    setChangeAnswer({ mentions: [], text: current.text ?? "" });
     setQuestionChoice(false);
     setChanging(true);
   };
@@ -360,6 +379,16 @@ export function useAskAnswerForm({
     reasonRequired && trimmedAnswer === ""
       ? `Add a reason to send ${reasonRequiredFor}`
       : undefined;
+  // The sessions this draft would reach, which an answer cannot carry: Answer and "Answer with
+  // it anyway" refuse while one stands, by button and by Ctrl/Cmd+Enter alike, rather than
+  // sending the mention as prose to nobody.
+  const answerMentioned = draftTargets(answerDraft).length > 0;
+  /** Why Answer refuses the draft as it stands, or null while it would take it. An approval
+   *  whose choice demands a reason keeps its own words; the rest is a draft nothing can send. */
+  const answerRefusal =
+    submitHint ?? (answerMentioned ? ANSWER_MENTION_REFUSAL : canAnswer ? null : ANSWER_REFUSAL);
+  /** Why Ask back refuses it: it posts what the box holds, and the box is empty. */
+  const clarificationRefusal = trimmedAnswer === "" ? EMPTY_DRAFT_REFUSAL : null;
   const answerPlaceholder = reasonRequired
     ? "Why?"
     : isApproval && selected.includes("Approve")
@@ -368,6 +397,7 @@ export function useAskAnswerForm({
         ? "Add a note (optional)"
         : "Answer in your own words, or ask a question back";
   const sendAnswer = (text: string) => {
+    if (answerRefusal !== null) return;
     submitGuard.guard(() => {
       const answerSelection = isApproval || hasOptions ? selected : [];
       mutation.mutate(answerAskInput(displayedAsk, answerSelection, text, replacing.current));
@@ -394,7 +424,7 @@ export function useAskAnswerForm({
       setOtherSelected((current) => {
         const next = !current;
         if (!next) {
-          setAnswerText("");
+          setAnswerDraft(EMPTY_DRAFT);
         }
         return next;
       });
@@ -406,7 +436,9 @@ export function useAskAnswerForm({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!canAnswer) return;
+    // The buttons swallow their own refused clicks, but Ctrl/Cmd+Enter in the field submits the
+    // form without passing through one, so the form owes the same refusal.
+    if (answerRefusal !== null) return;
     if (
       !isApproval &&
       !otherSelected &&
@@ -419,9 +451,10 @@ export function useAskAnswerForm({
     sendAnswer(answerText);
   };
   const sendClarification = () => {
-    const text = answerText.trim();
-    if (text === "") return;
-    submitGuard.guard(() => clarification.mutate(text));
+    const body = answerText.trim();
+    if (clarificationRefusal !== null || body === "") return;
+    const mentions = draftTargets(answerDraft).map((mention) => mention.target);
+    submitGuard.guard(() => clarification.mutate({ body, mentions }));
   };
   const completed = changing ? null : recordedAsk;
   // What the reader typed and no form will ever send: the question closed under them - withdrawn,
@@ -431,9 +464,11 @@ export function useAskAnswerForm({
   const unsentAnswer = completed !== null && justAnswered === null ? answerText : "";
 
   return {
+    answerDraft,
     answerFailure: mutation.error === null ? null : answerFailure(mutation.error),
     answerFieldId,
     answerPlaceholder,
+    answerRefusal,
     answers,
     answerText,
     askChanged,
@@ -442,6 +477,7 @@ export function useAskAnswerForm({
     cancelChanging,
     changing,
     clarification,
+    clarificationRefusal,
     completed,
     displayedAsk,
     edits,
@@ -456,7 +492,7 @@ export function useAskAnswerForm({
     selected,
     sendAnswer,
     sendClarification,
-    setAnswerText,
+    setAnswerDraft,
     setQuestionChoice,
     startChanging,
     submitGuard,

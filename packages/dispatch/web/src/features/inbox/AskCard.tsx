@@ -1,5 +1,6 @@
 import {
   type ReactNode,
+  type SetStateAction,
   useCallback,
   useEffect,
   useId,
@@ -13,30 +14,30 @@ import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
-import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
+import { RefusableButton } from "../../components/RefusableButton";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
   askUrgencyAccent,
   borderDefault,
   card,
-  cardHoverBorder,
   inlineWarningText,
-  inputClasses,
   linkHoverText,
   linkText,
   primaryButtonBg,
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
+  secondaryButton,
   textMutedHoverToSecondary,
   textMutedOnSurface,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
+import type { MentionFieldHandle } from "../conversation/MentionField";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { type AskAnswerActions, AskAnswerArea } from "./AskAnswerArea";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
 import {
@@ -51,6 +52,7 @@ import { AskRecipients } from "./AskRecipients";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { URGENCY_LABELS } from "./ask-urgency";
+import type { Draft } from "./draft-store";
 import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
@@ -164,17 +166,19 @@ export function AskCard({
   currentReplyId,
 }: AskCardProps): ReactNode {
   const {
+    answerDraft,
     answerFailure,
     answerFieldId,
     answerPlaceholder,
+    answerRefusal,
     answers,
     answerText,
     askChanged,
-    canAnswer,
     canChangeAnswer,
     cancelChanging,
     changing,
     clarification,
+    clarificationRefusal,
     completed,
     displayedAsk,
     edits,
@@ -189,11 +193,10 @@ export function AskCard({
     selected,
     sendAnswer,
     sendClarification,
-    setAnswerText,
+    setAnswerDraft,
     setQuestionChoice,
     startChanging,
     submit,
-    submitHint,
     toggleOther,
     submitGuard,
     threadQuery,
@@ -221,8 +224,10 @@ export function AskCard({
     if (changing && variant === "compact" && answerText.trim() !== "") setOwnWordsOpen(true);
   }
   // One page can host the same ask twice (a decision block and the margin sheet), so the
-  // panel each control names is this instance's.
+  // panel each control names, and the line the lone Answer over a closed disclosure is
+  // described by, are this instance's.
   const referencesPanelId = useId();
+  const loneAnswerReasonId = useId();
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
@@ -235,19 +240,21 @@ export function AskCard({
       : documentProject === undefined
         ? undefined
         : { project: documentProject };
-  const upload = useDraftUpload((text) => {
-    setAnswerText((current) => appendToDraft(current, text));
+  // Everything the reader puts in the box goes through here, the keystroke and the text an
+  // upload lands alike: a draft the field changed is no longer the question-shaped answer the
+  // card offered to ask back instead.
+  const changeDraft = (next: SetStateAction<Draft>) => {
+    setAnswerDraft(next);
     setQuestionChoice(false);
-  });
-  const uploading = upload.pending > 0;
-  const answerFieldRef = useRef<HTMLTextAreaElement>(null);
+  };
+  const answerFieldRef = useRef<MentionFieldHandle>(null);
   // Picking Request changes moves the person straight to the field the server insists
   // on. Keyed on the field actually being mounted, not just on the option: the compact variant
   // unmounts the field when its disclosure closes, and reopening it must refocus.
   const reasonFieldShown = reasonRequired && (!isCompact || ownWordsOpen);
   useEffect(() => {
     if (reasonFieldShown) {
-      answerFieldRef.current?.focus();
+      answerFieldRef.current?.textarea()?.focus();
     }
   }, [reasonFieldShown]);
   // Opening the disclosure is a move into the field it reveals, whoever opened it: the reader's
@@ -262,7 +269,7 @@ export function AskCard({
     if (!focusNoteOnOpen.current) return;
     focusNoteOnOpen.current = false;
     if (ownWordsOpen) {
-      answerFieldRef.current?.focus();
+      answerFieldRef.current?.textarea()?.focus();
     }
   }, [ownWordsOpen]);
   // A control that disables itself under the reader's focus - Ask back while sending and once
@@ -277,7 +284,6 @@ export function AskCard({
       handOffFocus(form);
     }
   });
-  const submitHintId = `${answerFieldId}-hint`;
   // A block ask the server indexed with no pending author has an empty label and reads as
   // "asked", with no session handles to open.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
@@ -328,6 +334,9 @@ export function AskCard({
         ) : null}
       </div>
     );
+  // A reply's own `dispatch://` reference needs the project document behind a document ask,
+  // which only an Inbox row carries on the ask itself.
+  const replyOwner = displayedAsk.document ?? owner;
   const threadNode =
     thread === "collapsed" ? (
       <AskThreadDisclosure
@@ -336,6 +345,7 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        owner={replyOwner}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
@@ -346,96 +356,63 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        owner={replyOwner}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
     );
 
-  const answerField = (
-    <>
-      <label className="block" htmlFor={answerFieldId}>
-        <span
-          className={
-            reasonRequired ? `mb-1 block text-sm font-medium ${textSecondaryOnSurface}` : "sr-only"
-          }
-        >
-          {reasonRequired ? "Reason (required)" : isApproval ? "Reason" : "Your answer"}
-        </span>
-        <textarea
-          className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-          data-ask-answer=""
-          disabled={isSubmitting}
-          id={answerFieldId}
-          onChange={(event) => {
-            setAnswerText(event.target.value);
-            setQuestionChoice(false);
-          }}
-          onDrop={
-            uploadOwner === undefined ? undefined : (event) => upload.drop(event, uploadOwner)
-          }
-          onKeyDown={(event) => submitOnModifiedEnter(event, { disabled: uploading })}
-          onPaste={
-            uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
-          }
-          placeholder={answerPlaceholder}
-          ref={answerFieldRef}
-          rows={2}
-          value={answerText}
-        />
-      </label>
-      <DraftUploadStatus upload={upload} />
-    </>
-  );
-  const submitButton = (
-    <button
-      aria-describedby={submitHint === undefined ? undefined : submitHintId}
-      className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-      disabled={!canAnswer || isSubmitting || uploading}
-      title={submitHint}
+  const answerLabel = changing ? "Save answer" : "Answer";
+  /** Answer, in each place this card draws it: inside the answer area, and as the lone button a
+   *  compact card shows over a closed note disclosure. Only its own send, or an upload the draft
+   *  is waiting on, disables it; every other reason it cannot be pressed it states and refuses. */
+  const submitButton = (shownBy: string | undefined, uploading: boolean) => (
+    <RefusableButton
+      busy={
+        mutation.isPending
+          ? changing
+            ? "Saving…"
+            : "Answering…"
+          : uploading
+            ? answerLabel
+            : undefined
+      }
+      className="min-h-11"
+      refusal={answerRefusal}
+      refusalShownBy={shownBy}
       type="submit"
     >
-      {mutation.isPending
-        ? changing
-          ? "Saving…"
-          : "Answering…"
-        : changing
-          ? "Save answer"
-          : "Answer"}
-    </button>
+      {answerLabel}
+    </RefusableButton>
   );
-  const submitHintNode =
-    submitHint === undefined ? null : (
-      <p className={`text-xs ${textMutedOnSurface}`} id={submitHintId}>
-        {submitHint}
-      </p>
-    );
-  const answerActions = questionChoice ? (
-    <fieldset aria-label="Question-shaped answer" className="flex gap-2">
-      <button
-        className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={isSubmitting}
-        onClick={sendClarification}
-        ref={(node) => node?.focus()}
-        type="button"
-      >
-        {clarification.isPending ? "Sending…" : "Ask back instead"}
-      </button>
-      <button
-        className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-        disabled={isSubmitting}
-        onClick={() => sendAnswer(answerText)}
-        type="button"
-      >
-        Answer with it anyway
-      </button>
-    </fieldset>
-  ) : (
-    <div className="space-y-2">
+  const answerActions = ({ reasonId, uploading }: AskAnswerActions): ReactNode =>
+    questionChoice ? (
+      <fieldset aria-label="Question-shaped answer" className="flex gap-2">
+        <button
+          className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+          disabled={isSubmitting}
+          onClick={sendClarification}
+          ref={(node) => node?.focus()}
+          type="button"
+        >
+          {clarification.isPending ? "Sending…" : "Ask back instead"}
+        </button>
+        <RefusableButton
+          busy={mutation.isPending ? "Answering…" : undefined}
+          look="secondary"
+          onPress={() => sendAnswer(answerText)}
+          refusal={answerRefusal}
+          refusalShownBy={reasonId.anyway}
+        >
+          Answer with it anyway
+        </RefusableButton>
+      </fieldset>
+    ) : (
       <div className="flex gap-2">
-        {submitButton}
+        {submitButton(reasonId.answer, uploading)}
         {changing ? (
           <button
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+            className={secondaryButton}
             disabled={isSubmitting}
             onClick={cancelChanging}
             type="button"
@@ -443,18 +420,40 @@ export function AskCard({
             Cancel
           </button>
         ) : (
-          <button
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-            disabled={trimmedAnswer === "" || isSubmitting || uploading}
-            onClick={sendClarification}
-            type="button"
+          <RefusableButton
+            busy={clarification.isPending ? "Sending…" : uploading ? "Ask back" : undefined}
+            look="secondary"
+            onPress={sendClarification}
+            refusal={clarificationRefusal}
+            refusalShownBy={reasonId.askBack}
           >
-            {clarification.isPending ? "Sending…" : "Ask back"}
-          </button>
+            Ask back
+          </RefusableButton>
         )}
       </div>
-      {submitHintNode}
-    </div>
+    );
+  /** The card's half of the one answer area (`AskAnswerArea.tsx`): the field, the `@` picker,
+   *  the draft and the uploads are the area's, and these submits are the card's, because Answer,
+   *  Save answer and Ask back all post through `useAskAnswerForm` rather than as a comment of
+   *  the box's own. */
+  const answerArea = (
+    <AskAnswerArea
+      actions={answerActions}
+      disabled={isSubmitting}
+      draft={answerDraft}
+      fieldRef={answerFieldRef}
+      handle="data-ask-answer"
+      label={reasonRequired ? "Reason (required)" : isApproval ? "Reason" : "Your answer"}
+      labelHidden={!reasonRequired}
+      onDraftChange={changeDraft}
+      placeholder={answerPlaceholder}
+      refusals={
+        questionChoice
+          ? { anyway: answerRefusal }
+          : { answer: answerRefusal, askBack: changing ? null : clarificationRefusal }
+      }
+      uploadOwner={uploadOwner}
+    />
   );
 
   if (completed !== null) {
@@ -637,9 +636,15 @@ export function AskCard({
         {isCompact ? (
           <>
             {selected.length === 0 || ownWordsOpen ? null : (
+              // Over a closed disclosure there is no box and so no area: the lone Answer still
+              // says why it refuses, on a line of this card's own.
               <div className="space-y-2">
-                {submitButton}
-                {submitHintNode}
+                {answerRefusal === null ? null : (
+                  <p className={`text-xs ${textMutedOnSurface}`} id={loneAnswerReasonId}>
+                    {answerRefusal}
+                  </p>
+                )}
+                {submitButton(loneAnswerReasonId, false)}
               </div>
             )}
             <div>
@@ -662,17 +667,13 @@ export function AskCard({
               </button>
               {ownWordsOpen ? (
                 <div className="space-y-3 pt-3" id={`${answerFieldId}-disclosure`}>
-                  {answerField}
-                  {answerActions}
+                  {answerArea}
                 </div>
               ) : null}
             </div>
           </>
         ) : (
-          <>
-            {answerField}
-            {answerActions}
-          </>
+          answerArea
         )}
         {answerFailure === null ? null : (
           <QueryError

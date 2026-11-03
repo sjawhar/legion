@@ -560,7 +560,10 @@ test("two AskCard instances for the same ask keep independently labeled answer f
     const fields = view.getAllByLabelText("Your answer");
     expect(fields).toHaveLength(2);
     expect(fields[0]).not.toBe(fields[1]);
-    expect(fields[0].id).not.toBe(fields[1].id);
+    // Each box is named by the label it stands inside (`MentionField`), not by an id another
+    // card could hold too, so no label on this page reaches the other card's box.
+    expect(fields[0]?.closest("label")).not.toBe(fields[1]?.closest("label"));
+    expect(fields.every((field) => field.closest("label") !== null)).toBe(true);
   } finally {
     view.unmount();
   }
@@ -636,11 +639,14 @@ test("AskCard submits the selected single option with the revision the human rev
       "Answer in your own words, or ask a question back"
     );
     const submit = view.getByRole("button", { name: "Answer" });
-    expect(submit.hasAttribute("disabled")).toBe(true);
+    // A refused Answer stays in the tab order and says why (`RefusableButton`), so it is
+    // `aria-disabled` rather than `disabled` (INFRA-341, R3).
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    expect(submit.getAttribute("title")).toBe("Pick an option or write an answer.");
 
     fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     expect(answer.getAttribute("placeholder")).toBe("Add a note (optional)");
-    expect(submit.hasAttribute("disabled")).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.click(submit);
 
     await waitFor(() =>
@@ -847,9 +853,9 @@ test("AskCard submits a selected Other option with free text", async () => {
     const submit = view.getByRole("button", { name: "Answer" });
     const other = await view.findByRole("radio", { name: "Other" });
     fireEvent.click(other);
-    expect(submit.hasAttribute("disabled")).toBe(true);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Try a hybrid" } });
-    expect(submit.hasAttribute("disabled")).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.click(submit);
 
     await waitFor(() =>
@@ -1116,12 +1122,12 @@ test("an approval-kind ask names the reason Request changes needs, focuses its f
     const reasonField = view.getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reasonField);
     const submit = view.getByRole("button", { name: "Answer" });
-    expect(submit.hasAttribute("disabled")).toBe(true);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
     expect(submit.getAttribute("title")).toBe("Add a reason to send Request changes");
     expect(view.getByText("Add a reason to send Request changes")).toBeTruthy();
 
     fireEvent.change(reasonField, { target: { value: "Needs another pass" } });
-    expect(submit.hasAttribute("disabled")).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     expect(submit.hasAttribute("title")).toBe(false);
     expect(view.queryByText("Add a reason to send Request changes")).toBeNull();
     fireEvent.click(submit);
@@ -1160,7 +1166,7 @@ test("a Done / Can't question is an ordinary question: Other stays, Can't needs 
     expect(within(card).getByRole("radio", { name: "Other" })).toBeTruthy();
     expect(within(card).queryByLabelText("Reason (required)")).toBeNull();
     const answer = within(card).getByRole("button", { name: "Answer" });
-    expect(answer.hasAttribute("disabled")).toBe(false);
+    expect(answer.hasAttribute("aria-disabled")).toBe(false);
     expect(answer.hasAttribute("title")).toBe(false);
     fireEvent.click(answer);
     await waitFor(() =>
@@ -1184,7 +1190,7 @@ test("the compact card opens and focuses the reason field when Request changes i
     const card = view.getByTestId("ask-ask-1");
     fireEvent.click(await within(card).findByRole("radio", { name: "Approve" }));
     expect(within(card).queryByLabelText(/Reason|Your answer/)).toBeNull();
-    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
+    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("aria-disabled")).toBe(
       false
     );
 
@@ -1192,10 +1198,10 @@ test("the compact card opens and focuses the reason field when Request changes i
     const reason = within(card).getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reason);
     const answer = within(card).getByRole("button", { name: "Answer" });
-    expect(answer.hasAttribute("disabled")).toBe(true);
+    expect(answer.getAttribute("aria-disabled")).toBe("true");
     expect(within(card).getByText("Add a reason to send Request changes")).toBeTruthy();
     fireEvent.change(reason, { target: { value: "Needs another pass." } });
-    expect(answer.hasAttribute("disabled")).toBe(false);
+    expect(answer.hasAttribute("aria-disabled")).toBe(false);
 
     // Closing the disclosure unmounts the field; Request changes is still the picked radio, so
     // reopening the disclosure is what brings the field back, and it must take focus again.
@@ -1262,11 +1268,11 @@ test("AskCard requires text when Other is selected with real multiple options", 
     fireEvent.click(await view.findByRole("checkbox", { name: "Docs" }));
     fireEvent.click(view.getByRole("checkbox", { name: "Other" }));
     const answer = view.getByRole("button", { name: "Answer" });
-    expect(answer.hasAttribute("disabled")).toBe(true);
+    expect(answer.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(view.getByLabelText("Your answer"), {
       target: { value: "Also update the guide." },
     });
-    expect(answer.hasAttribute("disabled")).toBe(false);
+    expect(answer.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.click(answer);
 
     await waitFor(() =>
@@ -1391,7 +1397,7 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
     await view.findByText(/This question changed while you were answering/);
     expect(view.getByText("Should we hold this release?")).toBeTruthy();
     expect(view.getByRole("radio", { name: "Hold" }).hasAttribute("checked")).toBe(false);
-    expect(view.getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(true);
+    expect(view.getByRole("button", { name: "Answer" }).getAttribute("aria-disabled")).toBe("true");
     expect(within(view.getByRole("alert")).queryByRole("button", { name: "Retry" })).toBeNull();
 
     fireEvent.click(view.getByRole("radio", { name: "Hold" }));
@@ -2338,15 +2344,15 @@ test("AskCard compact variant renders long options as the same wrapping choice r
 
     fireEvent.click(first);
     expect((first as HTMLInputElement).checked).toBe(true);
-    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
+    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("aria-disabled")).toBe(
       false
     );
     expect(within(card).queryByLabelText("Your answer")).toBeNull();
 
     fireEvent.click(within(options).getByRole("radio", { name: "Other" }));
     expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
-    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
-      true
+    expect(within(card).getByRole("button", { name: "Answer" }).getAttribute("aria-disabled")).toBe(
+      "true"
     );
   } finally {
     view.unmount();

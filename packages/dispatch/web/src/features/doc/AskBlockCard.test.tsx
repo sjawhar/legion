@@ -482,9 +482,11 @@ test("Other opens the composer; the words are the answer and no option is record
     fireEvent.click(await card.footer.findByRole("radio", { name: "Other" }));
     const field = card.footer.getByLabelText("Your answer");
     const submit = card.footer.getByRole("button", { name: "Answer" });
-    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    // A refused Answer keeps its place in the tab order and says why (`RefusableButton`), so it
+    // carries `aria-disabled` rather than `disabled` (INFRA-341, R3).
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(field, { target: { value: "Neither, actually." } });
-    expect((submit as HTMLButtonElement).disabled).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.click(submit);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
@@ -512,11 +514,11 @@ test("with multiple choice, Other sits beside the options and both are sent", as
     expect(ship.checked).toBe(true);
     const submit = card.footer.getByRole("button", { name: "Answer" });
     // Other still needs words, even with an option ticked beside it.
-    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(card.footer.getByLabelText("Your answer"), {
       target: { value: "And a canary first." },
     });
-    expect((submit as HTMLButtonElement).disabled).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.click(submit);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
@@ -539,9 +541,9 @@ test("a decision with no options answers in words alone", async () => {
     expect(card.footer.queryByRole("radio")).toBeNull();
     const field = card.openComposer();
     const submit = card.footer.getByRole("button", { name: "Answer" });
-    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(field, { target: { value: " Go. " } });
-    expect((submit as HTMLButtonElement).disabled).toBe(false);
+    expect(submit.hasAttribute("aria-disabled")).toBe(false);
     fireEvent.submit(card.section.querySelector("form") as HTMLFormElement);
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
@@ -579,9 +581,9 @@ test("Ask back on an issue document's decision posts a clarification on the issu
     const field = card.openComposer();
     const askBack = card.footer.getByRole("button", { name: "Ask back" });
     // Nothing to send yet.
-    expect((askBack as HTMLButtonElement).disabled).toBe(true);
+    expect(askBack.getAttribute("aria-disabled")).toBe("true");
     fireEvent.change(field, { target: { value: "Ship to which environment?" } });
-    expect((askBack as HTMLButtonElement).disabled).toBe(false);
+    expect(askBack.hasAttribute("aria-disabled")).toBe(false);
     getAsk.mockResolvedValue(threadRead(ask, [posted]));
     fireEvent.click(askBack);
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
