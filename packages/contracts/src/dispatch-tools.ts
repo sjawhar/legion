@@ -235,11 +235,12 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 /**
- * dispatch_read: an issue, a project document, or a ref, exactly as every owned read - or a
- * `message` alone, which addresses a conversation by any message in it. A human's direct message
- * to this session and the replies to it belong to no issue or document, so the id is all there is.
+ * dispatch_read: an issue, a project (alone, its documents; with artifact, one of them), or a ref,
+ * exactly as every owned read - or a `message` alone, which addresses a conversation by any
+ * message in it. A human's direct message to this session and the replies to it belong to no
+ * issue or document, so the id is all there is.
  */
-const readOwner = documentOwnerValidation(true);
+const readOwner = documentOwnerValidation(false);
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
     const input = value as {
@@ -257,7 +258,9 @@ const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
       input.ref === undefined
     );
   },
-  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`,
+  message:
+    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
+    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -938,7 +941,9 @@ export const dispatchToolSpecs = [
         .describe(
           "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
             "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
-            "you need the human to act - the ask returns to 'Waiting on you'."
+            "you need the human to act - the ask returns to 'Waiting on you'. human does not " +
+            "apply to an approval request a newer version moved: it stays with you until dispatch " +
+            "request-approval hands it back at the current version."
         )
         .optional(),
       images: imagesArgument(
@@ -1043,7 +1048,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. A find that opens with a list marker ('- ', '5. ', with an optional '[ ] ' or '[x] ' after it) and matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and a box matching only a task item in that state. A find or quote anchor stays inside one block, and in a table inside one cell: ' | ' is the boundary markdown writes between two cells, not text a cell holds, so a quote that runs across cells is refused, naming the cells; change several cells with one operation per cell in the same batch, and anchor on one cell's text. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exceptions are an item a find's list marker selected (it matched no text as written): replace(find=\"5. Old\", with=\"5. New\") gives the item the text 'New' under its own number, and a with that is the marker alone is INVALID_OP; and a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', where a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
@@ -1283,8 +1288,9 @@ export const dispatchToolSpecs = [
     description:
       "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "issue plus artifact (one of its documents), project plus artifact, or project alone, which lists the project's documents on no issue and nothing more; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
+      "An issue read lists every document, picture and file the issue holds under `Documents:`, each by slug, filename and kind. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +

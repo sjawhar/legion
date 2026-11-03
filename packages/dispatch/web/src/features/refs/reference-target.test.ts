@@ -19,6 +19,7 @@ import {
   messageQuery,
   prefetchReference,
   useReferenceTarget,
+  watchPicturePath,
 } from "./reference-target";
 
 let restore = () => {};
@@ -356,4 +357,58 @@ test.each([
   } finally {
     hook.unmount();
   }
+});
+
+test("watchPicturePath reports an image's latest version and follows its summary as it changes", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const summary = (kind: "image" | "doc", latest: number): IssueReferenceSummary => ({
+    documents: [
+      {
+        id: "shot",
+        kind,
+        latest_version: latest,
+        name: "shot.png",
+        primary: false,
+        slug: "shot-png",
+      },
+    ],
+    key: "CORE-1",
+    project: "CORE",
+    status: "in_progress",
+    title: "Core one",
+  });
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 2));
+  const reported: (string | undefined)[] = [];
+  const stop = watchPicturePath(
+    queryClient,
+    { key: "CORE-1", kind: "artifact", slug: "shot-png" },
+    (path) => reported.push(path)
+  );
+
+  // A summary already read answers at once, so the picture draws with no link before it.
+  expect(reported).toEqual(["/api/v1/issues/CORE-1/artifacts/shot-png/versions/2"]);
+  // An event's refresh of the summary - a new version uploaded - reaches the watcher.
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("image", 3));
+  await waitFor(() =>
+    expect(reported.at(-1)).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/3")
+  );
+  // A document is no picture.
+  queryClient.setQueryData(issueSummaryQuery("CORE-1").queryKey, summary("doc", 4));
+  await waitFor(() => expect(reported.at(-1)).toBeUndefined());
+
+  // Stopping unsubscribes: the summary query has no observer left to notify.
+  const query = queryClient
+    .getQueryCache()
+    .find({ queryKey: issueSummaryQuery("CORE-1").queryKey });
+  expect(query?.getObserversCount()).toBe(1);
+  stop();
+  expect(query?.getObserversCount()).toBe(0);
+});
+
+test("watchPicturePath answers undefined at once for a reference to no artifact", () => {
+  const reported: (string | undefined)[] = [];
+  watchPicturePath(new QueryClient(), { id: "ask-1", key: "CORE-1", kind: "ask" }, (path) =>
+    reported.push(path)
+  );
+  expect(reported).toEqual([undefined]);
 });

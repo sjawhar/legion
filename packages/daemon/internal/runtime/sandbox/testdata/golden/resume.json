@@ -16,7 +16,8 @@
       "metadata": {
         "annotations": {
           "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
-          "karpenter.sh/do-not-disrupt": "true"
+          "karpenter.sh/do-not-disrupt": "true",
+          "legion.dev/pod-shape": "{\"image\":\"ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef\",\"resources\":{\"limits\":{\"cpu\":\"3\",\"ephemeral-storage\":\"80Gi\",\"memory\":\"19Gi\"},\"requests\":{\"cpu\":\"3\",\"ephemeral-storage\":\"6Gi\",\"memory\":\"19Gi\"}},\"disk\":\"20Gi\"}"
         },
         "labels": {
           "legion.dev/issue": "LEGION-208",

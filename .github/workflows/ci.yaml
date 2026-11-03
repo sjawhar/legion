@@ -2577,7 +2577,7 @@ jobs:
   # the test process (internal/testnats), so no job here needs a container runtime of its own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
-  # kvwatch share this runner. The Dispatch store's tests (store_test.go:27, storetest.go:34) and
+  # kvwatch share this runner. The Dispatch store's tests (store_test.go:28, storetest.go:44) and
   # delivery's (internal/dispatch/delivery/intake_test.go:39-41) read DISPATCH_TEST_DATABASE_URL
   # and skip without it, and cmd/listener/dispatch_resolution_test.go:158 gets its database
   # through internal/testpg, so the job carries the lane's Postgres service; the registry store
@@ -2713,7 +2713,7 @@ jobs:
     # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
     # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
     # opens the store when DISPATCH_TEST_DATABASE_URL is unset
-    # (internal/dispatch/store/storetest/storetest.go:57-61). A skip is a pass, so without the
+    # (internal/dispatch/store/storetest/storetest.go:67-71). A skip is a pass, so without the
     # service this job would be green having run almost nothing.
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
