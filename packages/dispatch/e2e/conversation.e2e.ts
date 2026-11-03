@@ -121,6 +121,7 @@ test("Conversation owns the route, lists one card per message newest first, and 
       "Children",
       "Artifacts1",
       "Activity",
+      "Decisions",
     ]);
 
     await page.goto(`/issues/${issue.key}/conversation`);

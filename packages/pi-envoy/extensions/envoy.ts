@@ -20,8 +20,9 @@ import {
   type AskgateOwner,
   closeStore,
   dropAskgateRecord,
-  openStore,
+  keepStore,
   recordedOwnerMode,
+  STORE_BEAT_MS,
   selfOwner,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
@@ -644,6 +645,12 @@ export default function envoyExtension(pi: PiApi): void {
   const askgateOwner: AskgateOwner | undefined =
     askgateFile === null ? undefined : selfOwner(sessionStateRoot(process.env));
   const askgateRecords = new Set<string>();
+  // While this instance keeps a record, it touches its store every STORE_BEAT_MS (`keepStore`). A
+  // process of another pid namespace that shares the state directory (the host, or another agent
+  // box, while this process runs in one) cannot look this process up by its pid, so it counts the
+  // record live, and its prune keeps the store, only while the store keeps changing. A beat also
+  // makes the store again when another process removed it.
+  let askgateBeat: Timer | undefined;
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -922,13 +929,13 @@ export default function envoyExtension(pi: PiApi): void {
     if (askgateOwner !== undefined) {
       const dir = dispatchSessionDirectory(process.env, id);
       try {
-        openStore(askgateOwner.store);
         // The session's own check mode at the bind: block when it chose block through OMP_ASKGATE,
         // which survives a gate that does not load, or when this process already recorded block for
         // this session id. The gate reads an arm per call and records it in the owner file, so a
         // rebind (a start, a switch, a branch, a host move) keeps a recorded block rather than turn
         // it back to warn before the gate's next call; the gate's call still sets warn when the arm
         // is off. Kept per session in its owner file, so a switch never changes another session's.
+        // The write makes this process's store first, so the record never names a missing one.
         const recorded = recordedOwnerMode(dir, askgateOwner);
         writeAskgateRecord(
           dir,
@@ -936,6 +943,19 @@ export default function envoyExtension(pi: PiApi): void {
           process.env.OMP_ASKGATE?.trim() === "block" || recorded === "block" ? "block" : "warn"
         );
         askgateRecords.add(dir);
+        if (askgateBeat === undefined) {
+          const { store } = askgateOwner;
+          askgateBeat = setInterval(() => {
+            try {
+              keepStore(store, Date.now());
+            } catch (error) {
+              logger.warn(
+                `AskGate could not touch its marker store ${store}: ${messageFor(error)}`
+              );
+            }
+          }, STORE_BEAT_MS);
+          askgateBeat.unref();
+        }
       } catch (error) {
         const notice = `AskGate could not write its record for session ${id} (${messageFor(error)}), so the dispatch CLI does not ask for AskGate's marker there: a Dispatch write AskGate cannot read posts unreviewed.`;
         logger.warn(notice);
@@ -3411,6 +3431,8 @@ export default function envoyExtension(pi: PiApi): void {
         }
       }
       askgateRecords.clear();
+      clearInterval(askgateBeat);
+      askgateBeat = undefined;
       closeStore(askgateOwner.store);
     }
     const deadline = Promise.withResolvers<void>();
@@ -4123,18 +4145,17 @@ export default function envoyExtension(pi: PiApi): void {
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          // The skip is the listener's own delivery: the role lane skips the resolved holder,
-          // and the fanout skips its push to any interest whose session is the message's source.
-          // A session with no serving port — every Oh My Pi session — takes no push at all and
-          // still gets the message: a topic the stream stores comes back on its own consumer's
-          // relay, and an ad-hoc topic on its core subscription, so its own publish, and a
-          // subagent's, does reach it. Only the role lane,
-          // which its holder does not subscribe to, actually goes undelivered: a subagent's
-          // source is its parent, so a publish to a role that parent holds is accepted, answers
-          // with that holder, and reaches nobody. Only the role case is visible here (a plain
-          // topic's subscribers are not in the answer); AGENTS.md and the envoy skill carry the
-          // general rule. A direct envoy_send is unaffected: the agent-subject lane has no such
-          // skip.
+          // The skip is the listener's own delivery: the role lane skips the holder it resolved
+          // when that holder is the message's source, and the fanout skips every interest whose
+          // session is that source. The session still gets its own publish another way — a topic
+          // the stream stores comes back on its own consumer's relay, and an ad-hoc topic on its
+          // core subscription — so its own publish, and a subagent's, does reach it. Only the
+          // role lane, which its holder does not subscribe to, actually goes undelivered: a
+          // subagent's source is its parent, so a publish to a role that parent holds is
+          // accepted, answers with that holder, and reaches nobody. Only the role case is
+          // visible here (a plain topic's subscribers are not in the answer); AGENTS.md and the
+          // envoy skill carry the general rule. A direct envoy_send is unaffected: the
+          // agent-subject lane has no such skip.
           const undelivered = source !== "" && result.holder === source && inSubagent;
           const published =
             result.holder === undefined

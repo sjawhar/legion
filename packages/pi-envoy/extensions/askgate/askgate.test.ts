@@ -11,6 +11,7 @@ import {
   askgateState,
   consumeMarker,
   openStore,
+  pidNamespace,
   processStart,
   setRecordMode,
   writeAskgateRecord,
@@ -235,7 +236,12 @@ function bind(opts: BindOptions = {}): BoundGate {
   // The session directory the gate records its mode into (one real process keeps a record per
   // session it binds). A test may share a store and a session across binds to drive the switch case.
   const sessionDir = opts.sessionDir ?? fs.mkdtempSync(path.join(SUITE_TMP, "session-"));
-  const self: AskgateOwner = { pid: process.pid, start: processStart(process.pid), store };
+  const self: AskgateOwner = {
+    pid: process.pid,
+    start: processStart(process.pid),
+    ns: pidNamespace(),
+    store,
+  };
   try {
     openStore(store);
     // The bind, as envoy.ts does it: the mode from OMP_ASKGATE, which an arm does not change here.
@@ -3389,6 +3395,11 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         primary: { provider: "openai-codex", id: "gpt-5.5" },
       });
       await skipped.bash("s", ASK);
+      // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
+      // race that deadline. The real dry run is a process, and it races half of these 20 ms: on a
+      // busy machine it loses, and the call is an `error` rather than a `timeout`. This dry run
+      // answers at once, with what the stub's own prints, and the model call runs until the
+      // deadline aborts it, so the deadline is the only clock the outcome reads.
       const halted = bind({
         // The three calls that trip the breaker must time out in their review. A STUB row runs the
         // real `dispatch … --dry-run` stub above, a Bun process, and the dry run gets READ_SHARE
@@ -3400,6 +3411,12 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "2000" },
         cwd: work,
         complete: untilAborted,
+        dryRun: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2),
+          stderr: "",
+          timedOut: false,
+        }),
       });
       for (const id of ["a", "b", "c", "d"]) await halted.bash(id, ASK);
       expect(halted.entries.map((e) => e.outcome)).toEqual([
@@ -5696,7 +5713,7 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
     // The session chose block (gateEnv), so the CLI refuses a write that spends no marker.
     writeAskgateRecord(
       sessionDirectory(env, env.DISPATCH_SESSION_ID),
-      { pid: process.pid, start: processStart(process.pid), store },
+      { pid: process.pid, start: processStart(process.pid), ns: pidNamespace(), store },
       "block"
     );
     const sent: Array<{ path: string; body: unknown }> = [];
