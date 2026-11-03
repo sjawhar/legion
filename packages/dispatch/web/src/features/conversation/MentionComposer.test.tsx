@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
+import { relativeTimeLabel } from "../refs/Timestamp";
 import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
@@ -715,6 +716,49 @@ test("the mention picker draws each agent with its state and no link", async () 
   } finally {
     view.unmount();
     listAgents.mockRestore();
+  }
+});
+
+// INFRA-341 (R7). A session's last activity is a relative `<Timestamp>`, as every other surface
+// shows a time, with the exact time on its `title` - never the full locale date it used to be.
+test("the mention picker shows a session's last activity as a relative timestamp", async () => {
+  const { view } = renderComposer({ agents: [planner] });
+
+  try {
+    fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>("Comment"), {
+      target: { value: "@" },
+    });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const option = await within(listbox).findByRole("option", { name: "Planner" });
+    const seen = new Date(planner.last_seen);
+    const shown = option.querySelector("time");
+    expect(shown?.getAttribute("datetime")).toBe(seen.toISOString());
+    expect(shown?.getAttribute("title")).toBe(seen.toLocaleString());
+    expect(shown?.textContent).toBe(relativeTimeLabel(seen, Date.now()));
+    expect(option.textContent).toContain("/workspaces/planner");
+  } finally {
+    view.unmount();
+  }
+});
+
+// INFRA-341 (R7). The folder stays in the text the filter reads once the detail line splits the
+// time out of it: typing a session's directory still finds that session and nothing else.
+test("typing a session's folder finds it in the mention picker", async () => {
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>("Comment"), {
+      target: { value: "@/workspaces/worker" },
+    });
+    const listbox = await screen.findByRole("listbox", { name: "Mention suggestions" });
+    const options = within(listbox).getAllByRole("option");
+    expect(options.map((option) => option.getAttribute("aria-label"))).toEqual(["Worker"]);
+    expect(options[0]?.textContent).toContain("/workspaces/worker");
+    expect(options[0]?.querySelector("time")?.getAttribute("datetime")).toBe(
+      new Date(worker.last_seen).toISOString()
+    );
+  } finally {
+    view.unmount();
   }
 });
 

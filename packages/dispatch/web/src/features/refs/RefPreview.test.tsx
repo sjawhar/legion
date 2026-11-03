@@ -154,6 +154,29 @@ test("the card opens only after the hover delay, loads populated, and closes whe
   }
 });
 
+// INFRA-341 (R7). The server's statuses are not the client's list: one the client does not know
+// is shown on the card as the server wrote it (`statusText`), never as an empty pill.
+test("the card shows a status the client does not know as the server wrote it", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    ...issue("CORE-1", "Design decision"),
+    status: "parked",
+  });
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    fireEvent.pointerOver(screen.getByRole("link", { name: "first" }), { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    await act(async () => {});
+    expect(card.textContent).toContain("parked");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
 test("a pointer moved straight from a reference onto its card keeps it open, and leaving the reference for anywhere else closes it", async () => {
   const getIssue = mockIssues();
   jest.useFakeTimers();

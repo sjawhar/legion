@@ -15,7 +15,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { type IssueStatus, statusLabel } from "../project/board-model";
+import { statusText } from "../project/board-model";
 import { AgentName } from "./AgentName";
 import { type BlockItemKind, itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -362,7 +362,7 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
         <span className={`ml-2 font-normal ${textPrimaryOnSurface}`}>{issue.title}</span>
       </Heading>
       <span className="mt-2 flex flex-wrap items-center gap-2">
-        <StatusPill>{statusLabel(issue.status as IssueStatus)}</StatusPill>
+        <StatusPill>{statusText(issue.status)}</StatusPill>
         {issue.priority === null ? null : (
           // Read-only on purpose: the card is a tooltip whose body is one link, so the editable
           // `PriorityControl` every other surface uses cannot live inside it.

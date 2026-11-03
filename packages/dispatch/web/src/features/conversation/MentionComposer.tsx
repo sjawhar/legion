@@ -62,6 +62,7 @@ import { useComposerRegistry } from "../margin/margin-context";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
+import { Timestamp } from "../refs/Timestamp";
 import { SendStoppedError } from "../writes/keyed-write";
 import { StopTrying } from "../writes/StopTrying";
 import {
@@ -109,11 +110,14 @@ interface Draft {
 
 interface MentionOption {
   readonly capabilities: readonly string[];
-  /** Where and when: the session's directory and when it was last seen. */
-  readonly detail: string;
+  /** Where the session runs: its directory, which the picker shows and its filter matches. */
+  readonly dir: string;
   /** The name of the session the option is, or of the one holding its role, as `useAgentText`
    *  gives it: the filter matches it, and a role option's detail tooltip names it. */
   readonly holder: string;
+  /** When the session was last seen, ISO (`Agent.last_seen` is epoch milliseconds): the picker
+   *  shows it as a relative `<Timestamp>`, the exact time on its `title`. */
+  readonly lastSeen: string;
   /** The session the option is, or, for a role, the session holding it: `AgentName` draws it. */
   readonly sessionId: string;
   /** That session's title as the agent list gave it: its name when the registry cache has none. */
@@ -174,8 +178,9 @@ function roleOptions(
     })
     .map(([role, agent]) => ({
       capabilities: agent.capabilities,
-      detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      dir: agent.dir,
       holder: text.sessionText(agent.session_id, agent.title),
+      lastSeen: new Date(agent.last_seen).toISOString(),
       sessionId: agent.session_id,
       sessionTitle: agent.title,
       target: `role:${role}`,
@@ -195,8 +200,9 @@ export function mentionOptions(
       )
       .map((agent) => ({
         capabilities: agent.capabilities,
-        detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+        dir: agent.dir,
         holder: text.sessionText(agent.session_id, agent.title),
+        lastSeen: new Date(agent.last_seen).toISOString(),
         sessionId: agent.session_id,
         sessionTitle: agent.title,
         target: `session:${agent.session_id}`,
@@ -581,14 +587,15 @@ export function MentionComposer({
   const filteredOptions = useMemo(() => {
     if (autocomplete === undefined) return [];
     const query = autocomplete.query.toLocaleLowerCase();
-    // A role option matches its holder's name too, which its detail line shows.
+    // A role option matches its holder's name too, which its detail line shows, and either kind
+    // matches the session's folder: the time beside it in that line is no search term.
     return options.filter(
       (option) =>
         query === "" ||
         option.target.toLocaleLowerCase().includes(query) ||
         option.title.toLocaleLowerCase().includes(query) ||
         option.holder.toLocaleLowerCase().includes(query) ||
-        option.detail.toLocaleLowerCase().includes(query)
+        option.dir.toLocaleLowerCase().includes(query)
     );
   }, [autocomplete, options]);
   const compact = inline || edit !== undefined;
@@ -1303,14 +1310,16 @@ export function MentionComposer({
                 </span>
                 <TruncatedText
                   className={`self-stretch text-xs ${textMutedOnSurface}`}
-                  title={isRole ? `${option.holder} · ${option.detail}` : option.detail}
+                  title={isRole ? `${option.holder} · ${option.dir}` : option.dir}
                 >
                   {isRole ? (
                     <>
-                      {agent} · {option.detail}
+                      {agent} · {option.dir} · <Timestamp at={option.lastSeen} />
                     </>
                   ) : (
-                    option.detail
+                    <>
+                      {option.dir} · <Timestamp at={option.lastSeen} />
+                    </>
                   )}
                 </TruncatedText>
               </button>
