@@ -179,14 +179,18 @@ type PodUpdateOpen struct {
 // it records.
 //
 // The three steps are the same for both kinds. The consequence is not. A pod's round deletes the
-// pod and the disk the workspace is on, so work the worker does not push is lost. A plugin round
-// keeps both: the daemon starts the process again on its own plugin, in the same pod, once the
-// worker's turn has ended (endPodUpdate relaunches no working claim), so no turn is lost.
+// pod and the disk the workspace is on, so work the worker does not push is lost, and so is every
+// scratch and temporary file the worker keeps on that disk outside its commits: a log, a harness,
+// a measurement it still needs as evidence. Step 1 says so, and tells it where such a file goes
+// before it answers. A plugin round keeps both: the daemon starts the process again on its own
+// plugin, in the same pod, once the worker's turn has ended (endPodUpdate relaunches no working
+// claim), so no turn is lost.
 //
 // Another agent reads it, so it follows ASD-STE100: one instruction per sentence, active voice,
 // and no word that has a second reading.
 func UpdateTask(round, reasons string) string {
-	first, consequence := "The daemon must replace the pod that runs this issue's roles.",
+	first, keep, consequence := "The daemon must replace the pod that runs this issue's roles.",
+		` The pod's scratch and temporary files go with the pod: logs, test output, a harness, any file outside your commits. If you need such a file as evidence, put it on Dispatch before you answer.`,
 		`The replacement deletes the pod and the disk. The disk holds your workspace. Work that you do not push is lost.
 
 The daemon starts your process again on the new pod, in this same session.`
@@ -194,7 +198,7 @@ The daemon starts your process again on the new pod, in this same session.`
 	// Claim.InPluginRound reads too), so the words can never disagree with what endPodUpdate does
 	// for the same round.
 	if IsPluginRound(round) {
-		first, consequence = "The daemon must start your process again on a different plugin.",
+		first, keep, consequence = "The daemon must start your process again on a different plugin.", "",
 			`The restart keeps the pod and the disk. The disk holds your workspace. Work that you do not push stays on the disk. The restart waits until your turn ends.
 
 The daemon starts your process again on this same pod, in this same session.`
@@ -203,13 +207,13 @@ The daemon starts your process again on this same pod, in this same session.`
 
 Do these three steps now:
 
-1. Push every commit you want to keep to this issue's branch.
+1. Push every commit you want to keep to this issue's branch.%s
 2. Call the `+"`legion`"+` tool with op: "ready_for_update" and round: "%s".
 3. End your turn.
 
 If your `+"`legion`"+` tool has no "ready_for_update" operation, do step 1 and step 3 only. End your last message with a line that starts with WAITING and names this round, so your own plugin does not continue the turn. The daemon reads the end of this turn as your answer.
 
-%s The daemon holds your next task until your process runs again. Do not start new work now.`, first, reasons, round, consequence)
+%s The daemon holds your next task until your process runs again. Do not start new work now.`, first, reasons, keep, round, consequence)
 }
 
 // PodUpdateEnded is the update round over for this claim: every update_* field goes, and the task
@@ -375,6 +379,15 @@ type RequestDeliver struct {
 	// of no assignment — an operator's own, a resume, a production check's look — names none, and
 	// leaves the assignment the claim is serving alone.
 	Assignment string
+	// Row is the outbox row the task comes from (a workflow start), 0 for a task of no row (an
+	// operator's own, the controller's start message). A row the claim already queued a task from
+	// (Claim.DeliveredRows) queues nothing: its task was given once.
+	Row int64
+	// Kept is what the task names of what its tree is owed, as the row recorded it
+	// (record.KeptDecisions, encoded JSON), carried onto the delivery and persisted with it, which
+	// is what holds those rows until the delivery tells them (Delivery.Kept). Empty for a task
+	// that names none.
+	Kept []byte
 }
 
 // RequestExit is the agent reporting its own end.
@@ -1148,12 +1161,19 @@ func agentBusy(reason string) bool {
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
 // an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+//
+// The question a restart left (askFirst) counts as in flight for every delivery but one: a root
+// architect's task of a run (asksRoot) may be a task nobody has ever sent, held on the claim while
+// its root had no architect to hear it, so a turn of the agent's own is not that task's. Confirmed
+// by it, the task would tell the person's decisions it names — the confirmation is their telling —
+// to an architect nobody prompted, and be retired unsent when that turn ended. Only a send of this
+// machine's own or a prompt it waits for a turn on makes such a turn that task's.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
-	inFlight := m.send != nil || awaiting || m.askFirst
+	inFlight := m.send != nil || awaiting || (m.askFirst && (p == nil || !m.asksRoot(*p)))
 	own := p != nil && p.ConfirmedAt.IsZero() && (start.DeliveryID == p.ID || (start.DeliveryID == "" && inFlight))
 	// Whether this daemon saw the turn begin. No agent_start of a live turn names a delivery —
 	// Oh My Pi never sets the field, and the Claude Code bridge sends a bare start — so a start
@@ -1175,8 +1195,23 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // said was pushed. The answer stands for the state of the branch when it was given, and a turn
 // after it can move the branch, so the worker is asked again and the round waits for the second
 // answer. The ask's own clock goes with it (UpdateTaskedAt), so the next post of the round asks
-// at once rather than at the re-task bound hours away. Only the turn of an ask of this round
-// keeps the answer (updatesRound): that is the turn the worker answers in.
+// at once rather than at the re-task bound hours away.
+//
+// Two turns keep the answer. One is the turn of an ask of this round (updatesRound): that is the
+// turn the worker answers in.
+//
+// The other is a turn the daemon sent nothing for, in a claim whose plugin cannot answer the
+// round (CannotAnswerUpdate). The update task tells such a worker to end its last message with a
+// WAITING line, and its plugin's phase-stall reminder answers that line with a turn of its own
+// when the wait is over (15 minutes by default), or at once when the line is missing. That
+// reminder carries no instruction of the daemon's, and the worker still holds the task's "Do not
+// start new work now". A plugin that can answer holds its reminder while its answer stands
+// (`awaiting-update` in pi-shared's phase-stall), so a turn the daemon sent nothing for in such a
+// claim is an Envoy notice, a background job's result or a person's steer, and takes the answer
+// back. In a claim that cannot answer, the daemon cannot tell those turns from the reminder, so
+// they keep the answer too. Nothing verifies the branch before the pod goes: the answer is the
+// only guard, so such a turn that commits work against the task the worker read, and does not push
+// it, loses that work with the pod.
 //
 // A claim relaunched into another pod than its round's own keeps its answer whatever turn starts
 // (Claim.LeftPodRound): the answer was given in the pod the round is about, and no turn of the
@@ -1193,6 +1228,11 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 		return
 	}
 	if ownTask && updatesRound(m.claim.Pending, m.claim.UpdateRound) {
+		return
+	}
+	if !ownTask && CannotAnswerUpdate(m.claim) {
+		m.log.Info("supervise: a turn the daemon sent nothing for started after this claim answered its update round; its plugin has no ready_for_update op and reminds the worker on its own, so the answer stands",
+			"round", m.claim.UpdateRound, "pluginContract", m.claim.PluginContract, "delivery", pendingID(m.claim.Pending))
 		return
 	}
 	m.log.Warn("supervise: a turn started after this claim answered its update round; the answer is taken back and the worker is asked again",
