@@ -16,7 +16,8 @@
       "metadata": {
         "annotations": {
           "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
-          "karpenter.sh/do-not-disrupt": "true"
+          "karpenter.sh/do-not-disrupt": "true",
+          "legion.dev/pod-shape": "{\"image\":\"ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef\",\"resources\":{\"limits\":{\"cpu\":\"3\",\"ephemeral-storage\":\"80Gi\",\"memory\":\"19Gi\"},\"requests\":{\"cpu\":\"3\",\"ephemeral-storage\":\"6Gi\",\"memory\":\"19Gi\"}},\"volumes\":[{\"name\":\"operator-route\",\"configMap\":{\"name\":\"legion-operator-route\",\"items\":[{\"key\":\"models.yml\",\"path\":\"models.yml\"},{\"key\":\"overlay.yml\",\"path\":\"overlay.yml\"}]}},{\"name\":\"operator-token\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"audience\":\"operator-audience\",\"expirationSeconds\":3600,\"path\":\"token\"}}]}}],\"mounts\":[{\"name\":\"operator-route\",\"readOnly\":true,\"mountPath\":\"/home/legion/.omp/profiles/legion/agent/models.yml\",\"subPath\":\"models.yml\"},{\"name\":\"operator-route\",\"readOnly\":true,\"mountPath\":\"/etc/legion-operator/overlay.yml\",\"subPath\":\"overlay.yml\"},{\"name\":\"operator-token\",\"readOnly\":true,\"mountPath\":\"/var/run/operator\"}],\"disk\":\"20Gi\"}"
         },
         "labels": {
           "legion.dev/issue": "LEGION-208",

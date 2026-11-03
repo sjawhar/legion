@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -236,11 +235,15 @@ func TestARoleToldAStaleDaemonURLGetsANewGenerationInTheSamePod(t *testing.T) {
 // Enrolling a running deployment with the secrets broker (runtime.kubernetes.agent_secrets) leaves
 // every issue pod without the broker's token projection and its roles' key directories, which a
 // generation of a role that enrolls is started against: the shim's agent-secrets flags name both,
-// and the shim refuses to start without its token file. So the role is reported StaleAddress, its
-// detail naming the projection the pod lacks, and the relaunch replaces the issue pod rather than
-// start the role in one that cannot run it; the new pod mounts both for every role, and a sibling
-// resumes into that same new pod.
-func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
+// and the shim refuses to start without its token file. The pod has drifted, so PodDrift names the
+// projection the pod lacks and the daemon opens an update round over it; no observation of the
+// role names that projection any more, and its relaunch keeps the pod, since ending it under the
+// roles working in it is the thing the round exists to avoid. The running generation's own
+// AGENT_SECRETS_URL moves with nothing: it runs in a pod that carries no enrollment, so it was
+// handed no broker URL and is handed none now (Runtime.enrollsIn), and its role is Alive. Once
+// the round has ended the pod (ReplacePod), the next launch makes one mounting both for every
+// role, and a sibling resumes into that same new pod.
+func TestEnrollingWithTheSecretsBrokerDriftsAnIssuePodMadeWithoutIt(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
 	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
@@ -253,24 +256,45 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 		return connected && state.Child != nil
 	})
 	obs := readopt(t, g.ctx, r2, testerLoc)[0]
-	if obs.Kind != runtime.StaleAddress || obs.Locator != testerLoc {
-		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
+	if strings.Contains(obs.Detail, agentSecretsTokenVolume) {
+		t.Fatalf("%s at %+v names the pod's token projection (%s), which is its round's to act on, not a repoint's",
+			obs.Kind, obs.Locator, obs.Detail)
 	}
-	if want := (movedAddress{agentSecretsTokenVolume, "(unset)", enrollmentName(brokerTokenProjection(broker))}).String(); !strings.Contains(obs.Detail, want) {
-		t.Errorf("detail %q lacks %q", obs.Detail, want)
+	if obs.Kind != runtime.Alive {
+		t.Fatalf("%s (%s), want the tester alive: its generation runs in a pod that carries no enrollment, so it holds no broker URL to move",
+			obs.Kind, obs.Detail)
+	}
+	want := (movedAddress{agentSecretsTokenVolume, "(unset)", enrollmentName(brokerTokenProjection(broker))}).String()
+	if drifted := driftOf(t, g.ctx, r2, testerLoc); !slices.Contains(drifted, want) {
+		t.Errorf("PodDrift = %q, want %q among it", drifted, want)
 	}
 
 	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
-	newTester, err := r2.Resume(g.ctx, &testerLoc, tester)
+	kept, err := r2.Resume(g.ctx, &testerLoc, tester)
 	if err != nil {
 		t.Fatalf("Resume the tester: %v", err)
 	}
+	if kept.Sandbox.PodUID != testerLoc.Sandbox.PodUID {
+		t.Fatalf("Resume replaced the pod %s, which the tester's own update round replaces", testerLoc.Sandbox.PodUID)
+	}
+
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	tester.Generation, tester.BootToken = 3, "boot-tester-g3"
+	newTester, err := r2.Resume(g.ctx, &kept, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester after its round: %v", err)
+	}
 	if newTester.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
-		t.Fatalf("Resume kept the pod %s, which has no agent-secrets volume for the enrolled tester's shim", testerLoc.Sandbox.PodUID)
+		t.Fatalf("the round kept the pod %s, which has no agent-secrets volume for the enrolled tester's shim", testerLoc.Sandbox.PodUID)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
 	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
 		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
+	}
+	if drifted := driftOf(t, g.ctx, r2, newTester); len(drifted) > 0 {
+		t.Fatalf("the replaced pod has drifted: %q", drifted)
 	}
 	mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, workerContainer).VolumeMounts, func(m corev1.VolumeMount) bool {
 		return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
@@ -278,8 +302,8 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 	if !mounted {
 		t.Errorf("the replaced pod's launcher does not mount the broker's token at %s", AgentSecretsTokenDir)
 	}
-	if start := lastStart(t, g, workerToken); start.Generation != 2 || !slices.Contains(start.Argv, AgentSecretsTokenDir+"/"+AgentSecretsTokenFile) {
-		t.Errorf("the tester started generation %d with %q, want generation 2 pointed at the pod's token file", start.Generation, start.Argv)
+	if start := lastStart(t, g, workerToken); start.Generation != 3 || !slices.Contains(start.Argv, AgentSecretsTokenDir+"/"+AgentSecretsTokenFile) {
+		t.Errorf("the tester started generation %d with %q, want generation 3 pointed at the pod's token file", start.Generation, start.Argv)
 	}
 
 	reviewer.Generation, reviewer.BootToken, reviewer.ResumeSessionFile = 2, "boot-reviewer-g2", resumeSession
@@ -293,13 +317,14 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 }
 
 // A broker enrollment changed under running roles — another audience or token expiry, which only a
-// daemon restart brings — is read on every role of the pod at once: each is StaleAddress at its
-// re-adoption, naming the projection the pod holds and the one a pod created now carries, so the
-// supervisor relaunches every one of them uncharged (supervise's repoint), rather than leaving them
-// running until some unrelated relaunch replaces the pod under the rest. Relaunched together, as the
-// supervisor's machines relaunch them, they move into one new pod, and no role is ever reported
-// gone or not the recorded process on the way.
-func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) {
+// daemon restart brings — is read on every role of the pod at once: PodDrift names, for each, the
+// projection the pod holds and the one a pod created now carries, so one update round is opened
+// over the whole pod and each role keeps running until it has answered. None of them is
+// StaleAddress, which would have the supervisor repoint it mid-turn, and no relaunch replaces the
+// pod under the rest. The round's one ReplacePod ends the pod: every role in it is reported ended
+// by the daemon's own act (Displaced), never dead, and relaunched together, as the supervisor's
+// machines relaunch them, they move into one new pod that has drifted from nothing.
+func TestChangingTheBrokersAudienceDriftsEveryRoleOfThePodTogether(t *testing.T) {
 	before := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	now := before
 	now.Audience = "agent-secrets-next"
@@ -309,6 +334,13 @@ func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) 
 	name := testerLoc.Sandbox.Name
 
 	r2 := secondRuntime(t, g, func(o *Options) { o.AgentSecrets = &now })()
+	for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
+		g.connectRunning(loc.Claim, loc.Sandbox.Generation)
+		g.eventually("the "+string(loc.Claim)+" launcher to report its child to the restarted daemon", func() bool {
+			state, connected := r2.launchers.state(loc.Claim, loc.Sandbox.PodUID)
+			return connected && state.Child != nil
+		})
+	}
 	if err := r2.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &testerLoc}, {Claim: otherToken, Locator: &reviewerLoc}}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -316,34 +348,45 @@ func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale := (movedAddress{agentSecretsTokenVolume, enrollmentName(brokerTokenProjection(&before)), enrollmentName(brokerTokenProjection(&now))}).String()
+	drift := (movedAddress{agentSecretsTokenVolume, enrollmentName(brokerTokenProjection(&before)), enrollmentName(brokerTokenProjection(&now))}).String()
 	seen := []runtime.Observation{next(t, observations), next(t, observations)}
 	for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
 		obs := observationOf(t, seen, loc)
-		if obs.Kind != runtime.StaleAddress || obs.Locator != loc || !strings.Contains(obs.Detail, stale) {
-			t.Fatalf("%s: %s at %+v (%s), want StaleAddress at the recorded locator naming %q", loc.Claim, obs.Kind, obs.Locator, obs.Detail, stale)
+		if obs.Kind != runtime.Alive || obs.Locator != loc {
+			t.Fatalf("%s: %s at %+v (%s), want it alive at its recorded locator until its round ends", loc.Claim, obs.Kind, obs.Locator, obs.Detail)
+		}
+		if drifted := driftOf(t, g.ctx, r2, loc); !slices.Contains(drifted, drift) {
+			t.Fatalf("%s: PodDrift = %q, want %q among it", loc.Claim, drifted, drift)
 		}
 	}
 
-	// Every observation from here on: none may say a role is gone or not the recorded process.
-	var mu sync.Mutex
-	var later []runtime.Observation
-	collecting, stop := context.WithCancel(g.ctx)
-	defer stop()
-	go func() {
-		for {
-			select {
-			case obs := <-observations:
-				mu.Lock()
-				later = append(later, obs)
-				mu.Unlock()
-			case <-collecting.Done():
-				return
-			}
+	// The round is over: the pod is ended once, for every role in it at once.
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	ends := map[claim.Token]runtime.Observation{}
+	for range 40 {
+		if len(ends) == 2 {
+			break
 		}
-	}()
-	// Both relaunches begin before either replaces the pod, as the supervisor's machines begin theirs
-	// on the observations above: the pod's launch turn is held until both are waiting on it.
+		obs := next(t, observations)
+		if obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess {
+			ends[obs.Locator.Claim] = obs
+		}
+	}
+	for _, loc := range []runtime.Locator{testerLoc, reviewerLoc} {
+		ended, ok := ends[loc.Claim]
+		if !ok {
+			t.Fatalf("%s: no observation ended its process in the replaced pod", loc.Claim)
+		}
+		if !ended.Displaced || ended.Locator != loc {
+			t.Errorf("%s: %s at %+v, Displaced %t (%s); want its process reported displaced at its recorded locator",
+				loc.Claim, ended.Kind, ended.Locator, ended.Displaced, ended.Detail)
+		}
+	}
+
+	// Both relaunches begin before either provisions the new pod, as the supervisor's machines begin
+	// theirs on the ends above: the pod's launch turn is held until both are waiting on it.
 	held, err := r2.lockPod(g.ctx, name)
 	if err != nil {
 		t.Fatal(err)
@@ -370,37 +413,36 @@ func TestChangingTheBrokersAudienceMovesEveryRoleOfThePodTogether(t *testing.T) 
 		return !testerWatched && !reviewerWatched
 	})
 	held()
-	var pods []string
+	var moved []runtime.Locator
 	for range 2 {
 		result := <-results
 		if result.err != nil {
 			t.Fatalf("a relaunch failed, which the supervisor would charge: %v", result.err)
 		}
-		pods = append(pods, result.loc.Sandbox.PodUID)
+		moved = append(moved, result.loc)
 	}
-	if pods[0] != pods[1] || pods[0] == testerLoc.Sandbox.PodUID {
-		t.Fatalf("the roles relaunched into pods %v, want one new pod in place of %s", pods, testerLoc.Sandbox.PodUID)
+	if moved[0].Sandbox.PodUID != moved[1].Sandbox.PodUID || moved[0].Sandbox.PodUID == testerLoc.Sandbox.PodUID {
+		t.Fatalf("the roles relaunched into pods %s and %s, want one new pod in place of %s",
+			moved[0].Sandbox.PodUID, moved[1].Sandbox.PodUID, testerLoc.Sandbox.PodUID)
 	}
 	if held := heldInPod(r2, g.pod(name), claim.Roles); len(held) > 0 {
 		t.Fatalf("the new pod holds %+v, which a pod created now is not handed", held)
 	}
-	stop()
-	mu.Lock()
-	defer mu.Unlock()
-	for _, obs := range later {
-		if obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess {
-			t.Errorf("%s was reported %s on the way (%s)", obs.Locator.Claim, obs.Kind, obs.Detail)
+	for _, loc := range moved {
+		if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
+			t.Fatalf("the new pod has drifted for %s: %q", loc.Claim, drifted)
 		}
 	}
 }
 
-// A pod's agent-secrets volumes are fixed when it is created, so a relaunch of a role that enrolls
-// replaces a pod made under another audience or token expiry, as it does one made before the
-// runtime enrolled; a pod made under the enrollment the runtime has now is kept, whatever else its
-// stored volumes carry beside the token's audience, expiry and path and the key directories — a
-// mode, another projection source, a size the API server or an admission webhook set — since
-// replacing it for those would rebuild the pod and re-provision its workspace at every relaunch.
-func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T) {
+// A pod's agent-secrets volumes are fixed when it is created, so a pod made under another audience
+// or token expiry has drifted, as one made before the runtime enrolled has; a pod made under the
+// enrollment the runtime has now has not, whatever else its stored volumes carry beside the
+// token's audience, expiry and path and the key directories — a mode, another projection source, a
+// size the API server or an admission webhook set — since opening a round on those would rebuild
+// the pod and re-provision its workspace at every restart. Either way the relaunch keeps the live
+// pod: a drifted one is its round's to replace, never a launch's.
+func TestAPodEnrolledOtherwiseThanTheRuntimeIsNowHasDrifted(t *testing.T) {
 	broker := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	carryingMore := func(pod *corev1.Pod) {
 		for i := range pod.Spec.Volumes {
@@ -419,9 +461,9 @@ func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T)
 		}
 	}
 	for name, tc := range map[string]struct {
-		now      func(*AgentSecrets)
-		stored   func(*corev1.Pod)
-		replaced bool
+		now     func(*AgentSecrets)
+		stored  func(*corev1.Pod)
+		drifted bool
 	}{
 		"the same enrollment":                       {func(*AgentSecrets) {}, nil, false},
 		"the same enrollment, stored carrying more": {func(*AgentSecrets) {}, carryingMore, false},
@@ -443,13 +485,18 @@ func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T)
 				state, connected := r2.launchers.state(workerToken, loc.Sandbox.PodUID)
 				return connected && state.Child != nil
 			})
+			want := (movedAddress{agentSecretsTokenVolume, enrollmentName(brokerTokenProjection(&before)), enrollmentName(brokerTokenProjection(&now))}).String()
+			drifted := driftOf(t, g.ctx, r2, loc)
+			if slices.Contains(drifted, want) != tc.drifted {
+				t.Fatalf("PodDrift = %q, want the enrollment drifted %t (%q)", drifted, tc.drifted, want)
+			}
 			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
 			newLoc, err := r2.Resume(g.ctx, &loc, spec)
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
 			}
-			if replaced := newLoc.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
-				t.Fatalf("Resume replaced the pod: %t, want %t (pod %s, then %s)", replaced, tc.replaced, loc.Sandbox.PodUID, newLoc.Sandbox.PodUID)
+			if newLoc.Sandbox.PodUID != loc.Sandbox.PodUID {
+				t.Fatalf("Resume replaced the pod %s with %s; a drifted pod is its round's to replace", loc.Sandbox.PodUID, newLoc.Sandbox.PodUID)
 			}
 			if held := heldInPod(r2, g.pod(loc.Sandbox.Name), claim.Roles); len(held) > 0 {
 				t.Fatalf("the pod the tester runs in holds %+v, which a pod created now is not handed", held)
@@ -459,7 +506,8 @@ func TestARelaunchReplacesAPodEnrolledOtherwiseThanTheRuntimeIsNow(t *testing.T)
 }
 
 // heldInPod is everything pod holds, for any role of roles, that a pod created now is not handed
-// (movedInPod, the one rule evaluate and relaunch read it by).
+// and that no round can ask its workers about first (movedInPod, the one rule evaluate and
+// relaunch read it by).
 func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
 	var held []movedAddress
 	for _, role := range roles {
@@ -469,13 +517,16 @@ func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
 }
 
 // One rule decides both whether evaluate reads a role's pod as stale and whether relaunch replaces
-// that pod (movedInPod): for each kind of moved address, a role that holds one is reported
-// StaleAddress naming it, and the role's relaunch replaces its pod exactly when what moved is fixed
-// for the pod's life — the stream its launcher dials, or the secrets broker's enrollment (its
-// projection's audience or expiry, or enrollment configured only now). An address carried in the
-// generation's environment alone (the daemon's API, the broker's URL with its enrollment unchanged)
-// is stale too, but its relaunch starts a new generation in the same pod; a role holding nothing
-// moved is alive and its pod kept.
+// that pod (movedInPod): a role whose pod holds a move its workers cannot be asked about — the
+// stream its launcher dials — is reported StaleAddress naming it, and its relaunch replaces the
+// pod. An address carried in the generation's environment alone (the daemon's API, the broker's
+// URL with its pod's enrollment unchanged) is stale too, but its relaunch starts a new generation
+// in the same pod. What has drifted instead is neither: the broker's enrollment, configured only
+// now or changed, leaves the role Alive and its pod kept, and is read by PodDrift alone, for its
+// update round to act on once its workers have pushed — and enrolling only now moves no address
+// of the running generation, which runs in a pod carrying no enrollment and so holds no broker
+// URL to move (Runtime.enrollsIn). A role holding nothing moved and whose pod has drifted from
+// nothing is alive and its pod kept.
 func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 	broker := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	enrolled := func(edit func(*AgentSecrets)) func(*Options) {
@@ -489,15 +540,17 @@ func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 	for name, tc := range map[string]struct {
 		before, now func(*Options)
 		// where is where the moved address is carried, as the detail names it; "" for nothing moved.
-		where    string
+		where string
+		// drifts is what PodDrift names of the pod, "" for nothing drifted.
+		drifts   string
 		replaced bool
 	}{
 		"nothing moved":                 {before: func(*Options) {}, now: func(*Options) {}},
 		"the worker stream moved":       {before: func(*Options) {}, now: moveStream, where: connectFlag, replaced: true},
 		"the daemon's API moved":        {before: func(*Options) {}, now: func(o *Options) { o.DaemonURL = movedDaemonURL }, where: "LEGION_DAEMON_URL"},
-		"the broker enrolled only now":  {before: func(*Options) {}, now: enrolled(unchanged), where: agentSecretsTokenVolume, replaced: true},
-		"the broker's audience changed": {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.Audience = "agent-secrets-next" }), where: agentSecretsTokenVolume, replaced: true},
-		"the broker's expiry changed":   {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.TokenExpiry = 30 * time.Minute }), where: agentSecretsTokenVolume, replaced: true},
+		"the broker enrolled only now":  {before: func(*Options) {}, now: enrolled(unchanged), drifts: agentSecretsTokenVolume},
+		"the broker's audience changed": {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.Audience = "agent-secrets-next" }), drifts: agentSecretsTokenVolume},
+		"the broker's expiry changed":   {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.TokenExpiry = 30 * time.Minute }), drifts: agentSecretsTokenVolume},
 		"the broker's URL moved alone":  {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.URL = "https://secrets-next.internal.example" }), where: "AGENT_SECRETS_URL"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -517,9 +570,13 @@ func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 				obs := observationOf(t, seen, loc)
 				switch {
 				case tc.where == "" && obs.Kind != runtime.Alive:
-					t.Fatalf("%s: %s (%s), want alive: nothing moved", loc.Claim, obs.Kind, obs.Detail)
+					t.Fatalf("%s: %s (%s), want alive: nothing its launcher cannot be asked about moved", loc.Claim, obs.Kind, obs.Detail)
 				case tc.where != "" && (obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, tc.where+" ")):
 					t.Fatalf("%s: %s (%s), want StaleAddress naming %s", loc.Claim, obs.Kind, obs.Detail, tc.where)
+				}
+				drifted := strings.Join(driftOf(t, g.ctx, r2, loc), "; ")
+				if (tc.drifts == "") != (drifted == "") || (tc.drifts != "" && !strings.Contains(drifted, tc.drifts+" ")) {
+					t.Fatalf("%s: PodDrift = %q, want %q", loc.Claim, drifted, tc.drifts)
 				}
 			}
 			fromPod := len(heldInPod(r2, g.pod(testerLoc.Sandbox.Name), claim.Roles)) > 0
@@ -531,7 +588,7 @@ func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 			}
 			replaced := newLoc.Sandbox.PodUID != testerLoc.Sandbox.PodUID
 			if replaced != fromPod || replaced != tc.replaced {
-				t.Fatalf("Resume replaced the pod: %t; the pod held a move fixed for its life: %t; want both %t", replaced, fromPod, tc.replaced)
+				t.Fatalf("Resume replaced the pod: %t; the pod held a move no worker can be asked about: %t; want both %t", replaced, fromPod, tc.replaced)
 			}
 		})
 	}
