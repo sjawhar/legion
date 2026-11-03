@@ -599,8 +599,9 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 // boot catch-up's fact, a version event, a session's or Dispatch's own review — queues nothing,
 // since the daemon reads the issue only when a person's own act could queue it. A carried approval
 // (CarriedApproval) queues nothing either: it is the review Dispatch writes in the person's name
-// when their answer to a decision block was the whole change since the version they approved,
-// Dispatch's bookkeeping of an earlier approval and not a new act of theirs.
+// when their answer to a decision block was the whole change since the version they approved, or
+// when a later version's text is that version's, Dispatch's bookkeeping of an earlier approval and
+// not a new act of theirs.
 //
 // dispatchArtifact ties its skip of the root's own gate to this decision rather than to the tree
 // being live: a lingering root that is not parked — closed as done, or still in triage — queues

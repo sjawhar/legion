@@ -84,7 +84,7 @@ Each item below names a task and where its code is, then notes on it.
   `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
   the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
   A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
-  INFRA-493 extends that sweep to GitHub's 3-day redelivery window.
+  the sweep asks until GitHub records the delivery or 72 hours after its first failed attempt, GitHub's redelivery window.
   Unset, the stream is created with no limit and a start keeps a deployed one.
   Set, a start and the keeper raise a smaller deployed limit, or none, to it and never lower one, as for the copies, so an operator's raise of a full stream stands;
   lowering a limit is an operator step once every program's setting is lowered.
@@ -220,12 +220,14 @@ Each item below names a task and where its code is, then notes on it.
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
-  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`).
+  `stack.sh` (a local Postgres, latency proxy, NATS, listener and Dispatch built from the checkout), `run-step.sh` (one named step, on a fresh reset to the seed), `run-series.sh` (0.25x to 10x), and the `loadgen` binary (seed, sessions, event and request generators, samplers, `TABLES.md`, and for the cluster `cgroup-merge`, `curves` and `codepaths`).
   Every endpoint comes from the stack's `stack.json` (`guard.go`).
   The replay of LINUX's write log of 2026-10-26 22:55-23:34Z is its second request source (`replay_*.go`, `loadgen run -source replay`):
   the bundle and the seed dump are the file artifacts `loadtest/replay-2026-10-26.json` names by sha256, and one command gets them, prepares the build's template and runs a step (`loadtest/run-step.sh <name> --replay [--rate F] [--dispatch-commit REV]`);
   one bundle, inputs and rng seed send the same requests in every run, which the merge rule's three base and three head runs rest on.
-  How to run it, every column and the differences from production: `loadtest/README.md`
+  `loadtest/cluster/` runs the same load on a full-size copy of Dispatch in a Kubernetes namespace with one command, `cluster.sh all --namespace <ns> --storage-class <class> --dispatch-commit <sha> --pg-major <n> --production-repo <owner/repo> --profile quick|full`:
+  it stands the copy up, seeds it, runs the steps, collects the tables, curves and profiles, and tears it down.
+  How to run both, every column and the differences from production: `loadtest/README.md`
 
 - **Deploy/runtime**: `deploy/`
 
@@ -443,7 +445,7 @@ a margin write (`applyMargin`) renders nothing before it writes.
 It stays one measure where the observer renders less than the whole document, too:
 for an update that changed something inside some top-level blocks, `pmdoc.Layout.Splice` renders only those blocks into the markdown the replica keeps and answers exactly what a whole render of the new document writes or declines, and where it declines the observer renders the whole document (`renderedReplica.updateChangesMarkdown`).
 Indexing an ask block fails the second half:
-it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, staling an approval pinned to what an agent had just written and closing Legion's design gate with nothing in the event log to explain it (LEGION-273).
+it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, with nothing in the event log to explain it (LEGION-273, where such a version staled an approval pinned to what an agent had just written and closed Legion's design gate; the carry now carries that approval to such a version instead, `docs.carryApproval`).
 Settlement's tree writes - stamping block ids, restoring an ask block's server-owned attributes - move the stored Proof state and usually render the same markdown, so a version for one of those would repeat the version before it too (LEGION-229 requirement 2);
 their `doc_updates` row records what they rendered rather than `true`, so a repair that changed no text leaves nothing past the cursor for a later settlement to version.
 The version a settlement that writes none leaves the document at is the one it found, and that is the number its `block.repaired`, `block.invalid` and retraction events name (`settlementReconciliation.nameVersion`).
@@ -451,7 +453,7 @@ An update that changes only what no rendering carries therefore versions no docu
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on the first keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text it covers.
 A margin record changes the marks map alone, never the text, so its transactional write (`applyMargin`) records `false` without rendering the document again, and the room's update observer keeps its rendering for the publish of one whose fork was built from that same room (`liveWriteOrigin.marginOnly`).
 One forked from the store (`coldFork`) can carry deletes the room never took, since ygo encodes an update with its document's whole delete set, so its publish is rendered as any other update is.
-Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's and stale an approval pinned to it:
+Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's, which carries an approval pinned to that one to it (`docs.carryApproval`, while its decision blocks are as their rows have them) rather than staling it:
 an upload to an existing document (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`) always inserts one;
 `POST /artifacts/{id}/versions` and accepting a suggestion always name one through `NamedVersion`;
 and `POST /edits` names one through `NamedVersion` when it is sent with a `summary` and its `changed` is true.
@@ -1254,6 +1256,24 @@ An unpinned reference to a block no current version holds is `404 NOT_FOUND` `no
 Versions are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 2147483647 without a query as a version the document lacks:
 `404 NOT_FOUND` `no version <N> of <document ref>`.
 `GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from blocks of one document to blocks of another, or of the same one, while both blocks are current, and a typed block's pointer only while its target has a type the pointer allows (`block_ref_listed`, below the typed block rules).
+
+An issue's decision records are its document `decisions.md` read over that block graph (`internal/dispatch/api/decisions.go`, migration `20261101162254`).
+Each decision is one `##` section of it: its heading block and every block after it up to the next heading of its level or higher, the heading naming the choice, the blocks giving the reason and the options weighed, and each spec block it shaped linked `dispatch://KEY/spec#b-<id>`, which the block index records as a link from the decision's own block to that spec block.
+The section headed exactly `## Replaced` holds replaced decisions as `###` sections, a paragraph that starts `Unsure:` marks a decision unsure, and a person's decision links its answered ask, which is what makes it theirs rather than the agent's.
+A decision's changed version and time are the greatest of its blocks' (`refs.BlockChanges`), and a spec block X linked from decision D by link L is out of date exactly when D's own text changed after it first linked X and X has not changed since D did, both read from the document's text at a version rather than from that changed version:
+D's text at L's `created_version` differs from its text now, and D's text at the version of this document that stood when X last changed differs from it too.
+The changed version cannot answer either, since it is the greatest of the blocks D holds now and so does not move when a block is removed from D or moved into or out of it, where the text changes and every remaining block keeps its version;
+a stored version holds no block id, so each version is cut into its decisions by the rule the block walk cuts the document that stands by (`decisionSums` beside `decisionSections`: a `##` heading outside `## Replaced` and a `###` under it opens a decision, a heading of its own level or higher closes it, `#` included, which opens none, and a deeper heading is text of the decision it stands in), and each decision is named across versions by its heading and how many decisions before it carry that heading, so a document that carries one heading twice - a decision made again beside the replaced one of its name - names each of them, while a renamed heading, and a version that carried fewer decisions of that heading, give that decision no sum there and read as text that differs from the text now, which it is.
+A new decision marks nothing, and neither does the block index's first pass over a document, which gives every block and every pair one version;
+a version this document does not hold and a spec block Dispatch records no change for leave a link as it is, and a spec block whose last change is older than the document's first version is out of date by the first half alone, since every change of the decision came after it.
+`GET /api/v1/issues/{key}/decisions` serves that view - the document's `dispatch://` address (null, with no decisions, when the issue has no `decisions.md`), the issue's open asks whose block is in its spec in the shape every ask read has, and each decision in document order with its links read through `refs.BlockLinks`, the read `GET /api/v1/block-links` already serves.
+`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (a person's) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
+the sum is the decision's own `text_sha256`, which the view serves beside its `text`, and a decision whose text changed since is `409 DECISION_CHANGED` with nothing written, as an answer to an ask reworded since is `409 ASK_EDITED` - a Keep over text nobody read is what Keep exists to prevent - while a body with no sum is `400 INVALID_KEEP`.
+Keep records that the decision has been reviewed and not who reviewed it, so a second person's Keep moves the row, and the row holds that sum beside the version the decision then stood at.
+The sum, not the version, is what the view's `waiting_review` compares - an agent's decision, not replaced, whose text no Keep holds as it stands - since a decision's changed version is the greatest of the blocks it holds now and so does not move when a block is removed from the decision or moved into or out of it, where the text changes and every remaining block keeps its version.
+The document Keep takes is its issue's `decisions.md` resolved as the view resolves it, by slug and then by filename; any other document, and any other block - one that is no decision heading, or a decision under `## Replaced` - is `404 TARGET_NOT_FOUND`.
+It appends `decision.kept` (`{artifact_id, block_id, changed_version}`) on the decision's issue, which wakes nobody (`events.Quiet`): a Keep asks its agent for nothing.
+`GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, and announce nothing.
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
 `itemblocks.Split` reads a body as the document parser reads a document (`pmdoc.ParseWithSourceStarts`) and cuts it at its top-level blocks, each block the body's own text from the start of the line where it starts to where the next one starts, less the spaces, tabs and line endings that end it, so its stored text, its excerpt and its identity are what its author wrote, never the canonical rendering.
@@ -2168,10 +2188,19 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - Two candidates' verdicts can both hold, their approved versions straddling a block's absence; should two pass, nothing is carried rather than one guessed.
   The carry writes an `approved` review pinned to N in the approval's own actor, `reason` `Carried forward from the approval of version <A>: the answer to a decision block was the whole change since it.`, and `artifact.approved`, ahead of the version's own `artifact.version`;
   an approval request open at the carry is answered first, `Approve` in H's name with that reason as its text (`update asks`, `ask.answered` with H's actor), and the review's `ask_id` names it, null otherwise.
-  A version holding no ask block carries nothing and reads nothing more;
-  one holding no answered block, or holding every block as A held it - an answered block the agent deleted and inserted again, whose row stayed answered, is no change of his - carries nothing, whatever a comparison would say.
-  An edit outside the blocks before the answer, an approval by someone else only, H's latest review requesting changes, a newer `changes_requested` by another person, a block added since A left open or resolved, a block A held open that another person answered since (or that was resolved since), a block A held that the agent removed, an agent's reword of a decided block or a selection forged onto one landing in the version his answer writes (the version settlement then writes the row back into is compared on its own), an approved version that showed a decided block other than its row (a reword or a selection the human approved inside the settle window, before settlement wrote the row back), a block he answered deleted and inserted again, whether A held it or not, two people's answers in one version, a copy's document when its source is answered, and a copy planted in the document since A (answered in H's name through its source, but no row of this document's) all carry nothing, and the approval reads `stale` or `changes_requested` as before;
+  A version holding no ask block carries nothing by the answer and reads no row;
+  one holding no answered block, or holding every block as A held it - an answered block the agent deleted and inserted again, whose row stayed answered, is no change of his - carries nothing by the answer, whatever a comparison would say.
+  An edit outside the blocks before the answer, an approval by someone else only, H's latest review requesting changes, a newer `changes_requested` by another person, a block added since A left open or resolved, a block A held open that another person answered since (or that was resolved since), a block A held that the agent removed, an agent's reword of a decided block or a selection forged onto one landing in the version his answer writes (the version settlement then writes the row back into is compared on its own), an approved version that showed a decided block other than its row (a reword or a selection the human approved inside the settle window, before settlement wrote the row back), a block he answered deleted and inserted again, whether A held it or not, two people's answers in one version, a copy's document when its source is answered, and a copy planted in the document since A (answered in H's name through its source, but no row of this document's) all carry nothing by the answer, and the approval reads `stale` or `changes_requested` as before unless the version's text is the approved text (the restore, below);
   a stored version this release's parser or renderer refuses (`pmdoc.ErrSchema`) is logged at WARN and carries nothing rather than failing the version write.
+
+- The carry's second rule is the restore (`restoresApprovedText`), which runs when the answer carries nothing, and alone on the one route that writes a later document version outside `writeVersionTx`, an upload replacing a document (`storeArtifact` calls `docs.CarryRestoredApproval` after `MoveApprovalAsk`; an upload writes no answer, since the server takes a block's server-owned attributes off it):
+  a version whose stored markdown is byte for byte that of the version the document's newest review approved, A - an accidental edit undone exactly, or a version a route wrote over a document that changed nothing - and whose every ask block is as its row has it (`askNodes` and `rowBackedBlocks` over the version's own tree, the upload's read-back on that route, read only once the bytes match) carries that approval, since it holds nothing its reviewer has not agreed to.
+  The row test is what the bytes cannot say: a block A showed open that someone answered since comes back in A's bytes, showing open, while its row holds that answer, which settlement writes into the next version, so it carries nothing, and an approval request open then stays open.
+  Only the newest review carries so: a newest `changes_requested` leaves no approval standing, and an older approval was superseded by the newest one.
+  Only a stored A of N's size is read (`octet_length`, which reads a stored text's size without decompressing it), so the write of any other text reads no document.
+  A's markdown is compared as it was stored, so a renderer change between A and N leaves N a change, as N's diff against A shows, and a version whose decision blocks differ from A's is the answer carry's alone to judge.
+  The restore writes the review, the event and the request's answer the answer carry writes, with `reason` `Carried forward from the approval of version <A>: this version's text is that version's, unchanged.`, whose opening is the daemon's `intake.CarriedApprovalReasonPrefix`, so the restored approval queues no parked root and reopens a design gate as a carried approval does;
+  the write that restores supersedes no approval, so its advice carries no `superseded_approval`.
 
 - Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id` and `seq`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it);
   `at` is the review's `created_at`, which its event shares, and `seq` that event's sequence on the document's owner, absent for a review recorded before migration 0120 and on every read the release before it serves during a rollout or a rollback, so a missing `seq` does not prove an older review:
@@ -2182,7 +2211,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
 
 - Every read that picks a document's newest review orders by the order the reviews' events committed, `docs.ReviewOrder` (`event_seq desc nulls last, created_at desc, artifact_reviews.id desc`, the table's `id` rather than the `id::text` output column a bare `id` would name):
-  the document read's `approval` (`attachApprovals`, one `distinct on (artifact_id)` over the set), its `reviews` list (`loadReviews`), `docs.LatestApprovedReview` (the approval an approval request names as the one it follows), `latestReviewBy` (a carry candidate's latest review) and `docs.NewestReview` (the review a document write's `superseded_approval` advice reads).
+  the document read's `approval` (`attachApprovals`, one `distinct on (artifact_id)` over the set), its `reviews` list (`loadReviews`), `docs.LatestApprovedReview` (the approval an approval request names as the one it follows), `latestReviewBy` (a carry candidate's latest review) and `docs.NewestReview` (the review a document write's `superseded_approval` advice reads, and the one whose approval the carry must find standing and the restore carries).
   The last three take the first entry of the document's range in `artifact_reviews_by_artifact_event_seq` (migration 0120, that order per document) rather than sort its reviews, which `docs/review_order_plan_test.go` holds:
   it explains each query of `newestReviewQueries` and refuses a query constant of `docs/approval_review.go` that reads one row of the table and is not in that list.
   `created_at` is the review's transaction start, so two reviews written at once can carry it in the other order than they committed in, and the owner's row lock their events take is what orders them;
@@ -2386,7 +2415,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the source's previous projection, and every other source's, stays up.
   `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`.
 
-- Every sync runs under a two-minute deadline.
+- Every sync runs under a two-minute deadline of its own, counted from when its flight began rather than from when a caller arrived.
+  A flight runs on a context detached from whichever caller started it (`context.WithoutCancel`), so one caller hanging up fails none of the others.
+  Only the process stopping ends a flight early:
+  `Importer.Close`, which `cmd/dispatch/main.go` runs inside the shutdown's background wait, before `waitUntilIdle` and `pool.Close`, cancels every flight and waits for it.
   `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing.
   What orders writes across processes is the source row's version, PostgreSQL's `xmin`, which a sync loads (as text) with the row before its fetch:
   every write of the row by any build changes it
@@ -2396,7 +2428,12 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A re-resolved installation id is written only on the row as loaded (`xmin` unchanged), and the sync carries that write's `xmin` on.
   Writes are thus ordered by when each sync read the branch head, never by commit date:
   a process held mid-fetch never records an older head, or a failure it met, over another process's newer import, and a force-push back to an older commit still imports.
-  The per-project mutex only saves duplicate GitHub fetches inside one process.
+  The callers of one source, one project's one repository, share one flight (`singleflight` keyed on both), so two Refresh clicks cost one set of GitHub calls.
+  No lock is held across a GitHub call, so a slow source holds up no other source, of its project or of any other.
+  A caller takes a flight's answer only when that flight issued its branch-head lookup no earlier than the moment the caller asked.
+  Otherwise it joins the next flight, which necessarily began after it asked (`singleflight` deletes the key before it sends a result), so a push followed by a Refresh is never answered the pre-push commit.
+  Every import failure is recorded on the source row whatever its callers did, the sync's own deadline included, which is written on a cancel-free context;
+  only the process stopping suppresses that record.
   A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event);
   a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting
   — so a caller looping a sync route is bounded to the head lookups.
@@ -2413,8 +2450,6 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`.
   `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`);
   every other source's components stay, and snapshots remain as history.
-  A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context);
-  a caller that has gone away records nothing.
   The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent;
   a sync held by a recorded GitHub rate limit fails with text that names the limit by when it was recorded, never by its remaining wait, so one limit is one `sync_failed`.
   A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
@@ -3227,7 +3262,7 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   nats-server answers the refused publish with API error 10077 (`JSStreamStoreFailedF`) `maximum bytes exceeded`, which nats.go returns as `nats: maximum bytes exceeded` and the bus wraps as `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`;
   `publishJetStream` and a window's send, `streamFull`).
   It is not a `bus.ErrRefused`, so every publisher treats it as a failure to retry:
-  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (five times, over about half an hour);
+  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt);
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
@@ -3857,7 +3892,8 @@ The row holds a SHA-256 of the method, the route pattern, its path values, the q
   While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`, so a handler that runs past its limit holds its key one lease longer at most.
   A client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its stored answer, and only a run whose process died is taken over.
   A handler cut off with its client would roll its transactions back and leave every retry to start over, so a write that takes the server longer than the client waits could never land.
-  Every handler that reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync` among them.
+  Every handler that reads `r.Context()` for its work gets this detached context.
+  The architecture importer's `Sync` detaches one of its own from it (the importer section above), so the flight it shares outlives the caller that started it and ends only when the process stops.
 
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it.
   A 2xx or a 4xx is stored and the row finished in one statement;
