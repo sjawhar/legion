@@ -313,6 +313,7 @@ var idRoutes = map[string]idRoute{
 	"GET /api/v1/handoffs/{id}":                     {Reason: "a handoff id: one phase's record on an issue"},
 	"POST /api/v1/machine-logins/{id}/revoke":       {Reason: "a machine login id"},
 	"DELETE /api/v1/me/agent-tokens/{id}":           {Reason: "a personal agent token id"},
+	"PATCH /api/v1/me/agent-tokens/{id}":            {Reason: "a personal agent token id"},
 	"PUT /api/v1/me/threads/{id}/read":              {Reason: "a thread id: the root of a conversation, and no read of the message it names"},
 }
 
