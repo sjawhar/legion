@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -29,12 +31,13 @@ import (
 // `agent-secrets renew` was refused ENROLLMENT_NOT_LIVE and exited 76, and the pod was refused
 // every secret until it was relaunched. It runs the REAL broker binary twice on one database and
 // the REAL agent-secrets binary, with one local OIDC issuer standing in for the cluster's token
-// issuer the whole time, and a lease of 45 seconds, a sweep of one and no drain. Both brokers are
-// reached at one address a TCP forwarder the test owns holds across the restart, as a Service's
-// is: BROKER_PUBLIC_URL and AGENT_SECRETS_URL both name it, so a proof's htu is as good after the
-// restart as before, and while no broker runs the forwarder refuses every connection at once. The
-// outage runs from the first broker's exit until a lease, the three sweeps the broker tolerates
-// between two records that it serves, and the renewer's longest retry wait have all passed.
+// issuer the whole time, at a sweep of one second, the shortest lease config.Load accepts at that
+// sweep, and no drain. Both brokers are reached at one address a TCP forwarder the test owns
+// holds across the restart, as a Service's is: BROKER_PUBLIC_URL and AGENT_SECRETS_URL both name
+// it, so a proof's htu is as good after the restart as before, and while no broker runs the
+// forwarder refuses every connection at once. The outage runs from the first broker's exit until
+// a lease, the three sweeps the broker tolerates between two records that it serves, and the
+// renewer's longest retry wait have all passed.
 //
 // Four pods of one service, enrolled by its launcher and granted its agent-tier secret with no
 // approver, prove one thing each. The survivor is the outage itself: keyed by `agent-secrets
@@ -62,16 +65,20 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		otherAccount = "system:serviceaccount:example:example-other-worker"
 		secretName   = "OUTAGE_TOKEN"
 		secretValue  = "outage-token-value"
-		// lease is BROKER_LEASE_SECONDS. A renewer renews once a third of it has passed, so a pod
-		// that renews holds at least two thirds of it.
-		lease = 45 * time.Second
-		// notServing is the longest gap between two records that a broker serves which still
-		// counts as one serving: three sweeps of BROKER_SWEEP_SECONDS=1.
-		notServing = 3 * time.Second
-		// renewerLongestWait is agent-secrets renew's longest wait between two failed attempts
-		// (nextBackoff's cap), so a renewer whose broker is back renews within it.
-		renewerLongestWait = 10 * time.Second
 	)
+	// sweep is BROKER_SWEEP_SECONDS and lease is BROKER_LEASE_SECONDS: the shortest lease that
+	// outlives a gap no broker gives back and the retries its renewer then takes, which is what
+	// config.Load refuses below (internal/broker/leasetime). Both are rendered into the
+	// environment below, so this pair cannot drift from that refusal again. A renewer renews
+	// once a third of the lease has passed, so a pod that renews holds at least two thirds of it.
+	sweep := time.Second
+	lease := leasetime.Production().Shortest(sweep)
+	// notServing is the longest gap between two records that a broker serves which still
+	// counts as one serving: leasetime.NotServingSweeps sweeps.
+	notServing := leasetime.NotServingSweeps * sweep
+	// renewerLongestWait is agent-secrets renew's longest wait between two failed attempts
+	// (nextBackoff's cap), so a renewer whose broker is back renews within it.
+	renewerLongestWait := leasetime.RenewBackoffMax
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	fakeSecrets := `{"secrets": [
 		{"name": "` + testSecretsPrefix + `outage-token", "kms_key_id": "` + testSecretsKMSKeyARN + `", "tags": {"owner": "` + service + `", "tier": "agent"}, "value": "` + secretValue + `"}
@@ -93,8 +100,8 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
 		"BROKER_SERVICE_LOGINS=" + service + "=" + loginAccount,
 		"BROKER_SERVICES=" + service + "=" + podAccount,
-		"BROKER_LEASE_SECONDS=45",
-		"BROKER_SWEEP_SECONDS=1",
+		"BROKER_LEASE_SECONDS=" + strconv.Itoa(int(lease/time.Second)),
+		"BROKER_SWEEP_SECONDS=" + strconv.Itoa(int(sweep/time.Second)),
 		"BROKER_DRAIN_SECONDS=0",
 	}
 	serve := func() *brokerProcess {
@@ -200,7 +207,7 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 	// but renewed at least five seconds ago, between two of its renewals. The time given back
 	// restores the lease the survivor held at the first broker's last record that it served, at
 	// most one sweep before the stop, so the restored survivor holds at least two thirds of a
-	// lease, 30 s, less one beat, and its renewer, whose longest retry wait is 10 s, renews well
+	// lease less one beat, far more than its renewer's longest retry wait, and it renews well
 	// inside that. And the lease given back runs at least four seconds short of a whole one from
 	// the restart, which is what tells the renewer's own renewal after the restart from it.
 	t.Log("--- the outage: the broker is stopped between two of the survivor's renewals")

@@ -775,7 +775,12 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       { queryKey: ["artifacts", key] },
       { queryKey: ["comments", key] },
       // A reference to one of the issue's documents shows its name, kind and latest version.
-      issueSummaryOf(key, event)
+      issueSummaryOf(key, event),
+      // A version of the spec moves which requirements it marks and what serves them, and a
+      // version of the Verification document moves which checks there are: the two reads hang
+      // under the issue's key but are named here, since every issue target is `exact`.
+      { exact: true, queryKey: ["issue", key, "coverage"] },
+      { exact: true, queryKey: ["issue", key, "results"] }
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
@@ -802,6 +807,19 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
         { queryKey: ["ask", event.payload.ask_id] },
         { queryKey: ["ask-thread", event.payload.ask_id] }
       );
+    }
+    return targets;
+  }
+  // A result is recorded against a check of this issue's Verification document, by the issue the
+  // payload names, which is this one only when the result was recorded here. Both issues' results
+  // reads move: the check's issue lists the new result under its check, and the recording issue
+  // lists the results it recorded. Nothing else reads a result — no document, ask, inbox or
+  // issue detail carries one — and this switch has a default, so the branch is deliberate and
+  // its test pins it.
+  if (event.type === "result.recorded") {
+    targets.push({ exact: true, queryKey: ["issue", key, "results"] });
+    if (event.payload.issue !== key) {
+      targets.push({ exact: true, queryKey: ["issue", event.payload.issue, "results"] });
     }
     return targets;
   }
