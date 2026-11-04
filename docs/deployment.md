@@ -624,6 +624,7 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `github_apps.<app>.private_key` | rebuild | `github-apps` |
 | `github_apps.<app>.private_key_command` | rebuild | `github-apps` |
 | `github_apps.<app>.private_key_secret` | rebuild | `github-apps` |
+| `github_apps.<app>.token_command` | rebuild | `github-apps` |
 | `github_apps.implement` | rebuild | `github-apps` |
 | `github_apps.review` | rebuild | `github-apps` |
 | `instructions` | launch | `launch-specs` |

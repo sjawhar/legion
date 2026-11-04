@@ -223,6 +223,10 @@ var Classes = []Row{
 	{Field: "GitHubApp.PrivateKey", Path: "github_apps.<app>.private_key", Class: ClassRebuild, Holder: HolderGitHubApps, Secret: true},
 	{Field: "GitHubApp.PrivateKeyCommand", Path: "github_apps.<app>.private_key_command", Class: ClassRebuild, Holder: HolderGitHubApps, Secret: true},
 	{Field: "GitHubApp.PrivateKeySecret", Path: "github_apps.<app>.private_key_secret", Class: ClassRebuild, Holder: HolderGitHubApps, Secret: true},
+	// The fourth source of an App's credential, for a deployment whose keys only a secrets broker
+	// holds: the manager runs it for a token, so a change of it rebuilds the manager as the three
+	// key sources do.
+	{Field: "GitHubApp.TokenCommand", Path: "github_apps.<app>.token_command", Class: ClassRebuild, Holder: HolderGitHubApps, Secret: true},
 
 	// Read when a pod or a pane launches: the runtime and the launch specs hold them, and the
 	// change reaches a role at its next launch.

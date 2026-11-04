@@ -669,6 +669,10 @@
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
+    "github_apps.\u003capp\u003e.token_command": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
     "github_apps.implement": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
