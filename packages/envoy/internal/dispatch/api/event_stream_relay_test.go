@@ -254,8 +254,10 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 // head, above every new id, so its relay takes the new log's b for its cursor at once while a is
 // open, and a subscription made after that reset is never sent a when it commits, though it is sent
 // the event after it. With the horizon forgotten, the relay's new cursor waits for a to end. A
-// subscription made meanwhile finds the relay still on the old cursor, so it hands over only once
-// the relay has reset, and is sent a, which committed after it subscribed, below that new cursor.
+// subscription made meanwhile finds the relay still on the replaced log and fixes the id it starts
+// from below a (feedEvents, eventLogUnbrokenThrough: a is open, so the new log is unbroken through
+// nothing), hands over only once the relay has reset, and is sent a first -- an event that
+// committed after its start was fixed, and so one it may not be left without.
 func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
@@ -298,12 +300,30 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	case <-time.After(eventFeedWait):
 		t.Fatalf("B's relay did not find the replaced log within %s", eventFeedWait)
 	}
-	// This subscription hands over only once the relay's reset, which waits for a, has run, so it
-	// subscribes first, and a commits once the relay holds it.
+	// This subscription finds B's relay on the replaced log and fixes the id it starts from while
+	// a is open. B says when it has (feedReplacedStart), which is the moment a may commit: the
+	// subscriber count alone is a round trip or two early, and a that commits in that window is
+	// one the subscription is owed but starts above.
+	startFixed := make(chan int64, 1)
+	var startOnce sync.Once
+	fixStart := func(from int64) { startOnce.Do(func() { startFixed <- from }) }
+	secondServed.feedReplacedStart.Store(&fixStart)
 	waiting := dial()
 	sendEventsSubscribe(t, waiting, "events", nil)
-	pollUntil(t, eventFeedWait, "the waiting subscription reaches B's relay",
-		func() bool { return secondServed.eventRelay.stream.SubscriberCount() >= 2 })
+	var start int64
+	select {
+	case start = <-startFixed:
+	case <-time.After(eventFeedWait):
+		t.Fatalf("the subscription made while %d was open did not find B's relay on the replaced log within %s: B's relay took a cursor of the new log without waiting for the writes open at the reset", low, eventFeedWait)
+	}
+	if start >= low {
+		t.Fatalf("that subscription starts at %d, at or above the open %d: a start must leave every event that can still commit above it", start, low)
+	}
+	// B's relay stands on the old log's cursor while a is open: the horizon it forgot at the reset
+	// is proven afresh only once every write open then has ended.
+	if cursor, _ := secondServed.eventRelay.at(); cursor != head {
+		t.Fatalf("B's relay publishes through %d while %d is open; want the old log's head %d, which its reseed holds until the reset's writes have ended", cursor, low, head)
+	}
 	commitLow()
 	renameIssue(t, first, issue.Key, "Renamed after the reset")
 
@@ -324,10 +344,12 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 			t.Fatalf("frame = %+v, want the events subscription's end", frame)
 		}
 	}
-	// The subscription made while a was open is sent it first.
-	eventsStartID(t, waiting, "events")
+	// The subscription that fixed its start while a was open starts there and is sent a first.
+	if from := eventsStartID(t, waiting, "events"); from != start {
+		t.Fatalf("that subscription's events_start names %d; want the %d it fixed while %d was open", from, start, low)
+	}
 	if id := mustEventFrameID(t, waiting.event(t, eventFeedWait, "events")); id != low {
-		t.Fatalf("the subscription made while %d was open was sent event %d first, want %d, which committed after it subscribed", low, id, low)
+		t.Fatalf("the subscription that starts at %d was sent event %d first, want %d, which committed after its start was fixed", start, id, low)
 	}
 
 	// And a subscription made now is served the new log.

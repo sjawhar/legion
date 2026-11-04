@@ -378,6 +378,16 @@ type server struct {
 	// the event log replaced and before it waits for a horizon of the new one (resetCursor). Nil
 	// outside tests.
 	relayFoundReset func()
+	// feedReplacedStart runs once an events subscription that found the relay still on the
+	// replaced log has read the id it starts from (feedEvents, eventLogUnbrokenThrough), with
+	// that id: from then on no event can commit at or below that subscription's start, which is
+	// the moment a test of what such a subscription is owed has to write in. Unset outside tests.
+	//
+	// It is an atomic pointer because a test sets it while this server's other subscriptions are
+	// running and every subscription reads it: a plain field is a data race the detector reports
+	// against whatever test is running beside it (as the compaction queue's hooks are,
+	// internal/dispatch/docs/compaction_queue.go).
+	feedReplacedStart atomic.Pointer[func(from int64)]
 	// callerResolved, when a test sets it before the socket it drives opens, runs each time a
 	// connection that outlives its request has resolved its caller again (whileCallerResolves),
 	// so a test that proves such a socket outlives its re-resolutions waits for them rather than

@@ -130,6 +130,13 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 				s.endEventsAfterFailure(ctx, stream, sub, "read the event log's unbroken ids", err)
 				return
 			}
+			// A test of what a subscription made on the replaced log is owed commits its event
+			// after this read, which is where that subscription's start is fixed; the hook is
+			// how it knows the read is done, rather than resting on a span of time or on the
+			// relay subscription a round trip before it. Unset outside tests.
+			if fixed := s.feedReplacedStart.Load(); fixed != nil {
+				(*fixed)(replacedFrom)
+			}
 		}
 		signal(s.eventRelay.wake)
 		// Whatever the relay publishes before its reset check is a position in the old log, so it

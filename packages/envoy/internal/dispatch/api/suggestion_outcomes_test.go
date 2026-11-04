@@ -2,11 +2,16 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -663,6 +668,186 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	}
 	if again := suggestionOutcomeAt(t, srv, source, target); judged == nil || again == nil || !again.Equal(*judged) {
 		t.Fatalf("the suggestion was judged at %v and again at %v; want one judgement", judged, again)
+	}
+}
+
+// A pass reads the log and moves its cursor at once while a transaction in another database of
+// the same Postgres instance holds a transaction id. The pass caps its page at a writer floor
+// (suggestionOutcomeFloor, events.Horizon.WriterFloor), not at the safe horizon. Both are an id
+// every event at or below which is final, which is all a page needs (judgeSuggestionPage); they
+// differ only in what they wait on. The horizon is proven from pg_snapshot_xmin, the oldest
+// transaction id running anywhere on the instance (internal/dispatch/events, horizon.go), so an
+// open transaction in any database on it - another service's write, an operator's psql session,
+// a `create database ... template`, another package's test - holds it back, and a process whose
+// horizon has proven nothing yet, as one just started has, can only await it: the whole hold,
+// with every judgement the sweep owes behind it. The floor counts only the transactions that
+// hold a write lock on this database's events (oldestEventWriterSQL), which are the only ones
+// that can hold an id of this log open, so a mark taken now counts at once and the pass answers
+// under a hold of any length.
+func TestTheSuggestionSweepDoesNotWaitOnATransactionInAnotherDatabase(t *testing.T) {
+	// No t.Parallel: holdClusterTransactionID below holds a transaction id on the whole Postgres
+	// instance for thirty seconds, which keeps every horizon on it from being proven
+	// (internal/dispatch/events, horizon.go), and this test bounds how long one pass takes.
+	ctx := t.Context()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	// srv's is the one events.Horizon of a process that has just started: nothing proven and no
+	// observation taken, as the server's is on its boot pass.
+	srv := directServer(deps)
+	createSuggestionProject(t, handler, "OELSEWHERE")
+	target := createOutcomeIssue(t, handler, "OELSEWHERE", "Target issue")
+	postOutcomeMessage(t, handler, target, "alice", "A message on the target issue.")
+	newest := lastEventID(t, database)
+	if cursor := outcomeCursor(t, database); cursor != nil {
+		t.Fatalf("cursor = %d before any pass has run; want it null, so this pass is a just-started process's first", *cursor)
+	}
+
+	holdClusterTransactionID(t, 30*time.Second)
+	schedule := suggestionSchedule{minGap: time.Second, settle: time.Minute, page: suggestionOutcomePage}
+	began := time.Now()
+	if _, err := suggestionOutcomePass(ctx, database.Pool, &suggestionOutcomeFloor{horizon: srv.horizon()}, schedule); err != nil {
+		t.Fatalf("the pass run while another database holds a transaction id: %v", err)
+	}
+	if waited := time.Since(began); waited > 5*time.Second {
+		t.Fatalf("the pass took %v while another database held a transaction id for thirty seconds; want a pass that waits on no transaction of another database", waited)
+	}
+	switch cursor := outcomeCursor(t, database); {
+	case cursor == nil:
+		t.Fatalf("the cursor is unset after a pass run while another database held a transaction id; want it at %d, the newest event, which the floor bounds though no horizon is proven", newest)
+	case *cursor != newest:
+		t.Fatalf("cursor = %d after that pass; want %d, the newest event: the floor the pass read bounds the log where the horizon it could only await does not", *cursor, newest)
+	}
+}
+
+// No prepared transaction of this database can hold an event id, and the floor stays below one
+// that holds the lock an insert takes anyway.
+//
+// PREPARE TRANSACTION keeps a transaction, its locks and its right to commit, but leaves it no
+// backend, and pg_locks lists its locks with a null pid. So the arm of oldestEventWriterSQL that
+// joins a lock on events to its holder's transactionid lock on pid matches nothing for a
+// prepared transaction, and a floor read from that arm alone would count a mark while one could
+// still commit an event below it. Two things close that gap, and this test is both halves.
+//
+// Postgres refuses to prepare a transaction that has executed NOTIFY, and the trigger on every
+// insert into events notifies dispatch_events (migration 0107), so a transaction that has drawn
+// an event id cannot be prepared at all: the first half. And the floor's second arm counts every
+// prepared transaction of this database straight from pg_prepared_xacts, whatever it holds, so
+// one holding the RowExclusiveLock an insert takes keeps every mark the reader has from counting
+// and leaves the floor at the horizon already proven: the second half, which is what would hold
+// were a later schema to insert an event without notifying.
+//
+// The server has to allow prepared transactions: with max_prepared_transactions at 0, the stock
+// Postgres image's setting, none can be prepared and the test has no subject.
+func TestNoPreparedTransactionHoldsAnEventIDAndTheFloorTrailsOneAnyway(t *testing.T) {
+	// No t.Parallel: this test leaves a prepared transaction on the Postgres instance across the
+	// floor's statements, which holds the instance-wide safe horizon back for every test beside
+	// it.
+	ctx := t.Context()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	srv := directServer(deps)
+	var allowed int
+	if err := database.Pool.QueryRow(ctx, `select current_setting('max_prepared_transactions')::int`).Scan(&allowed); err != nil {
+		t.Fatalf("read max_prepared_transactions: %v", err)
+	}
+	if allowed == 0 {
+		t.Skip("this Postgres server runs with max_prepared_transactions = 0 and can prepare no transaction")
+	}
+	createSuggestionProject(t, handler, "OPREPARED")
+	target := createOutcomeIssue(t, handler, "OPREPARED", "Target issue")
+	other := createOutcomeIssue(t, handler, "OPREPARED", "Other issue")
+	// A connection of this test's own: PREPARE TRANSACTION ends the session's transaction and
+	// leaves it on the server, which no connection handed back to the pool may be left in.
+	config := database.Pool.Config().ConnConfig.Copy()
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect to prepare a transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	gid := "dispatch-floor-" + config.Database
+
+	// A transaction that has appended an event cannot be prepared: its insert notified.
+	appended, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that appends an event: %v", err)
+	}
+	held, err := deps.Events.Append(ctx, appended, model.Event{
+		IssueKey: new(target),
+		Type:     "test.prepared",
+		Actor:    model.Actor{Kind: "session", ID: "seed"},
+		Payload:  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("append the event the transaction holds: %v", err)
+	}
+	switch _, err := appended.Exec(ctx, fmt.Sprintf(`prepare transaction '%s'`, gid)); {
+	case err == nil:
+		_, _ = database.Pool.Exec(context.Background(), fmt.Sprintf(`rollback prepared '%s'`, gid))
+		t.Fatalf("a transaction holding event %d was prepared; want Postgres to refuse it, since the insert's trigger notified dispatch_events", held.ID)
+	case !strings.Contains(err.Error(), "LISTEN, UNLISTEN, or NOTIFY"):
+		t.Fatalf("preparing a transaction holding event %d failed with %v; want the refusal of a transaction that has notified", held.ID, err)
+	}
+	if err := appended.Rollback(ctx); err != nil {
+		t.Fatalf("roll back the transaction that could not be prepared: %v", err)
+	}
+
+	// The horizon this process has proven, which is the floor's only bound once no mark counts.
+	proven := safeHorizon(t, srv)
+	if proven == 0 {
+		t.Fatalf("no horizon is proven before the transaction below is prepared; this test could not tell the floor's fallback from a mark it took")
+	}
+	// A prepared transaction holding the lock an insert takes on events, and its transaction id,
+	// as a writer holds both (the writer invariant, events.Broker.Append).
+	locking, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction to prepare: %v", err)
+	}
+	if _, err := locking.Exec(ctx, `select pg_current_xact_id()`); err != nil {
+		t.Fatalf("take the prepared transaction's id: %v", err)
+	}
+	if _, err := locking.Exec(ctx, `lock table events in row exclusive mode`); err != nil {
+		t.Fatalf("lock events as an insert does: %v", err)
+	}
+	if _, err := locking.Exec(ctx, fmt.Sprintf(`prepare transaction '%s'`, gid)); err != nil {
+		t.Fatalf("prepare the transaction holding the lock on events: %v", err)
+	}
+	resolved := false
+	t.Cleanup(func() {
+		if resolved {
+			return
+		}
+		if _, err := database.Pool.Exec(context.Background(), fmt.Sprintf(`rollback prepared '%s'`, gid)); err != nil {
+			t.Errorf("roll back the prepared transaction %q, which would otherwise stay on the server: %v", gid, err)
+		}
+	})
+	// An event commits while it is prepared, so the mark the floor takes sees a newest id above
+	// the horizon already proven: a floor that counted that mark would stand above an id a
+	// writer of this database could still be holding.
+	postOutcomeMessage(t, handler, other, "alice", "Unrelated progress on another issue.")
+	newest := lastEventID(t, database)
+	if newest <= proven {
+		t.Fatalf("the newest committed id is %d, not above the proven horizon %d: this test proves nothing", newest, proven)
+	}
+
+	floor := &suggestionOutcomeFloor{horizon: srv.horizon()}
+	read, gap, err := floor.read(ctx)
+	if err != nil {
+		t.Fatalf("read the floor while a prepared transaction holds the lock on events: %v", err)
+	}
+	if read != proven {
+		t.Fatalf("the floor is %d while a prepared transaction holds the lock an insert takes on events; want the horizon %d already proven, the only bound left while no mark counts", read, proven)
+	}
+	if !gap {
+		t.Fatalf("the floor %d reports no id above it while the log holds %d; want the pass told it read less than the log holds", read, newest)
+	}
+
+	if _, err := database.Pool.Exec(ctx, fmt.Sprintf(`rollback prepared '%s'`, gid)); err != nil {
+		t.Fatalf("roll back the prepared transaction: %v", err)
+	}
+	resolved = true
+	switch read, _, err := floor.read(ctx); {
+	case err != nil:
+		t.Fatalf("read the floor once the prepared transaction has ended: %v", err)
+	case read < newest:
+		t.Fatalf("the floor is %d once the prepared transaction has ended; want it at %d, the newest committed id, which nothing holds open any more", read, newest)
 	}
 }
 
