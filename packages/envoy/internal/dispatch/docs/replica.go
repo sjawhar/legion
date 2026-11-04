@@ -709,13 +709,18 @@ func (s *Service) keepReplica(live *crdt.Doc, log *crdt.UpdateLog, loaded *repli
 // the update observer waits for it, and in the moment between a commit and the observer that
 // classifies it. A copy taken because the room has committed nothing since it loaded starts the
 // replica instead of being thrown away (startFromRead), so a room read and never written is
-// copied once rather than once a read. A read never waits for the replica's lock: the update
+// copied once rather than once a read. A read never waits for the replica's lock here: the update
 // observer takes it for each peer update before ygo broadcasts the update to the room's other
 // browsers, so a read queued behind it would stall their keystrokes for its walk, and every read
-// queued behind that one too. It opens no transaction on live, since ygo hands the room's
-// persistence an update for every transaction it commits, even one that only reads. The caller
-// must not hold live's document lock - be inside a Yjs transaction on it - since the copy encodes
-// under that lock, and read must not keep doc past its return.
+// queued behind that one too. The one read that waits for that lock is a read of a room behind
+// the stored head, which lists the room's not-yet-stored updates before it merges them into the
+// stored document (unstoredSnapshot through observeRoomUpdates, storedWithUpdates): it takes the
+// lock as the observer does, for one drain of the room's update log and the renders that drain
+// classifies, and then it is a read of the store rather than of the room. It opens no transaction
+// on live, since ygo hands the room's persistence an update for every transaction it commits,
+// even one that only reads. The caller must not hold live's document lock - be inside a Yjs
+// transaction on it - since the copy encodes under that lock, and read must not keep doc past
+// its return.
 func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
 	doc, release, err := s.holdLive(room, live)
 	if err != nil {

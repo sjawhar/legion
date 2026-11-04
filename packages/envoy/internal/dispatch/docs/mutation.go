@@ -935,13 +935,14 @@ func (s *Service) readDocument(ctx context.Context, artifactID string) (*documen
 
 // heldTree is the tree of the document where this server holds it, once a failed room's recovery
 // is done: the calling transaction's fork's when it has one (joinRead), else the resident room's,
-// as of one moment (liveTree). held is false where neither holds it. It is never older than the
-// stored head, read after joinRead and before the room (readStoredHead): a resident room behind
-// that head - another process stored an update its catch-up has not applied yet - is read from
-// the store instead (storedTree), which does not fail the room, sound and only behind; the read
-// waits for no catch-up. A room behind the head that holds an update of its own the store has
-// not taken is read from the room all the same (storeHoldsTheRoom): the stored document is
-// missing that update, and no read takes back text the room has already sent its browsers.
+// as of one moment (liveTree). held is false where neither holds it. It is older than neither the
+// stored head, read after joinRead and before the room (readStoredHead), nor the room: a resident
+// room behind that head - another process stored an update its catch-up has not applied yet - is
+// read as the stored document merged with the updates only that room holds (storedWithUpdates),
+// which does not fail the room, sound and only behind; the read waits for no catch-up. The merge
+// is what keeps such a read from going backwards: the stored document at that head is missing the
+// room's own update whose append is still in flight, and no read takes back text the room has
+// already sent its browsers.
 func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.Node, held bool, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return nil, false, err
@@ -962,8 +963,12 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 	if err != nil {
 		return nil, false, err
 	}
-	if !s.roomHoldsHead(live, head) && s.storeHoldsTheRoom(artifactID, live) {
-		tree, err := s.storedTree(ctx, artifactID)
+	if !s.roomHoldsHead(live, head) {
+		unstored, err := s.unstoredShare(artifactID, live)
+		if err != nil {
+			return nil, false, err
+		}
+		tree, err := s.storedWithUpdates(ctx, artifactID, unstored)
 		return tree, true, err
 	}
 	tree, err = s.liveTree(artifactID, live)
@@ -1875,17 +1880,30 @@ func (s *Service) captureWrite(ctx context.Context, tx pgx.Tx, room string, writ
 	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
 }
 
-// storedTree is the tree of artifactID's stored document at its head, for a version or a read
-// whose room stands behind that head (captureLiveTextAndAuthors, heldTree, docTree). It is read on
-// the pool that owns loads (LoadDocument), as a cold write's fork reads the stored document
-// (coldFork), never through the caller's transaction or a second connection of the shared pool. A
-// version's caller holds the document's advisory lock, so no append lands between the head it
-// compared against and this read; a read's holds nothing, and its load reads a head at or past
-// the one it compared against. A load that fails does not fail the room, where coldFork's does:
-// coldFork reads the store in place of a room, so its failure is the document's, while here the
-// room is sound and only behind, and its catch-up brings it to the head (roomCatchUps). The caller
-// answers ErrServiceUnavailable instead, and its caller retries.
+// storedTree is the tree of artifactID's stored document at its head, for a version whose room
+// stands behind that head (captureLiveTextAndAuthors, prevalidationTree with no room resident).
 func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
+	return s.storedWithUpdates(ctx, artifactID, nil)
+}
+
+// storedWithUpdates is the tree of artifactID's stored document at its head with unstored merged
+// into it: the updates a resident room behind that head holds that the store may not
+// (unstoredShare), which a read of such a room takes (heldTree, docTree) so that it is older than
+// neither the store nor the room - the store holds what another process committed, and the merge
+// holds the keystroke whose append is still in flight. The caller reads that share before this
+// load, so an append landing between the two only repeats here what the store already took. With
+// no such update this is the stored document itself, which is a version's (storedTree).
+//
+// It is read on the pool that owns loads (LoadDocument), as a cold write's fork reads the stored
+// document (coldFork), never through the caller's transaction or a second connection of the
+// shared pool, and the document it merges into is that load's own, which nothing else holds, so
+// no room is read or written here. A version's caller holds the document's advisory lock, so no
+// append lands between the head it compared against and this read; a read's holds nothing, and
+// its load reads a head at or past the one it compared against. A load that fails does not fail
+// the room, where coldFork's does: coldFork reads the store in place of a room, so its failure is
+// the document's, while here the room is sound and only behind, and its catch-up brings it to the
+// head (roomCatchUps). The caller answers ErrServiceUnavailable instead, and its caller retries.
+func (s *Service) storedWithUpdates(ctx context.Context, artifactID string, unstored []byte) (*pmdoc.Node, error) {
 	loaded, err := s.persistence.LoadDocument(ctx, artifactID)
 	if err != nil {
 		if errors.Is(err, ErrDocumentUnloadable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1896,6 +1914,11 @@ func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Nod
 	doc := loaded.Doc
 	if doc == nil {
 		doc = newDocumentCopy()
+	}
+	if len(unstored) > 0 {
+		if err := crdt.ApplyUpdateV1(doc, unstored, nil); err != nil {
+			return nil, fmt.Errorf("%w: merge a room's not-yet-stored updates into the stored document: %w", ErrServiceUnavailable, err)
+		}
 	}
 	return treeOf(doc)
 }

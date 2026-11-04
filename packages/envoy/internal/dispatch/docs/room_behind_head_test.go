@@ -1423,18 +1423,19 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 	}
 }
 
-// A read made inside an append's cursor window takes the room, not the stored document. The
-// window is the same one a write must not fork the store in (the test above): a browser's append
-// raises the head when it commits and takes that version into its room's cursor a moment later,
-// and a read compares the head it reads without the document's lock against that cursor
-// (heldTree, docTree), so inside the window it finds a healthy room one version behind the head.
-// The store at that head holds less than the room - the keystroke the room took while the append
-// was committing has not been appended yet - so a read that took the stored document would
-// answer without text the room has already sent the browser that typed it. That is how
-// TestDeleteColumnWithAListedColumnRemovesThatCell (package api) read a document holding only
-// its intro paragraph after a browser peer had added a table the room answered its sync with
-// (CI run 41548117572). The read takes the room instead (storeHoldsTheRoom), and once the room's
-// appends have landed it takes the store again.
+// A read made inside an append's cursor window answers with the room's own text, which the stored
+// document at that head does not hold. The window is the same one a write must not fork the store
+// in (the test above): a browser's append raises the head when it commits and takes that version
+// into its room's cursor a moment later, and a read compares the head it reads without the
+// document's lock against that cursor (heldTree, docTree), so inside the window it finds a healthy
+// room one version behind the head. The store at that head holds less than the room - the
+// keystroke the room took while the append was committing has not been appended yet - so a read
+// that took the stored document alone would answer without text the room has already sent the
+// browser that typed it. That is how TestDeleteColumnWithAListedColumnRemovesThatCell (package
+// api) read a document holding only its intro paragraph after a browser peer had added a table
+// the room answered its sync with (CI run 41548117572). The read merges what only the room holds
+// into the stored document instead (storedWithUpdates), so it holds both, and once the room's
+// appends have landed the stored document holds both by itself.
 func TestAReadInsideAnAppendsCursorWindowTakesTheRoom(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
