@@ -241,26 +241,27 @@ func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func
 }
 
 // offerPreload offers loaded, the durable state a cold socket's admission read for room, and
-// rendered, the tree it read from that state with what it rendered of that tree (whose rendering
-// is nil when the render failed for a reason other than the schema, which the room's load then
-// renders again), to the room's load (takePreload). The offer is decided under the room's state
-// record (lockState), where a load records that the room is loaded on this process (resident): a
-// preload is of use only until that load, so an offer to a room already loaded here is dropped on
-// the spot, holds nothing and leaves the socket's end nothing to withdraw, and an offer the load
-// overtakes is swept where it records itself (onLoadDocument). Of the offers to a room not yet
-// loaded the first stands (LoadOrStore): every offer is of a state the load checks against the
-// head before it takes it, and a socket whose offer lost keeps no reference to it, so its whole
-// history is released at once rather than when the socket ends, which can be hours later. It
-// returns what the socket's end runs: withdraw its own offer if no load took or swept it. An offer
-// that stands holds room's head-tracker entry (headTracker.hold) from before it is stored until a
-// load takes or sweeps it or the socket withdraws it, so the head the load checks it against is
-// one the tracker heard of while the offer stood, or else one read from the store. Exactly one
-// release ends that hold: a withdraw whose preload has gone finds the entry no longer its own
-// (CompareAndDelete) and releases nothing.
+// rendered, the tree it read from that state with what it rendered of that tree (whose rendering is
+// nil when the render failed for a reason other than the schema, which the room's load then renders
+// again), to the room's load (takePreload). A preload is of use only until its room is loaded on
+// this process, so an offer to a room loaded here, or one whose earlier load's unload has not
+// arrived yet (roomLoadedHere), is dropped on the spot, holds nothing and leaves the socket's end
+// nothing to withdraw. The offer is decided under the room's state record (lockState), where the
+// load that overtakes an offer stored before it counted itself sweeps that offer (onLoadDocument),
+// so an offer and a load that race leave no preload behind. Of the offers to a room not yet loaded
+// the first stands (LoadOrStore): every offer is of a state the load checks against the head before
+// it takes it, and a socket whose offer lost keeps no reference to it, so its whole history is
+// released at once rather than when the socket ends, which can be hours later. It returns what the
+// socket's end runs: withdraw its own offer if no load took or swept it. An offer that stands holds
+// room's head-tracker entry (headTracker.hold) from before it is stored until a load takes or
+// sweeps it or the socket withdraws it, so the head the load checks it against is one the tracker
+// heard of while the offer stood, or else one read from the store. Exactly one release ends that
+// hold: a withdraw whose preload has gone finds the entry no longer its own (CompareAndDelete) and
+// releases nothing.
 func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, rendered admissionRendering) (withdraw func()) {
 	preload := &preloadedDocument{loaded: *loaded, rendered: rendered}
 	state := s.lockState(room)
-	resident := state.resident
+	resident := s.roomLoadedHere(room)
 	var lost bool
 	if !resident {
 		s.heads.hold(room)

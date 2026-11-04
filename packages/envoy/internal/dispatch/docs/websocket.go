@@ -519,14 +519,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	open := !state.closed
 	state.residentBytes += int64(size)
 	s.residentBytes.Add(int64(size))
-	// The room is loaded on this record from here until it unloads (resident, releaseUnloadedRoom),
-	// so a socket's admission offers it no preload while it stands (offerPreload). A preload stored
-	// under the room's name is not this load's - LoadDoc's takePreload ran before any of this - so
-	// it is one no load of this room will ever use, and it is taken out here rather than left for
-	// the socket that offered it to withdraw hours later. Its hold on the room's head-tracker entry
-	// is released once this lock is dropped, so exactly one release ends it: the socket's withdraw
-	// finds the entry gone (CompareAndDelete) and releases nothing.
-	state.resident = true
+	// The room has counted itself loaded here since roomLoaded, above, and stays counted until its
+	// unload (roomLoadedHere), so a socket's admission offers it no preload from then on
+	// (offerPreload). An offer that checked before that count and has stored its preload is under
+	// the room's name now, and it is not this load's - LoadDoc's takePreload ran before any of this
+	// - so it is one no load of this room will ever use, and it is taken out here, under the room's
+	// record that the offer stored it under, rather than left for the socket that offered it to
+	// withdraw hours later. Its hold on the room's head-tracker entry is released once this lock is
+	// dropped, so exactly one release ends it: the socket's withdraw finds the entry gone
+	// (CompareAndDelete) and releases nothing.
 	_, swept := s.preloads.LoadAndDelete(room)
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
