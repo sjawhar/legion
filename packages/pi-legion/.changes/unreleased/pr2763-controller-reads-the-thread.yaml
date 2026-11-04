@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    The controller reads the whole Slack thread of a mention posted inside one, with Slack's
+    `conversations.replies` through the secrets broker's client, before it decides what the person
+    wants: the paging loop to five pages, de-duplication by `ts`, the success test, and whose words
+    make a request. A mention that adopts an earlier message's request files an issue whose
+    `Filed for` line names both messages. The worker, controller and architect skills point at the
+    new `agent-secrets` skill instead of restating the client's rules.
