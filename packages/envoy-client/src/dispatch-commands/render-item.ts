@@ -10,7 +10,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
 } from "@legion/contracts";
-import { encodeBlockId } from "@legion/contracts";
+import { actorActText, encodeBlockId } from "@legion/contracts";
 import { actorText } from "../actor-text";
 import { askAnswerText, textHead } from "../ask-answer";
 import type { DispatchClient } from "../dispatch-http";
@@ -60,7 +60,7 @@ export function askSummary(
     ...(answer === null
       ? ["- none"]
       : [
-          `- By: ${answer.user}`,
+          `- By: ${actorActText(answer.user, answer.act)}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
           ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
@@ -71,7 +71,8 @@ export function askSummary(
       : [
           "Earlier answers:",
           ...earlierAnswers.map(
-            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+            (earlier) =>
+              `- ${earlier.at} · ${actorActText(earlier.user, earlier.act)} · ${askAnswerText(earlier)}`
           ),
         ]),
     ...(ask.resolution === undefined

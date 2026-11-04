@@ -1,5 +1,5 @@
 {
-  "commands": 30,
+  "commands": 31,
   "refusals": 30,
   "runs": [
     {
@@ -786,6 +786,50 @@
       "outcome": "result",
       "text": [
         "Recorded the implement handoff of DSP-1, version 1 (id 01234567-0000-4000-8000-000000000001)"
+      ]
+    },
+    {
+      "tool": "dispatch_inbox",
+      "call": "valid",
+      "args": {},
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/credential-requests?approver=me",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/whoami",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/inbox?assignee=me",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "result",
+      "text": [
+        "Needs you 0",
+        "",
+        "Waiting on agents 0",
+        "",
+        "Later 0",
+        "",
+        "Credential requests 0"
       ]
     },
     {

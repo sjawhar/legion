@@ -58,6 +58,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_open_asks: true,
   dispatch_answers: true,
   dispatch_whoami: true,
+  dispatch_inbox: true,
   dispatch_architecture_sync: true,
 };
 

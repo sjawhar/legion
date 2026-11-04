@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { DispatchScope } from "./dispatch-api-core";
 
 /**
  * The signed-in viewer: who Dispatch resolves a request to, and the per-viewer state the
@@ -37,15 +38,22 @@ export interface ListUsersResponse {
  *  session the credential itself proved, which only an access token the secrets broker issued
  *  does, and `project` the one project key that credential lets the caller write, null where it
  *  names none. Both are absent from a Dispatch older than broker-issued tokens, which a client
- *  reads as an older build rather than as null. */
+ *  reads as an older build rather than as null.
+ *
+ *  `scopes` is the OAuth scopes the caller's own credential holds, which decide the routes it may
+ *  call: both of them for a person at a browser, the set its row names for a personal token, and
+ *  `[]` for the shared token and a verified service token, which act as nobody. The kind stays
+ *  `agent` for a personal token holding `person`, because the kind names the credential and not
+ *  the act; the person it acts for is `owner`. */
 export type WhoamiResponse =
-  | { readonly kind: "user"; readonly login: string }
+  | { readonly kind: "user"; readonly login: string; readonly scopes: DispatchScope[] }
   | {
       readonly kind: "agent";
       readonly owner: string | null;
       readonly service: string | null;
       readonly session?: string | null;
       readonly project?: string | null;
+      readonly scopes: DispatchScope[];
     };
 
 export const UserIssueStateSchema = z

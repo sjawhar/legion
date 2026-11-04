@@ -1,3 +1,4 @@
+import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -95,7 +96,7 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswerWithTrees[] })
                 <MarkdownBody markdown={previous.text} tree={previous.text_tree} />
               )}
               <p className="mt-1">
-                {previous.user} · <Timestamp at={previous.at} />
+                {actorActText(previous.user, previous.act)} · <Timestamp at={previous.at} />
               </p>
             </div>
           ))}
@@ -204,7 +205,8 @@ function AnsweredAsk({
       ) : (
         <p className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
           Asked <Timestamp at={ask.created_at} /> · Answered by{" "}
-          <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
+          <span className="font-semibold">{actorActText(answer.user, answer.act)}</span>{" "}
+          <Timestamp at={answer.at} />
         </p>
       )}
       <AskAnswerHistory answers={answers} />

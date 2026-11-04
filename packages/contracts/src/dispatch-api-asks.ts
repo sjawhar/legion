@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ActorActSchema,
   ActorSchema,
   AnchorSchema,
   anchorFields,
@@ -54,6 +55,9 @@ export const askAnswerFields = {
   selected: z.array(z.string()),
   text: z.string().nullable(),
   at: z.string(),
+  /** The agent that answered for the person `user` names, absent where the person answered
+   *  themselves. Whether the answer can carry an approval is read from its `scopes`. */
+  act: ActorActSchema.optional(),
 };
 
 export const AskAnswerSchema = z.strictObject(askAnswerFields).readonly();

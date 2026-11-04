@@ -43,7 +43,7 @@ related_issues:
    `always()`.
 7. **What the shape changes:** only cancelled runs. A publish on `always()` whose tested upstream
    had already succeeded still runs after a person cancels the run. `!cancelled()` would close
-   that; sjawhar/legion's rule 6 accepts `always()` alone today (see *Not proven*).
+   that; cybermonklabs/legion's rule 6 accepts `always()` alone today (see *Not proven*).
 8. **A `workflow_dispatch` does not reproduce a push's skipped job when the build jobs' own
    conditions name the trigger.** In `release.yaml` every `*_build` carries `github.event_name ==
    'workflow_dispatch'`, so on a dispatch every build runs and what skips is a `*_publish` whose
@@ -53,7 +53,7 @@ related_issues:
 
 ## Evidence
 
-- The defect: `Release Packages` run 38822866387 at sjawhar/legion merge `7b7496a0`, the first
+- The defect: `Release Packages` run 38822866387 at cybermonklabs/legion merge `7b7496a0`, the first
   run on the split build/publish jobs (sjawhar/legion#1969). `legion_build` printed `Bumping
   legion-v13.4.0 -> legion-v13.4.1` and succeeded; `legion_publish` (`if:
   needs.legion_build.outputs.skip != 'true'`) was `skipped` because `envoy_plugin_publish`, four
