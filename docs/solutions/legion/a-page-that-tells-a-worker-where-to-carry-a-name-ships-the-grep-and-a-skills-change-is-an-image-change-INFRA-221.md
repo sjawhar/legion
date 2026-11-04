@@ -50,8 +50,9 @@ The final `skills/legion-worker/references/tools.md`, "When no runner reaches it
 instead and says which hits a test holds.
 
 The last two rounds changed only `skills/` and `docs/solutions/`, and both completions left the
-image half unproven at the round's own tag. The retro drove it on
-`ghcr.io/sjawhar/legion-worker:sha-3061dbb55729` with a Job in the role's namespace. The Job ran
+image half unproven at the round's own tag. The retro drove it on the worker image at
+`legion-worker:sha-3061dbb55729`, under this repository's ghcr.io account before its transfer to
+cybermonklabs on 2026-11-03, with a Job in the role's namespace. The Job ran
 `type -P psql redis-cli sqlite3 nc dig` (five paths, exit 0) and each tool's version, and
 `legion probe-image` printed `capability toolchain: present (… /usr/bin/psql, /usr/bin/redis-cli,
 /usr/bin/sqlite3, /usr/bin/nc, /usr/bin/dig …)` and `probe-image: OK`. The image's

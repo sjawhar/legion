@@ -41,4 +41,4 @@ the rate-limited answer without `holdRateLimit`; the reviewer proved it at 90ca0
 overlay test (two GitHub calls across two reads inside the window) and the simplify pass before
 it had extracted the mint only. Fixed in c03a22fbad30 (`TestReviewBodyRateLimitedReadRetriesLater`
 now asserts the hold and one call across two reads); PR #1878 thread
-https://github.com/sjawhar/legion/pull/1878#discussion_r4236735153.
+https://github.com/cybermonklabs/legion/pull/1878#discussion_r4236735153.

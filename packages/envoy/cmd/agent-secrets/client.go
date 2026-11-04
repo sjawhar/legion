@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
-// HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
+// HTTP API reference (https://cybermonklabs.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
 // per call through a Signer (proofsource.go: an agent box or pod's own key, or a machine session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
