@@ -82,8 +82,10 @@ func TestBlocksListATablesRowsAndCellsWhereTheBlockRoutePlacesThem(t *testing.T)
 // places them; the second, past the budget, is listed under the headers GET /text draws it with,
 // Owner spanning nothing, so its Oct 1 is under Due where the first one's is under Owner; and
 // delete_row on one of its listed rows removes that row.
+//
+// It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
+// every byte a test running beside it allocates would count against this one.
 func TestBlocksOfAHeldDocumentShareOneSpanBudget(t *testing.T) {
-	t.Parallel()
 	documentService, handler, _ := browserDocumentService(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Spanned tables", "Intro.\n")
 	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)

@@ -814,6 +814,9 @@ func TestNestedUnclosedTypedBlockRunsToItsParentEnd(t *testing.T) {
 		next++
 		return fmt.Sprintf("generated-block-%d", next)
 	})
+	// The generator is the whole process's and this one counts its calls, so it is put back
+	// rather than left installed for whatever parses next.
+	t.Cleanup(func() { SetBlockIDGenerator(nil) })
 
 	doc, err := Parse("> :::callout{#callout-1 kind=\"note\" title=\"Read this\"}\n> Body text.\n")
 	if err != nil {

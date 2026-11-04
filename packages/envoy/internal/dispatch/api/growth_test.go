@@ -213,8 +213,10 @@ func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 // refusal allocates a fraction of what rendering it took. A 920 KB description of `)_` held 417 MiB
 // before its edit was weighed, 400 KB of it was taken, and one of 330,000 lines did not finish its
 // edit in twenty minutes. An ordinary long description is taken.
+//
+// It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
+// every byte a test running beside it allocates would count against this one.
 func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
-	t.Parallel()
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask text", openAsksSpec(1))
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-0", "Question 0?")

@@ -102,7 +102,9 @@ func storedRefreshToken(t *testing.T, database *Store, email string) *string {
 	return stored
 }
 
-// captureLogs sends slog's default logger to a buffer until t ends.
+// captureLogs sends slog's default logger to a buffer until t ends. The default logger is the
+// whole process's, so a test that reads what it captured runs on its own: beside a parallel test
+// each would take the other's lines into its own buffer.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logs bytes.Buffer
@@ -191,8 +193,9 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 // text. Each read answers none, so the person signs in again, and logs that, naming the person and
 // never the value; the read writes nothing and asks the pool nothing. The person's next sign-in
 // replaces the value, revoking one in plain text first; a sealed value is never sent to the pool.
+//
+// It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	database := openTestStore(t)
 	if err := database.Migrate(ctx); err != nil {
@@ -270,8 +273,9 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 // A boot retires every refresh token people holds in plain text: it revokes each at the sign-in
 // pool, then forgets it with its confirmation, keeping the person. A sealed token is never sent to
 // the pool and stays, as does a person holding none, and a second boot finds nothing to do.
+//
+// It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	pool, flow := revokingPool(t)
@@ -321,8 +325,9 @@ func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 // A token the sign-in pool does not revoke stays in its row, for the next boot to try again: the
 // boot logs one ERROR naming the person and the pool's HTTP status, never the value, and counts
 // it. The next boot the pool answers retires it.
+//
+// It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestRetirePlainRefreshTokensLeavesATokenThePoolDidNotRevoke(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	pool, flow := revokingPool(t)
@@ -396,8 +401,9 @@ func TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot(t *testing.
 // not revoke it, the sign-in proceeds (the person just signed in at the pool) and logs a line of its
 // own, apart from the boot's, naming the person to sign out at the pool and the status, never the
 // value: no later boot will see that token.
+//
+// It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	database := openTestStore(t)
 	if err := database.Migrate(ctx); err != nil {
@@ -470,8 +476,9 @@ func sessionGeneration(t *testing.T, sessions *PgSessionStore, login string) (in
 // given to a new account) ends every session of the address and records the new subject, logging
 // the address. A sign-in under a group neither reads nor writes the subject, and ending a sign-in
 // keeps it, so the next account's sign-in is still compared with it.
+//
+// It runs on its own: it reads what the default logger wrote (captureLogs).
 func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)

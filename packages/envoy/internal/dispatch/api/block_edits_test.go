@@ -1214,8 +1214,9 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	}
 }
 
+// It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
+// every byte a test running beside it allocates would count against this one.
 func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
-	t.Parallel()
 	const maximumAllocation = 128 << 20
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
@@ -1281,8 +1282,10 @@ func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
 // Goldmark pads a header narrower than its delimiter row with the rest of the table, so an insert
 // of a one-cell header over 500 columns and 500 one-cell rows, 7,513 bytes adding 249,999 cells, is
 // refused before those cells are built, and the document is left as it was.
+//
+// It runs on its own: the bound is on what the whole process allocates (runtime.ReadMemStats), so
+// every byte a test running beside it allocates would count against this one.
 func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
-	t.Parallel()
 	const maximumAllocation = 64 << 20
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Narrow header padding", "Before.\n")
