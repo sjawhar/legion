@@ -171,15 +171,15 @@ func TestSubjectsTheIntakeDoesNotWantAreAcknowledgedWithoutADecode(t *testing.T)
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	var decodes atomic.Int64
-	decode := decodeEnvelope
-	decodeEnvelope = func(data []byte) (contracts.Envelope, error) {
-		decodes.Add(1)
-		return decode(data)
-	}
-	// Before startIntake, so it is restored only once the intake has stopped.
-	t.Cleanup(func() { decodeEnvelope = decode })
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), newFakeGitHub(t).newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool)))
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), newFakeGitHub(t).newTestClient(), events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	// This intake's own decode, so the count is of what it decoded and not of what an intake of a
+	// test running beside this one did.
+	intake.decode = func(data []byte) (contracts.Envelope, error) {
+		decodes.Add(1)
+		return decodeEnvelope(data)
+	}
+	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
 	payload := `{"kind":"comment","action":"created","repo":"acme/widgets","number":"7","author":"octocat"}`
@@ -471,26 +471,27 @@ func TestAMessageInTheClientBufferAtStopIsGivenBack(t *testing.T) {
 	t.Parallel()
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
-	// The first decode, the workflow run's in the callback, waits until unblock: the messages
-	// behind it stay in the client's buffer meanwhile.
+	// This intake's first decode, the workflow run's in the callback, waits until unblock: the
+	// messages behind it stay in the client's buffer meanwhile.
 	blocked, unblock := make(chan struct{}), make(chan struct{})
 	var first sync.Once
-	decode := decodeEnvelope
-	decodeEnvelope = func(data []byte) (contracts.Envelope, error) {
+	fake := newFakeGitHub(t)
+	held := holdPullRequestOne(fake)
+	github := fake.newTestClient()
+	natsClient := intakeTestClient(t)
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
+	// On this intake rather than on a package variable every intake reads, so the hold is on its
+	// own first message and not on whichever intake of a test running beside this one decodes
+	// first.
+	intake.decode = func(data []byte) (contracts.Envelope, error) {
 		hold := false
 		first.Do(func() { hold = true })
 		if hold {
 			close(blocked)
 			<-unblock
 		}
-		return decode(data)
+		return decodeEnvelope(data)
 	}
-	t.Cleanup(func() { decodeEnvelope = decode })
-	fake := newFakeGitHub(t)
-	held := holdPullRequestOne(fake)
-	github := fake.newTestClient()
-	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), github, events.NewBroker(), loadedSettingsCache(t, ctx, pool))
 	stopFirst := runIntake(t, intake)
 	release := sync.OnceFunc(func() { close(unblock) })
 	t.Cleanup(release)

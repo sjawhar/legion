@@ -628,6 +628,12 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
 		return exitUsageError
 	}
+	// A zero or negative cap would make the backoff zero, so a renewer that cannot reach the
+	// broker would retry without pause: the flag exists to shorten the wait, never to remove it.
+	if *retryWait <= 0 {
+		fmt.Fprintln(stderr, "agent-secrets renew: --retry-cap must be positive")
+		return exitUsageError
+	}
 	if *vmFlag && *podTokenFile != "" {
 		fmt.Fprintln(stderr, "agent-secrets renew: --vm and --pod-token-file are mutually exclusive: a VM's token comes from its metadata server, a pod's from its projected file")
 		return exitUsageError

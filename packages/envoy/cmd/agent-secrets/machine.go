@@ -43,6 +43,12 @@ func cmdMachineLogin(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets machine login: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
+	// A zero or negative first wait would make every later one zero too, so the re-reads would
+	// spin against the helper's socket: the flag shortens the wait, it does not remove it.
+	if *poll <= 0 {
+		fmt.Fprintln(stderr, "agent-secrets machine login: --poll must be positive")
+		return exitUsageError
+	}
 	sock, _ := helperSocket()
 	resp, err := helper.Call(sock, helper.Request{Op: "login"}, 10*time.Second)
 	if err != nil {

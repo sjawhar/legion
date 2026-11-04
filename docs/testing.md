@@ -64,7 +64,8 @@ go test -race -timeout 30m ./internal/daemon/
 ## A database a Go test creates
 
 A Go test that creates a Postgres database writes `create database … strategy file_copy`, as
-`packages/envoy/internal/dispatch/store/storetest` and both modules' `internal/testpg` do. Without
+`packages/envoy/internal/pgclone`, which both `storetest` harnesses hand their databases out
+through, and both modules' `internal/testpg` do. Without
 it, PostgreSQL 15 and later copy the source database through the write-ahead log, every page of it:
 4.4 MB of log for an empty database made from `template1`, and 6.4 MB for a clone of Dispatch's
 migrated template, which made one run of the `api` and `docs` packages write 16 GiB of log. A file
@@ -85,9 +86,10 @@ A since read answers only the edges at or below the event log's safe horizon (`g
 that wait it answers at the horizon it has and leaves the rest to a later read: the route defers,
 it never loses an edge. The horizon is instance-wide,
 so any transaction holding a transaction id on the Postgres instance holds it back, and in
-`packages/envoy/internal/dispatch/api` the holder is the test process itself: `storetest.Open`'s
-`create database … template … strategy file_copy` and `storetest`'s
-`drop database … with (force)` (`packages/envoy/internal/dispatch/store/storetest/storetest.go`).
+`packages/envoy/internal/dispatch/api` the holder is the test process itself: the writes of the
+tests running beside the read, and the harness's own `create database … template … strategy
+file_copy` and `drop database`, which it now runs only when its free list is empty
+or a database cannot be handed on (`packages/envoy/internal/pgclone/pgclone.go`).
 
 So a read that answered within `referencesSinceWait` was not held back: what it listed is what it
 owed, and a wrong answer fails the test at once. Only a read held past that wait is read again,

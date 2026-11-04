@@ -23,6 +23,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -56,6 +57,11 @@ type Intake struct {
 	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
 	// how recently it said it was standing by for it (bindThrottle).
 	throttle *bindThrottle
+	// decode reads one message's envelope (decodeEnvelope). A field of the intake rather than a
+	// package variable because a test that counts or holds its own intake's decodes must leave
+	// every other test's intake decoding as production does: the tests of this package run beside
+	// one another, and a swapped package variable counted their decodes too.
+	decode func([]byte) (contracts.Envelope, error)
 
 	mu sync.Mutex
 	// delivering is the latest subscription subscribe made, which StopDelivering stops.
@@ -68,7 +74,7 @@ type Intake struct {
 // newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone,
 // reconciling its durable under a lease it takes on leases and routing by settings.
 func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, broker *events.Broker, settings *SettingsCache) *Intake {
-	return &Intake{nats: natsClient, pool: pool, github: github, events: broker, settings: settings, leases: leases, throttle: &bindThrottle{}}
+	return &Intake{nats: natsClient, pool: pool, github: github, events: broker, settings: settings, leases: leases, throttle: &bindThrottle{}, decode: decodeEnvelope}
 }
 
 // Run binds the durable consumer and processes GitHub events until ctx is cancelled, then stops
@@ -675,7 +681,7 @@ func (in *Intake) deliver(handling context.Context, message intakeMessage) {
 
 	envelope := message.envelope
 	if envelope == nil {
-		decoded, err := decodeEnvelope(msg.Data)
+		decoded, err := in.decode(msg.Data)
 		if err != nil {
 			slog.Error("dispatch delivery: decode envelope", "subject", msg.Subject, "error", err)
 			return

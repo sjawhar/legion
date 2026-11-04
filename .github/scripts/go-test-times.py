@@ -109,7 +109,8 @@ def load(paths) -> Stream:
 
 def report(stream: Stream, leaf_bar: float, package_bar: float, top: int, bars_only: bool) -> int:
     packages = sorted(stream.package_elapsed.items(), key=lambda row: -row[1])
-    leaves = sorted(stream.leaves().items(), key=lambda row: -row[1])
+    leaf_seconds = stream.leaves()
+    leaves = sorted(leaf_seconds.items(), key=lambda row: -row[1])
     if not packages and not leaves:
         sys.exit("go-test-times.py: the stream holds no test or package result")
 
@@ -117,7 +118,7 @@ def report(stream: Stream, leaf_bar: float, package_bar: float, top: int, bars_o
     over_leaves = [row for row in leaves if row[1] > leaf_bar]
 
     print(f"packages: {len(packages)}, summing to {sum(stream.package_elapsed.values()):.1f} s")
-    print(f"leaf tests: {len(leaves)}, summing to {sum(stream.leaves().values()):.1f} s")
+    print(f"leaf tests: {len(leaves)}, summing to {sum(leaf_seconds.values()):.1f} s")
     print(f"over the {package_bar:g} s package bar: {len(over_packages)}")
     print(f"over the {leaf_bar:g} s leaf-test bar: {len(over_leaves)}")
 

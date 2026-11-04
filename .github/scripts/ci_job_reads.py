@@ -340,25 +340,34 @@ UNIT_TEST_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
 s=0
 go test -json -count=1 -timeout 20m ./internal/dispatch/api > "$RUNNER_TEMP/go-test-json/unit-api.json" || s=$?
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
-jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
-[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
+if [ "$s" -eq 0 ]; then
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+else
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+fi
 exit $s"""
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
 NATSLIVE_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
 s=0
 go test -json -count=1 -tags natslive ./internal/testnats/ > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
-jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
-[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+if [ "$s" -eq 0 ]; then
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+else
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+fi
 exit $s"""
 INTEGRATION_STEP = "Integration test envoy (a real NATS server, in the test process)"
 INTEGRATION_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
 s=0
 go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
-jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
-[ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+if [ "$s" -eq 0 ]; then
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+else
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+fi
 exit $s"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\

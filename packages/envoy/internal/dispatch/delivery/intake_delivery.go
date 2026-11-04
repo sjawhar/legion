@@ -23,6 +23,9 @@ type intakeDelivery struct {
 	nats *bus.Client
 	sub  *natsgo.Subscription
 	keys *keyedRunner[intakeMessage]
+	// decode is the intake's own envelope decode (Intake.decode), which keying a workflow run's
+	// message runs.
+	decode func([]byte) (contracts.Envelope, error)
 	// handling is the parent of every handler's context (deliver), and abandon cancels it: the stop
 	// gives up the handlers still running when its context ends.
 	handling context.Context
@@ -58,7 +61,7 @@ type intakeMessage struct {
 // replaced it.
 func (in *Intake) subscribe(deliverSubject string) (*natsgo.Subscription, error) {
 	handling, abandon := context.WithCancel(context.Background())
-	delivery := &intakeDelivery{nats: in.nats, handling: handling, abandon: abandon}
+	delivery := &intakeDelivery{nats: in.nats, handling: handling, abandon: abandon, decode: in.decode}
 	delivery.keys = newKeyedRunner(func(message intakeMessage) { in.deliver(handling, message) })
 	wanted := deliveryConsumerConfig()
 	sub, err := subscribeDurable(in.nats, wanted, deliverSubject, delivery.receive)
@@ -221,7 +224,7 @@ func (d *intakeDelivery) receive(msg *natsgo.Msg) {
 		d.giveBack(msg)
 		return
 	}
-	key, envelope, wanted := intakeKey(msg)
+	key, envelope, wanted := intakeKey(msg, d.decode)
 	if !wanted {
 		acknowledge(msg)
 		return
@@ -242,7 +245,7 @@ func (d *intakeDelivery) receive(msg *natsgo.Msg) {
 // run's subject names its file and not its run, so its key is its payload's repo and run_id, and
 // the envelope decoded for them is handed on. A workflow message whose envelope or payload does
 // not decode is keyed by its subject, and its handler logs it.
-func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wanted bool) {
+func intakeKey(msg *natsgo.Msg, decode func([]byte) (contracts.Envelope, error)) (key string, envelope *contracts.Envelope, wanted bool) {
 	tokens := strings.Split(msg.Subject, ".")
 	if len(tokens) < 5 || tokens[0] != "notifications" || tokens[1] != "github" {
 		return "", nil, false
@@ -251,7 +254,7 @@ func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wante
 	case tokens[4] == "pr" && len(tokens) == 6:
 		return "pr " + tokens[2] + "/" + tokens[3] + "#" + tokens[5], nil, true
 	case tokens[4] == "workflow" && len(tokens) == 7:
-		decoded, err := decodeEnvelope(msg.Data)
+		decoded, err := decode(msg.Data)
 		if err != nil {
 			return "workflow " + msg.Subject, nil, true
 		}
@@ -267,8 +270,9 @@ func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wante
 	return "", nil, false
 }
 
-// decodeEnvelope decodes one message's envelope. A var so a test can count the decodes.
-var decodeEnvelope = func(data []byte) (contracts.Envelope, error) {
+// decodeEnvelope decodes one message's envelope. Each intake holds it as its decode field, which
+// a test replaces on the intake it is about (Intake.decode).
+func decodeEnvelope(data []byte) (contracts.Envelope, error) {
 	var envelope contracts.Envelope
 	err := json.Unmarshal(data, &envelope)
 	return envelope, err

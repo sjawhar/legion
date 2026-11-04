@@ -18,8 +18,11 @@ import (
 // header, the server's own 404 and NoSuchKey shapes and its checksum validation on read, none of
 // which the loopback fake can vouch for. The backfill runs over it too, so a row's bytes make the
 // whole trip: Postgres, the bucket, back through the verifying reader, and the row cleared.
+//
+// Not parallel: tests3.Start points this process's AWS SDK at the container with t.Setenv, a
+// process-wide swap the testing package refuses a test that has called t.Parallel
+// (dispatch://INFRA-1075).
 func TestS3AgainstAnS3CompatibleServer(t *testing.T) {
-	t.Parallel()
 	if os.Getenv("DISPATCH_TEST_NO_CONTAINERS") == "1" {
 		t.Skip("DISPATCH_TEST_NO_CONTAINERS=1: this box runs no test containers")
 	}

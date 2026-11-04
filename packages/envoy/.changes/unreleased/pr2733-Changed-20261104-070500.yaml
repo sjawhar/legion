@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  The Go tests of this package follow the standard practice, so CI's `envoy-go` job no longer
+  runs for its whole limit: independent tests run at the same time, a test that waited on a
+  clock waits on the event instead, and a test that waited out a production duration sets a
+  short one of its own through a field that defaults to the constant it replaces. No production
+  behaviour changes. `store.Open` takes options, with `store.WithMaxConns` for a harness that
+  holds many pools in one process; the document service carries its own logger and its drain
+  budget, room cap, cold-read timeout and sweep intervals as fields; `api.Deps.CallerRecheck`
+  separates how often a caller is re-resolved from the socket heartbeat; and the Dispatch and
+  broker test harnesses reuse a migrated database rather than cloning one per test.

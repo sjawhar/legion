@@ -143,9 +143,11 @@ func makeBuildsDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("make the test process's build directory: %w", err)
 	}
+	// The reaper is housekeeping, so a machine that cannot start one still builds: refusing
+	// every Build of the process to avoid leaving a directory behind would cost more than the
+	// directory, which the operating system reclaims with the rest of its temporary files.
 	if err := removeWhenThisProcessExits(dir); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", err
+		fmt.Fprintf(os.Stderr, "cmdtest: %v; %s is left for the operating system to reclaim\n", err, dir)
 	}
 	return dir, nil
 }

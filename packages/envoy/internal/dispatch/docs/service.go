@@ -648,7 +648,8 @@ func (s *Service) purgeSuppressedPersistence(room string) {
 	delete(s.suppressed, room)
 }
 
-// log is where this service writes, Deps' logger or the package default as it stands now.
+// log is where this service writes: its own logger (Service.logger), or the package default as
+// it stands now.
 func (s *Service) log() *slog.Logger {
 	if s.logger != nil {
 		return s.logger

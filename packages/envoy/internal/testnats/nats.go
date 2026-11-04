@@ -213,22 +213,16 @@ func accountsConfig(n int) string {
 }
 
 // deleteStreams deletes every stream in the account conn is connected to, as its test ends, and
-// closes conn. An account whose test created no stream is left alone: the account's own report
-// says so in one round trip, where listing and deleting would take more.
+// closes conn. It asks the account for its stream names and nothing else: that one request also
+// answers an account that holds none, so a test that created no stream pays one round trip, the
+// same as a report of the account would have cost, and a test that created some pays no more
+// than its deletes.
 func deleteStreams(t testing.TB, conn *natsgo.Conn) {
 	t.Helper()
 	defer conn.Close()
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Errorf("open JetStream to delete the test's streams: %v", err)
-		return
-	}
-	info, err := js.AccountInfo()
-	if err != nil {
-		t.Errorf("read the test account to delete its streams: %v", err)
-		return
-	}
-	if info.Streams == 0 {
 		return
 	}
 	var streams []string

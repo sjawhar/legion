@@ -34,16 +34,13 @@ func fullDisk(b *Broker) (restore func()) {
 	return func() { mu.Lock(); full = false; mu.Unlock() }
 }
 
-// loggedInBrokerLogging is loggedInBroker with log set before the login starts, so the login's
-// own goroutines never race a later write of b.Log.
+// loggedInBrokerLogging is loggedInBroker with log set before the credential is installed, so
+// the goroutines the install starts never race a later write of b.Log.
 func loggedInBrokerLogging(t *testing.T, f *fakeBroker, log *slog.Logger) *Broker {
 	t.Helper()
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log}
 	t.Cleanup(b.Close)
-	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
-	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	installLogin(t, f, b)
 	return b
 }
 

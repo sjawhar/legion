@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -1077,12 +1078,26 @@ func envGetter(values map[string]string) settingValues {
 // under the `memory` tag) drive a real Dispatch process and read its own resident memory.
 const memoryTestServeEnv = "DISPATCH_MEMORY_TEST_SERVE"
 
+// dispatchTestParallelism bounds how many of this package's tests run at once, in place of go
+// test's default of GOMAXPROCS. Most of the parallel tests here start a real Dispatch process,
+// and one of those holds up to store.ConnectionsPerProcess connections of the Postgres the whole
+// job shares — 94 at the time of writing, of which the permanent listeners and the registry are
+// held from the boot. Four at once would ask for 376 before any other package's binary had
+// opened one. Two is what this package's own work needs to overlap, and it leaves the rest of
+// the job's budget alone (dispatch://INFRA-1075).
+const dispatchTestParallelism = 2
+
 // TestMain runs the package's tests, or, run by a memory test with memoryTestServeEnv set, is that
-// test's Dispatch server.
+// test's Dispatch server. It sets the package's parallelism before M.Run reads the flag, so a
+// -parallel on the command line still wins.
 func TestMain(m *testing.M) {
 	if os.Getenv(memoryTestServeEnv) == "1" {
 		main()
 		os.Exit(0)
+	}
+	if err := flag.Set("test.parallel", strconv.Itoa(dispatchTestParallelism)); err != nil {
+		fmt.Fprintf(os.Stderr, "set the package's test parallelism: %v\n", err)
+		os.Exit(1)
 	}
 	os.Exit(storetest.Main(m))
 }

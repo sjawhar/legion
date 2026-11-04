@@ -60,17 +60,17 @@ const (
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
-// is newRig plus that login, for every test that doesn't care about the pre-login state itself.
-// tune, when given, is applied to the Server before it serves, for a row that needs a setting of
-// its own.
-func newRig(t *testing.T, statePath string, tune ...func(*Server)) *rig {
+// is newRig plus a credential, for every test that doesn't care about the pre-login state itself.
+// Each tune, when given, runs on the rig after its Server is built and before it recovers and
+// serves, for a row that needs a setting — or a credential — of its own.
+func newRig(t *testing.T, statePath string, tune ...func(*rig)) *rig {
 	t.Helper()
 	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)), tune...)
 }
 
 // newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
 // cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
-func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func(*Server)) *rig {
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func(*rig)) *rig {
 	t.Helper()
 	f := newFakeBroker(t)
 	of := operatorFile(t, "ada@example.com")
@@ -87,9 +87,6 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func
 		EnrollRetryMin: testEnrollRetryMin,
 		EnrollRetryMax: testEnrollRetryMax,
 		RevokeRetry:    testRevokeRetry,
-	}
-	for _, set := range tune {
-		set(r.srv)
 	}
 	r.srv.Registry.parent = func(pid int) (int, error) {
 		if parent := r.parentOf.Load(); parent != nil {
@@ -141,23 +138,32 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger, tune ...func
 		// lives in.
 		<-served
 	})
+	// Last, so the credential a tune installs (startRig) is covered by the Close above, and
+	// before Recover and Serve, which a setting of the rig's own must be in place for.
+	for _, set := range tune {
+		set(r)
+	}
 	r.srv.Recover(ctx)
 	go func() { defer close(served); _ = r.srv.Serve(ctx, ln) }()
 	return r
 }
 
-// startRig is newRig plus an immediate machine login, so the returned rig's Broker already
-// holds a credential and ordinary session enrollment (Enroll) can succeed. Tests exercising the
-// pre-login state itself (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
+// startRig is newRig plus a machine credential, held before anything is recovered: the order
+// cmd/agent-secrets-helper starts in is Broker.Start, which resumes the login kept on disk, and
+// only then Recover. The order matters to what Recover does with a recorded session whose
+// process is gone: its enrollment goes to the bounded revoke, three tries that no login wakes,
+// so a credential arriving after Recover leaves that revoke racing it (dispatch://INFRA-1075).
+// The credential is installed rather than approved (installLogin), since none of these rows has
+// the login ceremony for its subject. Tests exercising the pre-login state itself
+// (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
 // TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot) call newRig directly instead.
-func startRig(t *testing.T, statePath string, tune ...func(*Server)) *rig {
+func startRig(t *testing.T, statePath string, tune ...func(*rig)) *rig {
 	t.Helper()
-	r := newRig(t, statePath, tune...)
-	r.login(t)
-	return r
+	return newRig(t, statePath, append(tune, func(r *rig) { installLogin(t, r.fake, r.srv.Broker) })...)
 }
 
-// login logs r's Broker in against its own fake and waits for the credential to install.
+// login logs r's Broker in through the device ceremony and waits for the credential to install,
+// for a test that builds its rig with none (newRig) and logs it in at a moment of its own.
 func (r *rig) login(t *testing.T) {
 	t.Helper()
 	if _, err := r.srv.Broker.Login(context.Background(), r.srv.Hostname); err != nil {
@@ -521,10 +527,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
 		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)
@@ -643,10 +646,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
 		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)
@@ -702,8 +702,9 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
 // unreachable broker, not merely a slow one) until the session has ended and its own retry loop
 // has stopped, so revokeLapsed is genuinely retrying when the session ends, however long the test
-// takes to get there: no assertion here has to land inside a real backoff window. Only then is the
-// fault cleared, so only the handed-off revoke can land the prior id.
+// takes to get there: no assertion here has to land inside a real backoff window. The end leaves
+// one last failure behind it and clears the fault (endSessionThenReleaseRevokes), so only the
+// handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -748,10 +749,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second,
 		EnrollRetryMin: testEnrollRetryMin, EnrollRetryMax: testEnrollRetryMax, RevokeRetry: testRevokeRetry}
-	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
-		t.Fatalf("srv2 login: %v", err)
-	}
-	waitFor(t, func() bool { return srv2.Broker.LoginStatus().State == "issued" })
+	installLogin(t, r.fake, srv2.Broker)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv2.Recover(ctx)

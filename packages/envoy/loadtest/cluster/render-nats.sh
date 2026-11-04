@@ -55,7 +55,10 @@ while [ $# -gt 0 ]; do
 done
 [ -z "$pin_from" ] || [ -f "$pin_from" ] || die "--pin-from $pin_from is not a file"
 [ -z "$chart" ] || [ -f "$chart" ] || die "--chart $chart is not a file"
-for tool in curl go sha256sum jq; do
+# curl is not in this list: with --chart the archive is already on disk and nothing is
+# downloaded, so a machine with go but no curl would otherwise be refused a render it can do.
+# The download branch below asks for it where it uses it.
+for tool in go sha256sum jq; do
   command -v "$tool" >/dev/null || die "render-nats.sh needs $tool on PATH"
 done
 
@@ -68,6 +71,7 @@ if [ -n "$chart" ]; then
   chart_from=$chart
   cp -- "$chart" "$tmp/nats.tgz" || die "could not read $chart"
 else
+  command -v curl >/dev/null || die "render-nats.sh needs curl on PATH to download the chart; pass --chart FILE to render a copy on disk"
   curl -fsSL --max-time 60 -o "$tmp/index.yaml" "$CHART_REPO/index.yaml" || die "could not read $CHART_REPO/index.yaml"
   chart_from=$(grep -oE "https://[^[:space:]\"']+/nats-$CHART_VERSION\.tgz" "$tmp/index.yaml" | head -n1)
   [ -n "$chart_from" ] || die "$CHART_REPO/index.yaml lists no nats-$CHART_VERSION.tgz"

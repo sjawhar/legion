@@ -2612,6 +2612,24 @@ jobs:
       - name: Postgres service version
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
+      # The tests of this job run at the same time now, each with a pool of its own, and the
+      # image's default max_connections is 100, which several package binaries at once exhaust
+      # (`FATAL: sorry, too many clients already`). A service container takes no command of its
+      # own, so the limit is raised here and the server restarted, since max_connections takes
+      # effect only at a start. 500 is above the worst case the job can reach: eight package
+      # binaries (`go test -p 8`), each running its tests at the runner's four cores, each test
+      # store bounded at 16 connections (storetest's testPoolSize). Nothing about durability
+      # changes: fsync, synchronous_commit and the data directory are untouched, which the spec
+      # of dispatch://INFRA-1075 makes a non-goal and two learnings of this repository warn about.
+      - name: Raise the Postgres connection limit for the parallel tests
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "alter system set max_connections = 500"
+          docker restart "${{ job.services.postgres.id }}"
+          for _ in $(seq 60); do
+            if docker exec "${{ job.services.postgres.id }}" pg_isready -U postgres; then break; fi
+            sleep 1
+          done
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "show max_connections"
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
       # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
       # reason the action gives.
@@ -2643,9 +2661,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-test-json"
           s=0
           go test -json -count=1 -timeout 20m ./internal/dispatch/api > "$RUNNER_TEMP/go-test-json/unit-api.json" || s=$?
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
-          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
-          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+          fi
           exit $s
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
@@ -2657,8 +2678,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-test-json"
           s=0
           go test -json -count=1 -tags natslive ./internal/testnats/ > "$RUNNER_TEMP/go-test-json/natslive.json" || s=$?
-          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
-          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/natslive.json"
+          fi
           exit $s
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
@@ -2691,8 +2715,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-test-json"
           s=0
           go test -json -count=1 -timeout 300s ./internal/integration/ > "$RUNNER_TEMP/go-test-json/integration.json" || s=$?
-          jq -rj 'select(.Action == "output" and .Test == null) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
-          [ "$s" -eq 0 ] || jq -rj 'select(.Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          if [ "$s" -eq 0 ]; then
+            jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          else
+            jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
+          fi
           exit $s
         working-directory: packages/envoy
       # Always, because a red attempt's times are the ones a reader needs, and one artifact per

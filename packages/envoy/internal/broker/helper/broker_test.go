@@ -6,6 +6,7 @@ package helper
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -434,9 +435,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 // the credential's extras, keeping the refresh token as the one that credential's next refresh
 // spends. With loginLifetime zero it names no expiry. The caller holds f.mu.
 func (f *fakeBroker) writeTokens(w http.ResponseWriter, credentialID string) {
-	f.tokens++
-	refresh := fmt.Sprintf("refresh-%d", f.tokens)
-	f.refreshTokens[refresh] = credentialID
+	refresh := f.mintRefresh(credentialID)
 	answer := map[string]any{
 		"access_token": fmt.Sprintf("access-%d", f.tokens), "token_type": "DPoP", "expires_in": 900,
 		"refresh_token": refresh, "credential_id": credentialID,
@@ -445,6 +444,15 @@ func (f *fakeBroker) writeTokens(w http.ResponseWriter, credentialID string) {
 		answer["credential_expires_at"] = time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, 200, answer)
+}
+
+// mintRefresh is the refresh token this fake keeps as the one credentialID's next refresh
+// spends. The caller holds f.mu.
+func (f *fakeBroker) mintRefresh(credentialID string) string {
+	f.tokens++
+	refresh := fmt.Sprintf("refresh-%d", f.tokens)
+	f.refreshTokens[refresh] = credentialID
+	return refresh
 }
 
 // dpopProves reports whether r carries a DPoP proof for POST htu signed by the key whose
@@ -544,18 +552,64 @@ func machineFilePath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "agent-secrets", "machine.json")
 }
 
-// loggedInBroker builds a Broker against f, logs it in against the fake's default "issued"
-// outcome, and waits for the credential to install, so a test can exercise Enroll/Renew/Revoke
-// without exercising Login itself.
+// loggedInBroker builds a Broker against f and gives it a credential f has issued (installLogin),
+// so a test can exercise Enroll/Renew/Revoke without exercising Login itself.
 func loggedInBroker(t *testing.T, f *fakeBroker, operator string) *Broker {
 	t.Helper()
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, operator), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	t.Cleanup(b.Close)
-	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
-		t.Fatalf("login: %v", err)
-	}
-	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	installLogin(t, f, b)
 	return b
+}
+
+// installLogin gives b a launcher credential f issues for a fresh key, kept at b.MachineFile and
+// then installed as an issued login — what an approved login's own keepLogin does, without the
+// device ceremony. That ceremony costs a second whatever the broker and the helper do: RFC 8628
+// names the token-polling interval in whole seconds, the fake names the lowest of them, and
+// oauth2.Config.DeviceAccessToken waits one out before it asks at all. Nearly every test here
+// needs a logged-in helper and almost none has the ceremony for its subject, so that second was
+// the largest single cost of this package (dispatch://INFRA-1075). A test whose subject IS the
+// ceremony — the code a person types, an approval, a denial, an expiry, a re-login — calls
+// Broker.Login itself.
+func installLogin(t *testing.T, f *fakeBroker, b *Broker) {
+	t.Helper()
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatalf("the machine key: %v", err)
+	}
+	mf := f.issueCredential(t, key)
+	b.credMu.Lock()
+	defer b.credMu.Unlock()
+	if err := b.saveFile(mf); err != nil {
+		t.Fatalf("keeping the machine file: %v", err)
+	}
+	b.installCredential(mf.credential(), &loginState{State: "issued"})
+}
+
+// issueCredential mints a launcher credential for key as the token endpoint's device grant does,
+// and records it as the login this fake issued: the credential a launcher proof is read against
+// (lastProofSubject), the key every refresh of it must prove, and the refresh token the first of
+// those spends.
+func (f *fakeBroker) issueCredential(t *testing.T, key *ecdsa.PrivateKey) *MachineFile {
+	t.Helper()
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("the machine key's thumbprint: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.loginLifetime == 0 {
+		t.Fatal("a credential with no expiry is a token answer the helper cannot keep; drive Login for that")
+	}
+	f.next++
+	f.issuedCredentialID = fmt.Sprintf("lcred-%d", f.next)
+	f.pendingThumbprint = thumbprint
+	return &MachineFile{
+		Key:          key,
+		CredentialID: f.issuedCredentialID,
+		RefreshToken: f.mintRefresh(f.issuedCredentialID),
+		ExpiresAt:    time.Now().Add(f.loginLifetime).UTC().Truncate(time.Second),
+	}
 }
 
 // waitFor polls cond until it is true or 5s pass, whichever comes first, failing the test on

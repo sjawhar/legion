@@ -97,15 +97,17 @@ func (l WokenLoop) run(ctx context.Context, exclusive ExclusiveFunc) {
 				timer.Stop()
 				armed = time.Time{}
 			}
-			// A wake already waiting is taken here rather than a moment later in the select
-			// below, so the loop is reported idle only when nothing is waiting to wake it.
-			select {
-			case <-l.Wake:
-				owed = true
-				continue
-			default:
-			}
 			if l.Idle != nil {
+				// A wake already waiting is taken here rather than a moment later in the
+				// select below, so the loop is reported idle only when nothing is waiting
+				// to wake it. Both this read and the report are behind Idle, so a loop
+				// nobody is watching runs exactly the select below, as it always did.
+				select {
+				case <-l.Wake:
+					owed = true
+					continue
+				default:
+				}
 				l.Idle()
 			}
 		}

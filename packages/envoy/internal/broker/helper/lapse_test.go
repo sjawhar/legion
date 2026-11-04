@@ -60,40 +60,46 @@ func revoked(r *rig, id string) bool {
 }
 
 // endSessionThenReleaseRevokes ends sess while every revoke is failing (reg.Remove, as retire and
-// unregister do), waits for the next revoke attempt after that, then clears the fake's revoke
-// fault. The fake fails an attempt in the same critical section that counts it, so the attempt the
-// helper sees has already failed. That attempt is the handed-off revoke's first, or at most one
-// last try of the session's own loop, which then returns at once. In that second case the
-// handed-off revoke's first try follows at once, and the 200 ms sleep before the fault is cleared
-// makes that try fail too. Either way the id lands on the handed-off revoke's next try, 2 s later,
-// although no test asserts which try lands it. The helper fails the test when no attempt comes
-// within 5 s: nothing handed the id on.
+// unregister do) and leaves exactly one more failure behind it, so the lapsed id can only be
+// revoked by the revoke the session hands off, on whichever of that revoke's three tries follows
+// the failure. Nothing here is timed: the fault is cleared by a count the fake decrements, not by
+// a sleep the next try has to outlast, so no assertion depends on how far apart those tries are
+// (dispatch://INFRA-1075).
+//
+// The count and the Remove are one critical section of the fake's own lock, which its DELETE
+// handler takes before it answers anything, so a revoke already in flight waits there until the
+// session is gone and the one remaining failure is counted from a point no answer can cross.
+// Once its stop is closed the session's own loop can attempt at most once more — the attempt it
+// held in flight, or one whose backoff fired in that same instant — because the wait after that
+// attempt fails meets a closed stop and a timer that has only just started (retryUntilStop). So
+// that one failure is the last the session's own loop can be answered, and the fake answers
+// every attempt after it, every one of which is the handed-off revoke's.
 func endSessionThenReleaseRevokes(t *testing.T, r *rig, reg *Registry, sess *Session) {
 	t.Helper()
 	r.fake.mu.Lock()
 	before := r.fake.revokeAttempts
-	r.fake.mu.Unlock()
+	r.fake.revokeFailFirst = 1
 	reg.Remove(sess)
+	r.fake.mu.Unlock()
 	if sess.peer != nil {
 		sess.peer.Close()
 	}
+	// Some revoke must follow the session's end — the session's own last try, or the handed-off
+	// revoke's first. None within 5 s means the id went nowhere, which says more here than the
+	// caller's own "never revoked" after its wait.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
 		n := r.fake.revokeAttempts
 		r.fake.mu.Unlock()
 		if n > before {
-			break
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("no revoke was attempted after the session ended; nothing handed its id on")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	time.Sleep(200 * time.Millisecond)
-	r.fake.mu.Lock()
-	r.fake.revokeFailFirst = 0
-	r.fake.mu.Unlock()
 }
 
 // testGate returns a gate for the fake's enrollGate or renewGate and the func that opens it, once
@@ -216,8 +222,8 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 // TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt: retire revokes only a live
 // enrollment, so a session that ends while its lapsed id's revoke is backing off must hand that
 // id to the bounded independent revoke rather than abandon it. Every revoke fails until the
-// session has ended and its own retry loop has stopped, so only the handed-off revoke can land
-// the id: its second try, 2 s after the first.
+// session has ended and its own retry loop has stopped (endSessionThenReleaseRevokes), so only
+// the handed-off revoke can land the id.
 func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T) {
 	r, lapsed, _ := lapseRig(t, failAlways)
 	sess := r.srv.Registry.Get(os.Getpid())

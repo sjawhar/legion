@@ -221,9 +221,9 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 // at 0, 0.4, 1.2 and 2.8 s, and a bound of one second - at a tenth of the production minute's
 // clock (dispatch://INFRA-1075).
 func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testing.T) {
-	r := newRig(t, "", func(s *Server) {
-		s.EnrollRetryMin = 400 * time.Millisecond
-		s.EnrollRetryMax = time.Minute
+	r := newRig(t, "", func(r *rig) {
+		r.srv.EnrollRetryMin = 400 * time.Millisecond
+		r.srv.EnrollRetryMax = time.Minute
 	})
 	if reg := r.call(t, Request{Op: "register"}); !reg.OK || reg.Code != CodeNoCredential {
 		t.Fatalf("register with no credential: %+v", reg)
