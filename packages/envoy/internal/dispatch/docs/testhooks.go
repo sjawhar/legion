@@ -547,3 +547,13 @@ func StateStructsForTest(state []byte) (int64, error) {
 	tally, err := walkUpdate(state, fromRoom, nil)
 	return int64(tally.structs), err
 }
+
+// RescanForTest is what a re-scan of state, a document's stored Yjs state, scans (rescan): the
+// count a room's load starts its scan total at, since the load decodes the same bytes the same
+// way (roomScans.rescanned, decodeStoredCopy). A real-process drive reads from the allowance a
+// reloaded room refused an update at what that room's total started from, and holds it to this,
+// without decoding the state as the load does itself.
+func RescanForTest(state []byte) (int64, error) {
+	scans, err := rescan(state)
+	return int64(scans), err
+}

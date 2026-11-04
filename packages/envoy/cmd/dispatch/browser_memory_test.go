@@ -454,18 +454,25 @@ func TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas(t *testing.T) {
 	requireApplied(t, reopened, shorter, fmt.Sprintf("a frame of %d items scanning %d", items-1, shorterScans))
 }
 
-// A room's scan total survives a reload, over a real document socket of a real server: a room
-// takes two browsers' frames, each scanning just under the per-frame ceiling, which leave about a
-// fifth of the room's scan total; a third frame scanning more than is left, and less than the
-// ceiling, is refused DOC_TOO_TANGLED at an allowance of what is left. The server stops, which
-// flushes the room to the store, and a new server loads the room from what it stored; the same
-// third frame is refused there at an allowance within a few hundred items of the first: the
-// reloaded room's total starts at what its stored state re-scans, which is what the first room had
-// come to, short of the scans of the refusal, which the store never held. Each frame's client is
-// above the one before it, and a decode of the stored state takes the clients by descending
-// client (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:386-387), so it integrates the frames in
-// the reverse of the order the room applied them.
-func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
+// A room's scan total is re-measured by each load, over a real document socket of a real server: a
+// room takes two browsers' frames, each scanning just under the per-frame ceiling, which leave
+// about a fifth of the room's scan total; a third frame, scanning more than is left and less than
+// the ceiling, is refused DOC_TOO_TANGLED at an allowance of what is left, which the server names
+// in the line it logs for the refusal (scanRefusalLine). The server stops, which flushes the room
+// to the store, and a new server loads the room from what it stored; the same third frame is
+// refused there too, at an allowance no smaller than the first's - a load never starts a room past
+// what the room had come to - and the total the reloaded room started from is exactly what its
+// stored state re-scans (docs.RescanForTest), which is what that load's own decode cost and what
+// the total is there to bound (roomScans.rescanned).
+//
+// That re-scan is not the sum of what the room's own applies scanned, and at sjawhar/ygo
+// v1.55.1-sami.1 it is the smaller of the two for a shape like this one: the room's browsers scan
+// as their frames arrive, while a decode of the whole stored state integrates the clients' groups
+// by descending client (crdt/update.go:386-387), and each frame's client is above the one before
+// it, so the decode takes the frames in the reverse of the order the room applied them. What
+// bounds any one apply is the per-frame ceiling, which no total changes.
+// TestTheRoomScanTotalIsReMeasuredByEachLoad holds the same truth in process.
+func TestTheRoomScanTotalIsReMeasuredByEachLoadOverARealSocket(t *testing.T) {
 	memory := newMemoryHarness(t)
 	server := memory.start(t)
 	stored := server.upload(t, "json", memory.issue, "# Tangled\n\nOne paragraph of ordinary prose.\n")
@@ -490,7 +497,9 @@ func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 	third, thirdItems, thirdScans := scanFramePast(t, after, tangledScanClient+2, 300_000)
 	t.Logf("the room took two frames scanning %d items together; the third frame, of %d items, scans %d", admitted, thirdItems, thirdScans)
 
-	refuse := func(server *memoryServer) int {
+	// refuse sends the third frame to the room on server and returns the allowance the refusal
+	// names and what the room's history had scanned when the frame arrived.
+	refuse := func(server *memoryServer) (allowance, used int) {
 		t.Helper()
 		refused := server.openBrowser(t, room)
 		t.Cleanup(refused.leave)
@@ -504,21 +513,46 @@ func TestTheRoomScanTotalSurvivesAReloadOverARealSocket(t *testing.T) {
 		requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooTangledCloseReason)
 		refusal := server.scanRefusals(t, 1)[0]
 		t.Logf("the server logged %q", refusal[0])
-		allowance, err := strconv.Atoi(refusal[5])
-		if err != nil || allowance >= thirdScans || allowance >= perFrameScanCeilingForTest {
-			t.Fatalf("the refusal names an allowance of %s items, want what is left of the room's total, under the frame's %d scans and the %d ceiling",
-				refusal[5], thirdScans, perFrameScanCeilingForTest)
+		allowance, allowanceErr := strconv.Atoi(refusal[5])
+		scanned, scannedErr := strconv.Atoi(refusal[6])
+		left, leftErr := strconv.Atoi(refusal[7])
+		if allowanceErr != nil || scannedErr != nil || leftErr != nil {
+			t.Fatalf("the refusal names allowance=%s scan_total=%s scans_left=%s, want three counts",
+				refusal[5], refusal[6], refusal[7])
 		}
-		return allowance
+		if allowance >= thirdScans || allowance >= perFrameScanCeilingForTest {
+			t.Fatalf("the refusal names an allowance of %d items, want what is left of the room's total, under the frame's %d scans and the %d ceiling",
+				allowance, thirdScans, perFrameScanCeilingForTest)
+		}
+		// The line's scan_total and scans_left are the room's total and what is left of the whole
+		// scan total past it once the refusal has settled, with no other apply's allowance in
+		// flight, so their sum is that whole total; and the allowance, which is under the ceiling,
+		// is what was left of it when the frame arrived. The total less the allowance is therefore
+		// what the room's history had scanned before the refusal.
+		return allowance, scanned + left - allowance
 	}
-	left := refuse(server)
+	left, used := refuse(server)
 	memory.waitForSettled(t, room)
 	server.stop(t)
+	storedState := memory.storedState(t, room)
+	if !bytes.Equal(canonicalState(t, storedState), canonicalState(t, after)) {
+		t.Fatalf("the store holds a %d-byte state, want the %d-byte state the room held after the two frames", len(storedState), len(after))
+	}
 	again := memory.start(t)
-	reloaded := refuse(again)
-	t.Logf("the room was refused at %d items left, and reloaded at %d", left, reloaded)
-	if difference := reloaded - left; difference < -500 || difference > 500 {
-		t.Fatalf("the reloaded room refused the frame at an allowance of %d, want within 500 of the %d the room had left before the reload", reloaded, left)
+	reloaded, reloadedUsed := refuse(again)
+	t.Logf("the room had scanned %d items and was refused at %d left; reloaded, it had scanned %d and was refused at %d",
+		used, left, reloadedUsed, reloaded)
+	if reloaded < left {
+		t.Errorf("the reloaded room refused the frame at an allowance of %d, under the %d the room had left before the reload: a load must never start a room past what the room had come to",
+			reloaded, left)
+	}
+	rescanned, err := docs.RescanForTest(storedState)
+	if err != nil {
+		t.Fatalf("re-scan the stored state: %v", err)
+	}
+	if int64(reloadedUsed) != rescanned {
+		t.Errorf("the reloaded room started at %d scans and a re-scan of its %d-byte stored state counts %d, want the load's total to be that re-scan",
+			reloadedUsed, len(storedState), rescanned)
 	}
 }
 
