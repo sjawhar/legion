@@ -1,0 +1,119 @@
+name: CodeQL
+
+# CodeQL code scanning, as GitHub's starter workflow for advanced setup writes it
+# (actions/starter-workflows, code-scanning/codeql.yml): a pull request to main, a push to main
+# and one scheduled run a week. The repository is public, so GitHub charges nothing for it.
+#
+# READ THIS BEFORE JUDGING A RED CHECK HERE: while GitHub's default setup for code scanning is
+# still on for this repository, every analysis below runs and then fails to upload, because
+# GitHub refuses results from an advanced configuration while default setup owns the repository's
+# code scanning. So this workflow's check is red on the pull request that adds it, and stays red
+# until a person switches default setup off: Settings -> Code security -> Code scanning -> CodeQL
+# analysis -> Disable CodeQL (then this workflow is the repository's code scanning). No change in
+# this tree can make that switch; it is a repository setting, and only a person with admin rights
+# can make it. A reviewer should expect exactly this one check red, and nothing else.
+#
+# What is analysed, and why those languages (counted over the tracked tree):
+#   * go - 2,658 .go files in the two modules go.work binds, packages/daemon and packages/envoy;
+#   * javascript-typescript - 1,068 .ts, 304 .tsx and 4 .js files under packages/, docs/site and
+#     scripts/; CodeQL analyses both languages under this one name;
+#   * python - 8 .py files: the CI checks' engine (.github/scripts/ci_filter_coverage.py,
+#     ci_job_reads.py, ci_images.py, workflow_paths.py), two e2e helpers under scripts/e2e/lib and
+#     two media scripts under docs/site/media. Few, but each one runs in CI or in a release path;
+#   * actions - every workflow under .github/workflows and the 10 composite `action.yml` files,
+#     which run with this repository's tokens.
+# The repository's shell scripts (179 .sh) and SQL migrations (403 .sql) have no CodeQL language,
+# so no analysis here covers them. Build modes are the starter workflow's: `autobuild` for go,
+# which CodeQL has no `none` mode for, and `none` for the three others.
+#
+# A pull request that changes only documentation starts no analysis (paths-ignore, as
+# docs.github.com's "Avoiding unnecessary scans of pull requests" shows). The list is this
+# repository's prose: every Markdown file, the five prose subtrees of docs/ (their JSON and PNG
+# attachments included) and skills/. docs/site is NOT ignored beyond its Markdown, because it
+# holds 30 TypeScript files the javascript-typescript analysis reads. A change to any of the
+# ignored paths still reaches CodeQL through the push to main and the weekly run.
+#
+# No `merge_group` trigger, though GitHub's documentation adds one: every pull request is scanned
+# on its own pushes, and no rule of this repository requires a scan before a merge, so a scan of
+# the queued group would analyse the same code a second time.
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/brainstorms/**'
+      - 'docs/plans/**'
+      - 'docs/research/**'
+      - 'docs/solutions/**'
+      - 'docs/superpowers/**'
+      - 'skills/**'
+      - 'LICENSE'
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, off the hour: a cron on the hour queues behind everyone else's.
+    - cron: '17 4 * * 2'
+
+# A newer push to a pull request cancels its older analysis, waiting or running, as ci.yaml's
+# group does and for the same reason: the older head's alerts answer for code the pull request no
+# longer has. On push and on the schedule the key is the ref, refs/heads/main, with the default
+# queue and no cancellation: the running analysis finishes, one run waits, and a newer push
+# replaces the waiting one, so main's alerts end at its newest commit.
+concurrency:
+  group: codeql-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The analyze job declares every scope it needs in a block of its own; nothing runs under this
+# default.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    # The whole default setup took about 13.6 minutes per pull-request push for every language at
+    # once, so this bounds a hung extractor, not an analysis.
+    timeout-minutes: 60
+    # The starter workflow's least permissions: security-events: write uploads the results,
+    # packages: read fetches CodeQL packs, actions: read and contents: read let the action read
+    # this run and the checkout.
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      # One language's failure leaves the others' alerts uploaded.
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Before init, as the starter workflow's comment says setup steps go: go.work asks for a Go
+      # the runner image does not carry, and autobuild builds both modules of the workspace with
+      # whatever `go` is on the PATH. cache: false, as in every other Go job here: this workflow
+      # fills no Actions cache entry (INFRA-490's budget).
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.language == 'go'
+        with:
+          go-version-file: go.work
+          cache: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: "/language:${{ matrix.language }}"

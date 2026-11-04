@@ -56,7 +56,14 @@
 #            nothing is started and the command fails with an ::error:: naming
 #            the command a person runs: each loss means another run published
 #            in between, so a chain that long means something keeps moving the
-#            tags.
+#            tags. A commit left to another run loses an image and a version
+#            number of its own, never its change: the workflow-level group of
+#            release-envoy-listener.yaml replaces a waiting build with a newer
+#            push that still holds the commit, `version` counts every commit
+#            since the newest tag, and the deployment takes the newest main
+#            commit with a published image. The run started here is a
+#            workflow_dispatch, which that group keys on its run id, so it is
+#            a group of its own and no newer push replaces it while it waits.
 # tag:       commit the version bump and create the release tag on that
 #            un-rebased commit, so the tag always describes exactly the source
 #            the artifacts were built and published from; pushes nothing
