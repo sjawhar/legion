@@ -657,13 +657,17 @@ jobs:
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
               # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
               # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
-              # tables, and scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are
-              # current.
+              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - two
+              # Go files, pmdoc's generated block schema and contracts' own generated TypeScript -
+              # is current. pmdoc/schema is the block schema those generated types are the shape
+              # of, so a change to it is a change to what this job generates for.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
+              - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
@@ -847,7 +851,9 @@ jobs:
               # (internal/dispatch/api/lock_level_test.go:120-133).
               - 'packages/envoy/**'
               # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
-              # and sources and checks the daemon's generated copy too (gen-go.ts:445).
+              # and sources, renders pmdoc's generated block schema from
+              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
+              # (its outputs list, the files the generator owns).
               - 'packages/contracts/scripts/gen-go.ts'
               - 'packages/contracts/schemas/**'
               - 'packages/contracts/src/**'
@@ -885,6 +891,10 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/dispatch/githubapp/**'
+              # delivery/pull_request_heads.go imports internal/dispatch/refs, which imports
+              # internal/dispatch/text, so the natslive run compiles that package and the check
+              # counts its testdata among what this job reads.
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and

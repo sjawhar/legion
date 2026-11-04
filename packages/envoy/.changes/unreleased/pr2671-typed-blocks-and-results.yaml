@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+  An issue can now say how its work will be proved, and show each result as it arrives.
+  A document marks a requirement with a `requirement` block, a plan task with a `plan_task` block (`serves`, `needs`) and a check with a `check` block (`serves`, `surface`, `run`, `when`, `negative_control`); the block schema is version 3.
+  A document created on an issue as `verification.md` or `plan.md` carries that role, and the issue read names both.
+  `POST /api/v1/issues/{key}/results` records what a check saw against a check block of the issue or of an issue above it, and `GET` reads each check with its results and whether each still stands: a result is current while its commit is the head of an open pull request attributed to the check's issue, or the final head of a merged one, and the check's words have not changed, so a push turns a result older with no write of Dispatch's.
+  An after-merge or default-branch result is current at a commit the default branch carries, and a closed issue takes such a result while it refuses every other write.
+  `GET /api/v1/issues/{key}/coverage` answers each requirement of the spec with what it lacks, counting the checks and plan tasks of the issue and of every issue below it, and the answer to an approval request names each requirement with no check.
+  `POST /api/v1/artifacts/{id}/approval-requests` takes `include_verification`, which opens one request naming the spec and the issue's Verification document, and `POST /api/v1/artifacts/{id}/plan-reviews` records a plan review's approval of a plan version, which no person is asked for.
