@@ -69,6 +69,25 @@ func TestBlocksReadsAFenceHoldingBlankLinesAsOneBlock(t *testing.T) {
 	assertBlocks(t, "- item\n\n  ```\n  a\n\n  b\n  ```\n\ntail", []string{"- item\n\n  ```\n  a\n\n  b\n  ```", "tail"})
 }
 
+// A typed block (:::ask{...} through the line of colons that closes it) and the frontmatter a
+// body opens with each hold their blank lines, as a fence does: the parser reads each as one
+// block, so each is one block here. Both shapes stand in the parser's corpus, where
+// corpus_test.go holds this reader to the server's own reading of them.
+func TestBlocksReadsATypedBlockAndFrontmatterAsOneBlock(t *testing.T) {
+	assertBlocks(t, ":::ask{#ask-1}\nWhich transport?\n\n* REST\n* gRPC\n:::\n\ntail",
+		[]string{":::ask{#ask-1}\nWhich transport?\n\n* REST\n* gRPC\n:::", "tail"})
+	// A typed block inside another closes the inner one, so the outer runs on to the colons that
+	// stand at the left margin.
+	assertBlocks(t, ":::note{}\n  :::warn{}\n  a\n\n  b\n  :::\n\nc\n:::\n\ntail",
+		[]string{":::note{}\n  :::warn{}\n  a\n\n  b\n  :::\n\nc\n:::", "tail"})
+	// An unclosed typed block runs to the end of the text, as an unclosed fence does.
+	assertBlocks(t, ":::ask{}\na\n\nb", []string{":::ask{}\na\n\nb"})
+	assertBlocks(t, "---\ntitle: x\n\nnote: y\n---\n\nBody.", []string{"---\ntitle: x\n\nnote: y\n---", "Body."})
+	// A line of dashes no second one closes is a thematic break, and the text splits as it did.
+	assertBlocks(t, "---\n\nBody.", []string{"---", "Body."})
+	assertBlocks(t, "Body.\n\n---\n\nmore", []string{"Body.", "---", "more"})
+}
+
 func TestUnits16CountsAsDispatchCounts(t *testing.T) {
 	for text, want := range map[string]int{"": 0, "abc": 3, "é": 1, "\U0001F600": 2, "a\U0001F600b": 4} {
 		if got := Units16(text); got != want {

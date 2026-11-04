@@ -1,0 +1,717 @@
+[
+  {
+    "document": "adjacent-lists.md",
+    "blocks": 14,
+    "longest": 59
+  },
+  {
+    "document": "ask-answered.md",
+    "blocks": 1,
+    "longest": 274
+  },
+  {
+    "document": "ask.md",
+    "blocks": 1,
+    "longest": 159
+  },
+  {
+    "document": "bare-address-after-punctuation.md",
+    "blocks": 51,
+    "longest": 50
+  },
+  {
+    "document": "bare-url-trailing-punctuation.md",
+    "blocks": 8,
+    "longest": 160
+  },
+  {
+    "document": "bare-url.md",
+    "blocks": 1,
+    "longest": 29
+  },
+  {
+    "document": "blockquote.md",
+    "blocks": 1,
+    "longest": 61
+  },
+  {
+    "document": "browser-list-spacing.md",
+    "blocks": 16,
+    "longest": 60
+  },
+  {
+    "document": "callout-blocks.md",
+    "blocks": 1,
+    "longest": 146
+  },
+  {
+    "document": "callout-nested.md",
+    "blocks": 7,
+    "longest": 149
+  },
+  {
+    "document": "callout.md",
+    "blocks": 11,
+    "longest": 106
+  },
+  {
+    "document": "code-directive-example.md",
+    "blocks": 1,
+    "longest": 30
+  },
+  {
+    "document": "code-fence.md",
+    "blocks": 1,
+    "longest": 33
+  },
+  {
+    "document": "code-span-line-ends.md",
+    "blocks": 34,
+    "longest": 74
+  },
+  {
+    "document": "code.md",
+    "blocks": 10,
+    "longest": 67
+  },
+  {
+    "document": "definition-callout-holding-an-unclosed-fence.md",
+    "blocks": 4,
+    "longest": 137
+  },
+  {
+    "document": "definition-items-spaced-around-callouts-holding-an-unclosed-fence.md",
+    "blocks": 6,
+    "longest": 145
+  },
+  {
+    "document": "directive-like-text.md",
+    "blocks": 6,
+    "longest": 60
+  },
+  {
+    "document": "emphasis-beside-another-marker.md",
+    "blocks": 10,
+    "longest": 175
+  },
+  {
+    "document": "emphasis-rule-of-three.md",
+    "blocks": 7,
+    "longest": 132
+  },
+  {
+    "document": "emphasis.md",
+    "blocks": 1,
+    "longest": 56
+  },
+  {
+    "document": "empty-containers.md",
+    "blocks": 35,
+    "longest": 41
+  },
+  {
+    "document": "empty-footnote-definitions-in-quoted-items.md",
+    "blocks": 25,
+    "longest": 48
+  },
+  {
+    "document": "empty-items-before-a-block-outside-their-item.md",
+    "blocks": 17,
+    "longest": 78
+  },
+  {
+    "document": "empty-items-holding-the-next-line.md",
+    "blocks": 36,
+    "longest": 55
+  },
+  {
+    "document": "empty.md",
+    "blocks": 0,
+    "longest": 0
+  },
+  {
+    "document": "escaped-block-markers.md",
+    "blocks": 10,
+    "longest": 46
+  },
+  {
+    "document": "escapes.md",
+    "blocks": 1,
+    "longest": 122
+  },
+  {
+    "document": "explicit-url-space.md",
+    "blocks": 1,
+    "longest": 52
+  },
+  {
+    "document": "explicit-url-title.md",
+    "blocks": 1,
+    "longest": 54
+  },
+  {
+    "document": "fence-blank-before-the-block-after-its-container.md",
+    "blocks": 27,
+    "longest": 95
+  },
+  {
+    "document": "fenced-code-whitespace-lines-short-of-the-fence-indent.md",
+    "blocks": 20,
+    "longest": 281
+  },
+  {
+    "document": "footnote-block-indents.md",
+    "blocks": 16,
+    "longest": 60
+  },
+  {
+    "document": "footnote-ending-in-a-block-in-an-item.md",
+    "blocks": 4,
+    "longest": 17
+  },
+  {
+    "document": "footnote-ending-in-a-block.md",
+    "blocks": 5,
+    "longest": 87
+  },
+  {
+    "document": "footnote-label-escapes.md",
+    "blocks": 12,
+    "longest": 98
+  },
+  {
+    "document": "footnote-opening-on-a-later-line.md",
+    "blocks": 15,
+    "longest": 95
+  },
+  {
+    "document": "footnote-placement.md",
+    "blocks": 25,
+    "longest": 104
+  },
+  {
+    "document": "footnote-spread-inside-a-quoted-item.md",
+    "blocks": 8,
+    "longest": 85
+  },
+  {
+    "document": "footnote-unreferenced.md",
+    "blocks": 3,
+    "longest": 57
+  },
+  {
+    "document": "footnote.md",
+    "blocks": 9,
+    "longest": 66
+  },
+  {
+    "document": "frontmatter-empty.md",
+    "blocks": 2,
+    "longest": 8
+  },
+  {
+    "document": "frontmatter-fence-whitespace.md",
+    "blocks": 2,
+    "longest": 26
+  },
+  {
+    "document": "frontmatter-long-fence.md",
+    "blocks": 3,
+    "longest": 13
+  },
+  {
+    "document": "frontmatter-opener-unclosed.md",
+    "blocks": 17,
+    "longest": 49
+  },
+  {
+    "document": "frontmatter.md",
+    "blocks": 2,
+    "longest": 38
+  },
+  {
+    "document": "generated-indented-code-g21-g10436-round6.md",
+    "blocks": 11,
+    "longest": 379
+  },
+  {
+    "document": "generated-indented-code-g21-g11819-round6.md",
+    "blocks": 3,
+    "longest": 204
+  },
+  {
+    "document": "generated-indented-code-g21-g1560-round6.md",
+    "blocks": 15,
+    "longest": 286
+  },
+  {
+    "document": "generated-indented-code-g21-g217-round6.md",
+    "blocks": 7,
+    "longest": 272
+  },
+  {
+    "document": "generated-indented-code-g21-g5616-round6.md",
+    "blocks": 8,
+    "longest": 44
+  },
+  {
+    "document": "generated-indented-code-g21-g6243-round6.md",
+    "blocks": 4,
+    "longest": 216
+  },
+  {
+    "document": "generated-indented-code-g21-g754-round6.md",
+    "blocks": 7,
+    "longest": 261
+  },
+  {
+    "document": "generated-indented-code-g21-g7991-round6.md",
+    "blocks": 7,
+    "longest": 222
+  },
+  {
+    "document": "generated-indented-code-g21-g8243-round6.md",
+    "blocks": 6,
+    "longest": 101
+  },
+  {
+    "document": "generated-indented-code-g21-g9089-round6.md",
+    "blocks": 7,
+    "longest": 330
+  },
+  {
+    "document": "generated-indented-code-g21-g9305-round6.md",
+    "blocks": 6,
+    "longest": 124
+  },
+  {
+    "document": "generated-indented-code-g21-g9745-round6.md",
+    "blocks": 8,
+    "longest": 226
+  },
+  {
+    "document": "generated-indented-code-g22-g11512-round6.md",
+    "blocks": 9,
+    "longest": 108
+  },
+  {
+    "document": "generated-indented-code-g22-g1471-round6.md",
+    "blocks": 5,
+    "longest": 194
+  },
+  {
+    "document": "generated-indented-code-g22-g4026-round6.md",
+    "blocks": 6,
+    "longest": 200
+  },
+  {
+    "document": "generated-indented-code-g22-g6351-round6.md",
+    "blocks": 7,
+    "longest": 600
+  },
+  {
+    "document": "generated-indented-code-g22-g6373-round6.md",
+    "blocks": 8,
+    "longest": 194
+  },
+  {
+    "document": "generated-indented-code-g22-g6776-round6.md",
+    "blocks": 5,
+    "longest": 156
+  },
+  {
+    "document": "generated-indented-code-g22-g6846-round6.md",
+    "blocks": 4,
+    "longest": 103
+  },
+  {
+    "document": "generated-indented-code-g22-g7356-round6.md",
+    "blocks": 14,
+    "longest": 130
+  },
+  {
+    "document": "generated-indented-code-g22-g7786-round6.md",
+    "blocks": 3,
+    "longest": 286
+  },
+  {
+    "document": "generated-indented-code-g22-g7832-round6.md",
+    "blocks": 3,
+    "longest": 221
+  },
+  {
+    "document": "generated-indented-code-g22-g9407-round6.md",
+    "blocks": 4,
+    "longest": 439
+  },
+  {
+    "document": "generated-indented-code-g22-g9654-round6.md",
+    "blocks": 8,
+    "longest": 129
+  },
+  {
+    "document": "generated-indented-code-g22-g9908-round6.md",
+    "blocks": 7,
+    "longest": 155
+  },
+  {
+    "document": "heading-line-breaks.md",
+    "blocks": 6,
+    "longest": 37
+  },
+  {
+    "document": "headings.md",
+    "blocks": 3,
+    "longest": 9
+  },
+  {
+    "document": "hr.md",
+    "blocks": 3,
+    "longest": 16
+  },
+  {
+    "document": "html-declarations.md",
+    "blocks": 23,
+    "longest": 50
+  },
+  {
+    "document": "html.md",
+    "blocks": 1,
+    "longest": 45
+  },
+  {
+    "document": "image-alt-line-ends.md",
+    "blocks": 4,
+    "longest": 131
+  },
+  {
+    "document": "image-delimiters.md",
+    "blocks": 1,
+    "longest": 49
+  },
+  {
+    "document": "image.md",
+    "blocks": 1,
+    "longest": 61
+  },
+  {
+    "document": "indented-code-after-a-closed-callout.md",
+    "blocks": 9,
+    "longest": 99
+  },
+  {
+    "document": "indented-code-tab-lines.md",
+    "blocks": 17,
+    "longest": 87
+  },
+  {
+    "document": "indented-code-trailing-whitespace-lines.md",
+    "blocks": 32,
+    "longest": 251
+  },
+  {
+    "document": "inline-code-backticks.md",
+    "blocks": 1,
+    "longest": 41
+  },
+  {
+    "document": "inline-code-spaces.md",
+    "blocks": 1,
+    "longest": 33
+  },
+  {
+    "document": "item-callouts-holding-an-unclosed-fence-before-a-lazy-line.md",
+    "blocks": 6,
+    "longest": 111
+  },
+  {
+    "document": "item-callouts-holding-an-unclosed-fence-before-flow-content.md",
+    "blocks": 15,
+    "longest": 151
+  },
+  {
+    "document": "item-fence-before-a-callout-after-blank-lines.md",
+    "blocks": 3,
+    "longest": 85
+  },
+  {
+    "document": "item-opening-with-an-empty-definition-line.md",
+    "blocks": 7,
+    "longest": 86
+  },
+  {
+    "document": "items-spaced-around-callouts-holding-an-unclosed-fence.md",
+    "blocks": 10,
+    "longest": 131
+  },
+  {
+    "document": "link-delimiters.md",
+    "blocks": 1,
+    "longest": 48
+  },
+  {
+    "document": "links-holding-an-autolink.md",
+    "blocks": 19,
+    "longest": 39
+  },
+  {
+    "document": "links.md",
+    "blocks": 1,
+    "longest": 99
+  },
+  {
+    "document": "list-item-code-blank-lines.md",
+    "blocks": 20,
+    "longest": 113
+  },
+  {
+    "document": "list-item-with-lazy-lines-and-brackets.md",
+    "blocks": 1,
+    "longest": 716
+  },
+  {
+    "document": "list-items-chained-50-deep.md",
+    "blocks": 1,
+    "longest": 101
+  },
+  {
+    "document": "list-nested-49-deep-with-blank-lines.md",
+    "blocks": 2,
+    "longest": 2547
+  },
+  {
+    "document": "list-spacing-in-containers.md",
+    "blocks": 61,
+    "longest": 107
+  },
+  {
+    "document": "lists-after-code-after-a-list.md",
+    "blocks": 54,
+    "longest": 93
+  },
+  {
+    "document": "lists-after-code-after-a-quote.md",
+    "blocks": 37,
+    "longest": 55
+  },
+  {
+    "document": "lists-opening-in-a-container-after-code.md",
+    "blocks": 34,
+    "longest": 61
+  },
+  {
+    "document": "lists-spaced-by-indented-code-whitespace-lines.md",
+    "blocks": 15,
+    "longest": 105
+  },
+  {
+    "document": "lists.md",
+    "blocks": 3,
+    "longest": 24
+  },
+  {
+    "document": "long.md",
+    "blocks": 40,
+    "longest": 51
+  },
+  {
+    "document": "marks-on-addresses-before-inline-html.md",
+    "blocks": 5,
+    "longest": 41
+  },
+  {
+    "document": "marks-on-footnote-references.md",
+    "blocks": 21,
+    "longest": 50
+  },
+  {
+    "document": "marks-on-hard-breaks.md",
+    "blocks": 36,
+    "longest": 51
+  },
+  {
+    "document": "marks-on-images.md",
+    "blocks": 40,
+    "longest": 83
+  },
+  {
+    "document": "marks-on-inline-html.md",
+    "blocks": 20,
+    "longest": 53
+  },
+  {
+    "document": "marks.md",
+    "blocks": 2,
+    "longest": 185
+  },
+  {
+    "document": "nested-code.md",
+    "blocks": 16,
+    "longest": 77
+  },
+  {
+    "document": "nested-empty-items.md",
+    "blocks": 16,
+    "longest": 17
+  },
+  {
+    "document": "nested-marks.md",
+    "blocks": 10,
+    "longest": 144
+  },
+  {
+    "document": "ordered-list-prefixes.md",
+    "blocks": 9,
+    "longest": 121
+  },
+  {
+    "document": "outer-fence-closing-unclosed-inner-blocks.md",
+    "blocks": 5,
+    "longest": 124
+  },
+  {
+    "document": "overlapping-marks.md",
+    "blocks": 7,
+    "longest": 317
+  },
+  {
+    "document": "paragraphs.md",
+    "blocks": 2,
+    "longest": 52
+  },
+  {
+    "document": "quote-with-lazy-lines.md",
+    "blocks": 3,
+    "longest": 190
+  },
+  {
+    "document": "quoted-callouts-holding-an-unclosed-fence.md",
+    "blocks": 7,
+    "longest": 147
+  },
+  {
+    "document": "quoted-definition-first-items.md",
+    "blocks": 14,
+    "longest": 87
+  },
+  {
+    "document": "quoted-definition-items.md",
+    "blocks": 17,
+    "longest": 92
+  },
+  {
+    "document": "quoted-definitions-ending-in-lists.md",
+    "blocks": 6,
+    "longest": 63
+  },
+  {
+    "document": "quoted-item-callout-holding-an-unclosed-fence-at-the-document-end.md",
+    "blocks": 4,
+    "longest": 164
+  },
+  {
+    "document": "quoted-items-holding-a-closed-callout.md",
+    "blocks": 11,
+    "longest": 119
+  },
+  {
+    "document": "quoted-items-spaced-around-callouts-holding-an-unclosed-fence.md",
+    "blocks": 8,
+    "longest": 138
+  },
+  {
+    "document": "quoted-typed-block-list-ends.md",
+    "blocks": 28,
+    "longest": 108
+  },
+  {
+    "document": "quoted-unclosed-fence-at-the-document-end.md",
+    "blocks": 2,
+    "longest": 136
+  },
+  {
+    "document": "quotes-nested-100-deep.md",
+    "blocks": 1,
+    "longest": 201
+  },
+  {
+    "document": "requirements-tasks-and-checks.md",
+    "blocks": 6,
+    "longest": 264
+  },
+  {
+    "document": "softbreak.md",
+    "blocks": 3,
+    "longest": 201
+  },
+  {
+    "document": "strikethrough-run-lengths.md",
+    "blocks": 28,
+    "longest": 132
+  },
+  {
+    "document": "tab-indented-list-markers.md",
+    "blocks": 45,
+    "longest": 49
+  },
+  {
+    "document": "table-cell-pipes.md",
+    "blocks": 1,
+    "longest": 508
+  },
+  {
+    "document": "table-then-setext-underline.md",
+    "blocks": 20,
+    "longest": 32
+  },
+  {
+    "document": "table.md",
+    "blocks": 2,
+    "longest": 72
+  },
+  {
+    "document": "tables-then-empty-items.md",
+    "blocks": 18,
+    "longest": 79
+  },
+  {
+    "document": "task-markers.md",
+    "blocks": 36,
+    "longest": 22
+  },
+  {
+    "document": "tasks.md",
+    "blocks": 1,
+    "longest": 29
+  },
+  {
+    "document": "typed-block-in-a-quote-ending-in-blank-lines.md",
+    "blocks": 8,
+    "longest": 60
+  },
+  {
+    "document": "typed-block-opening-a-list-item-then-blank-lines.md",
+    "blocks": 8,
+    "longest": 61
+  },
+  {
+    "document": "typed-blocks-nested-32-deep.md",
+    "blocks": 3,
+    "longest": 2360
+  },
+  {
+    "document": "unclosed-fences-before-the-next-block.md",
+    "blocks": 42,
+    "longest": 79
+  },
+  {
+    "document": "unicode.md",
+    "blocks": 1,
+    "longest": 33
+  },
+  {
+    "document": "writer-spells-a-flanked-letter-after-a-backslash.md",
+    "blocks": 9,
+    "longest": 116
+  }
+]
