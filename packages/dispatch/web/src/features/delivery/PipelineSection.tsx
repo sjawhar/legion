@@ -66,7 +66,6 @@ import {
 import { formatDue, formatDuration, formatRate } from "./lib/format";
 import { formatAge } from "./lib/freshness";
 import { liveWindow } from "./lib/window";
-import { SourceFreshness } from "./SourceFreshness";
 import { SpreadBars } from "./SpreadBars";
 import { TargetBadge } from "./TargetBadge";
 
@@ -126,7 +125,6 @@ export const PipelineSection = memo(function PipelineSection({
           compare={{ data: compared.data, onRange: onCompare, range: compare }}
           nowMs={nowMs}
           pipeline={query.data}
-          readAtMs={answeredAtRef.current}
         />
       )}
     </section>
@@ -156,19 +154,18 @@ function leadTimeSeries(days: readonly DeliveryLeadTimeDay[], target: number): C
   ];
 }
 
-/** The section's body for one answer of the route; `readAtMs` is when that answer was read, and
- *  `nowMs` the moment a failure's age is measured from. `compare` is the page's comparison,
+/** The section's body for one answer of the route; `nowMs` is the moment a failure's age is
+ *  measured from. The answer's `freshness` is the page's, drawn once at its head
+ *  (`DeliveryPage.tsx`), so this draws no row of its own. `compare` is the page's comparison,
  *  which every card offers and one second answer serves; a host that reads no second range
  *  passes none and the cards show their graph-or-table control alone. */
 export function PipelineView({
   compare,
   pipeline,
-  readAtMs,
   nowMs,
 }: {
   compare?: ChartCompareSource<DeliveryPipelineResponse>;
   pipeline: DeliveryPipelineResponse;
-  readAtMs: number;
   nowMs: number;
 }): ReactNode {
   // What each card's chart compares its own days with: the compare range's answer read as that
@@ -217,7 +214,6 @@ export function PipelineView({
 
   return (
     <>
-      <SourceFreshness freshness={pipeline.freshness} readAtMs={readAtMs} />
       <p className={`text-xs ${textMutedOnCanvas}`}>
         Last {dayCount} days, {formatDue(first)} to {formatDue(last)} (UTC), by the day each run
         started; a day the window only partly covers is drawn faded. Not filtered by the

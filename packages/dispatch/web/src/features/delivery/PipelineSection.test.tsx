@@ -235,12 +235,9 @@ const PIPELINE: DeliveryPipelineResponse = {
 
 function view(pipeline: DeliveryPipelineResponse = PIPELINE): HTMLElement {
   const at = Date.parse("2026-10-02T12:00:00Z");
-  // The freshness row reads the live connection's state from the query client.
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <PipelineView nowMs={at} pipeline={pipeline} readAtMs={at} />
-    </QueryClientProvider>
-  );
+  // The body draws no freshness row of its own (the page draws one at its head), so it reads
+  // nothing from a query client.
+  render(<PipelineView nowMs={at} pipeline={pipeline} />);
   return document.body;
 }
 

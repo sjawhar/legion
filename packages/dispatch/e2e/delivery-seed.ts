@@ -162,12 +162,15 @@ export async function seedMeasuresFixture(): Promise<void> {
  *  seven days ending on its day, 2026-09-26 to 2026-10-02. */
 export const PIPELINE_AT = "2026-10-02T12:00:00Z";
 
-/** The Delivery page opened at its Pipeline section over those same seven days, as the page's
- *  one window control writes a custom range: `from` is the first day's midnight and `to` the
- *  midnight after the last (INFRA-1077, which folded the Pipeline page into this one). */
+/** The Delivery page opened at its Pipeline section over those same seven days: `from` is the
+ *  first day's midnight and `to` is `PIPELINE_AT`, the instant the rows below are dated for, so
+ *  the section's clock is the route's `?at=` clock and its failing-jobs table looks its 24 hours
+ *  back from the same moment (INFRA-1077, which folded the Pipeline page into this one). A
+ *  preset window ends at the present, so an end inside a day is what the page sends most of the
+ *  time; a custom range the window control writes ends at the midnight after its last day. */
 export const PIPELINE_SECTION_URL = `/delivery?from=${encodeURIComponent(
   "2026-09-26T00:00:00Z"
-)}&to=${encodeURIComponent("2026-10-03T00:00:00Z")}#pipeline`;
+)}&to=${encodeURIComponent(PIPELINE_AT)}#pipeline`;
 
 /** A time on 2026-09-<day> (a day past 30 rolls into October), as the prototype's
  *  collector/tests/test_pipeline.py `_ts` writes it. */

@@ -453,6 +453,14 @@ export function DeliveryPage(): ReactNode {
         )}
       </header>
 
+      {/* One freshness row for the whole page, at its head: the three sections read the same
+          reconcile, the same Dispatch tables and the same event intake, so one row names every
+          source of all three (INFRA-1077). Two rows would be two regions a reader, and a
+          screen reader, could not tell apart. */}
+      {data === undefined ? null : (
+        <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
+      )}
+
       <LegionSection compare={compareRange} onCompare={setCompareRange} window={state.window} />
 
       {notConfigured ? (
@@ -485,10 +493,6 @@ export function DeliveryPage(): ReactNode {
             <h2 className={`text-lg font-semibold ${textPrimaryOnCanvas}`} id="delivery-heading">
               Delivery: merge to production
             </h2>
-            {data === undefined ? null : (
-              <SourceFreshness freshness={data.freshness} readAtMs={answeredAt} />
-            )}
-
             {query.isPending ? (
               <p className={textMutedOnCanvas}>Loading delivery timeline…</p>
             ) : null}
