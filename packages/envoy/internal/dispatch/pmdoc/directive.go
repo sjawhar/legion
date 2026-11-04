@@ -345,25 +345,19 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 			}
 			offset++
 			start = offset
-			escaped := false
-			for offset < len(value) {
-				if value[offset] == '"' && !escaped {
-					break
-				}
-				escaped = value[offset] == '\\' && !escaped
-				if value[offset] != '\\' {
-					escaped = false
-				}
+			// The value ends at the next quote, whatever stands before it: the browser editor's
+			// parser (micromark-extension-directive's factory-attributes, valueQuoted) consumes
+			// every character up to the marker and gives no meaning to a backslash, so `\"` ends
+			// the value after a literal backslash, and what the value holds is decoded as
+			// character references alone (its html compiler's parseEntities) - `a\u202fb` is
+			// those six characters and not U+202F, which is what the browser draws.
+			for offset < len(value) && value[offset] != '"' {
 				offset++
 			}
 			if offset == len(value) {
 				return nil, fmt.Errorf("unterminated value for %q", name)
 			}
-			unquoted, err := strconv.Unquote(value[start-1 : offset+1])
-			if err != nil {
-				return nil, fmt.Errorf("decode value for %q: %w", name, err)
-			}
-			attrs[name] = html.UnescapeString(unquoted)
+			attrs[name] = html.UnescapeString(value[start:offset])
 			offset++
 		}
 		if offset < len(value) && !unicode.IsSpace(rune(value[offset])) {

@@ -859,3 +859,61 @@ func TestChangingBlockAskReplacesAnswerAttributes(t *testing.T) {
 		t.Fatalf("changed block markdown = %q, want gRPC selected and no answer attribute", markdown)
 	}
 }
+
+// An ask written with its options and no question is refused where a caller writes whole
+// markdown, however the author spelled the question: an empty paragraph, a link with no text, two
+// such links, or two such paragraphs, which the renderer writes as nothing and which no reader can
+// answer. Each refusal is INVALID_ASK_BLOCK naming the content rule and the line to write the
+// question on, including the two-paragraph one, whose rendering the read-back would otherwise
+// refuse as markdown. A question that writes bytes is a question, thin as it is: an image, a
+// U+00A0, or words.
+func TestUploadsRefuseAnAskWrittenWithOptionsAndNoQuestion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "AQ", "Asks with no question", "Intro.\n")
+	ask := func(body string) string {
+		return "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n" + body + "\n:::\n\nAfter.\n"
+	}
+	for index, test := range []struct {
+		name, body string
+		refused    bool
+	}{
+		{name: "an empty question", body: "- A\n- B", refused: true},
+		{name: "a link with no text", body: "[](https://e.example)\n\n- A\n- B", refused: true},
+		{name: "a link with no text or target", body: "[]()\n\n- A\n- B", refused: true},
+		{name: "two links with no text", body: "[](https://e.example)[](https://f.example)\n\n- A\n- B", refused: true},
+		{name: "two paragraphs of such links", body: "[](https://e.example)\n\n[](https://f.example)\n\n- A\n- B", refused: true},
+		{name: "an image", body: "![a diagram](https://e.example/d.png)\n\n- A\n- B"},
+		{name: "a U+00A0", body: "\u00a0\n\n- A\n- B"},
+		{name: "words", body: "Which transport?\n\n- A\n- B"},
+	} {
+		content := ask(test.body)
+		for route, send := range map[string]func() *httptest.ResponseRecorder{
+			"create an issue": func() *httptest.ResponseRecorder {
+				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+					"project": "AQ", "title": fmt.Sprintf("Ask %d: %s", index, test.name), "spec": content, "force": true,
+				}, "alice")
+			},
+			"upload a document": func() *httptest.ResponseRecorder {
+				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+					"name": fmt.Sprintf("ask-%d.md", index), "content": content,
+				}, "alice")
+			},
+		} {
+			response := send()
+			body := response.Body.String()
+			if !test.refused {
+				if response.Code != http.StatusCreated {
+					t.Errorf("%s with %s as the question: status=%d body=%s, want it stored", route, test.name, response.Code, body)
+				}
+				continue
+			}
+			if response.Code != http.StatusBadRequest ||
+				!strings.Contains(body, `"code":"INVALID_ASK_BLOCK"`) ||
+				!strings.Contains(body, "options and no question") ||
+				!strings.Contains(body, "paragraph+ bullet_list?") ||
+				!strings.Contains(body, "write it on the line under the block's opening fence") {
+				t.Errorf("%s with %s as the question: status=%d body=%s, want INVALID_ASK_BLOCK naming the missing question, the content rule and where to write it", route, test.name, response.Code, body)
+			}
+		}
+	}
+}

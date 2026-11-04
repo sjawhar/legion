@@ -614,6 +614,103 @@
     "rendered_by_milkdown": "* a\n\n- b\n\n* c\n\nText.\n\n1. one\n2. two\n\n3) three\n\nText.\n\n* outer\n  * x\n  - y\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- in a\n\n* callout\n:::\n\nText.\n\n* a\n\n-\n  ***\n\nText.\n\n* outer\n  * x\n  -\n    ***\n  - y\n"
   },
   {
+    "name": "ask-answer-holding-a-backslash-escape",
+    "markdown": ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-11-04T09:00:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\\u202fThe six characters before this sentence are text, not a space.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "urgency": "med",
+            "multiple": false,
+            "state": "answered",
+            "answered_by": "alice",
+            "answered_at": "2026-11-04T09:00:00Z",
+            "selected": [
+              "REST"
+            ],
+            "answer": "Ship REST first.\\u202fThe six characters before this sentence are text, not a space.",
+            "blockId": "ask-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which transport should we expose?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: Matches the existing platform"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "gRPC: Adds streaming"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASUBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3A21lZCgAAQAIbXVsdGlwbGUBeSgAAQAFc3RhdGUBdwhhbnN3ZXJlZCgAAQALYW5zd2VyZWRfYnkBdwVhbGljZSgAAQALYW5zd2VyZWRfYXQBdxQyMDI2LTExLTA0VDA5OjAwOjAwWigAAQAIc2VsZWN0ZWQBdQF3BFJFU1QoAAEABmFuc3dlcgF3VFNoaXAgUkVTVCBmaXJzdC5cdTIwMmZUaGUgc2l4IGNoYXJhY3RlcnMgYmVmb3JlIHRoaXMgc2VudGVuY2UgYXJlIHRleHQsIG5vdCBhIHNwYWNlLigAAQAHaW52YWxpZAF/KAABAAtjb3BpZWRfZnJvbQF/KAABABRjb3BpZWRfZnJvbV9kb2N1bWVudAF/KAABAAdibG9ja0lkAXcFYXNrLTEA",
+    "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-11-04T09:00:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\\u202fThe six characters before this sentence are text, not a space.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
+  },
+  {
     "name": "ask-answered",
     "markdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n",
     "pm_json": {
@@ -709,6 +806,91 @@
     },
     "yjs_update_v1_b64": "ASUBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3BGhpZ2goAAEACG11bHRpcGxlAXkoAAEABXN0YXRlAXcIYW5zd2VyZWQoAAEAC2Fuc3dlcmVkX2J5AXcFYWxpY2UoAAEAC2Fuc3dlcmVkX2F0AXcUMjAyNi0wOS0xMlQxMzoyMDowMFooAAEACHNlbGVjdGVkAXUBdwRSRVNUKAABAAZhbnN3ZXIBdxBTaGlwIFJFU1QgZmlyc3QuKAABAAdpbnZhbGlkAX8oAAEAC2NvcGllZF9mcm9tAX8oAAEAFGNvcGllZF9mcm9tX2RvY3VtZW50AX8oAAEAB2Jsb2NrSWQBdwVhc2stMQA=",
     "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
+  },
+  {
+    "name": "ask-opening-with-a-list",
+    "markdown": ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n- REST: Matches the existing platform\n- gRPC: Adds streaming\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "urgency": "med",
+            "multiple": false,
+            "state": "open",
+            "blockId": "ask-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              }
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: Matches the existing platform"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "gRPC: Adds streaming"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASMBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgoAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAQMLYnVsbGV0X2xpc3QHAAEDAwlsaXN0X2l0ZW0HAAEEAwlwYXJhZ3JhcGgHAAEFBgQAAQYjUkVTVDogTWF0Y2hlcyB0aGUgZXhpc3RpbmcgcGxhdGZvcm0oAAEFB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAQQFbGFiZWwBdwPigKIoAAEECGxpc3RUeXBlAXcGYnVsbGV0KAABBAZzcHJlYWQBeSgAAQQHYmxvY2tJZAF3CGItMDAwMDAzhwEEAwlsaXN0X2l0ZW0HAAEvAwlwYXJhZ3JhcGgHAAEwBgQAATEUZ1JQQzogQWRkcyBzdHJlYW1pbmcoAAEwB2Jsb2NrSWQBdwhiLTAwMDAwNigAAS8FbGFiZWwBdwPigKIoAAEvCGxpc3RUeXBlAXcGYnVsbGV0KAABLwZzcHJlYWQBeSgAAS8HYmxvY2tJZAF3CGItMDAwMDA1KAABAwZzcHJlYWQBeSgAAQMHYmxvY2tJZAF3CGItMDAwMDAyKAABAAd1cmdlbmN5AXcDbWVkKAABAAhtdWx0aXBsZQF5KAABAAVzdGF0ZQF3BG9wZW4oAAEAC2Fuc3dlcmVkX2J5AX8oAAEAC2Fuc3dlcmVkX2F0AX8oAAEACHNlbGVjdGVkAX8oAAEABmFuc3dlcgF/KAABAAdpbnZhbGlkAX8oAAEAC2NvcGllZF9mcm9tAX8oAAEAFGNvcGllZF9mcm9tX2RvY3VtZW50AX8oAAEAB2Jsb2NrSWQBdwVhc2stMQA=",
+    "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
   },
   {
     "name": "ask",
@@ -13770,6 +13952,130 @@
     },
     "yjs_update_v1_b64": "Ab8BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBBFJlZnOHAQEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQYFbGFiZWwBdwExhwEGAxJmb290bm90ZV9yZWZlcmVuY2UoAAEIBWxhYmVsAXcBMocBCAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABCgVsYWJlbAF3ATOHAQoDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQwFbGFiZWwBdwE0hwEMAxJmb290bm90ZV9yZWZlcmVuY2UoAAEOBWxhYmVsAXcBNYcBDgYEAAEQAS4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAARMDCmNvZGVfYmxvY2sHAAEUBgQAARUCIHgoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwMygAARMFbGFiZWwBdwExKAABEwdibG9ja0lkAXcIYi0wMDAwMDKHARMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAEbAwtidWxsZXRfbGlzdAcAARwDCWxpc3RfaXRlbQcAAR0DCXBhcmFncmFwaAcAAR4GBAABHwFhKAABHgdibG9ja0lkAXcIYi0wMDAwMDeHAR4DCmNvZGVfYmxvY2sHAAEiBgQAASMBeCgAASIHYmxvY2tJZAF3CGItMDAwMDA4KAABHQVsYWJlbAF3A+KAoigAAR0IbGlzdFR5cGUBdwZidWxsZXQoAAEdBnNwcmVhZAF5KAABHQdibG9ja0lkAXcIYi0wMDAwMDYoAAEcBnNwcmVhZAF5KAABHAdibG9ja0lkAXcIYi0wMDAwMDUoAAEbBWxhYmVsAXcBMigAARsHYmxvY2tJZAF3CGItMDAwMDA0hwEbAxNmb290bm90ZV9kZWZpbml0aW9uBwABLgMLYnVsbGV0X2xpc3QHAAEvAwlsaXN0X2l0ZW0HAAEwAwlwYXJhZ3JhcGgHAAExBgQAATIBYSgAATEHYmxvY2tJZAF3CGItMDAwMDEyhwExAwlwYXJhZ3JhcGgHAAE1BgQAATYBYigAATUHYmxvY2tJZAF3CGItMDAwMDEzKAABMAVsYWJlbAF3A+KAoigAATAIbGlzdFR5cGUBdwZidWxsZXQoAAEwBnNwcmVhZAF4KAABMAdibG9ja0lkAXcIYi0wMDAwMTEoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMTAoAAEuBWxhYmVsAXcBMygAAS4HYmxvY2tJZAF3CGItMDAwMDA5hwEuAxNmb290bm90ZV9kZWZpbml0aW9uBwABQQMKYmxvY2txdW90ZQcAAUIDCmNvZGVfYmxvY2sHAAFDBgQAAUQCIHgoAAFDB2Jsb2NrSWQBdwhiLTAwMDAxNigAAUIHYmxvY2tJZAF3CGItMDAwMDE1KAABQQVsYWJlbAF3ATQoAAFBB2Jsb2NrSWQBdwhiLTAwMDAxNIcBQQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAUsDDG9yZGVyZWRfbGlzdAcAAUwDCWxpc3RfaXRlbQcAAU0DCXBhcmFncmFwaAcAAU4GBAABTwFhKAABTgdibG9ja0lkAXcIYi0wMDAwMjCHAU4DCmNvZGVfYmxvY2sHAAFSBgQAAVMCIHkoAAFSB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAU0FbGFiZWwBdwPigKIoAAFNCGxpc3RUeXBlAXcGYnVsbGV0KAABTQZzcHJlYWQBeSgAAU0HYmxvY2tJZAF3CGItMDAwMDE5KAABTAVvcmRlcgF9ASgAAUwGc3ByZWFkAXkoAAFMB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAUsFbGFiZWwBdwE1KAABSwdibG9ja0lkAXcIYi0wMDAwMTeHAUsDCXBhcmFncmFwaAcAAWAGBAABYQxBIGRlZmluaXRpb26HAWEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAW4FbGFiZWwBdwJibIcBbgYEAAFwIyB3aG9zZSBjb2RlIGhvbGRzIG9ubHkgYmxhbmsgbGluZXM6KAABYAdibG9ja0lkAXcIYi0wMDAwMjKHAWADE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGVAQMJcGFyYWdyYXBoBwABlgEGBAABlwEBYSgAAZYBB2Jsb2NrSWQBdwhiLTAwMDAyNIcBlgEDCmNvZGVfYmxvY2sHAAGaAQYEAAGbAQEKKAABmgEHYmxvY2tJZAF3CGItMDAwMDI1KAABlQEFbGFiZWwBdwJibCgAAZUBB2Jsb2NrSWQBdwhiLTAwMDAyM4cBlQEDCXBhcmFncmFwaAcAAaABBgQAAaEBB0FuZCBvbmWHAaEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAGpAQVsYWJlbAF3AmJthwGpAQYEAAGrARsgd2hvc2UgY29kZSBvcGVucyB3aXRoIG9uZTooAAGgAQdibG9ja0lkAXcIYi0wMDAwMjaHAaABAxNmb290bm90ZV9kZWZpbml0aW9uBwAByAEDCXBhcmFncmFwaAcAAckBBgQAAcoBAWEoAAHJAQdibG9ja0lkAXcIYi0wMDAwMjiHAckBAwpjb2RlX2Jsb2NrBwABzQEGBAABzgECCmMoAAHNAQdibG9ja0lkAXcIYi0wMDAwMjkoAAHIAQVsYWJlbAF3AmJtKAAByAEHYmxvY2tJZAF3CGItMDAwMDI3hwHIAQMJcGFyYWdyYXBoBwAB1AEGBAAB1QEYSW4gYSBxdW90ZSwgYSBkZWZpbml0aW9uhwHVAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB7gEFbGFiZWwBdwJicYcB7gEGBAAB8AEfIHdob3NlIGNvZGUgaG9sZHMgYSBibGFuayBsaW5lOigAAdQBB2Jsb2NrSWQBdwhiLTAwMDAzMIcB1AEDCmJsb2NrcXVvdGUHAAGRAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZICAwpjb2RlX2Jsb2NrBwABkwIGBAABlAIEYwoKZCgAAZMCB2Jsb2NrSWQBdwhiLTAwMDAzMygAAZICBWxhYmVsAXcCYnEoAAGSAgdibG9ja0lkAXcIYi0wMDAwMzIoAAGRAgdibG9ja0lkAXcIYi0wMDAwMzGHAZECAwlwYXJhZ3JhcGgHAAGdAgYEAAGeAgdBbmQgb25lhwGeAgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABpgIFbGFiZWwBdwJicocBpgIGBAABqAIXIGluIGEgcXVvdGVkIGxpc3QgaXRlbTooAAGdAgdibG9ja0lkAXcIYi0wMDAwMzSHAZ0CAwpibG9ja3F1b3RlBwABwQIDC2J1bGxldF9saXN0BwABwgIDCWxpc3RfaXRlbQcAAcMCAwlwYXJhZ3JhcGgHAAHEAgYEAAHFAgFhKAABxAIHYmxvY2tJZAF3CGItMDAwMDM4hwHEAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAcgCAwpjb2RlX2Jsb2NrBwAByQIGBAABygIEYwoKZCgAAckCB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAcgCBWxhYmVsAXcCYnIoAAHIAgdibG9ja0lkAXcIYi0wMDAwMzkoAAHDAgVsYWJlbAF3A+KAoigAAcMCCGxpc3RUeXBlAXcGYnVsbGV0KAABwwIGc3ByZWFkAXkoAAHDAgdibG9ja0lkAXcIYi0wMDAwMzcoAAHCAgZzcHJlYWQBeSgAAcICB2Jsb2NrSWQBdwhiLTAwMDAzNigAAcECB2Jsb2NrSWQBdwhiLTAwMDAzNYcBwQIDCXBhcmFncmFwaAcAAdkCBgQAAdoCB0FuZCBvbmWHAdoCAxJmb290bm90ZV9yZWZlcmVuY2UoAAHiAgVsYWJlbAF3AmJzhwHiAgYEAAHkAiQgd2hvc2UgYmxhbmsgY29kZSBsaW5lIGhvbGRzIHNwYWNlczooAAHZAgdibG9ja0lkAXcIYi0wMDAwNDGHAdkCAwpibG9ja3F1b3RlBwABigMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGLAwMKY29kZV9ibG9jawcAAYwDBgQAAY0DB2MKICAgCmQoAAGMAwdibG9ja0lkAXcIYi0wMDAwNDQoAAGLAwVsYWJlbAF3AmJzKAABiwMHYmxvY2tJZAF3CGItMDAwMDQzKAABigMHYmxvY2tJZAF3CGItMDAwMDQyAA==",
     "rendered_by_milkdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: * a\n      ```\n      x\n      ```\n\n[^3]: * a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n\nA definition[^bl] whose code holds only blank lines:\n\n[^bl]: a\n\n    ```\n\n\n    ```\n\nAnd one[^bm] whose code opens with one:\n\n[^bm]: a\n\n    ```\n\n    c\n    ```\n\nIn a quote, a definition[^bq] whose code holds a blank line:\n\n> [^bq]: ```\n>     c\n>\n>     d\n>     ```\n\nAnd one[^br] in a quoted list item:\n\n> * a\n>   [^br]: ```\n>       c\n>\n>       d\n>       ```\n\nAnd one[^bs] whose blank code line holds spaces:\n\n> [^bs]: ```\n>     c\n>        \n>     d\n>     ```\n"
+  },
+  {
+    "name": "footnote-definition-ask-opening-with-a-list",
+    "markdown": "[^f]: The question is in the note.\n    :::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n    - REST: Matches the existing platform\n    - gRPC: Adds streaming\n    :::\n\nA paragraph that refers to the note.[^f]\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "f",
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The question is in the note."
+                }
+              ]
+            },
+            {
+              "type": "ask",
+              "attrs": {
+                "urgency": "med",
+                "multiple": false,
+                "state": "open",
+                "blockId": "ask-1"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  }
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000006"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "REST: Matches the existing platform"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000008"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "gRPC: Adds streaming"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A paragraph that refers to the note."
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "f"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ATABAAcBC3Byb3NlbWlycm9yAxNmb290bm90ZV9kZWZpbml0aW9uBwABAAMJcGFyYWdyYXBoBwABAQYEAAECHFRoZSBxdWVzdGlvbiBpcyBpbiB0aGUgbm90ZS4oAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMocBAQMDYXNrBwABIAMJcGFyYWdyYXBoKAABIQdibG9ja0lkAXcIYi0wMDAwMDOHASEDC2J1bGxldF9saXN0BwABIwMJbGlzdF9pdGVtBwABJAMJcGFyYWdyYXBoBwABJQYEAAEmI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJQdibG9ja0lkAXcIYi0wMDAwMDYoAAEkBWxhYmVsAXcD4oCiKAABJAhsaXN0VHlwZQF3BmJ1bGxldCgAASQGc3ByZWFkAXkoAAEkB2Jsb2NrSWQBdwhiLTAwMDAwNYcBJAMJbGlzdF9pdGVtBwABTwMJcGFyYWdyYXBoBwABUAYEAAFRFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUAdibG9ja0lkAXcIYi0wMDAwMDgoAAFPBWxhYmVsAXcD4oCiKAABTwhsaXN0VHlwZQF3BmJ1bGxldCgAAU8Gc3ByZWFkAXkoAAFPB2Jsb2NrSWQBdwhiLTAwMDAwNygAASMGc3ByZWFkAXkoAAEjB2Jsb2NrSWQBdwhiLTAwMDAwNCgAASAHdXJnZW5jeQF3A21lZCgAASAIbXVsdGlwbGUBeSgAASAFc3RhdGUBdwRvcGVuKAABIAthbnN3ZXJlZF9ieQF/KAABIAthbnN3ZXJlZF9hdAF/KAABIAhzZWxlY3RlZAF/KAABIAZhbnN3ZXIBfygAASAHaW52YWxpZAF/KAABIAtjb3BpZWRfZnJvbQF/KAABIBRjb3BpZWRfZnJvbV9kb2N1bWVudAF/KAABIAdibG9ja0lkAXcFYXNrLTEoAAEABWxhYmVsAXcBZigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAF6BgQAAXskQSBwYXJhZ3JhcGggdGhhdCByZWZlcnMgdG8gdGhlIG5vdGUuhwF7AxJmb290bm90ZV9yZWZlcmVuY2UoAAGgAQVsYWJlbAF3AWYoAAF6B2Jsb2NrSWQBdwhiLTAwMDAwOQA=",
+    "rendered_by_milkdown": "[^f]: The question is in the note.\n\n    :::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n\n\n    * REST: Matches the existing platform\n    * gRPC: Adds streaming\n    :::\n\nA paragraph that refers to the note.[^f]\n"
   },
   {
     "name": "footnote-ending-in-a-block-in-an-item",

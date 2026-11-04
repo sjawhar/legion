@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"weak"
@@ -140,9 +141,29 @@ func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdo
 	parsed, read, err := pmdoc.ParseWritten(markdown, live)
 	tree, err := uploadedInput(parsed, err)
 	if err != nil {
-		return nil, pmdoc.WrittenReadBack{}, err
+		return nil, pmdoc.WrittenReadBack{}, askRefusalInstead(markdown, err)
 	}
 	return tree, read, nil
+}
+
+// askRefusalInstead is err, or the refusal of an ask written with its options and no question
+// where that is what err is about. The renderer writes such an ask's empty paragraphs as nothing
+// (both parsers read one back), so markdown writing two of them renders to one the read-back
+// cannot match, and the write is refused for the rendering rather than for the ask. The author's
+// fault is the ask, so it is named: this reads the markdown again without the read-back check and
+// returns the ask rule's own refusal when it has one.
+func askRefusalInstead(markdown string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "reads back otherwise") {
+		return err
+	}
+	tree, parseErr := pmdoc.Parse(markdown)
+	if parseErr != nil {
+		return err
+	}
+	if ask := pmdoc.AskWrittenContentError(tree); ask != nil {
+		return &ErrInvalidAskBlock{Reason: ask}
+	}
+	return err
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A

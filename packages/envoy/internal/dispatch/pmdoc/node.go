@@ -362,14 +362,23 @@ func openingWords(text string) string {
 }
 
 // askWritesNoQuestion reports whether these children are an ask's whose markdown wrote its
-// options and no question: the empty paragraph the Proof schema fills in ahead of a list
-// (emptyParagraphFirst), then that list. A question emptied by a person's edit leaves the same
-// shape, which the document service keeps and repairs through its question
-// (refuseEmptyQuestionEdit, docs/ask_block_text.go), so only markdown written in whole is held to
-// this (AskWrittenContentError).
+// options and no question: one or more paragraphs that hold nothing - the one the Proof schema
+// fills in ahead of a list (emptyParagraphFirst), and any the author wrote out of inlines that
+// write no bytes, a link with no text among them - and then that list. A question emptied by a
+// person's edit leaves the same shape, which the document service keeps and repairs through its
+// question (refuseEmptyQuestionEdit, docs/ask_block_text.go), so only markdown written in whole
+// is held to this (AskWrittenContentError).
 func askWritesNoQuestion(children []*Node) bool {
-	return len(children) == 2 && children[0] != nil && children[0].Type == "paragraph" &&
-		len(children[0].Children) == 0 && children[1] != nil && children[1].Type == "bullet_list"
+	last := len(children) - 1
+	if last < 1 || children[last] == nil || children[last].Type != "bullet_list" {
+		return false
+	}
+	for _, child := range children[:last] {
+		if child == nil || child.Type != "paragraph" || len(child.Children) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
