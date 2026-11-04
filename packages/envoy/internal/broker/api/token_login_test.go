@@ -314,13 +314,14 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 	}
 }
 
-// TestAReplacedPodGetsALoginOfItsOwn: a machine login belongs to the pod whose token made it
-// (migration 0026), so a replaced pod of the same account gets a credential of its own rather
-// than taking the old pod's over. The old row stays live until its expiry, at most an hour, so
-// the enrollments it made are not the new credential's to end (403 NOT_ENROLLING_CREDENTIAL) and
-// end by their lease, or at once when a person revokes that old login. This is what lets several
-// pods of one account hold logins at the same time.
-func TestAReplacedPodGetsALoginOfItsOwn(t *testing.T) {
+// TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods: a machine login belongs to the pod
+// whose token made it (migration 0026), so a replaced pod of the same account gets a credential of
+// its own rather than taking the old pod's over, which is what lets several pods of one account
+// hold logins at the same time. It still ends the enrollments its predecessor made, because they
+// are the same launcher: the same ServiceAccount, the same service, and pods of an account
+// BROKER_SERVICES binds to that service. Without it, one deploy would leave every enrollment the
+// launcher pods before it made running to its lease with nothing able to revoke it.
+func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) {
 	ts := newTestServer(t)
 	firstKey := newSigningKey(t)
 	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
@@ -349,9 +350,11 @@ func TestAReplacedPodGetsALoginOfItsOwn(t *testing.T) {
 	if status, body := ts.enrollPodWith(t, nextKey, next.CredentialID); status != http.StatusCreated {
 		t.Fatalf("the replacement pod's enrollment = %d %s, want 201", status, body)
 	}
-	if status, body := ts.launcher(t, nextKey, next.CredentialID, http.MethodDelete, "/v1/enrollments/"+earlier, nil); status != http.StatusForbidden ||
-		decode[wireError](t, body).Code != "NOT_ENROLLING_CREDENTIAL" {
-		t.Fatalf("the replacement ends the first pod's enrollment = %d %s, want 403 NOT_ENROLLING_CREDENTIAL", status, body)
+	if status, body := ts.launcher(t, nextKey, next.CredentialID, http.MethodDelete, "/v1/enrollments/"+earlier, nil); status != http.StatusNoContent {
+		t.Fatalf("the replacement ends the first pod's enrollment = %d %s, want 204", status, body)
+	}
+	if got := ts.column(t, `select (revoked_at is not null)::text from enrollments where id=$1`, earlier); !slices.Equal(got, []string{"true"}) {
+		t.Fatalf("the first pod's enrollment ended = %v, want true: ended at once, not at its lease", got)
 	}
 }
 

@@ -4,10 +4,12 @@ body: |-
   unique per ServiceAccount and pod, and a login from a token bound to no pod stays its
   account's one credential, so every pod of an account may hold a login at the same time, each
   with its own key. A process that logs in again from the pod it already runs in keeps its
-  credential, so every pod it enrolled stays under it. A **replaced** pod gets a credential of
-  its own rather than taking the old pod's over: the enrollments the old credential made are no
-  longer the new one's to end (`403 NOT_ENROLLING_CREDENTIAL`, which a launcher already treats
-  as final) and end one lease after their renewer stops, or at once when a person revokes that
-  old login on the machine-login page.
+  credential. A **replaced** pod gets a credential of its own, and ends the enrollments its
+  predecessor made all the same: a pod enrollment is now revoked by the credential that made it
+  or by the same launcher logging in again from another pod — the same ServiceAccount, the same
+  service, and a pod of an account `BROKER_SERVICES` binds to that service, the launcher
+  relation an enrolment already reads. A pod that enrolled itself gets nothing from this: the
+  service such an account logs in as binds no pod account, so no session pod can end another's.
+  Every other caller stays `403 NOT_ENROLLING_CREDENTIAL`.
 custom:
   Issue: pr2777

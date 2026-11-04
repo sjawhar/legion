@@ -27,6 +27,8 @@ const (
 	// pods it launches run as, which BROKER_SERVICES binds to the launcher's service.
 	launcherAccount  = "system:serviceaccount:legion:legion-daemon"
 	workerPodAccount = "system:serviceaccount:legion:legion-worker"
+	// otherLauncherAccount is a second service's launcher login.
+	otherLauncherAccount = "system:serviceaccount:other:other-daemon"
 	// strangerPodAccount is an account no setting binds to anything: no login enrols its pods.
 	strangerPodAccount = "system:serviceaccount:other:stranger"
 )
@@ -87,13 +89,19 @@ func newLoginKey(t *testing.T) loginKey {
 	return loginKey{thumbprint: thumbprint, jwk: jwk}
 }
 
+// serviceOf is the service BROKER_SERVICE_LOGINS gives account, as machine.Service.TokenLogin
+// resolves it before issuing the credential.
+func (r podRig) serviceOf(account string) string {
+	return r.svc.ServiceLogins[account]
+}
+
 // loginWithKey is login proving key, so a test can log in twice with one key as a daemon does.
 func (r podRig) loginWithKey(t *testing.T, account, podUID string, key loginKey) Credential {
 	t.Helper()
 	ctx := context.Background()
 	expires := time.Now().Add(time.Hour)
 	id, err := r.svc.IssueTokenLogin(ctx, TokenLogin{
-		Subject: account, Service: podLoginService, Host: "legion/" + account, PodUID: podUID,
+		Subject: account, Service: r.serviceOf(account), Host: "legion/" + account, PodUID: podUID,
 		TokenExpires: expires, Thumbprint: key.thumbprint, JWK: key.jwk, Expires: expires,
 	})
 	if err != nil {
@@ -277,4 +285,104 @@ func (r podRig) liveRows(t *testing.T, account string) int {
 		t.Fatalf("count live credentials of %s: %v", account, err)
 	}
 	return n
+}
+
+// revoked reports whether the enrollment has ended.
+func (r podRig) revoked(t *testing.T, enrollmentID string) bool {
+	t.Helper()
+	var ended bool
+	if err := r.svc.Store.Pool.QueryRow(context.Background(),
+		`select revoked_at is not null from enrollments where id=$1`, enrollmentID).Scan(&ended); err != nil {
+		t.Fatalf("read enrollment %s: %v", enrollmentID, err)
+	}
+	return ended
+}
+
+// TestAReplacedLauncherPodEndsItsPredecessorsEnrollments: a machine login is per pod, so the pod
+// that replaces a launcher holds a credential of its own, not its predecessor's. Without this it
+// could end none of the enrollments the pods before it made, and the first boot after a deploy
+// replaces every launcher at once, leaving every enrollment they made to run to its lease with
+// nothing able to revoke it. The new credential ends them at once: same ServiceAccount, same
+// service, and a pod of an account BROKER_SERVICES binds to that service.
+func TestAReplacedLauncherPodEndsItsPredecessorsEnrollments(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	first := r.login(t, launcherAccount, "pod-uid-daemon-one")
+	worker, err := r.enroll(t, first, workerPodAccount, "pod-uid-worker")
+	if err != nil {
+		t.Fatalf("Create(a worker pod under the first launcher pod) = %v", err)
+	}
+
+	next := r.login(t, launcherAccount, "pod-uid-daemon-two")
+	if next.ID == first.ID {
+		t.Fatalf("the replacement launcher pod took credential %s over, want one of its own", first.ID)
+	}
+	if err := r.svc.Revoke(ctx, next, worker.ID.String(), "launcher:"+next.ID.String()); err != nil {
+		t.Fatalf("the replacement ends its predecessor's enrollment: %v", err)
+	}
+	if !r.revoked(t, worker.ID.String()) {
+		t.Fatalf("enrollment %s is still live, want it ended at once rather than at its lease", worker.ID)
+	}
+}
+
+// TestALauncherStillEndsItsOwnEnrollments: the rule above adds to the enrolling credential's own
+// revoke and replaces nothing — a launcher ends the pods it enrolled itself, as before.
+func TestALauncherStillEndsItsOwnEnrollments(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	cred := r.login(t, launcherAccount, "pod-uid-daemon")
+	worker, err := r.enroll(t, cred, workerPodAccount, "pod-uid-worker-own")
+	if err != nil {
+		t.Fatalf("Create(a worker pod) = %v", err)
+	}
+	if err := r.svc.Revoke(ctx, cred, worker.ID.String(), "launcher:"+cred.ID.String()); err != nil {
+		t.Fatalf("the launcher ends the pod it enrolled: %v", err)
+	}
+	if !r.revoked(t, worker.ID.String()) {
+		t.Fatalf("enrollment %s is still live, want it ended", worker.ID)
+	}
+}
+
+// TestASelfEnrolledPodEndsNoOtherPodsEnrollment: the service a self-enrolling account logs in as
+// binds no pod account, so one session pod can never end another's enrollment, whichever of them
+// logged in last. This is what keeps the replaced-launcher rule to launchers.
+func TestASelfEnrolledPodEndsNoOtherPodsEnrollment(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	first := r.login(t, selfAccount, "pod-uid-session-one")
+	mine, err := r.enroll(t, first, selfAccount, "pod-uid-session-one")
+	if err != nil {
+		t.Fatalf("Create(the first session pod's own enrollment) = %v", err)
+	}
+	second := r.login(t, selfAccount, "pod-uid-session-two")
+	if err := r.svc.Revoke(ctx, second, mine.ID.String(), "launcher:"+second.ID.String()); !errors.Is(err, ErrNotEnrollingCredential) {
+		t.Fatalf("Revoke(another session pod's enrollment) = %v, want ErrNotEnrollingCredential", err)
+	}
+	if r.revoked(t, mine.ID.String()) {
+		t.Fatalf("enrollment %s ended, want it untouched", mine.ID)
+	}
+}
+
+// TestATokenLoginEndsNoEnrollmentOfAnotherServicesPods: the same ServiceAccount is not enough on
+// its own — the pod's account must be one BROKER_SERVICES binds to the login's own service, so a
+// login of one service ends nothing of another's pods.
+func TestATokenLoginEndsNoEnrollmentOfAnotherServicesPods(t *testing.T) {
+	r := newPodRig(t)
+	ctx := context.Background()
+	const otherService, otherPodAccount = "other-service", "system:serviceaccount:other:other-worker"
+	r.svc.ServiceLogins[otherLauncherAccount] = otherService
+	r.svc.ServicesByAccount[otherPodAccount] = otherService
+
+	theirs := r.login(t, otherLauncherAccount, "pod-uid-other-daemon")
+	pod, err := r.enroll(t, theirs, otherPodAccount, "pod-uid-other-worker")
+	if err != nil {
+		t.Fatalf("Create(the other service's pod) = %v", err)
+	}
+	ours := r.login(t, launcherAccount, "pod-uid-daemon")
+	if err := r.svc.Revoke(ctx, ours, pod.ID.String(), "launcher:"+ours.ID.String()); !errors.Is(err, ErrNotEnrollingCredential) {
+		t.Fatalf("Revoke(another service's pod) = %v, want ErrNotEnrollingCredential", err)
+	}
+	if r.revoked(t, pod.ID.String()) {
+		t.Fatalf("enrollment %s ended, want it untouched", pod.ID)
+	}
 }

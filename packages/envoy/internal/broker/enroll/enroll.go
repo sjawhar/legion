@@ -910,14 +910,52 @@ func (s *Service) podUnderTokenLogin(cred Credential, claims PodClaims, runtimeI
 		}
 		return nil
 	}
-	service := ""
-	if cred.Service != nil {
-		service = *cred.Service
-	}
-	if bound, listed := s.ServicesByAccount[claims.Subject]; !listed || bound != service {
+	if !s.launches(cred.Service, claims.Subject) {
+		service := ""
+		if cred.Service != nil {
+			service = *cred.Service
+		}
 		return fmt.Errorf("%w: BROKER_SERVICES does not bind %s to %q, the service %s logs in as", ErrPodNotLaunched, claims.Subject, service, *cred.Subject)
 	}
 	return nil
+}
+
+// launches reports whether BROKER_SERVICES binds podAccount, the ServiceAccount a pod runs as, to
+// service, the one a login logs in as: the deployment's own statement that this service launches
+// that pod. The one lookup, read by Create through podUnderTokenLogin and by Revoke through
+// sameLauncher, so a pod a login may enrol is exactly a pod it may end.
+func (s *Service) launches(service *string, podAccount string) bool {
+	if service == nil {
+		return false
+	}
+	bound, listed := s.ServicesByAccount[podAccount]
+	return listed && bound == *service
+}
+
+// sameLauncher reports whether cred is the same launcher as the credential that made a pod
+// enrollment, logging in again from another pod: the same ServiceAccount (both token logins of
+// one subject), the same service, and a pod running as an account BROKER_SERVICES binds to that
+// service — the launcher relation Create already reads (launches). It is what lets a replaced
+// Legion daemon pod end the enrollments its predecessor made, since a machine login is per pod
+// and the new pod holds a credential of its own.
+//
+// It gives a pod that enrolled itself nothing: the service a self-enrolling account logs in as
+// binds no pod account, so launches is false for every such enrollment and one session pod can
+// never end another's. It gives nothing across services either, and nothing to a credential a
+// person approved, which carries no subject. enrolledLoginSubject, enrolledLoginService and
+// enrolledPodAccount are the enrolling credential's subject and service and the enrollment's own
+// verified pod account, each nil where the row has none.
+func (s *Service) sameLauncher(cred Credential, enrolledLoginSubject, enrolledLoginService, enrolledPodAccount *string) bool {
+	if cred.Operator != nil || cred.Subject == nil || enrolledLoginSubject == nil || enrolledPodAccount == nil {
+		return false
+	}
+	if *enrolledLoginSubject != *cred.Subject {
+		return false
+	}
+	if cred.Service == nil || enrolledLoginService == nil || *enrolledLoginService != *cred.Service {
+		return false
+	}
+	return s.launches(cred.Service, *enrolledPodAccount)
 }
 
 // Revoke ends the enrollment — revoking every live grant and cancelling every pending request
@@ -929,15 +967,22 @@ func (s *Service) podUnderTokenLogin(cred Credential, claims PodClaims, runtimeI
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
 //
 // A pod enrollment carries no operator, so the operator cannot tell one service's pods from
-// another's: it is ended only by the launcher credential that created it
-// (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service. A vm enrollment is ended by no launcher credential at all
+// another's: it is ended by the launcher credential that created it, and otherwise only by the
+// same launcher logging in again from another pod (sameLauncher), never by another service's
+// credential and never by a pod that enrolled itself (ErrNotEnrollingCredential for every other
+// caller). A launcher's machine login is per pod (IssueTokenLogin), so a replaced Legion daemon
+// pod holds a credential of its own rather than its predecessor's, and without that second rule
+// one deploy of the daemon would leave every enrollment its previous pods made with nothing able
+// to end it; sameLauncher gives the new credential its predecessor's pods and no others, since it
+// takes the same ServiceAccount logging in and the pod's own account being one BROKER_SERVICES
+// binds to that login's service — the launcher relation POD_NOT_LAUNCHED reads at Create. A
+// service that binds no account, which is every service whose pods enrol themselves, gives its
+// logins nothing here: no such pod can end another's enrollment. A vm enrollment is ended by no
+// launcher credential at all
 // (ErrVMEndsByRevokingItsLogin): a VM's credential follows whoever last logged in with that VM's
 // token, a copied token included, so its proof shows nothing about who holds the VM; the VM's
-// enrollment ends when a person revokes its machine login (RevokeCredential) or with its lease. A
-// Legion daemon's token login keeps its account's one credential
-// across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
-// enrollment another credential made — a service login a person approved before token logins, or
+// enrollment ends when a person revokes its machine login (RevokeCredential) or with its lease.
+// An enrollment neither rule reaches — a service login a person approved before token logins, or
 // the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
 // (BROKER_LEASE_SECONDS) after its renewer stops, or at once when a person revokes that credential
 // (RevokeCredential). A box or host enrollment keeps the operator rule alone: a helper that logs in
@@ -953,12 +998,14 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	defer tx.Rollback(ctx)
 
-	var operator *string
+	var operator, enrolledSubject, enrolledLoginSubject, enrolledLoginService *string
 	var kind string
 	var enrolledBy uuid.UUID
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select operator, kind, launcher_credential_id, revoked_at from enrollments where id=$1 for update`, id).
-		Scan(&operator, &kind, &enrolledBy, &revokedAt)
+	err = tx.QueryRow(ctx, `select e.operator, e.kind, e.launcher_credential_id, e.revoked_at, e.subject, c.subject, c.service
+		from enrollments e join launcher_credentials c on c.id = e.launcher_credential_id
+		where e.id=$1 for update of e`, id).
+		Scan(&operator, &kind, &enrolledBy, &revokedAt, &enrolledSubject, &enrolledLoginSubject, &enrolledLoginService)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}
@@ -971,7 +1018,8 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if kind == "vm" {
 		return ErrVMEndsByRevokingItsLogin
 	}
-	if kind == "pod" && enrolledBy != cred.ID {
+	if kind == "pod" && enrolledBy != cred.ID &&
+		!s.sameLauncher(cred, enrolledLoginSubject, enrolledLoginService, enrolledSubject) {
 		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {

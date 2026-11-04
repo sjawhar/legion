@@ -15,6 +15,12 @@
 -- carries a pod, so a pod logging in again from the same pod still moves its own row rather than
 -- inserting a second, and a launcher's login still moves its account's one row.
 --
+-- A launcher's replaced pod therefore holds a credential its predecessor's enrollments were not
+-- made under. enroll.Service.Revoke's sameLauncher gives it those enrollments anyway -- the same
+-- subject, the same service, and a pod of an account BROKER_SERVICES binds to that service --
+-- since otherwise one deploy, which replaces every launcher pod at once, would leave every
+-- enrollment they made running to its lease with nothing able to revoke it.
+--
 -- The index of 0015 goes: it would refuse the second pod's insert before either of these is
 -- consulted.
 drop index launcher_credentials_live_subject;
