@@ -1,0 +1,120 @@
+name: CI (dequeued pull request)
+
+# Ends the merge-queue CI run of a pull request the queue took out. Main's queue builds each group
+# on top of the group below it, and a pull request that leaves the queue takes its group with it —
+# while that group's ci.yaml merge-group run, which nothing cancels, keeps its runners to the end
+# and decides nothing. That runner time is what this workflow takes back, for the one case
+# ci.yaml's own cancel acts cannot see: a removal is no job failure, so no follower job of that run
+# ever fires (the comment above ci.yaml's `cancel-started` says what those acts do).
+#
+# Why pull_request_target. `dequeued` is an activity type of that event alone, and GitHub runs the
+# base branch's copy of the workflow with the base branch's token, so a fork's pull request and one
+# the queue took out over a conflict are both safe here. Nothing of the head is read, built or run:
+# this workflow has no checkout step at all, so there is no tree here for a head to reach, and its
+# one job holds `actions: write` and nothing else.
+#
+# Where the commit comes from. The `dequeued` payload carries no beforeCommit, so the job reads the
+# pull request's timeline with GraphQL and takes the newest RemovedFromMergeQueueEvent after the
+# newest AddedToMergeQueueEvent, which is the selection
+# packages/daemon/internal/ghautomerge/removal.go makes over the same two item types; that item's
+# `beforeCommit.oid` is the head of the group the queue had built, and its `reason` is read from
+# the same item. GitHub can show the event before the timeline holds it, so the read is made up to
+# seven times, ten seconds apart: a fixed list of attempts, which bounds the wait at one minute and
+# cannot spin. A run left alive by that bound is still stopped by the queue: when the pull request
+# is added again, the new group's `cancel-started` cancels the older groups of the same pull
+# request.
+#
+# What it deliberately does not do:
+#   * a removal whose reason is `merged` cancels nothing: that group's run tested the tree that
+#     landed, and the ci-ok it posted is what let the merge happen;
+#   * it names one run, the ci.yaml merge-group run whose headSha is that beforeCommit, so a group
+#     the queue builds after the removal — a different head — is never touched;
+#   * it adds nothing back to the queue and comments nowhere: a pull request that was taken out
+#     over a failure or a conflict is its author's to fix, and the groups that stayed are rebuilt
+#     by the queue itself;
+#   * it has no concurrency group: two removals cancel two different runs, and a removal that
+#     waited behind another would cancel nothing while its run went on burning runners.
+#
+# The cancel is `force-cancel`, the call ci.yaml's cancel acts make: it leaves a running job's
+# `if: always()` steps skipped, so the cancelled run posts no ci-ok, and a failing ci-ok on a
+# commit the queue still holds could take an innocent pull request out of the queue. A cancel that
+# fails leaves a warning rather than a red job: the run may have completed between the list and the
+# call, and an act that reclaims nothing is no failure.
+on:
+  pull_request_target:
+    types: [dequeued]
+
+jobs:
+  cancel-dequeued:
+    runs-on: ubuntu-24.04
+    # A GraphQL read, one run list and one cancel: the limit is short so that a wedged API call
+    # cannot hold a runner, and it is above the minute the timeline read can wait.
+    timeout-minutes: 5
+    # `gh run list` and the force-cancel need `actions: write`, and nothing here needs another
+    # scope: there is no checkout, and the GraphQL read is of a public repository's pull request,
+    # which GitHub serves to any valid token — the same ground on which ci.yaml's cancel acts hold
+    # `actions: write` alone and still check out and read check runs.
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the removed group's ci.yaml run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          query='query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                timelineItems(last: 20, itemTypes: [ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+                  nodes {
+                    __typename
+                    ... on AddedToMergeQueueEvent { createdAt }
+                    ... on RemovedFromMergeQueueEvent { createdAt reason beforeCommit { oid } }
+                  }
+                }
+              }
+            }
+          }'
+          # The nodes come oldest first, so the selection is the last removal after the index of
+          # the last entry: a removal before that index belongs to an earlier turn in the queue.
+          select='.data.repository.pullRequest.timelineItems.nodes as $nodes
+            | ([$nodes | to_entries[]
+                | select(.value.__typename == "AddedToMergeQueueEvent") | .key] | last) as $added
+            | [$nodes[(($added // -1) + 1):][]
+               | select(.__typename == "RemovedFromMergeQueueEvent")] | last // empty'
+          removal=
+          for attempt in 1 2 3 4 5 6 7; do
+            removal=$(gh api graphql -F owner="${GITHUB_REPOSITORY%%/*}" -F name="${GITHUB_REPOSITORY#*/}" \
+              -F number="$PR_NUMBER" -f query="$query" --jq "$select")
+            [ -z "$removal" ] || break
+            echo "read $attempt of 7 of pull request #$PR_NUMBER's timeline holds no removal after its newest queue entry"
+            [ "$attempt" = 7 ] || sleep 10
+          done
+          if [ -z "$removal" ]; then
+            echo "::notice::no removal of pull request #$PR_NUMBER reached its timeline in the minute this run waited, so no run is named and none is cancelled; the group the queue builds next ends this one"
+            exit 0
+          fi
+          reason=$(jq -r '.reason // "no reason"' <<<"$removal")
+          before=$(jq -r '.beforeCommit.oid // ""' <<<"$removal")
+          echo "pull request #$PR_NUMBER left the queue at $(jq -r '.createdAt' <<<"$removal") for reason '$reason', out of the group whose head is ${before:-no commit}"
+          if [ "$reason" = merged ]; then
+            echo "that removal is the merge itself, so the group's run tested the tree that landed: nothing is cancelled"
+            exit 0
+          fi
+          if [ -z "$before" ]; then
+            echo "::warning::the removal names no beforeCommit, so there is no group head to look for and nothing is cancelled"
+            exit 0
+          fi
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --commit "$before" --limit 20 --json databaseId,headSha,status,conclusion)
+          doomed=$(jq -r --arg sha "$before" \
+            '.[] | select(.headSha == $sha and .status != "completed") | .databaseId' <<<"$runs")
+          if [ -z "$doomed" ]; then
+            echo "no ci.yaml merge-group run with head $before is still going, so nothing is cancelled. What that commit's runs are: $(jq -c --arg sha "$before" '[.[] | select(.headSha == $sha) | {databaseId, status, conclusion}]' <<<"$runs")"
+            exit 0
+          fi
+          while read -r id; do
+            echo "run $id is the ci.yaml merge-group run of the group whose head is $before, and it has not completed: force-cancel it"
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$doomed"
