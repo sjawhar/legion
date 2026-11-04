@@ -1868,7 +1868,10 @@ A release at contract 47 carries, on every issue of `GET /legion/v1/state`, the 
 `memoryGroup` (`memory` or `none`), `memoryDrawMode` (the `projects.<KEY>.memory.mode` in force at the draw) and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree.
 A caller in a pod whose claims record a contract below 47 is served the state without the three, so a pod of the release before this one reads it as it always did.
 Store migration 20261104073148_issue_memory_group adds the three columns they are read from to `issues` — `memory_group`, `memory_draw_mode` and `memory_drawn_at` — written once, when the tree's lifecycle row is first created, and backfilled for no row.
-Store migration 20261104153554_issue_memory_carried adds `memory_carried` beside them, the hand-over's own answer about a root handed over out of another tree, which no caller of the state reads and which is false for every row recorded before it.
+Store migration 20261104153554_issue_memory_carried adds `memory_carried` beside them, the hand-over's own answer about a root handed over out of another tree, which no caller of the state reads.
+It backfills the hand-overs the release before it recorded: a row whose `handed_over_from` names a tree that holds a `tree_lifecycles` row of the project's normalized token, and that carries no draw of its own, is marked carried.
+Those old trees ran with no memory, the setting having not existed then, so the mark is written and no group with it, which is the answer `record.Store.CarryMemory` writes at a hand-over made from now on.
+A child handed over out of a tree nothing ever opened keeps the column's default, false, and is drawn at its own first open like any other new tree.
 
 To roll this release back to contract 46, put `legion.yaml` back without `projects.<KEY>.memory`, which the earlier release refuses as a key it does not know, and re-pin it.
 There is no SQL to run and no column to drop:
@@ -1876,6 +1879,7 @@ the earlier release names every column it reads and writes on `issues` (`issueCo
 What the rollback costs is the draws it does not make:
 a tree the earlier release opens carries no group, and this release draws for no tree whose lifecycle row already exists, so every such tree runs without memory for its whole life.
 A child handed over out of such a tree is settled at the hand-over, with the answer that tree has, which is no group.
+A hand-over the earlier release makes while the rollback holds is settled by nothing: that release writes `handed_over_from` and knows no `memory_carried`, and 20261104153554's backfill ran before the rollback, so such a child is drawn at its first open after the upgrade back.
 
 ### Contract discipline
 
