@@ -286,6 +286,22 @@ export function agentRowId(messageId: string): string {
   return `agent:${messageId}`;
 }
 
+/**
+ * Holds every read mark the page writes - a thread's and an Agent row's session state - so a
+ * thread drawn for a second keeps saying what it has that the reader has not read, and the fold
+ * under it stays where the row put it. The marks themselves are the subject of
+ * `inbox-read-state.e2e.ts` and `keyboard-inbox.e2e.ts`, not of the specs that hold them.
+ */
+export async function holdReadMarks(page: Page): Promise<void> {
+  for (const pattern of ["**/api/v1/me/threads/*/read", "**/api/v1/me/agents/*/state"]) {
+    await page.route(pattern, (route) =>
+      route.request().method() === "GET"
+        ? route.fallback()
+        : route.fulfill({ body: "{}", contentType: "application/json", status: 503 })
+    );
+  }
+}
+
 /** The sidebar's own Inbox entry, which carries the one count. */
 export function sidebarInbox(page: Page): Locator {
   return page.getByRole("navigation", { name: "Navigation" }).getByRole("link", { name: /^Inbox/ });

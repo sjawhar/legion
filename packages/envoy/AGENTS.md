@@ -2557,6 +2557,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - `PUT /api/v1/me/threads/{id}/read` `{read_through}` (human-only, `api/replies.go`) stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it);
   a non-uuid id is `400 THREAD_ID_INPUT`, a thread the caller has no row for writes nothing, and both answer `204`.
   It locks the thread's owner row `for share` before it touches the caller's row, since every writer holds that owner `for no key update` before its trigger fires, and appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing.
+  That is the Inbox's read-mark lock order over one thread, written once on `markInboxReadThreads` (`api/inbox_read.go`).
   A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction.
 
 - `POST /api/v1/me/inbox/read` (human-only, `api/inbox_read.go`) is the Inbox's Mark all read: one request marks every thread the list route would show the caller as unread, loaded on the page or not.
@@ -2566,11 +2567,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a thread written in since stays unread, and one already read past the mark keeps its later mark.
   An Agent row carries no issue, no document, no project and no priority, so any narrowing to one of those leaves it out;
   no thread of either kind carries an urgency - only an ask the Inbox lists in Waiting on you does - so a request that names urgencies without `none` marks nothing at all.
-  The transaction takes the owner row of every thread it marks `for share` first - its documents, then its issues, the ascending owner-key order `LockOwners` sorts by - then moves the `user_threads` rows, then takes the project of each row it moved to append its event.
-  Owner, then rows, then project is the order `PUT /api/v1/me/threads/{id}/read` takes too, and the two need it:
-  both take the owner `for share`, two share locks do not conflict, so only the row and the project in one order keep the pair off a `40P01` the caller reads as a 500.
-  An ordinary writer is ordered by the owner instead, whichever order it reaches the project in:
-  it takes its issue or document `for no key update` before its trigger moves the thread's `user_threads` rows, that level conflicts with the `for share` taken here, and every row such a trigger moves belongs to a thread on an owner this transaction holds too.
+  The transaction takes the owner row of every thread it marks `for share` first - its documents, then its issues, the ascending owner-key order `LockOwners` sorts by - then the caller's `user_threads` rows `for no key update` in `thread_id` order, which its own update re-locks, and then the project of each row it moved, to append its event.
+  Owner, rows, project is the order `PUT /api/v1/me/threads/{id}/read` takes too, and taking the rows in one order is what keeps two presses of this button, whose plans scan them in two orders, off each other.
+  Which cycles that order rules out - against the one-thread route, against a second press, and against an ordinary writer, which the owner lock orders instead - is written once, on `markInboxReadThreads` (`api/inbox_read.go`).
   Every statement runs under a ten-second `statement_timeout`, because that transaction holds those owner rows and a statement that hangs holds every comment, answer and issue message on them behind it.
   It appends one `user_thread_state.updated` per project it marked in, naming no thread (`{login}`, the payload's `thread_id` being optional for exactly this), and one `user_agent_state.updated` per session whose replies it wrote, as `putUserAgentState` appends one.
   A request that moved nothing appends none and answers `{"marked": 0}`.

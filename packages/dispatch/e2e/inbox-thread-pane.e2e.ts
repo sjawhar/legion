@@ -23,6 +23,7 @@ import { inboxPane } from "./inbox-pane";
 import {
   agentRowId,
   asSession,
+  holdReadMarks,
   replyRowId,
   seedAgentThread,
   sessionActor,
@@ -51,20 +52,6 @@ async function selectRow(page: Page, id: string): Promise<Locator> {
   await row.locator("time").first().click();
   await expect(row).toHaveAttribute("data-inbox-selected", "true");
   return row;
-}
-
-/**
- * Holds every read mark the page writes, so a thread drawn for a second keeps saying what it
- * has that the reader has not read. The marks themselves are `keyboard-inbox.e2e.ts`'s subject.
- */
-async function holdReadMarks(page: Page): Promise<void> {
-  for (const pattern of ["**/api/v1/me/threads/*/read", "**/api/v1/me/agents/*/state"]) {
-    await page.route(pattern, (route) =>
-      route.request().method() === "GET"
-        ? route.fallback()
-        : route.fulfill({ body: "{}", contentType: "application/json", status: 503 })
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------

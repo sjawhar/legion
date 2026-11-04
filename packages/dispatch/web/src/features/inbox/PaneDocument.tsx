@@ -3,8 +3,9 @@
  *
  * Every flow of the column - a question's (`ReadingPane.tsx`) and a thread's (`ThreadPane.tsx`)
  * - draws under `PaneFrame` with only its own reads and its own effects, and the two that show
- * a document beside the list share `useDocumentAtBlock`: a question written as a decision block
- * and a comment thread anchored in a project document are the same placement problem.
+ * a document beside the list are one `DocumentPane` over `useDocumentAtBlock`: a question
+ * written as a decision block and a comment thread anchored in a project document are the same
+ * placement problem, and the same pane.
  */
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
@@ -13,6 +14,7 @@ import { type ReactNode, type RefObject, useCallback, useEffect, useRef, useStat
 import { api } from "../../api/client";
 import { issueQuery, whoAmIQuery } from "../../api/queries";
 import type { Artifact, AuthenticatedUser } from "../../api/types";
+import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { quoteAccentBorder } from "../../theme/classes";
 import { liveTextQueryOptions, ProofDocument, type ProofDocumentProps } from "../doc/ProofDocument";
 import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop } from "../doc/scroll-block";
@@ -362,3 +364,82 @@ export function PaneDocument({
 /** The column carries no version picker: which version it shows is the question's, never the
  *  reader's. */
 function noVersionChange(): void {}
+
+/**
+ * The body the column draws in a document: the live document opened at one block, under the
+ * host's own head, with what it falls back to where the document cannot be opened or the block
+ * cannot be placed.
+ *
+ * The two hosts draw the same pane - a question written as a decision block
+ * (`ReadingPane.tsx`) and a thread in its own document (`ThreadPane.tsx`) - and differ only in
+ * what they put in it: the head, what the frame is of, what it falls back to, the name the
+ * skeleton opens, and whose slot the document carries, the ask's answer or the thread.
+ */
+export function DocumentPane({
+  anchoredThread,
+  artifactId,
+  blockId,
+  fallback,
+  head,
+  issueKey,
+  label,
+  loadingName,
+  onAskAnswered,
+  paneBody,
+}: {
+  /** The thread drawn under its own block, for a comment thread anchored in the document; a
+   *  decision block's ask needs none, because the block draws its own question and thread. A
+   *  host that passes one falls back where the document holds no such block: an anchor the
+   *  column cannot place leaves the thread nowhere to be drawn. */
+  anchoredThread: ProofDocumentProps["anchoredThread"];
+  artifactId: string;
+  blockId: string;
+  /** What the column draws in this frame instead of the document: the question's own card, or
+   *  the thread alone with the text it is anchored to, marked as the host marks it. */
+  fallback: ReactNode;
+  /** The head above the document, given what the column found in it. */
+  head: (document: DocumentAtBlock) => ReactNode;
+  issueKey: string | null;
+  /** What the frame is of, where it is not a question (`PaneFrame`). */
+  label?: string;
+  /** The document the skeleton says it is opening. */
+  loadingName: string;
+  onAskAnswered: (askId: string) => void;
+  /** The `data-inbox-pane-body` mark the thread column puts on what it drew
+   *  (`ThreadPane.tsx`); a question's body carries none. */
+  paneBody?: "ask" | "document";
+}): ReactNode {
+  const document = useDocumentAtBlock({ artifactId, blockId, issueKey });
+  const { artifact, blockFound, failed, user } = document;
+
+  const body = (): ReactNode => {
+    if (failed || (anchoredThread !== undefined && blockFound === false)) {
+      return fallback;
+    }
+    const drawn =
+      !document.ready || artifact === undefined || user === undefined ? (
+        <LoadingSkeleton label={`Opening ${loadingName}`} />
+      ) : (
+        <PaneDocument
+          anchoredThread={anchoredThread}
+          artifact={artifact}
+          document={document}
+          onAskAnswered={onAskAnswered}
+          user={user}
+        />
+      );
+    return paneBody === undefined ? drawn : <div data-inbox-pane-body={paneBody}>{drawn}</div>;
+  };
+
+  return (
+    <PaneFrame
+      content={document.content}
+      head={head(document)}
+      label={label}
+      scroller={document.scroller}
+      sectionBar={document.sectionBar}
+    >
+      {body()}
+    </PaneFrame>
+  );
+}

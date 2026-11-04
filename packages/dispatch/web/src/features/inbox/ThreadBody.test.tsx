@@ -15,6 +15,7 @@ import type {
   MyReplyRow,
   MyReplyThreadRow,
 } from "../../api/types";
+import { agentRow as sharedAgentRow } from "../threads/replies-fixture";
 import { ThreadRowCard } from "./ThreadRowCard";
 
 /** Every API mock a test installed, restored after it. */
@@ -59,9 +60,9 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
   };
 }
 
+/** An Agent row: the shared fixture's row under this file's own session and reply. */
 function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
-  return {
-    kind: "agent",
+  return sharedAgentRow("message-1", {
     ref: "/agents/planner/live",
     reply: {
       author: { id: "planner", kind: "session" },
@@ -72,12 +73,9 @@ function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
     },
     session: { id: "planner", name: "Planner" },
     subject: "Have a look at the build",
-    thread_id: "message-1",
-    unread: true,
-    unread_count: 1,
     unread_reply_ids: ["reply-1"],
     ...overrides,
-  };
+  });
 }
 
 function commentRow(overrides: Partial<MyReplyThreadRow> = {}): MyReplyThreadRow {

@@ -14,7 +14,7 @@ import {
   markThreadRead,
 } from "./api";
 import { inboxPane } from "./inbox-pane";
-import { asSession, replyRowId, THREAD_SESSION } from "./inbox-threads";
+import { asSession, holdReadMarks, replyRowId, THREAD_SESSION } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -224,20 +224,6 @@ async function openInPane(page: Page, id: string): Promise<Locator> {
   return body;
 }
 
-/**
- * Holds every read mark the page writes, so a thread drawn for a second keeps saying what it
- * has that the reader has not read, and the fold under it stays where the row put it. The marks
- * themselves are `inbox-read-state.e2e.ts`'s subject, and `inbox-thread-pane.e2e.ts` holds them
- * the same way.
- */
-async function holdReadMarks(page: Page): Promise<void> {
-  await page.route("**/api/v1/me/threads/*/read", (route) =>
-    route.request().method() === "GET"
-      ? route.fallback()
-      : route.fulfill({ body: "{}", contentType: "application/json", status: 503 })
-  );
-}
-
 test("the Inbox's pane and its card read a thread in the chosen order, and keep it over a reload", async ({
   browser,
 }) => {
@@ -347,7 +333,8 @@ test("an ask's thread folds and places its box by the chosen order", async ({ br
  * two writes the reader never saw, marked read.
  *
  * The read marks are held, so the row keeps saying what it has that the reader has not read
- * while the thread is drawn (`inbox-thread-pane.e2e.ts` holds them the same way).
+ * while the thread is drawn (`holdReadMarks` in `inbox-threads.ts`, which the Inbox's own pane
+ * spec holds them with too).
  */
 test("an ask's thread leaves every unread reply on screen and folds only the read ones", async ({
   browser,

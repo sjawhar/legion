@@ -190,8 +190,8 @@ export interface AskThreadProps {
   /** The order the thread reads in: the reader's own choice, which the card holds
    *  (`threads/thread-order.ts`). */
   order: ThreadOrder;
-  /** The ids of the replies the reader has not read (`useUnreadReplies`): an unread reply is
-   *  never folded away. */
+  /** The ids of the replies the reader has not read (`unreadWrites` in
+   *  `threads/thread-layout.ts`): an unread reply is never folded away. */
   unread?: ReadonlySet<string>;
 }
 

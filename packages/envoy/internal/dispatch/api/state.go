@@ -422,14 +422,20 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		// of them its own replies, and a session answers only what was delivered to it, so its
 		// replies sit under roots targeted at it, where this mark is the one the unread count
 		// reads. A Clear plays no part: it can move back.
-		if _, err := tx.Exec(r.Context(), `
-			delete from user_agent_reply_read
-			using messages, user_agent_read
-			where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = $2
-			  and user_agent_read.login = $1 and user_agent_read.session_id = $2
-			  and messages.id = user_agent_reply_read.reply_id
-			  and messages.created_at <= user_agent_read.read_through
-		`, model.CanonicalLogin(actor.ID), sessionID); err != nil {
+		//
+		// The dead rows are locked in one order first (pruneAgentRepliesLock), because a delete
+		// takes them in whatever order its plan reaches them and this prune has two writers: this
+		// route and the Inbox's mark-all, which runs the same pair over several sessions at once
+		// (markInboxReadThreads names the lock order every writer here takes).
+		if _, err := tx.Exec(r.Context(), pruneAgentRepliesLock,
+			model.CanonicalLogin(actor.ID), []string{sessionID},
+		); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if _, err := tx.Exec(r.Context(), pruneAgentReplies,
+			model.CanonicalLogin(actor.ID), []string{sessionID},
+		); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -463,3 +469,35 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, states[sessionID])
 }
+
+// pruneAgentRepliesLock and pruneAgentReplies are the one prune of user_agent_reply_read, shared
+// by the two writers that make rows dead: this route, which moves one session's read mark, and
+// the Inbox's mark-all, which writes replies by id across several sessions at once. A reply at or
+// before its session's read mark is read whatever user_agent_reply_read holds, so its row is
+// dead.
+//
+// The lock statement takes exactly those dead rows, ascending by reply id, before the delete
+// reaches them: a delete locks rows in whatever order its plan finds them, and the plans differ
+// with the session list's size, so two writers that crossed here would each hold a row the other
+// waits on. One order over both writers leaves no cycle (markInboxReadThreads states the whole
+// lock order this file's transactions take).
+const (
+	pruneAgentRepliesWhere = `
+		from user_agent_reply_read, messages, user_agent_read
+		where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = any($2::text[])
+		  and user_agent_read.login = $1 and user_agent_read.session_id = user_agent_reply_read.session_id
+		  and messages.id = user_agent_reply_read.reply_id
+		  and messages.created_at <= user_agent_read.read_through`
+
+	pruneAgentRepliesLock = `select 1 ` + pruneAgentRepliesWhere + `
+		order by user_agent_reply_read.reply_id
+		for no key update of user_agent_reply_read`
+
+	pruneAgentReplies = `
+	delete from user_agent_reply_read
+	using messages, user_agent_read
+	where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = any($2::text[])
+	  and user_agent_read.login = $1 and user_agent_read.session_id = user_agent_reply_read.session_id
+	  and messages.id = user_agent_reply_read.reply_id
+	  and messages.created_at <= user_agent_read.read_through`
+)

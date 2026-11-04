@@ -23,13 +23,7 @@ import { VersionView } from "../doc/VersionView";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
 import type { InboxListRow } from "./list-row";
-import {
-  artifactQueryOptions,
-  PaneDocument,
-  PaneFrame,
-  useDocumentAtBlock,
-  useSettled,
-} from "./PaneDocument";
+import { artifactQueryOptions, DocumentPane, PaneFrame, useSettled } from "./PaneDocument";
 import { ReadingPaneHead } from "./ReadingPaneHead";
 import { ThreadPane } from "./ThreadPane";
 
@@ -279,48 +273,28 @@ function DecisionBody({
   onSnoozeLive,
   viewer,
 }: PaneFlowProps & { artifactId: string; blockId: string }): ReactNode {
-  const document = useDocumentAtBlock({ artifactId, blockId, issueKey: ask.issue_key });
-  const { artifact, failed, showsDocument, user } = document;
-
-  const body = (): ReactNode => {
-    if (failed) {
-      return <QuestionCard ask={ask} onAnswered={onAnswered} />;
-    }
-    const name = ask.approval?.name ?? ask.document?.name ?? "the document";
-    if (!document.ready || artifact === undefined || user === undefined) {
-      return <LoadingSkeleton label={`Opening ${name}`} />;
-    }
-    return (
-      <PaneDocument
-        anchoredThread={undefined}
-        artifact={artifact}
-        document={document}
-        onAskAnswered={onAnswered}
-        user={user}
-      />
-    );
-  };
-
   return (
-    <PaneFrame
-      content={document.content}
-      head={
+    <DocumentPane
+      anchoredThread={undefined}
+      artifactId={artifactId}
+      blockId={blockId}
+      fallback={<QuestionCard ask={ask} onAnswered={onAnswered} />}
+      head={(document) => (
         <ReadingPaneHead
-          artifact={artifact}
+          artifact={document.artifact}
           ask={ask}
           onAnswered={onAnswered}
           onNextChange={undefined}
-          onSkipToAnswer={showsDocument ? document.skipToBlock : undefined}
+          onSkipToAnswer={document.showsDocument ? document.skipToBlock : undefined}
           onSnoozeLive={onSnoozeLive}
           sectionBlockId={document.sectionBlockId}
           viewer={viewer}
         />
-      }
-      scroller={document.scroller}
-      sectionBar={document.sectionBar}
-    >
-      {body()}
-    </PaneFrame>
+      )}
+      issueKey={ask.issue_key}
+      loadingName={ask.approval?.name ?? ask.document?.name ?? "the document"}
+      onAskAnswered={onAnswered}
+    />
   );
 }
 

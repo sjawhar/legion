@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -9,14 +10,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // postInboxRead is one Mark all read: the body as written, from login.
 func postInboxRead(t *testing.T, handler http.Handler, login string, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/me/inbox/read", body, login)
+}
+
+// markedBy is the number of threads one Mark all read answers it marked.
+func markedBy(t *testing.T, response *httptest.ResponseRecorder) int {
+	t.Helper()
+	return decodeBody[struct {
+		Marked int `json:"marked"`
+	}](t, response).Marked
 }
 
 // markedThrough is one Mark all read through at, narrowed by narrowing, and how many threads it
@@ -31,9 +43,7 @@ func markedThrough(t *testing.T, handler http.Handler, login string, at time.Tim
 	if response.Code != http.StatusOK {
 		t.Fatalf("mark all read %#v: status=%d body=%s", body, response.Code, response.Body.String())
 	}
-	return decodeBody[struct {
-		Marked int `json:"marked"`
-	}](t, response).Marked
+	return markedBy(t, response)
 }
 
 // threadMark is the caller's stored read mark on one thread and whether it is still unread.
@@ -300,8 +310,9 @@ func TestInboxReadMarksOnlyWhatTheNarrowingNames(t *testing.T) {
 }
 
 // Every refusal, by status and code: the mark itself, the two owner narrowings together, an
-// unknown value in any list, a document id that is not one, and a session, for whom the Inbox is
-// nobody's.
+// unknown value in any list - the empty kind among them, which only the list route's own split
+// of an absent ?kind= stands for - a document id that is not one, and a session, for whom the
+// Inbox is nobody's.
 func TestInboxReadRefusesWhatItCannotMark(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Refusals", "A spec")
@@ -315,6 +326,7 @@ func TestInboxReadRefusesWhatItCannotMark(t *testing.T) {
 		"mark ahead":       {map[string]any{"read_through": time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)}, "INVALID_STATE"},
 		"both owners":      {map[string]any{"read_through": now, "issue": issue.Key, "artifact": "7c9e6679-7425-40de-944b-e07fc1f90ae7"}, "INVALID_QUERY"},
 		"unknown kind":     {map[string]any{"read_through": now, "kind": []string{"ask"}}, "INVALID_QUERY"},
+		"empty kind":       {map[string]any{"read_through": now, "kind": []string{""}}, "INVALID_QUERY"},
 		"unknown priority": {map[string]any{"read_through": now, "priority": []string{"P9"}}, "INVALID_QUERY"},
 		"unknown urgency":  {map[string]any{"read_through": now, "urgency": []string{"urgent"}}, "INVALID_QUERY"},
 		"unreadable owner": {map[string]any{"read_through": now, "artifact": "not-a-uuid"}, "INVALID_QUERY"},
@@ -333,10 +345,11 @@ func TestInboxReadRefusesWhatItCannotMark(t *testing.T) {
 }
 
 // A mark-all and a session's reply in one of the threads it marks, at once: neither waits on the
-// other forever, the mark is never lost and the reply's time is never lost either. The mark-all
-// takes the thread's issue `for share` before it touches any user_threads row, and the comment
-// writer holds that issue `for no key update` while its trigger moves those rows, so one of the
-// two waits at the issue holding nothing the other wants.
+// other forever, the mark is never lost and the reply's time is never lost either. The owner is
+// what orders this pair (the lock order is markInboxReadThreads'): the mark-all takes the
+// thread's issue `for share` before it touches any user_threads row, and the comment writer
+// holds that issue `for no key update` while its trigger moves those rows, so one of the two
+// waits at the issue holding nothing the other wants.
 func TestInboxReadRacingASessionReply(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Race", "A spec")
@@ -361,9 +374,7 @@ func TestInboxReadRacingASessionReply(t *testing.T) {
 		if marked.Code != http.StatusOK || replied.Code != http.StatusCreated {
 			t.Fatalf("round %d: mark-all %d %s, reply %d %s", round, marked.Code, marked.Body.String(), replied.Code, replied.Body.String())
 		}
-		marks += decodeBody[struct {
-			Marked int `json:"marked"`
-		}](t, marked).Marked
+		marks += markedBy(t, marked)
 		reply := decodeBody[model.Comment](t, replied)
 		through, repliedAt := readThrough(t, database, root.ID)
 		if through.Before(before) {
@@ -381,9 +392,9 @@ func TestInboxReadRacingASessionReply(t *testing.T) {
 // A mark-all and one thread's own PUT /api/v1/me/threads/{id}/read, for the same person and a
 // thread the mark-all marks, at once. Both move that user_threads row and both append under its
 // project, and the thread's owner orders neither of them: each takes it `for share`, and two
-// share locks do not conflict. Only taking the row and the project in one order does, so a
-// round where one held the row while the other held the project would die of a deadlock (40P01)
-// its caller answers 500.
+// share locks do not conflict. Only taking the row and the project in one order does
+// (markInboxReadThreads), so a round where one held the row while the other held the project
+// would die of a deadlock (40P01) its caller answers 500.
 //
 // A second unread thread in the same project keeps the mark-all on its write path whichever of
 // the two reaches the shared row first: it marks that thread every round, so it takes the
@@ -410,9 +421,7 @@ func TestInboxReadRacingOneThreadsOwnMark(t *testing.T) {
 			t.Fatalf("round %d: mark-all %d %s, thread mark %d %s",
 				round, all.Code, all.Body.String(), one.Code, one.Body.String())
 		}
-		marked := decodeBody[struct {
-			Marked int `json:"marked"`
-		}](t, all).Marked
+		marked := markedBy(t, all)
 		if marked == 0 {
 			t.Fatalf("round %d: the mark-all marked nothing, so it never took the write path", round)
 		}
@@ -423,6 +432,212 @@ func TestInboxReadRacingOneThreadsOwnMark(t *testing.T) {
 			through, unread := threadMark(t, database, "alice", thread)
 			if through.Before(mark.Truncate(time.Microsecond)) || unread {
 				t.Fatalf("round %d: %s's read mark %s lost the mark %s (unread %v)", round, name, through, mark, unread)
+			}
+		}
+	}
+}
+
+// inboxReadRaceThreads is how many threads the two presses below share. A press that holds one
+// row leaves the other nothing to wait for, so the set has to be big enough that the press
+// reading in heap order is holding most of it by the time it reaches the row both wait on.
+const inboxReadRaceThreads = 24
+
+// markAllOnPlan mounts a second server on deps's database whose connections scan user_threads
+// with plan alone (storetest.Planned), so two presses of Mark all read reach the caller's rows
+// in two orders: a press on the index pool through the primary key, in thread_id order, and one
+// on the sequential pool in heap order. That is the pair production takes - a large press's
+// custom plan is a bitmap heap scan, a small one's and the generic plan an index scan on the
+// primary key - and with random thread ids the two orders disagree.
+func markAllOnPlan(t *testing.T, deps Deps, plan storetest.Plan) http.Handler {
+	t.Helper()
+	deps.Store = &store.Store{Pool: storetest.Planned(t, deps.Store.Pool, plan)}
+	mux := http.NewServeMux()
+	served := register(mux, t.Context(), deps)
+	t.Cleanup(func() { waitBackgroundOf(t, served) })
+	return mux
+}
+
+// unreadAgain puts Alice's rows back behind their newest reply, which is the state a press
+// marks, and lays them out in the heap in descending thread_id order, which is what gives the
+// two presses two scan orders to disagree about. An update writes each row's new version where
+// its scan reaches it, so the order of this statement's own scan - the sort below, driving the
+// join - is the heap order the press on the sequential pool then reads. A plain
+// `thread_id = any($1)` would be planned as an index scan on the primary key and lay the rows
+// out in ascending order, which is the order the other press takes: the two would agree and
+// the race would prove nothing.
+func unreadAgain(t *testing.T, database *store.Store, threads []string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update user_threads u set read_through = u.replied_at - interval '1 second'
+		from (select id from unnest($1::uuid[]) as id order by id desc) ordered
+		where u.login = 'alice' and u.thread_id = ordered.id
+	`, threads); err != nil {
+		t.Fatalf("leave the threads unread again: %v", err)
+	}
+}
+
+// heapOrder is the order a sequential scan of user_threads reaches threads in, which is the
+// order the press on the sequential pool locks them in.
+func heapOrder(t *testing.T, database *store.Store, threads []string) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select thread_id::text from user_threads
+		where login = 'alice' and thread_id = any($1::uuid[])
+		order by ctid
+	`, threads)
+	if err != nil {
+		t.Fatalf("read the caller's rows in heap order: %v", err)
+	}
+	heap, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the caller's rows in heap order: %v", err)
+	}
+	if len(heap) != len(threads) {
+		t.Fatalf("the heap holds %d of the %d threads", len(heap), len(threads))
+	}
+	return heap
+}
+
+// raceGate picks the row both presses wait on and the threads this round leaves unread for
+// them to mark. The gate has to be the lowest thread id of that set, so the press reading
+// through the primary key reaches it holding nothing, and it has to sit behind rows of the set
+// in the heap, so the press reading in heap order is holding some of them when it gets there.
+// Every set that satisfies both is a cycle; the largest is taken, which is every thread
+// whenever the lowest id is not the first row of the heap.
+//
+// The layout is read each round rather than arranged: an update writes a row's new version
+// wherever its page has room, so a round that rewrote the rows can have reordered them.
+func raceGate(t *testing.T, database *store.Store, threads []string) (string, []string) {
+	t.Helper()
+	heap := heapOrder(t, database, threads)
+	gate, marked := "", []string(nil)
+	for position, candidate := range heap {
+		above, behind := []string{candidate}, 0
+		for other, thread := range heap {
+			if thread > candidate {
+				above = append(above, thread)
+				if other < position {
+					behind++
+				}
+			}
+		}
+		if behind > 0 && len(above) > len(marked) {
+			gate, marked = candidate, above
+		}
+	}
+	if gate == "" {
+		t.Fatalf("the heap holds the threads in thread id order, so the two presses would agree")
+	}
+	slices.Sort(marked)
+	return gate, marked
+}
+
+// markThreadsRead takes the threads this round leaves out past their newest reply, so neither
+// press reads them and neither locks them.
+func markThreadsRead(t *testing.T, database *store.Store, threads []string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update user_threads set read_through = now()
+		where login = 'alice' and thread_id = any($1::uuid[])
+	`, threads); err != nil {
+		t.Fatalf("mark the threads this round leaves out read: %v", err)
+	}
+}
+
+// holdGateThread takes one thread's row the way a press takes it, on a connection of the test's
+// own, and answers the transaction holding it. Both presses queue behind that transaction, and
+// the roll back that follows starts one of them inside the other's scan.
+func holdGateThread(t *testing.T, database *store.Store, gate string) pgx.Tx {
+	t.Helper()
+	held, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("hold the gate row: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Rollback(context.Background()) })
+	if _, err := held.Exec(context.Background(), `
+		select 1 from user_threads where login = 'alice' and thread_id = $1 for no key update
+	`, gate); err != nil {
+		t.Fatalf("hold the gate row: %v", err)
+	}
+	return held
+}
+
+// Two Mark all read presses by one person over the same threads, at once, with their query
+// plans forced apart (markAllOnPlan): two tabs, two devices, or a narrowed press racing an
+// unfiltered one. Both take the same owner `for share`, which orders nothing, and both move the
+// same user_threads rows, so those rows are all that can order the pair - which is what the
+// lock pass in thread_id order does (markInboxReadThreads, inboxReadLockThreads).
+//
+// The crossing is made rather than waited for. Each round picks the row both presses wait on
+// and the threads they mark (raceGate), holds that row on a connection of the test's own and
+// lets both presses queue behind it: the press reading through the primary key reaches it
+// first, holding nothing, and the press reading in heap order reaches it holding rows of the
+// set. Rolling the hold back then starts the first press inside the second's scan. Without the
+// lock pass the first walks up into rows the second holds while the second waits for the row
+// the first was just given, and Postgres breaks the cycle with a 40P01 its caller answers 500.
+// With it the two queue at the same row in the same order, and one simply follows the other.
+//
+// The two presses carry marks a millisecond apart, so one of them moves every row whichever
+// order they commit in.
+func TestInboxReadRacingAnotherMarkAll(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Two presses", "A spec")
+	comments := "/api/v1/issues/" + issue.Key + "/comments"
+	threads := make([]string, 0, inboxReadRaceThreads)
+	for index := range inboxReadRaceThreads {
+		threads = append(threads, seedUnreadThread(t, handler, comments, fmt.Sprintf("Racing %d?", index)))
+	}
+	byThreadID := markAllOnPlan(t, deps, storetest.IndexScan)
+	byHeap := markAllOnPlan(t, deps, storetest.SequentialScan)
+	for round := range raceRounds {
+		unreadAgain(t, database, threads)
+		gate, marks := raceGate(t, database, threads)
+		markThreadsRead(t, database, slices.DeleteFunc(slices.Clone(threads), func(thread string) bool {
+			return slices.Contains(marks, thread)
+		}))
+		held := holdGateThread(t, database, gate)
+		queued := make(chan int, 1)
+		go func() {
+			queued <- storetest.WaitForLockWaiters(t, held, 2, 10*time.Second)
+			_ = held.Rollback(context.Background())
+		}()
+		mark := time.Now()
+		later := mark.Add(time.Millisecond)
+		first, second := race(t, round,
+			func() *httptest.ResponseRecorder {
+				return postInboxRead(t, byThreadID, "alice", map[string]any{
+					"read_through": mark.UTC().Format(time.RFC3339Nano),
+				})
+			},
+			func() *httptest.ResponseRecorder {
+				return postInboxRead(t, byHeap, "alice", map[string]any{
+					"read_through": later.UTC().Format(time.RFC3339Nano),
+				})
+			})
+		if waiters := <-queued; waiters != 2 {
+			t.Fatalf("round %d: %d presses queued on the gate row, want both of them", round, waiters)
+		}
+		if first.Code != http.StatusOK || second.Code != http.StatusOK {
+			t.Fatalf("round %d: the press in thread_id order %d %s, the press in heap order %d %s",
+				round, first.Code, first.Body.String(), second.Code, second.Body.String())
+		}
+		// Between them the two presses mark every thread. Which of them marks it depends on
+		// where the other's commit falls: a press that reads after the other committed finds
+		// nothing unread and marks none, and one that reads before it marks what is left to
+		// move, so only the sum is fixed.
+		marked := markedBy(t, first) + markedBy(t, second)
+		if marked < len(marks) {
+			t.Fatalf("round %d: the two presses marked %d threads between them, want at least %d",
+				round, marked, len(marks))
+		}
+		// Every thread is read through at least the first press's mark, whichever press moved
+		// it: a mark is stored as no later than the server's own now(), so the second press's
+		// millisecond of lead is spent as often as it is stored, and no mark is ever lost.
+		for _, thread := range marks {
+			through, unread := threadMark(t, database, "alice", thread)
+			if through.Before(mark.Truncate(time.Microsecond)) || unread {
+				t.Fatalf("round %d: thread %s's read mark %s lost the mark %s (unread %v)",
+					round, thread, through, mark, unread)
 			}
 		}
 	}

@@ -11,7 +11,7 @@ import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
-import { useInboxCount } from "./features/inbox/useUnreadThreadCount";
+import { useInboxCount } from "./features/inbox/useInboxCount";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -429,7 +429,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const fillsViewport =
     routeFillsViewport(location.pathname) || (routeIsInbox(location.pathname) && readingPaneShown);
   const connection = useLiveSocketPill();
-  // One number for the Inbox, composed in one place (`useUnreadThreadCount.ts`): the work
+  // One number for the Inbox, composed in one place (`useInboxCount.ts`): the work
   // waiting on the reader plus the threads they have not read.
   const inboxCount = useInboxCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);

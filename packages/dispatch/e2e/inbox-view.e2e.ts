@@ -17,6 +17,7 @@ import { inboxList, inboxPane } from "./inbox-pane";
 import {
   agentRowId,
   asSession,
+  holdReadMarks,
   replyRowId,
   seedAgentThread,
   seedBulkReplyThreads,
@@ -688,6 +689,11 @@ test("a hundred and twenty threads sort by priority, count up, and follow their 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // Every row here is a thread, so the pane marks the row it selects read as it draws it
+    // (A7) and that row leaves the unread list the next time it is read. The marks are held,
+    // so the list this row is about keeps all 120 (`inbox-thread-pane.e2e.ts` holds them the
+    // same way); what the pane marks is `inbox-read-state.e2e.ts`'s subject.
+    await holdReadMarks(page);
     // Sorted by priority, over one list: the oldest message of all is still the first row,
     // because it is the P0 thread.
     await page.goto("/?group=none&sort=priority");

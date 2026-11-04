@@ -23,13 +23,14 @@ import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { loadedEngine, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { agentRow as sharedAgentRow } from "../threads/replies-fixture";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 import { ReadingPane } from "./ReadingPane";
 
 installInboxApiMocks();
 
 /** The pane waits this long after the last change of the selected question before it opens
- *  another document (`DOCUMENT_SETTLE_MS` in `ReadingPane.tsx`). */
+ *  another document (`DOCUMENT_SETTLE_MS` in `PaneDocument.tsx`). */
 const SETTLE_MS = 200;
 
 let getArtifact: Mock<typeof api.getArtifact>;
@@ -648,21 +649,17 @@ function threadRow(overrides: Partial<MyReplyThreadRow>): MyReplyThreadRow {
 }
 
 /** An Agent row, the other shape the column draws: a message the reader sent a session, with
- *  that session's reply. */
+ *  that session's reply - the shared fixture's row under this file's own session and reply. */
 function agentThreadRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
-  const { reply, subject, unread, unread_count } = threadRow({});
-  return {
-    kind: "agent",
+  const { reply, subject } = threadRow({});
+  return sharedAgentRow("message-1", {
     ref: "/agents/planner/live",
     reply,
     session: { id: "planner", name: "Planner" },
     subject,
-    thread_id: "message-1",
-    unread,
-    unread_count,
     unread_reply_ids: ["reply-1"],
     ...overrides,
-  };
+  });
 }
 
 /** The anchor a comment thread in a project document carries. */

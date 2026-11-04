@@ -12,7 +12,7 @@ import { replyRow, agentRow as sharedAgentRow } from "../threads/replies-fixture
 import { InboxBar, type InboxFilters } from "./InboxBar";
 import type { InboxListRow } from "./list-row";
 import { MARK_ALL_REFUSED_TEXT, markAllReadBody, marksThread, useMarkAllRead } from "./mark-all";
-import { useUnreadThreadCount } from "./useUnreadThreadCount";
+import { useUnreadThreadCount } from "./useInboxCount";
 
 afterEach(cleanup);
 

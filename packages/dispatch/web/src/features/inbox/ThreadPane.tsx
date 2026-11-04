@@ -14,11 +14,10 @@ import type { ReactNode } from "react";
 
 import { askThreadQuery } from "../../api/queries";
 import type { MyReplyRow, MyReplyThreadRow } from "../../api/types";
-import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { textPrimaryOnCanvas } from "../../theme/classes";
 import type { ProofDocumentProps } from "../doc/ProofDocument";
 import { isDecisionAsk } from "./ask-decision";
-import { PaneDocument, PaneFrame, useDocumentAtBlock } from "./PaneDocument";
+import { DocumentPane, PaneFrame } from "./PaneDocument";
 import { questionLine } from "./question-line";
 import { ThreadPaneHead } from "./ReadingPaneHead";
 import { ThreadBody } from "./ThreadBody";
@@ -35,27 +34,34 @@ function ThreadSubject({ thread }: { thread: MyReplyRow }): ReactNode {
 /** Which of the column's four thread bodies this is, as the pane marks it. */
 type ThreadPaneBody = "agent" | "ask" | "document" | "issue";
 
-/** A thread that needs no document: a comment thread on an issue, an issue message
- *  conversation, an ask that is not a decision block, and a thread whose document the column
- *  could not open, which shows the quote the thread is anchored to in place of it. */
-function ThreadBodyPane({
-  body,
-  fallback = false,
-  quote,
-  thread,
-}: {
+/** What a thread body is drawn from, whether it is a pane of its own or the document body's
+ *  fall-back. */
+interface ThreadBodyProps {
   body: ThreadPaneBody;
   /** Whether this is the document body falling back to the thread alone. */
   fallback?: boolean;
   quote: boolean;
   thread: MyReplyRow;
-}): ReactNode {
+}
+
+/** What a thread body is: the thread's subject line and the thread itself, marked as the
+ *  column's own body. The document body draws this in its place where it falls back. */
+function ThreadBodyContent({ body, fallback = false, quote, thread }: ThreadBodyProps): ReactNode {
   return (
-    <PaneFrame head={<ThreadPaneHead thread={thread} />} label="Selected thread">
-      <div data-inbox-pane-body={body} data-inbox-pane-fallback={fallback ? "" : undefined}>
-        <ThreadSubject thread={thread} />
-        <ThreadBody openAtFirstUnread quote={quote} thread={thread} />
-      </div>
+    <div data-inbox-pane-body={body} data-inbox-pane-fallback={fallback ? "" : undefined}>
+      <ThreadSubject thread={thread} />
+      <ThreadBody openAtFirstUnread quote={quote} thread={thread} />
+    </div>
+  );
+}
+
+/** A thread that needs no document: a comment thread on an issue, an issue message
+ *  conversation, an ask that is not a decision block, and a thread whose document the column
+ *  could not open, which shows the quote the thread is anchored to in place of it. */
+function ThreadBodyPane(pane: ThreadBodyProps): ReactNode {
+  return (
+    <PaneFrame head={<ThreadPaneHead thread={pane.thread} />} label="Selected thread">
+      <ThreadBodyContent {...pane} />
     </PaneFrame>
   );
 }
@@ -88,33 +94,21 @@ function ThreadDocumentBody({
   issueKey: string | null;
   thread: MyReplyThreadRow;
 }): ReactNode {
-  const document = useDocumentAtBlock({ artifactId, blockId, issueKey });
-  const { artifact, blockFound, failed, user } = document;
-  if (failed || (anchoredThread !== undefined && blockFound === false)) {
-    return <ThreadBodyPane body={body} fallback quote thread={thread} />;
-  }
   return (
-    <PaneFrame
-      content={document.content}
-      head={<ThreadPaneHead sectionBlockId={document.sectionBlockId} thread={thread} />}
+    <DocumentPane
+      anchoredThread={anchoredThread}
+      artifactId={artifactId}
+      blockId={blockId}
+      fallback={<ThreadBodyContent body={body} fallback quote thread={thread} />}
+      head={(document) => (
+        <ThreadPaneHead sectionBlockId={document.sectionBlockId} thread={thread} />
+      )}
+      issueKey={issueKey}
       label="Selected thread"
-      scroller={document.scroller}
-      sectionBar={document.sectionBar}
-    >
-      <div data-inbox-pane-body={body}>
-        {!document.ready || artifact === undefined || user === undefined ? (
-          <LoadingSkeleton label={`Opening ${thread.document?.name ?? "the document"}`} />
-        ) : (
-          <PaneDocument
-            anchoredThread={anchoredThread}
-            artifact={artifact}
-            document={document}
-            onAskAnswered={noAnswer}
-            user={user}
-          />
-        )}
-      </div>
-    </PaneFrame>
+      loadingName={thread.document?.name ?? "the document"}
+      onAskAnswered={noAnswer}
+      paneBody={body}
+    />
   );
 }
 
@@ -142,10 +136,13 @@ function AskThreadPane({ thread }: { thread: MyReplyThreadRow }): ReactNode {
 
 /** The reading column for a Reply or an Agent row: one body per shape the thread comes in. */
 export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
+  if (thread.kind === "agent") {
+    return <ThreadBodyPane body="agent" quote={false} thread={thread} />;
+  }
   if (thread.kind === "ask") {
     return <AskThreadPane thread={thread} />;
   }
-  const anchor = thread.kind === "agent" ? undefined : thread.anchor;
+  const anchor = thread.anchor;
   const blockId = anchor?.block_id;
   if (
     thread.kind === "comment" &&
@@ -160,7 +157,7 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
         anchoredThread={{
           blockId,
           children: <ThreadBody openAtFirstUnread thread={thread} />,
-          markId: thread.anchor?.mark_id ?? null,
+          markId: anchor.mark_id,
         }}
         artifactId={anchor.artifact_id}
         blockId={blockId}
@@ -175,7 +172,7 @@ export function ThreadPane({ thread }: { thread: MyReplyRow }): ReactNode {
   const inDocument = thread.kind === "comment" && thread.document !== undefined;
   return (
     <ThreadBodyPane
-      body={thread.kind === "agent" ? "agent" : inDocument ? "document" : "issue"}
+      body={inDocument ? "document" : "issue"}
       fallback={inDocument}
       quote={inDocument}
       thread={thread}

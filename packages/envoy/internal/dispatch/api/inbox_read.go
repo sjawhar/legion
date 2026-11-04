@@ -65,44 +65,32 @@ const inboxReadAgentRest = `
 // to either moves the list and this button together.
 const inboxReadAgentThreads = myAgentHead + myAgentUnread + myAgentRoots + inboxReadAgentRest
 
-// inboxReadLockDocuments and inboxReadLockIssues take the owner rows of the threads this request
-// marks - its documents, then its issues - in the ascending owner-key order eventOwnerKey builds
-// and LockOwners sorts by ("artifact:" + id before "issue:" + key, as strings).
+// The three lock statements of this transaction, in the order it takes them: the owner rows of
+// the threads it marks `for share` - its documents, then its issues, the ascending owner-key
+// order eventOwnerKey builds and LockOwners sorts by ("artifact:" + id before "issue:" + key, as
+// strings) - and then the caller's own user_threads rows `for no key update`, in ascending
+// thread_id order, which the update below re-locks rather than taking in the order its plan
+// scans them. Each list is ordered before it is locked, so the locks are taken in the sorted
+// order rather than whatever order the scan returns. The projects come last, from LockOwners.
 //
-// The order this transaction keeps is the owner, then the caller's user_threads rows, then the
-// project its events name, and PUT /api/v1/me/threads/{id}/read keeps that same one
-// (api/replies.go, putThreadRead). It has to be the same order: both routes take the owner
-// `for share`, two share locks do not conflict, so the owner orders nothing between the two,
-// and one of them holding the project while the other holds the row and waits for the project
-// is a cycle Postgres breaks with a 40P01 that the caller reads as a 500. Rows before project
-// rather than project before rows, because that is where the one-thread route's project lock
-// already falls: its Append takes it (events.Broker.Append), after the row and only when the
-// mark moved. The other order would have every revisit that moves nothing queue on the project
-// row - the busiest row the Inbox touches - behind every write in that project, for an event it
-// was never going to append.
-//
-// An ordinary writer is ordered by the owner instead. A comment, an answer or an issue message
-// takes its issue or document `for no key update` (owner.go, ownerRowLock) before its trigger
-// moves the user_threads rows of everyone in the thread; that level conflicts with the
-// `for share` taken here, and every row such a trigger moves belongs to a thread on the owner
-// it holds, which is an owner this transaction holds too, since it locks the owner of every
-// thread it marks. One of the two therefore waits at the owner while holding nothing the other
-// wants, whichever order the writer itself reaches the project in: a block ask's answer appends
-// an anchor refresh, and so takes the project, before its own update moves those rows, and it
-// is ordered all the same.
-//
-// The rows are ordered before they are locked, so the lock is taken in the sorted order rather
-// than whatever order the scan returns.
+// Why that order, and the cycles it rules out: markInboxReadThreads, which is where the Inbox's
+// read-mark lock order is written down.
 const (
 	inboxReadLockDocuments = `select 1 from artifacts where id = any($1::uuid[]) order by id for share`
 	inboxReadLockIssues    = `select 1 from issues where key = any($1::text[]) order by key for share`
+	inboxReadLockThreads   = `
+	select 1 from user_threads
+	where login = $1 and thread_id = any($2::uuid[])
+	order by thread_id
+	for no key update`
 )
 
 // inboxReadMarkThreads moves the caller's mark on every Reply thread it was given, and answers
-// the project of each row it moved. read_through is cast by Postgres from the caller's own text
-// rather than bound as a parsed time, and stored as no later than now, exactly as putThreadRead
-// stores one mark: a mark never moves back, and a time carrying nanoseconds is not truncated a
-// microsecond short of the write it means to cover.
+// the project of each row it moved. Every row it reaches is one inboxReadLockThreads has just
+// taken, so the order its own plan scans them in decides nothing. read_through is cast by
+// Postgres from the caller's own text rather than bound as a parsed time, and stored as no
+// later than now, exactly as putThreadRead stores one mark: a mark never moves back, and a time
+// carrying nanoseconds is not truncated a microsecond short of the write it means to cover.
 const inboxReadMarkThreads = `
 	update user_threads set read_through = least($2::text::timestamptz, now())
 	where login = $1 and thread_id = any($3::uuid[])
@@ -128,23 +116,11 @@ const inboxReadMarkAgentReplies = `
 	on conflict do nothing
 	returning session_id, reply_id::text`
 
-// inboxReadPruneAgentReplies is putUserAgentState's prune over the sessions this request wrote
-// for: a reply at or before the session's read mark is read whatever user_agent_reply_read holds,
-// so its row is dead and is deleted here. Nothing this request writes is ever dead - the insert
-// above skips what the mark covers - so this only clears what an older write left behind, and it
-// keeps the two writers to one rule about which rows may exist.
-const inboxReadPruneAgentReplies = `
-	delete from user_agent_reply_read
-	using messages, user_agent_read
-	where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = any($2::text[])
-	  and user_agent_read.login = $1 and user_agent_read.session_id = user_agent_reply_read.session_id
-	  and messages.id = user_agent_reply_read.reply_id
-	  and messages.created_at <= user_agent_read.read_through`
-
 // inboxReadStatementTimeout bounds every statement of the mark-all's transaction. One request
 // marking the acceptance seed - 600 unread Reply threads and 20 Agent threads for one login -
-// takes 24 to 28 ms end to end on the test database, so ten seconds leaves two and a half orders
-// of magnitude of headroom for a busier server and cuts no honest request off. The ceiling
+// takes 30 to 43 ms end to end on the test database, of which the ordered lock pass is 7 to 10
+// (the same seed takes 24 to 33 ms without it), so ten seconds leaves better than two orders of
+// magnitude of headroom for a busier server and cuts no honest request off. The ceiling
 // matters because this transaction holds its owner rows `for share`: every comment, answer and
 // issue message on those owners waits behind a statement that hangs, so one that cannot finish
 // is better killed, which rolls the transaction back and frees them.
@@ -327,6 +303,52 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 // the three marks, takes the projects it wrote in and appends one event per project and per
 // session it touched. It answers how many threads it marked and the events to publish once it
 // has committed.
+//
+// This comment is where the Inbox's read-mark lock order is written down. putThreadRead
+// (api/replies.go), the lock statements above, the race tests and packages/envoy/AGENTS.md
+// point here rather than saying it again.
+//
+// The order is owner, then the caller's rows, then the project its events name:
+//
+//  1. the owner row of every thread it marks, `for share`, documents then issues, in ascending
+//     owner-key order (lockInboxReadOwners, inboxReadLockDocuments);
+//  2. the caller's user_threads rows, `for no key update`, in ascending thread_id order
+//     (inboxReadLockThreads), which the update that follows re-locks;
+//  3. the project of every row that update moved, through LockOwners, in sorted key order and
+//     before the first append.
+//
+// PUT /api/v1/me/threads/{id}/read takes that same order over its one thread, and the two need
+// the same one: both take the owner `for share`, two share locks do not conflict, so the owner
+// orders nothing between them, and one of them holding the project while the other holds the
+// row and waits for the project is a cycle Postgres breaks with a 40P01 that the caller reads
+// as a 500. Rows before project rather than project before rows, because that is where the
+// one-thread route's project lock already falls: its Append takes it (events.Broker.Append),
+// after the row and only when the mark moved. The other order would have every revisit that
+// moves nothing queue on the project row - the busiest row the Inbox touches - behind every
+// write in that project, for an event it was never going to append.
+//
+// Two presses of this button by one person - two tabs, two devices, a narrowed press against an
+// unfiltered one - are ordered by step 2 and nothing else: they can name the same threads and
+// the same projects, and both take their owners `for share`. Step 2 is a pass of its own rather
+// than the update's own row locks because `thread_id = any($3)` locks what its plan reaches in
+// the order it reaches it, and the plans differ with the size of the array: a press of a
+// thousand threads is planned as a bitmap heap scan, which locks in heap order, where a small
+// press and the generic plan take an index scan on the primary key, which locks in thread_id
+// order. With random thread ids those two orders disagree, so without the pass two presses over
+// one set of rows could each hold a row the other waits on (TestInboxReadRacingAnotherMarkAll
+// forces the two plans apart and is red without it). The pass costs one index scan of the rows
+// the press named, and it takes `for no key update` on every row it named rather than on the
+// ones the update moves, so a second press waits for the first over rows it would have skipped.
+//
+// An ordinary writer is ordered by the owner instead. A comment, an answer or an issue message
+// takes its issue or document `for no key update` (owner.go, ownerRowLock) before its trigger
+// moves the user_threads rows of everyone in the thread; that level conflicts with the
+// `for share` taken here, and every row such a trigger moves belongs to a thread on the owner
+// it holds, which is an owner this transaction holds too, since it locks the owner of every
+// thread it marks. One of the two therefore waits at the owner while holding nothing the other
+// wants, whichever order the writer itself reaches the project in: a block ask's answer appends
+// an anchor refresh, and so takes the project, before its own update moves those rows, and it
+// is ordered all the same.
 func (s *server) markInboxReadThreads(
 	ctx context.Context, actor model.Actor, readThrough string, scope inboxReadScope,
 ) (int, []model.Event, error) {
@@ -379,9 +401,9 @@ func (s *server) markInboxReadThreads(
 	if len(events) == 0 {
 		return 0, nil, tx.Rollback(ctx)
 	}
-	// Every project this transaction announces in, taken in one sorted order after the rows it
-	// marked and before the first append (inboxReadLockDocuments). An agent reply's event names
-	// no owner, so it takes no lock here.
+	// Step 3 of the lock order above: every project this transaction announces in, taken in one
+	// sorted order after the rows it marked and before the first append. An agent reply's event
+	// names no owner, so it takes no lock here.
 	if err := s.deps.Events.LockOwners(ctx, tx, events...); err != nil {
 		return 0, nil, fmt.Errorf("lock the marked threads' projects: %w", err)
 	}
@@ -468,9 +490,9 @@ func (s *server) readInboxReadThreads(
 	return read, nil
 }
 
-// lockInboxReadOwners takes the owner row of every thread this request marks, in the one
-// ascending owner-key order (inboxReadLockDocuments). The projects are taken after the rows,
-// by markInboxReadThreads, and only for the rows it moved.
+// lockInboxReadOwners takes the owner row of every thread this request marks, step 1 of the
+// lock order markInboxReadThreads writes down. The caller's rows follow, in
+// markInboxReadReplyThreads, and the projects after them.
 func lockInboxReadOwners(ctx context.Context, tx pgx.Tx, read inboxReadThreads) error {
 	if len(read.documents) > 0 {
 		if _, err := tx.Exec(ctx, inboxReadLockDocuments, read.documents); err != nil {
@@ -492,11 +514,18 @@ type inboxReadMarked struct {
 	keys   []string
 }
 
-// markInboxReadReplyThreads runs the Reply threads' one update and reads back the project of
-// every row it moved. A thread already read past the mark is not among them: its read_through is
-// the later one, the update leaves it alone, and the answer does not count it.
+// markInboxReadReplyThreads takes the caller's rows in thread_id order, runs the Reply threads'
+// one update over them and reads back the project of every row it moved. A thread already read
+// past the mark is locked with the rest - what orders two presses must be the rows they named,
+// not the rows one of them happens to move - but it is not among those answered: its
+// read_through is the later one, the update leaves it alone, and the answer does not count it.
 func markInboxReadReplyThreads(ctx context.Context, tx pgx.Tx, login, readThrough string, threads []string) (inboxReadMarked, error) {
 	moved := inboxReadMarked{}
+	// Step 2 of that order: the update below locks what its plan reaches in the order it
+	// reaches it, which is not one order across two presses (markInboxReadThreads).
+	if _, err := tx.Exec(ctx, inboxReadLockThreads, login, threads); err != nil {
+		return moved, fmt.Errorf("lock the caller's threads: %w", err)
+	}
 	rows, err := tx.Query(ctx, inboxReadMarkThreads, login, readThrough, threads)
 	if err != nil {
 		return moved, err
@@ -543,7 +572,14 @@ func (s *server) markInboxReadAgentReplies(
 	}
 	touched := slices.Sorted(maps.Keys(sessions))
 	if len(touched) > 0 {
-		if _, err := tx.Exec(ctx, inboxReadPruneAgentReplies, login, touched); err != nil {
+		// The dead rows are taken in one order before the delete reaches them, as putUserAgentState
+		// takes them: nothing this request writes is ever dead (the insert above skips what the
+		// mark covers), so this clears only what an older write left behind, and two writers that
+		// crossed here would otherwise each hold a row the other waits on.
+		if _, err := tx.Exec(ctx, pruneAgentRepliesLock, login, touched); err != nil {
+			return nil, 0, fmt.Errorf("take the agent replies the read marks cover: %w", err)
+		}
+		if _, err := tx.Exec(ctx, pruneAgentReplies, login, touched); err != nil {
 			return nil, 0, fmt.Errorf("prune the agent replies the read marks cover: %w", err)
 		}
 	}

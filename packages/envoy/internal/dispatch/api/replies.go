@@ -287,13 +287,12 @@ const (
 )
 
 // parseThreadKinds reads the kinds of row an Inbox read names: reply and agent, a value named
-// twice counting once, an empty value skipped (the list route splits an absent ?kind= into one),
-// and any other value refused. Both false is a request that named none, which each route
-// defaults for itself: reply alone for the list, both for the mark-all.
+// twice counting once, and any other value refused, the empty one included. Both false is a
+// request that named none - an empty list - which each route defaults for itself: reply alone
+// for the list, both for the mark-all.
 func parseThreadKinds(values []string) (reply, agent bool, err error) {
 	for _, value := range values {
 		switch strings.TrimSpace(value) {
-		case "":
 		case myReplyKindReply:
 			reply = true
 		case myReplyKindAgent:
@@ -307,9 +306,18 @@ func parseThreadKinds(values []string) (reply, agent bool, err error) {
 }
 
 // parseMyRepliesKinds reads ?kind=, a comma-separated list of reply and agent. A request that
-// named none reads reply alone, what it read before the Inbox took the Agent rows.
+// named none reads reply alone, what it read before the Inbox took the Agent rows. An absent
+// ?kind= splits into one empty string, which is how this route names none, so the empties are
+// dropped here rather than skipped by the parser: the mark-all reads its kinds off a JSON list,
+// where "" is a value the caller wrote and the route refuses.
 func parseMyRepliesKinds(r *http.Request) (reply, agent bool, err error) {
-	reply, agent, err = parseThreadKinds(strings.Split(r.URL.Query().Get("kind"), ","))
+	named := []string{}
+	for _, value := range strings.Split(r.URL.Query().Get("kind"), ",") {
+		if strings.TrimSpace(value) != "" {
+			named = append(named, value)
+		}
+	}
+	reply, agent, err = parseThreadKinds(named)
 	if err != nil {
 		return false, false, err
 	}
@@ -369,10 +377,11 @@ func parseMyRepliesPage(r *http.Request) (limit *int, offset int, err error) {
 // costs no title.
 //
 // The two kinds' blocks below stay two blocks. They share a shape - count when the read is
-// paged, read the rows, add to the total - but every line of it differs: a pair of queries each,
-// a login with an owner narrowing against a session read's own arguments, a row read of its own,
-// and an error of its own to report. One block over a per-kind callback would hide four
-// differences behind one parameter list to save six lines.
+// paged, then read the rows - but every line of it differs: a pair of queries each, a login
+// with an owner narrowing against a session read's own arguments, a row read of its own, and an
+// error of its own to report. One block over a per-kind callback would hide four differences
+// behind one parameter list to save six lines. The unpaged total is the one line the two would
+// have shared, and it is taken once, after both.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.requireHuman(w, r)
 	if !ok {
@@ -441,9 +450,6 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if limit == nil {
-			response.Total += len(read)
-		}
 		rows = append(rows, read...)
 	}
 	if wantAgent {
@@ -465,10 +471,12 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if limit == nil {
-			response.Total += len(read)
-		}
 		rows = append(rows, read...)
+	}
+	// An unpaged read of either kind read every matching row, so the rows in hand are the total
+	// - before the offset cut below throws any away.
+	if limit == nil {
+		response.Total = len(rows)
 	}
 
 	slices.SortFunc(rows, func(left, right model.MyReplyRow) int {
@@ -628,14 +636,10 @@ func nameAgentSessions(ctx context.Context, tx pgx.Tx, rows []model.MyReplyRow) 
 // so a row a tab read less of a moment ago never comes back. A thread the caller has no row for
 // writes nothing.
 //
-// The transaction locks the thread's owner row `for share` before it touches the caller's row:
-// every writer that moves a user_threads row (a comment, an answer, an issue message) holds that
-// owner `for no key update` before its trigger fires, so a mark that took the row first could wait
-// on a writer waiting on it. Owner, then the caller's row, then the project the event names is
-// also the order the Inbox's Mark all read takes (api/inbox_read.go, inboxReadLockDocuments),
-// and the two need the same one: both take the owner `for share`, two share locks do not
-// conflict, so the owner orders nothing between them, and only the row and the project in one
-// order keeps the pair off a deadlock.
+// This transaction takes the Inbox's read-mark lock order over its one thread: the thread's
+// owner row `for share`, then the caller's user_threads row, then the project its event names.
+// Which locks that order rules out, and why the Inbox's Mark all read has to take the same one,
+// is written on markInboxReadThreads (api/inbox_read.go).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
