@@ -334,7 +334,16 @@ func TestAnUpdateThatOverwritesOrDeletesARetiredEntryIsRefused(t *testing.T) {
 // document, as its 4413 path makes, reads the rebuilt text and saves a new edit. A document far
 // from both caps with a resident room is still refused, DOCUMENT_LIVE
 // (TestRebuildDocumentRefusesALiveRoom).
+//
+// Its fixture stands at the decode cap (longEditedAtCapState), built by about a million ygo
+// writes, so a -race build leaves it out (skipAtTheBoundsUnderRace). What the detector could
+// catch here the tests beside it drive over a small document in seconds: the rebuild's close
+// against an apply still writing in the room (TestTheRebuildsCloseLeavesARoomAnApplyIsWriting),
+// the rebuild a live room is refused for (TestRebuildDocumentRefusesALiveRoom), and a browser
+// whose socket a room's close ends and which reconnects and re-syncs
+// (TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip).
 func TestARebuildNearACapClosesTheResidentRoomAndItsEditorsReAdmitTheRebuiltDocument(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	state := longEditedAtCapState(t)
 	service, artifactID := newTestService(t)
 	storeHistory(t, service, artifactID, state)
@@ -500,7 +509,18 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 // history as rows of a rebuilt document. The room's struct total stays small, the document reads
 // the rebuilt text with no block twice and without the unsent edit, and a browser of the rebuilt
 // history - its whole state, the retired clients' list included, handed back - edits it as before.
+//
+// Its fixture stands at the decode cap (longEditedAtCapState), so a -race build leaves it out
+// (skipAtTheBoundsUnderRace): the fixture's million instrumented writes cost the race run minutes
+// and gigabytes, and under -race on the development pod a socket connect of this test timed out
+// after 192 s. What the detector could catch here the tests beside it drive over a small
+// document: the hook closing a browser that hands back a history a rebuild replaced
+// (TestAGroupOfARetiredClientBelowItsClockIsClosedWhereverTheWalkRefuses, and the row of
+// TestEveryRefusalOfTheHookCarriesItsOwnCodeAndReason that hands one back), and a browser whose
+// socket a room's close ends and which reconnects and re-syncs
+// (TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip).
 func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	state := longEditedAtCapState(t)
 	service, artifactID := newTestService(t)
 	storeHistory(t, service, artifactID, state)
@@ -658,7 +678,17 @@ func oneClientAtCapState(t *testing.T) []byte {
 // naming the old history's items, parked. The room closes it with the document's own close and
 // DOC_REBUILT; it reconnects from a fresh read of the rebuilt document, as the editor's
 // 4413 path does, not with its old state; and a new edit from it is applied and stored.
+//
+// Its fixture stands at the decode cap (oneClientAtCapState), built by about a million ygo
+// writes, so a -race build leaves it out (skipAtTheBoundsUnderRace). What the detector could
+// catch here the tests beside it drive over a small document: the hook closing a browser that
+// holds a history a rebuild replaced, wherever the walk refuses its message
+// (TestAGroupOfARetiredClientBelowItsClockIsClosedWhereverTheWalkRefuses, and the row of
+// TestEveryRefusalOfTheHookCarriesItsOwnCodeAndReason that hands one back), and a browser whose
+// socket a room's close ends and which reconnects and re-syncs
+// (TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip).
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	const browserClient crdt.ClientID = 1
 	state := oneClientAtCapState(t)
 	service, artifactID := newTestService(t)
@@ -772,10 +802,19 @@ func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBe
 // the long-edited one's handoff carrying 1,345 delete ranges and the agent's 32,793; the
 // long-edited one took 33 s here, the one a keystroke short 30 s, and the agent's 229 s, which
 // runs with DISPATCH_REBUILD_AGENT_REWRITES=1, as its rebuild does. The row a keystroke short of
-// the cap types a million keystrokes of its own, where the rows before it share one fixture, and
-// a -race build leaves it out (skipAtTheBoundsUnderRace): the row at the cap drives the same
-// sockets over the same document.
+// the cap types a million keystrokes of its own, where the rows before it share one fixture.
+//
+// Every row's fixture stands at the decode cap, each built by about a million ygo writes, so a
+// -race build leaves the test out (skipAtTheBoundsUnderRace): under -race on the development pod
+// it carried its shard's resident memory from 4.2 GB to 9.3 GB over 4.75 minutes. What the
+// detector could catch here the tests beside it drive over a small document: a room taking a
+// whole state handed back (the row of TestAnUpdateThatOverwritesOrDeletesARetiredEntryIsRefused
+// that hands the room its own state), two browsers' sockets with one update refused between them
+// (TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt), and a browser whose socket a room's
+// close ends and which reconnects and re-syncs
+// (TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip).
 func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
+	skipAtTheBoundsUnderRace(t)
 	const editAdds = 1 + splitsAStructCanCause
 	for _, row := range []struct {
 		name  string
@@ -783,9 +822,6 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 		state func(t *testing.T) []byte
 		// edits is whether the room's total leaves room for the offline edit.
 		edits bool
-		// typedAfresh is whether the row types a million keystrokes of its own rather than
-		// taking the fixture the rows before it share.
-		typedAfresh bool
 	}{
 		{"an agent's whole rewrites until the cap refused one", agentRewritesEnv, func(t *testing.T) []byte {
 			state, refusal := agentRewrittenState(t)
@@ -793,18 +829,15 @@ func TestAWholeStateHandoffOfADocumentAtTheDecodeCapIsAdmitted(t *testing.T) {
 				t.Fatalf("the agent's last write was refused with %v, want ErrDocumentTooLarge", refusal)
 			}
 			return state
-		}, false, false},
-		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false, false},
+		}, false},
+		{"a long-edited document typed on until the cap", "", longEditedAtCapState, false},
 		{"a long-edited document typed on until a keystroke short of the cap", "", func(t *testing.T) []byte {
 			return longEditedTypedTo(t, maxUpdateItems-editAdds)
-		}, true, true},
+		}, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.gate != "" && os.Getenv(row.gate) == "" {
 				t.Skip("set " + row.gate + "=1 to run this document")
-			}
-			if row.typedAfresh {
-				skipAtTheBoundsUnderRace(t)
 			}
 			state := row.state(t)
 			service, artifactID := newTestService(t)
