@@ -108,7 +108,7 @@ func requireDocumentUnchanged(t *testing.T, builds *twoBuilds, artifactID, want,
 // builds live, a document socket of this tree's page on this tree's server is admitted read-only
 // and an edit sent through it lands nowhere; once the previous build's process has stopped and
 // its row has left the registry, the socket a reload opens - the same page, the same numbers -
-// is admitted writable, and an edit through it lands on both builds' servers.
+// is admitted writable, and an edit through it lands on this build's server.
 //
 // The wait for the row to leave is bounded by the registry's own numbers (fleetDepartureBound)
 // and polled: a process stopped as a deploy stops it deletes its row at the end of its HTTP

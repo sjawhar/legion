@@ -811,7 +811,7 @@ So for each surface the two builds share, this is what build N+1 may change whil
   Reader-first, by the schema manifest (`internal/dispatch/pmdoc/schema/blocks.json`).
   Every node, mark, typed block, attribute and enum value carries `since`, the schema version from which a build reads it, and `creatable_since`, the version from which a build creates it;
   both are 1 where the manifest names neither.
-  A new element is readable one release before it is creatable, unless the page admission below gates it: `requirement`, `plan_task` and `check` carry `since` 3 and `creatable_since` 3, and ship that way from `legion-envoy-v29.1.0` on (Generations and holds, below).
+  A new element is readable one release before it is creatable, unless the page admission below gates it: `legion-envoy-v29.1.0` first declares `requirement`, `plan_task` and `check`, at manifest version 3, and this build gives them `since` 3 and `creatable_since` 3 (Generations and holds, below).
   A server-side write (an agent's edit, a settlement, an import) is bound by this build's manifest alone, so one can still add such an element during a roll; a build of this manifest at an earlier version then answers `409 DOC_NEWER_CONTENT` for that document (the release before the manifest: Generations and holds, below).
   Every write path refuses an element this build reads but may not create yet (`pmdoc`, `refuseUncreatable`), unless the document already holds it, and the editor offers only the elements it may create.
   An element stays readable while stored documents may hold it: no release removes a readable element from the manifest.

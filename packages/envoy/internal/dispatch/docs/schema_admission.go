@@ -16,8 +16,10 @@ import (
 // schemaPage is the schema a page presents on its document socket: version is C, the
 // schema_version it reads, and creatable is R, the schema_creatable it may create up to. A page
 // that sends no schema_creatable is a page from before the manifest, every element of which has
-// since 1, so its R is 1. A page that presents no number, or a number that does not parse, is not
-// valid, and is admitted read-only.
+// since 1, so its R is 1. A page that presents no number, a number that does not parse, or a
+// schema_creatable below 1, which no manifest has, is not valid, and is admitted read-only: a
+// live process of a build before the fleet columns counts as reading version 0 (schemaFleet), so
+// an R at or below 0 would pass that bound.
 type schemaPage struct {
 	version, creatable int
 	valid              bool
@@ -30,7 +32,7 @@ func schemaPageOf(query url.Values) schemaPage {
 	}
 	creatable := 1
 	if query.Has("schema_creatable") {
-		if creatable, err = strconv.Atoi(query.Get("schema_creatable")); err != nil {
+		if creatable, err = strconv.Atoi(query.Get("schema_creatable")); err != nil || creatable < 1 {
 			return schemaPage{}
 		}
 	}

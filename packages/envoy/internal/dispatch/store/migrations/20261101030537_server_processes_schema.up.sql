@@ -11,9 +11,9 @@
 -- file_store is whether the process stores uploaded files in a bucket.
 --
 -- A row at the defaults (0, 0, '', null) is a process of a build before this one, which writes
--- none of the four: the admission leaves it out of the fleet's numbers, as it leaves out a build
--- that does not register at all, and a reader of the other two treats it as carrying no identity
--- and as lacking the bucket.
+-- none of the four: the admission counts it as reading schema version 0, which keeps every page
+-- read-only while it lives, and a reader of the other two treats it as carrying no identity and
+-- as lacking the bucket.
 --
 -- Four columns with constant defaults: Postgres records each default in the catalog and rewrites
 -- no row, so the ALTER takes ACCESS EXCLUSIVE on server_processes only for the catalog write. The

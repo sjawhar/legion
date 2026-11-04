@@ -246,6 +246,8 @@ func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(5, 4), token: "5"},
 		{name: "a process that predates the fleet columns reads version 0, which no page creates at or under", fleet: []process{{0, 0, 0}}, query: page(4, 3), token: "4"},
 		{name: "a page from before the manifest beside a process that predates the fleet columns", fleet: []process{{0, 0, 0}}, query: page(4, -1), token: "4"},
+		{name: "a page claiming to create nothing beside a process that predates the fleet columns", fleet: []process{{0, 0, 0}}, query: page(4, 0), token: "4"},
+		{name: "a page claiming a creatable version below zero", query: url.Values{"schema_version": {"4"}, "schema_creatable": {"-2"}}, token: "4"},
 		{name: "a lapsed process is left out", fleet: []process{{5, 4, time.Hour}}, query: page(3, 3), token: "3", writable: true},
 		{name: "a page that sends no schema_creatable on this version", query: page(4, -1), token: "4", writable: true},
 		{name: "a page that sends no schema_creatable one version newer creates what the first version reads", query: page(5, -1), token: "5", writable: true},
