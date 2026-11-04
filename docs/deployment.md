@@ -1,90 +1,34 @@
 # Deploying the Legion daemon on a shared box
 
-This runbook covers the one deployment shape Legion has today: the daemon, its tmux server, and
-every pane it launches run as the same Unix user on one machine, and every process on that machine
-can ask the `secrets` broker (secretsd) for any agent-tier key. A credential that only the daemon
-may hold therefore cannot live in the agent tier without every pane being able to read it.
-Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do not need this page.
+This runbook covers a shared-box deployment: the daemon, its tmux server, and every pane it
+launches run as the same Unix user on one machine.
+This provides no filesystem boundary between the daemon and its panes.
+Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead.
 
-`secrets` and `agent-secrets` are two CLIs over two stores, and a name can exist in both. `secrets`
-is secretsd, shipped from `sjawhar/forward` (the old `sjawhar/secretsd` repository is archived): it
-reads its agent tier from local sops files and its human tier through the local secretsd daemon,
-which asks for a YubiKey touch, and it never reads the agent-secrets broker. `agent-secrets` reads
-that broker, which is backed by a cloud Secret Manager. One key name can therefore hold different
-values in the two stores. `agent-secrets` names its store in output and every refusal; `secrets`
-names none today. This page is mostly about `secrets`; the `legion-implementer` (App ID 5341240)
-and `legion-reviewer` (App ID 5341243) Apps are `github-app` secrets in the broker, which release
-installation tokens and no key, and
-[their own section](#the-legion-implementer-and-legion-reviewer-apps) says how a daemon reads them.
-The key names below (`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64`, `GH_REVIEW_APP_PRIVATE_KEY_B64`) are
-secretsd's, for a shared-box deployment that holds its App keys itself.
+The daemon gets GitHub App installation tokens from the secrets broker; the App private keys
+stay in the broker.
+Raw key secrets are not used.
+Configure each App with `app_id` and `token_command`, as [the App section](#the-legion-implementer-and-legion-reviewer-apps) shows.
 
-## Current decision for the LEGION deployment
+`secrets` and `agent-secrets` are two CLIs over two stores, and a name can exist in both.
+`secrets` is secretsd, shipped from `sjawhar/forward`: it reads its agent tier from local sops
+files and its human tier through the local secretsd daemon, which asks for a YubiKey touch.
+`agent-secrets` reads the secrets broker, which is backed by a cloud Secret Manager and releases
+installation tokens for `github-app` secrets.
+The App configuration below uses `agent-secrets`; `provider_keys` can still read secretsd keys.
 
-On 2026-09-13 Sami decided that the two GitHub App private keys stay in the secrets store's agent
-tier on this machine, readable by every pane, until the daemon runs in its own Kubernetes pod
-(LEGION-19, "Legion on Kubernetes"). Do not move them to the human tier and do not change the
-daemon's launcher on this deployment. The rotation happens at that cutover: the new keys are
-generated straight into the cluster's secret store, the App keys are mounted into the daemon pod
-only, and the old keys are revoked once the shared-box daemon stops using them. That rotation is
-recorded on LEGION-74. The rest of this page documents the human-tier mechanism and
-`private_key_secret` for a shared-box deployment that chooses that boundary.
+## How the daemon launcher gets tokens
 
-## Where daemon-only credentials live
-
-The two GitHub App private keys (`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` for the implement App,
-`GH_REVIEW_APP_PRIVATE_KEY_B64` for the review App) are daemon-only: a pane that could read them
-could mint installation tokens as either App and act on GitHub outside the daemon's grant path.
-`GH_AGENT_APP_PRIVATE_KEY_B64` is the sjawhar-agent App's key and must not be configured for Legion.
-
-On a shared box that chooses the human-tier boundary, they live in secretsd's **human tier**: one
-file per key under a source root's `secrets.human.d/`, written with `secrets edit-human <NAME>` (it
-accepts the value on stdin non-interactively). Never in
-the agent-tier files (`secrets.env`, `secrets.local.env` in `~/.dotfiles` or `~/.dotfiles/.secrets`):
-every process on the box reads those without approval. `secrets list` shows each key's tier;
-`secrets get <NAME> --no-request` prints it as JSON without requesting anything
-(`{"key":"<NAME>","tier":"human","grant":false}` is what you want to see). A key present in two
-source roots is refused by secretsd rather than resolved, so remove the agent-tier copy when you
-add the human-tier one.
-
-## How the daemon launcher gets them
-
-A human-tier key is released only to a caller secretsd can scope: a process holding an agent
-session's token, or a process whose standard input is a terminal. The daemon must use the second
-path — the first would make an agent session the grantee — so:
-
-- Start the daemon in a terminal pane the operator opens by hand (a tmux window or pane in the
-  operator's own session), in which no agent session has run since secretsd last started.
-  secretsd remembers a terminal an agent session has used and refuses tokenless requests from it
-  with `a tokenless request came from a known agent terminal`.
-- The daemon and its supervisor loop (for example `while :; do legion start <team> --config
-  legion.yaml; sleep 5; done`) run inside that pane's process tree with **stdin left on the pane's
-  terminal**: no `< /dev/null`, no `nohup`, no `setsid` with stdin redirected. secretsd identifies
-  the caller by its standard input; a daemon whose stdin is not the terminal is refused with
-  `there is neither a terminal tty nor a session token`.
-- Unset `SECRETSD_SESSION_TOKEN_FILE` in that shell if it is set (`env -u SECRETSD_SESSION_TOKEN_FILE`);
-  the daemon also drops it from the `secrets` children it runs, so the request always takes the
-  terminal path.
-
-The tap cost, as secretsd actually scopes grants: the first `secrets get <NAME> --value` from that
-terminal makes the YubiKey blink once per key — two taps for the two App keys. The grant is held for
-the pair (terminal, secretsd run), so every later request from that same terminal is silent: a
-daemon restart in the same pane costs no taps. The grant ends, and the next daemon start needs two
-taps again, when any of these happens: secretsd restarts (grants are memory-only), 12 hours pass
-since the tap (`SECRETSD_MAX_GRANT_SECS`, default 43200), the pane's terminal is closed,
-`secrets lock` runs, or the key is rewritten (a rotation). The daemon holds the decoded PEM in
-memory for its whole lifetime, so a grant ending never interrupts a running daemon; only a restart
-after it notices. A request nobody taps within 90 seconds fails with secretsd's timeout message and
-the daemon refuses to start, quoting it.
+Make `agent-secrets` available on the `PATH` of the shell that starts the daemon.
+The helper uses the machine login a person approves through `agent-secrets machine login`.
+That login must be allowed to request both Apps' broker secrets.
 
 ## The `legion-implementer` and `legion-reviewer` Apps
 
-The `sjawhar` account owns both Apps. The secrets broker holds them as `github-app` secrets, which
-release installation tokens and never the App's private key: `LEGION_IMPLEMENT_APP` (agent tier)
-and `LEGION_REVIEW_APP` (human tier: each new grant waits for a person's approval in Dispatch, and
-a later release under the same live grant reuses it). A daemon that holds no App key uses them
-through `token_command`, as the live proofs do (`scripts/e2e/lib/github-apps.sh`,
-`app_token_command`):
+The `sjawhar` account owns both Apps.
+The secrets broker holds them as `github-app` secrets, which release installation tokens and never the App's private key:
+`LEGION_IMPLEMENT_APP` (agent tier) and `LEGION_REVIEW_APP` (human tier: each new grant waits for a person's approval in Dispatch, and a later release under the same live grant reuses it).
+A daemon that holds no App key uses them through `token_command`, as the live proofs do (`scripts/e2e/lib/github-apps.sh`, `app_token_command`):
 
 ```yaml
 github_apps:
@@ -110,7 +54,7 @@ With no key, the daemon reads each App's bot login from GraphQL's `viewer` under
 tokens, refuses a token whose `GET /apps/<slug>` names an id other than `app_id`, and reads whether
 the App is installed on a repository from that owner's installation's repository list.
 A read-only token holds what the command's read-only release gives: the broker's holds
-`contents: read`, `metadata: read` and `pull_requests: read`, as the key forms' read-only token does.
+`contents: read`, `metadata: read` and `pull_requests: read`.
 The daemon passes the command's stderr through as it runs, with every GitHub token in it redacted,
 so `agent-secrets`' line naming the pending request appears in the daemon's log while the review
 App waits for its grant.
@@ -120,50 +64,8 @@ request; `agent-secrets`' exit 75 (still waiting when its own wait ended) is ret
 `legion start --check-config` never runs it, and `installations` cannot be set beside it, since
 the release names every installation.
 
-A deployment that holds its App keys itself keeps any of the three key forms below.
-To rotate a key the broker holds: in the App's GitHub settings, generate a new private key; set it
-on the broker's `github-app` secret; confirm a fresh worker pane's `gh auth status` shows account
-`x-access-token`; only then revoke the old key in GitHub, for the reason step 7 below gives.
-A daemon on `token_command` needs no restart for it.
-
-## The `private_key_secret` form
-
-```yaml
-github_apps:
-  implement:
-    app_id: "<implement App id>"
-    private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
-  review:
-    app_id: "<review App id>"
-    private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
-```
-
-`private_key_secret` names a secretsd key whose value is the App's PEM, base64-encoded (the same
-encoding the `_B64` keys already use). It is one of exactly four credential sources per App —
-`private_key` (inline PEM), `private_key_command` (a shell command whose stdout is the PEM),
-`private_key_secret`, and `token_command` (above) — and naming two of them refuses start-up with
-`github_apps.<role> requires exactly one of private_key, private_key_command, private_key_secret, or token_command`.
-On a box where panes share the daemon's user, `private_key_secret` is the only form the daemon can
-verify: a shell string cannot be checked for what it reads, a key name can.
-
-At start-up the daemon runs `secrets get <NAME> --no-request` and reads the tier. It refuses to
-start with
-
-    App private key <NAME> is readable by agent-tier callers; move it to a daemon-only store
-
-when the tier is anything but `human` — that refusal means the key is still in an agent-tier file
-and every pane can read it; move it with `secrets edit-human` and remove the agent-tier entry. Then
-it logs `[legion] requesting <NAME> from secretsd (human tier; a YubiKey tap may be needed)`, runs
-`secrets get <NAME> --value`, base64-decodes the output, and refuses unless the result begins
-`-----BEGIN`. Each of these also refuses start-up, naming `github_apps.<role>.private_key_secret`
-and the key (never the value): `secrets` not on the launcher shell's PATH, a key secretsd does not
-know (`secret '<NAME>' not found`), a status it cannot parse, a value that is not a PEM, and any
-secretsd refusal (timeout, denial, no terminal scope) quoted from `secrets`' stderr.
-`legion start --check-config` validates the key name only and never runs `secrets`.
-
-`secrets` is found on the PATH of the shell that starts the daemon (configuration loads before the
-daemon resolves its `mise` environment); under a login shell on the shared box that is
-`~/.mise/shims/secrets`.
+Each App needs its own `app_id` and `token_command`, with no second credential source.
+See [Rotating broker-held App keys](#rotating-broker-held-app-keys) for the rotation procedure.
 
 ## What a pane's `gh`, `git` and `jj` are
 
@@ -517,44 +419,23 @@ written by whichever daemon wrote last — so the order matters:
    found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
    drives refuses to start rather than take its claims.
 
-## Rotating App keys held in secretsd
+## Rotating broker-held App keys
 
-This runbook is for a shared-box deployment whose App keys are in secretsd under the human-tier
-boundary (the `legion-implementer` and `legion-reviewer` keys are in the broker; rotate those as
-[their section](#the-legion-implementer-and-legion-reviewer-apps) says). Rotation is pointless
-while panes can still read the keys, so the order is:
+Rotate the keys in the broker's `github-app` secrets, not on the daemon's machine:
 
-1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private
-   keys"): no pane inherits the keys from the daemon's environment or the tmux server.
-2. Move the two keys to the human tier: `secrets edit-human LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
-   `secrets edit-human GH_REVIEW_APP_PRIVATE_KEY_B64` with the current values, then remove both from
-   the agent-tier `secrets.env`. `secrets get <NAME> --no-request` must now report `"tier":"human"`.
-3. Switch `legion.yaml` to `private_key_secret` for both Apps and restart the daemon from the
-   launcher pane described above (two taps).
-4. Prove a pane cannot read them: from a fresh worker pane run
-   `secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --no-request` and
-   `secrets get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request`. Both must print
-   `"tier":"human","grant":false`: the key is in no agent-tier file, and the pane holds no grant,
-   so the only way it could obtain the key is a request on the operator's YubiKey. Do not prove it
-   with `secrets <KEY> -- <cmd>` from the pane: on a human-tier key that command is not refused
-   but queued on the operator's YubiKey under the pane's session (it blinks until tapped or 90
-   seconds pass), an unwatched request a stray tap would satisfy; the status check proves the same
-   boundary without opening a request. Meanwhile `gh auth status` from that same pane
-   still succeeds, showing account `x-access-token`, because the daemon mints the token and writes
-   it to the pane's gh files.
-5. Rotate: in each GitHub App's settings, generate a new private key. Store each with
-   `secrets edit-human <NAME>` under the same names (base64-encode the downloaded PEM first:
-   `base64 -w0 < key.pem | secrets edit-human <NAME>`). Do not revoke anything yet.
-6. Restart the daemon from the launcher pane (the rewritten keys need a fresh grant: two taps).
-   Confirm the new keys mint: `gh auth status` from a fresh worker pane shows account `x-access-token`.
-7. Only now revoke the old private keys in GitHub App settings. The order matters because the
-   running daemon signs every installation-token request with the key it decoded at start-up and
-   holds in memory until it restarts — revoking first would break every pane's `gh`, its `jj git
-   push` credential, and identity leases until step 6 completes, with no rollback if that
-   restart fails (an untapped request, a bad base64 paste).
+1. In each GitHub App's settings, generate a new private key and leave the old key active.
 
-Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
-material).
+2. Update the matching broker secret, `LEGION_IMPLEMENT_APP` or `LEGION_REVIEW_APP`, with the new
+   key.
+   The secret remains a `github-app` secret that releases installation tokens, not key material.
+
+3. Confirm the broker mints fresh installation tokens with the new keys, then confirm a fresh
+   worker pane's `gh auth status` succeeds with account `x-access-token`.
+   The daemon needs no restart: `token_command` gets fresh tokens as its cached leases near expiry.
+
+4. Only then revoke the old private keys in GitHub App settings.
+   Revoking them before the broker can mint with the new keys would break token refresh and,
+   once existing tokens expire, the panes' `gh` and `jj git push` credentials.
 
 ## Serving on a socket the harness holds
 
@@ -570,7 +451,7 @@ port in between. A shared-box deployment leaves the variable unset.
   them. A socket they do not name, or a descriptor that is not a listening TCP socket, refuses the
   start before it takes the team or opens the store, naming `LEGION_LISTEN_FD` and the setting:
   `legion start: legion.yaml: port=8081 does not match LEGION_LISTEN_FD=3, a socket listening on 127.0.0.1:8080`.
-- The daemon takes the socket over before it runs anything, the configuration's key commands
+- The daemon takes the socket over before it runs anything, the configuration's token commands
   included, and serves on a close-on-exec copy, then unsets the variable: no process it starts, its
   panes and tmux server among them, holds the socket or inherits the variable.
 - The boot line `legion daemon started` names the address the daemon serves on, as it does when it
