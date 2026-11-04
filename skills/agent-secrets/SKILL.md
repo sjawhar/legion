@@ -45,8 +45,10 @@ agent-secrets LEGION_SLACK_BOT_TOKEN -- \
 ```
 
 The repository uses the same form for a GitHub App key in `docs/deployment.md`:
-`agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=… -- sh -c 'printf %s
-"$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64" | base64 -d'`.
+
+```sh
+agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=… -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64" | base64 -d'
+```
 
 ## The value never reaches your transcript
 
@@ -55,8 +57,11 @@ Your transcript keeps everything a command prints.
 - Never echo or print the value, and never run `curl -v`, `curl --trace` or a shell with `set -x`
   around it: each of those writes the header, and so the value, to your output.
 - Check a value's shape by its length and its prefix alone:
-  `agent-secrets NAME -- sh -c 'echo "${#NAME}"; case "$NAME" in ghp_*) echo prefix-ok;; *) echo
-  prefix-no;; esac'`.
+
+  ```sh
+  agent-secrets NAME -- sh -c 'echo "${#NAME}"; case "$NAME" in ghp_*) echo prefix-ok;; *) echo prefix-no;; esac'
+  ```
+
 - Compare two values only as equal or not equal. Never print, slice or diff their characters.
 
 ## Read the answer, not the status alone
@@ -75,10 +80,11 @@ after it means the command could not start, and the status is 1.
 Without the grant line the status is the client's own:
 
 - **1** — a refusal or a failure that the message names: a name the broker does not serve
-  (`UNKNOWN_SECRET`), a broker it cannot reach, a request cancelled or expired, `REQUEST_PENDING`,
-  a grant that is no longer live, or a command that is not on `PATH`.
-- **2** — a usage error: no broker identity, no `AGENT_SECRETS_URL`, no `--`, no `NAME`, or a flag
-  value the client refuses.
+  (`UNKNOWN_SECRET`), a broker it cannot reach, a machine that is not logged in to the broker, a
+  request cancelled or expired, `REQUEST_PENDING`, a grant that is no longer live, or a command
+  that is not on `PATH`.
+- **2** — a usage error: no broker identity at all (no key in the key dir and no helper socket), no
+  `AGENT_SECRETS_URL`, no `--`, no `NAME`, or a flag value the client refuses.
 - **75** — the request still waits for a person. The message names who decides it, where, and the
   `agent-secrets status <request_id>` that reads it.
 - **77** — the request was denied.
@@ -93,8 +99,10 @@ run or was not found; and 129, 130, 131 and 143 from a signal at the value promp
 - `--wait` waits 30 minutes by default. A session that must not block passes `--wait 0s`, reads the
   request id from the message, and reads the decision later with `agent-secrets status
   <request_id>`.
-- A later run with the same names and the same `--ttl` uses the live grant again and asks nobody. A
-  run with another `--ttl` while a request still waits is refused `REQUEST_PENDING`.
+- A later run with the same names and the same `--ttl` uses the live grant again and asks nobody;
+  while the first request still waits, such a run joins it. Any other run that shares a name with a
+  waiting request, with another `--ttl` or another set of names, is refused `REQUEST_PENDING`,
+  which names the request already waiting.
 - `agent-secrets identity` exits 0 when this session has a broker identity and 1 when it has none,
   and it asks the broker nothing. `agent-secrets self` prints this session's live grants.
 
@@ -129,19 +137,20 @@ for two reasons:
 
 - **The machine is not logged in.** `agent-secrets machine login-status` prints `issued` only while
   the machine holds its credential. The person logs the machine in; step 4b of `docs/joining.md` in
-  theorem-labs/agent-infra is that step.
+  theorem-labs/agent-infra, "Log the VM in to the secrets broker", is that step.
 - **The agent is not a broker session.** The helper knows only the process tree it registered. The
   person restarts the agent as one: `agent-secrets register --wait 10 --exec -- <the agent's
   command>`.
 
 On `UNKNOWN_SECRET` you stop, as above. You may tell the secret's owner how to find the cause:
-`agent-secrets secret list` and `agent-secrets secret show NAME`, under their own
-`gcloud auth login`.
+`agent-secrets secret list` and `agent-secrets secret show NAME`, under their own cloud sign-in
+(`gcloud auth login` against a broker on Google Cloud, their `AWS_PROFILE` against one on AWS).
 
 An owner who must store a secret does every write under their own cloud sign-in. `agent-secrets
 secret set NAME` replaces the value of a secret that exists. A new one is `agent-secrets secret
-create NAME --owner me|shared --tier agent|human`. Both read the value from a prompt, never from the
-command line, so no value reaches a shell history.
+create NAME --owner me|shared --tier agent|human`. Both read the value from standard input or from
+a prompt with echo off, never from an argument. Type it at the prompt, so it reaches no shell
+history.
 
 ## A worked example: one page of a Slack thread
 
@@ -159,9 +168,10 @@ messages of the thread. A `ts` that names no message answers
 `{"ok":false,"error":"thread_not_found"}`, also at exit 0, which is why the body decides and not the
 status. A thread read needs the app's `channels:history` scope in a public channel and
 `groups:history` in a private one; without them Slack answers `missing_scope`, which only a person
-in the Slack workspace can fix.
+in the Slack workspace can fix. Outside a Legion pod the broker denies this token, and the example
+exits 77.
 
-Paging: `limit` is at most 200. While the answer's `has_more` is true, pass its
+Paging: Slack recommends a `limit` of at most 200. While the answer's `has_more` is true, pass its
 `response_metadata.next_cursor` as `cursor` to the next call. Each page repeats the thread's root
 message, so drop repeats by `ts` and sort by `ts`.
 

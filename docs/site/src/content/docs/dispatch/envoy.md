@@ -69,8 +69,9 @@ signing secret, answering `401` to one that does not match. The repository's
 The two history scopes are what a thread read needs: Slack's `conversations.replies`, which the
 Legion controller calls to read the thread of a mention posted inside one, needs
 `channels:history` in a public channel and `groups:history` in a private one, and answers
-`missing_scope` without them. An app made before this change does not hold them: an operator adds
-them to the app's bot scopes and reinstalls the app to the workspace.
+`missing_scope` without them. An app made from an earlier version of the manifest, which listed
+only `app_mentions:read` and `chat:write`, does not hold them: an operator adds them to the app's
+bot scopes and reinstalls the app to the workspace.
 
 A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
 thread a second time under the thread's root, its timestamp's dot written `_`:

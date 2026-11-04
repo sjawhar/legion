@@ -96,11 +96,11 @@ Every answer is one `slack_post` call:
 `slack_post` is sent once and never retried. When it answers that Slack did not answer, the reply
 may already be in the thread: do not post it again. When it answers with Slack's refusal, the
 reply is not posted: `not_in_channel` means the app has not been added to that channel, and
-`missing_scope`, which a thread read gets when the app holds neither `channels:history` nor
-`groups:history` for that channel's kind, means the app's install lacks the scope. Only a person in
-the workspace can fix either, so say so in the next daily report rather than retrying. When it
-answers that the secrets broker has not granted `LEGION_SLACK_BOT_TOKEN` (its request waits for
-approval, or was denied), nothing was posted and no reply can be until the operator stores the
+`missing_scope` means the app's install lacks a scope the call needs (`chat:write` for a post; for
+a thread read, `channels:history` in a public channel or `groups:history` in a private one). Only a
+person in the workspace can fix either, so say so in the next daily report rather than retrying.
+When it answers that the secrets broker has not granted `LEGION_SLACK_BOT_TOKEN` (its request waits
+for approval, or was denied), nothing was posted and no reply can be until the operator stores the
 token with owner `legion-daemon` and tier `agent`: name the error in the next daily report.
 
 ## Decide what the person wants

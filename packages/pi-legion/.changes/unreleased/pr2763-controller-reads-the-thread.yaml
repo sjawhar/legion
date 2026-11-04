@@ -6,3 +6,4 @@ body: |-
     make a request. A mention that adopts an earlier message's request files an issue whose
     `Filed for` line names both messages. The worker, controller and architect skills point at the
     new `agent-secrets` skill instead of restating the client's rules.
+    They name `skill://agent-secrets`, so they need a `@sjawhar/pi-envoy` that ships that skill.
