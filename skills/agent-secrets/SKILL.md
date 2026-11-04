@@ -97,8 +97,8 @@ run or was not found; and 129, 130, 131 and 143 from a signal at the value promp
 ## Waiting, and a grant you already hold
 
 - `--wait` waits 30 minutes by default. A session that must not block passes `--wait 0s`, reads the
-  request id from the message, and reads the decision later with `agent-secrets status
-  <request_id>`.
+  request id from the message, and reads the decision later with
+  `agent-secrets status <request_id>`.
 - A later run with the same names and the same `--ttl` uses the live grant again and asks nobody;
   while the first request still waits, such a run joins it. Any other run that shares a name with a
   waiting request, with another `--ttl` or another set of names, is refused `REQUEST_PENDING`,
@@ -139,18 +139,18 @@ for two reasons:
   the machine holds its credential. The person logs the machine in; step 4b of `docs/joining.md` in
   theorem-labs/agent-infra, "Log the VM in to the secrets broker", is that step.
 - **The agent is not a broker session.** The helper knows only the process tree it registered. The
-  person restarts the agent as one: `agent-secrets register --wait 10 --exec -- <the agent's
-  command>`.
+  person restarts the agent as one:
+  `agent-secrets register --wait 10 --exec -- <the agent's command>`.
 
 On `UNKNOWN_SECRET` you stop, as above. You may tell the secret's owner how to find the cause:
 `agent-secrets secret list` and `agent-secrets secret show NAME`, under their own cloud sign-in
 (`gcloud auth login` against a broker on Google Cloud, their `AWS_PROFILE` against one on AWS).
 
-An owner who must store a secret does every write under their own cloud sign-in. `agent-secrets
-secret set NAME` replaces the value of a secret that exists. A new one is `agent-secrets secret
-create NAME --owner me|shared --tier agent|human`. Both read the value from standard input or from
-a prompt with echo off, never from an argument. Type it at the prompt, so it reaches no shell
-history.
+An owner who must store a secret does every write under their own cloud sign-in.
+`agent-secrets secret set NAME` replaces the value of a secret that exists. A new one is
+`agent-secrets secret create NAME --owner me|shared --tier agent|human`. Both read the value from
+standard input or from a prompt with echo off, never from an argument. Type it at the prompt, so it
+reaches no shell history.
 
 ## A worked example: one page of a Slack thread
 
