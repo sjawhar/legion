@@ -142,13 +142,16 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 }
 
 // forwardOf maps a role's resolution to how item reaches it, as the listener's role lane maps the
-// same resolution to its delivery outcomes:
+// same resolution to its delivery outcomes, but for the gone holder below, which the lane does not
+// keep for:
 //
 //   - no claim (the listener's no_holder): kept on the role's kept lane for its next holder;
 //   - a holder whose own record is past the gone horizon (session.Gone, dated by that record or
 //     by what the lookup remembers of it): kept as an unclaimed role is, since the listener's
 //     role-claim reaper releases that claim - the one release there is - and the holder that
-//     claims the role next is handed the copy;
+//     claims the role next is handed the copy. The listener keeps for no lapsed claim at all
+//     (roleKeepable), refusing it 404 holder_lapsed, so this is the one resolution the two keep
+//     differently;
 //   - a holder past the live window and within that horizon (session.Unresponsive), where the
 //     listener's delivery reports delivery_failed: pending, so the event waits for the session to
 //     answer again rather than being published to nobody, and nothing is kept, since the claim

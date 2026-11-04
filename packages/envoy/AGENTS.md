@@ -2687,7 +2687,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - A role send has three answers, and its sender tells them apart by status.
   200 is a live holder that took the message, named by `holder`.
   202 is the kept answer:
-  nobody holds the role, or the holder's claim had lapsed, and the body is the envelope with `kept: true`, `kept_reason` (`unclaimed` or `holder_lapsed`) and `holder` when a lapsed claim named one.
+  nobody holds the role at all, and the body is the envelope with `kept: true` and `kept_reason: "unclaimed"`, the one state a copy is kept for (`roleKeepable`).
+  A lapsed claim is never kept for, so no 202 names `holder_lapsed` and none carries a `holder`.
   404 is today's refusal body (`reason` `unclaimed` or `holder_lapsed`), and it means nothing was kept and the sender's own fallback must run.
   A sender asks for the 404 with `keep: false` in the publish body, which is for a sender that keeps a queue of its own;
   the Legion daemon does.
@@ -2928,7 +2929,8 @@ A send NATS denied (`bus.ErrPublishDenied`) is backed off with its attempt count
 no acknowledgement in time, no responders, no receipt from a role's holder), unless a probe of that connection then fails, which releases it and gives the hold up.
 A `role:` route is not published to `notifications.role.<role>`:
 the outbox resolves the holder with `roles.ResolveHolder` (`internal/roles`), the one resolution the listener's role routes and its role lane read too, and forwards to the holder's `notifications.agent.<holder>` with a window Request under the role forward's dedupe key and a MsgId (`bus.ForwardMsgID`), counting it reached only on the holder's empty receipt (for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy).
-A role no live holder can take is kept for the role's next holder instead (`forwardOf`, `internal/dispatch/outbox/role.go`), which is the two resolutions the lane keeps for as well: a role with no claim, and a claim whose holder is gone, whose claim the listener's role-claim reaper releases.
+A role no live holder can take is kept for the role's next holder instead (`forwardOf`, `internal/dispatch/outbox/role.go`): a role with no claim, and a claim whose holder is gone, whose claim the listener's role-claim reaper does release, so a next holder comes to be handed the copy.
+The listener's own route and lane keep for the first of those alone (`roleKeepable`) and refuse a lapsed claim of either state with nothing kept, so the gone holder's route is the one resolution the two keep differently.
 The keep is one JetStream publish of the envelope on the role's kept lane, under the id every writer of that lane keeps the message under (`bus.KeptRoleSubject`, `bus.KeptMsgID`), so it is the copy `keepRoleMessage` writes.
 Acknowledged, the route is reached; anything else leaves the event pending for the outbox's own retry, which that MsgId makes idempotent at the stream.
 The acknowledgement also starts a handover: the batch reads the role's claim once more, and when it names a live holder and the copy just kept is the first on that role's lane past the drain cursor with no walk's claim outstanding, it forwards the event to that holder (`handOverKept`), because a role claimed between the batch's resolution of it and its keep leaves a copy on a lane whose claimant's own drain had already read it empty, which nothing walks again until the listener's sweep, up to five minutes later, while the issue's next event resolves that holder live and goes straight to its agent subject.

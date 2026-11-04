@@ -180,14 +180,17 @@ const EnvelopeResponseSchema = EnvelopeSchema.extend({
 /**
  * The publish route's answer. A role topic has three of them, told apart by status: 200, a live
  * holder took the message, with `holder`; 202, nobody holds the role, so the listener kept the
- * message on the role's kept lane and hands it to the role's next holder, with `kept`,
- * `kept_reason` and `holder` when a lapsed claim named one; 404, nothing was kept and the
- * sender's own fallback must run, which `request` throws as an `EnvoyApiError`. 202 is a success
- * answer, so it passes `response.ok` and reaches this schema — load-bearing: without it a kept
- * message would read as a refusal.
+ * message on the role's kept lane and hands it to the role's next holder, with `kept` and
+ * `kept_reason: "unclaimed"`, the one state a listener of this build keeps for; 404, nothing was
+ * kept and the sender's own fallback must run, which `request` throws as an `EnvoyApiError`. 202
+ * is a success answer, so it passes `response.ok` and reaches this schema — load-bearing: without
+ * it a kept message would read as a refusal.
  */
 const PublishResponseSchema = EnvelopeResponseSchema.extend({
   kept: z.boolean().optional(),
+  /** `holder_lapsed` stays readable though no listener of this build sends it: envoy 29.4.0 kept
+   *  for a lapsed claim and answered 202 with that reason, and a reader that refused it would
+   *  read a kept message from such a listener as a refusal. */
   kept_reason: z.enum(["unclaimed", "holder_lapsed"]).optional(),
 });
 
@@ -487,7 +490,8 @@ export type PublishResult = {
    * a success answer, not a refusal. Absent unless the listener answered it.
    */
   readonly kept?: boolean;
-  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. Read
+  /** Why the message was kept. A listener of this build keeps only for a role nobody claims, so
+   * it sends `unclaimed` alone; `holder_lapsed` is what envoy 29.4.0 sent for a lapsed claim. Read
    * from the answer's own schema, so a reason a later listener adds is added in one place. */
   readonly keptReason?: z.infer<typeof PublishResponseSchema>["kept_reason"];
 };

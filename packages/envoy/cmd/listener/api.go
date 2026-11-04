@@ -132,7 +132,8 @@ type publishResponse struct {
 	Unresponsive []string      `json:"unresponsive,omitempty"`
 	Kept         bool          `json:"kept,omitempty"`
 	// KeptReason is the state the resolution found, in the same wire words the 404's own reason
-	// carries (roleHolderError.Reason): unclaimed, or holder_lapsed.
+	// carries (roleHolderError.Reason). This build keeps only for a role no claim holds
+	// (roleKeepable), so unclaimed is the one reason it sends; a lapsed claim is refused 404.
 	KeptReason roles.State `json:"kept_reason,omitempty"`
 }
 

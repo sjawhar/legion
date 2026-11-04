@@ -25,3 +25,9 @@ body: |-
     unread messages, since the listener keeps no read receipt. The bucket's maximum age is
     `ENVOY_SESSION_MAX_AGE`, reported in `/healthz` as `session_max_age` and re-read on each reaper
     pass, so a change made by another process reaches a running listener with no restart.
+    A publish to a role whose claim has lapsed is refused `404 holder_lapsed` with nothing kept,
+    where 29.4.0 answered `202` with `kept_reason: holder_lapsed`: the claim stands, so a copy kept
+    for it would wait for a claim that never comes, and the sender publishes again once the holder
+    reads `live`. Dispatch's outbox does keep a role-routed event for a holder past the gone
+    horizon, whose claim the role-claim reaper releases, so the session that claims the role next is
+    handed it.

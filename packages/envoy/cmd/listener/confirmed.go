@@ -278,20 +278,17 @@ func (s *roleSend) noHolder(result roles.Resolution) {
 	s.settle(outcome)
 }
 
-// kept answers 202 with the envelope the listener kept on the role's kept lane: kept is true,
-// kept_reason names which case it was (unclaimed or holder_lapsed) and holder names the session
-// the lapsed claim pointed at, when one was read. The message reaches the role's next holder when
-// it claims the role (drainKeptRole), so this is an answer rather than a refusal, and it settles
-// under its own outcome so the send still writes exactly one delivery line.
+// kept answers 202 with the envelope the listener kept on the role's kept lane: kept is true and
+// kept_reason names the one state a copy is kept for, unclaimed (roleKeepable). A lapsed claim is
+// never kept for, so no 202 of this build names holder_lapsed. The message reaches the role's next
+// holder when it claims the role (drainKeptRole), so this is an answer rather than a refusal, and
+// it settles under its own outcome so the send still writes exactly one delivery line.
 //
 // 202 rather than 200, so a sender tells the three answers of a role send apart by status alone:
 // 200, the message is with a live holder; 202, nobody holds the role and the message waits for
 // whoever claims it within roleKeepWindow; 404, nothing was kept and the sender's own fallback
 // must run. INFRA-514's architect decided it on 2026-10-31.
 func (s *roleSend) kept(result roles.Resolution) {
-	if result.Holder != "" {
-		s.holder = result.Holder
-	}
 	s.record.holder = s.holder
 	s.record.acceptWith(s.w, http.StatusAccepted, publishResponse{Envelope: s.item, Holder: s.holder, Kept: true, KeptReason: result.State})
 	s.settle(sendKept)

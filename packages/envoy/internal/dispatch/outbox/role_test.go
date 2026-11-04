@@ -492,6 +492,8 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *tes
 // answer. The claim is not touched - releasing it is the listener's role-claim reaper's alone,
 // and a resolution that released it here would take an unresponsive holder's role on the next
 // event (dispatch://INFRA-392).
+// The copy on the role's kept lane is the envelope as its sender sent it, kept for the holder the
+// role-claim reaper's release of this claim lets claim the role next.
 func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
@@ -509,6 +511,18 @@ func TestARoleRouteWhoseHolderIsGoneKeepsTheClaimAndIsPublished(t *testing.T) {
 	}
 	if claim := rig.roleClaim(t, role); claim.HolderSessionID != holder || claim.ClaimedAt != claimedAt {
 		t.Fatalf("the claim after the scan is %+v, want %s's untouched, claimed at %d", claim, holder, claimedAt)
+	}
+	kept := keptCopies(t, rig.client, role)
+	if len(kept) != 1 {
+		t.Fatalf("role %s's kept lane holds %d copies, want the one the outbox kept for its next holder", role, len(kept))
+	}
+	key := fmt.Sprintf("dispatch-%d", event.ID)
+	if kept[0].Topic != contracts.RoleTopicPrefix+role || kept[0].DedupeKey != key || kept[0].EventID != key {
+		t.Fatalf("the kept copy is topic %q dedupe key %q event id %q, want the envelope as its sender sent it under %q",
+			kept[0].Topic, kept[0].DedupeKey, kept[0].EventID, key)
+	}
+	if copies := storedCopies(t, rig.client, contracts.AgentSubject(holder)); copies != 0 {
+		t.Fatalf("the stream holds %d messages on the gone holder's subject, want none: the copy was kept, not sent", copies)
 	}
 }
 

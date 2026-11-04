@@ -736,7 +736,7 @@ jq -e --arg session_id "$session_id" '.session_id == $session_id' "$role_claim_r
 }
 wait_for_kept_delivery 'unclaimed-role window' "$unheld_event_id"
 
-# The control for both kept windows above, on the same route and the same unheld state: a sender
+# The control for the kept window above, on the same route and the same unheld state: a sender
 # that keeps its own queue asks for keep false and gets exactly today's refusal, and the listener
 # stores nothing for the role. The Legion daemon's notice publisher sends this
 # (packages/daemon/internal/notify/notify.go).
@@ -758,15 +758,16 @@ if [[ "$keep_false_status" != 404 ]] || ! jq -e --arg role "$keep_false_role" \
   exit 1
 fi
 # Nothing was kept, so claiming the role hands the claimant nothing. The claim below is the same
-# call the two kept windows are drained by; the assertion that nothing arrived is made at the end
-# of the role section, after the lapsed window's own bounded wait for a delivery has run, so the
-# drain this claim started has had its chance and no fixed sleep is needed here.
+# call the kept window is drained by; the assertion that nothing arrived is made after the
+# consumer's own frame count has settled (wait_for_consumer_frame_count), so the drain this claim
+# started has had its chance and no fixed sleep is needed here.
 curl -fsS -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/roles/set" \
   -d "{\"session_id\":\"${session_id}\",\"role\":\"${keep_false_role}\"}" >/dev/null
 
-# A role a live session holds answers as it always did, beside the two kept answers above, so no
-# one of the three can be read for another: 200 naming the holder, and no kept field at all.
+# A role a live session holds answers as it always did, beside the kept answer and the lapsed
+# refusal above, so no one of the three can be read for another: 200 naming the holder, and no
+# kept field at all.
 held_status="$(curl -sS -o "$held_role_response_file" -w '%{http_code}' \
   -X POST -H 'Content-Type: application/json' \
   "${listener_url}/v1/messages/publish" \
@@ -824,19 +825,6 @@ jq -e --arg session_id "$session_id" '.session_id == $session_id' "$lapsed_role_
   exit 1
 }
 
-# The keep-false control, read now: its claim went in before the lapsed window, whose own bounded
-# wait has since seen a kept message delivered, so a drain of the unkept role would have run by
-# now. The session was handed nothing for it, and the bus holds no copy of it either.
-if grep -q 'Unkept role delivery.' "$session_frames_file"; then
-  printf 'ERR: a message published with keep false reached the role claimant; nothing should have been kept.\n' >&2
-  exit 1
-fi
-if jq -e 'select(.payload_summary == "Unkept role delivery.")' "$envelopes_file" >/dev/null 2>&1; then
-  printf 'ERR: a message published with keep false is on the bus; the listener stored nothing for it.\n' >&2
-  exit 1
-fi
-printf 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing\n'
-
 post_github issue_comment "${fixture_dir}/issue-comment-created.json"
 post_github issue_comment "${fixture_dir}/issue-comment-edited.json"
 post_github issue_comment "${fixture_dir}/issue-comment-pr-created.json"
@@ -871,22 +859,38 @@ post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
 wait_for_consumer_frame_count 16
 
+# The keep-false control, read now the consumer's frame count has settled: its claim went in
+# before the lapsed window, so a drain of the unkept role would have run by now. The session was
+# handed nothing for it, and the bus holds no copy of it either.
+if grep -q 'Unkept role delivery.' "$session_frames_file"; then
+  printf 'ERR: a message published with keep false reached the role claimant; nothing should have been kept.\n' >&2
+  exit 1
+fi
+if jq -e 'select(.payload_summary == "Unkept role delivery.")' "$envelopes_file" >/dev/null 2>&1; then
+  printf 'ERR: a message published with keep false is on the bus; the listener stored nothing for it.\n' >&2
+  exit 1
+fi
+printf 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing\n'
+
 # What the session itself took, which is the whole point of a consumer: every GitHub delivery, the
 # direct message and both role forwards reached it as frames of its own consumer, each exactly
 # once, with no connection opened to it from anywhere. Both role forwards are the reviewer role's
 # — the copy kept while nobody held it and the publish its live holder took. The escalation role
 # has none: its holder's claim stood while the holder was gone, so the listener kept nothing for
-# it and refused that publish (dispatch://INFRA-392).
+# it and refused that publish (dispatch://INFRA-392). The unkept role has no frame either, since
+# its own publish asked for nothing to be kept.
 printf 'consumer frames by topic:\n'
 jq -r '.topic' "$session_frames_file" | sort | uniq -c
 jq -es --arg session_id "$session_id" --arg role_topic "notifications.role.${role}" \
-  --arg lapsed_role_topic "notifications.role.${lapsed_role}" --arg message "$direct_message" '
+  --arg lapsed_role_topic "notifications.role.${lapsed_role}" \
+  --arg unkept_role_topic "notifications.role.${keep_false_role}" --arg message "$direct_message" '
   (map(select(.topic == "notifications.agent." + $session_id)) | length == 1 and .[0].payload == $message)
   and (map(select(.topic == $role_topic)) | length) == 2
   and (map(select(.topic == $lapsed_role_topic)) | length) == 0
+  and (map(select(.topic == $unkept_role_topic)) | length) == 0
   and (map(select(.topic | startswith("notifications.github.example-org.example-repo."))) | length) == 13
 ' "$session_frames_file" >/dev/null || {
-  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its two reviewer-role forwards from its consumer, with nothing for the lapsed role.\n' >&2
+  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its two reviewer-role forwards from its consumer, with nothing for the lapsed role and nothing for the unkept one.\n' >&2
   exit 1
 }
 

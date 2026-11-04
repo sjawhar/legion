@@ -162,14 +162,6 @@ func Valid(role string) bool {
 	return pattern.MatchString(role)
 }
 
-// Registered is the liveness that counts any registered session as live: any entry.
-func Registered(session.SessionEntry) bool { return true }
-
-// Fresh reports whether entry heartbeated within session.ClaimStaleAfter of now.
-func Fresh(entry session.SessionEntry, now time.Time) bool {
-	return entry.UpdatedAt > 0 && now.UnixMilli()-entry.UpdatedAt < session.ClaimStaleAfter.Milliseconds()
-}
-
 // readClaim reads role's claim for a resolution (ResolveHolderFrom). A resolution given a
 // firstHolder reads it from there - the listener's registry passes its watched copy of the role
 // bucket (store.Registry.CachedRoleHolder), which costs no round trip, so a role message the lane

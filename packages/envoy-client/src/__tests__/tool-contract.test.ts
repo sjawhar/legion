@@ -152,8 +152,13 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain(
       "The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success"
     );
-    // 404: nothing was kept, so the sender's own fallback must run.
+    // 404: nothing was kept, and the one state that reaches it - a holder that stopped
+    // answering, which keeps its role - must tell the model to publish again rather than to
+    // treat the message as waiting for that holder (dispatch://INFRA-392, R3 and R7).
     expect(publish?.description).toContain("the listener keeps nothing and errs");
+    expect(publish?.description).toContain(
+      "A holder that stopped answering keeps its role but was not sent the message, and nothing waits for it, so publish the message again once that holder's holder_state reads live, and start no replacement for that session."
+    );
   });
 });
 

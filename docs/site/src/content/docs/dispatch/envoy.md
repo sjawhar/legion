@@ -148,7 +148,7 @@ published still gets it when it reconnects
 | Topic | What it is |
 | --- | --- |
 | `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. With no claim at all it keeps the message for the session that claims the role next, and answers that it kept it; a holder that stopped answering keeps its role, and its message waits for it. |
+| `notifications.role.<role>` | A role, held by one session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. With no claim at all it keeps the message for the session that claims the role next, and answers that it kept it; a holder that stopped answering keeps its role but is sent nothing, and the publish is refused, so publish it again once that holder reads live. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
