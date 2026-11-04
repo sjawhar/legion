@@ -236,7 +236,9 @@ export function firstInstallationToken(output: string, field: string, now: Date)
       );
     }
     if (at <= now.getTime()) {
-      throw new Error(`${field} released ${owner}'s installation with a token that expired at ${expires}`);
+      throw new Error(
+        `${field} released ${owner}'s installation with a token that expired at ${expires}`
+      );
     }
   }
   return member(member(installations, owners[0]), "token") as string;
