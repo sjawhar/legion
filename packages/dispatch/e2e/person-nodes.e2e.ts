@@ -37,7 +37,9 @@ test("a person's graph lists authored and recorded received nodes @phone", async
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open navigation" }).click();
     }
-    await page.getByRole("link", { name: "Signed in as alice", exact: true }).click();
+    const profile = page.getByRole("link", { name: "Signed in as alice", exact: true });
+    await expect(profile).toBeVisible();
+    await profile.click();
     await expect(page).toHaveURL("/people/alice");
     await expect(page.getByRole("heading", { name: "alice", exact: true })).toBeVisible();
     const rows = page.getByRole("list", { name: "Person nodes" }).getByRole("listitem");
