@@ -437,9 +437,9 @@ func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 		code   string
 		text   string
 	}{
-		{target: "/api/v1/asks/7430fab3", code: "ASK_ID_INPUT", text: "ask IDs are UUIDs; use the full ask ID"},
-		{target: "/api/v1/comments/7430fab3", code: "COMMENT_ID_INPUT", text: "comment id must be a full uuid"},
-		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab3", code: "MESSAGE_ID_INPUT", text: "message id must be a full uuid"},
+		{target: "/api/v1/asks/7430fab", code: "ASK_ID_INPUT", text: "ask id must be a whole uuid or a unique prefix of 8 characters or more"},
+		{target: "/api/v1/comments/7430fab", code: "COMMENT_ID_INPUT", text: "comment id must be a whole uuid or a unique prefix of 8 characters or more"},
+		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab", code: "MESSAGE_ID_INPUT", text: "message id must be a whole uuid or a unique prefix of 8 characters or more"},
 	} {
 		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || !strings.Contains(response.Body.String(), test.text) {
@@ -453,7 +453,7 @@ func TestResolveAskRejectsNumberedIDWithClientGuidance(t *testing.T) {
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/3/resolve", map[string]any{
 		"kind": "resolved", "reason": "Resolved elsewhere", "actor": sessionActor(),
 	})
-	const want = "ask IDs are UUIDs; use the full ask ID"
+	const want = "ask id must be a whole uuid or a unique prefix of 8 characters or more"
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) || !strings.Contains(response.Body.String(), want) {
 		t.Fatalf("resolve numbered ask: status=%d body=%s, want 400 ASK_ID_INPUT %q", response.Code, response.Body.String(), want)
 	}

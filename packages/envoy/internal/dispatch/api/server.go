@@ -41,6 +41,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -604,6 +605,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.withinSessionScope(route, handler)
 			handler = s.refuseChangedLogin(handler)
 		}
+		// Outside the two scope checks and outside the GET test, so it runs before them and
+		// before every handler, on a read as on a write: the whole id it resolves a path
+		// prefix into is the value the project check resolves and the value the handler
+		// addresses its row by, one value for both (resolveIDPrefixes, project_scope.go).
+		handler = s.resolveIDPrefixes(route, handler)
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
@@ -915,6 +921,190 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 	})
 }
 
+// writeAmbiguousID refuses an id written as a prefix two items or more carry, listing them for
+// the caller to choose between or to write more of the id. It is writeAmbiguousTarget's shape -
+// {error, code, candidates} under a 409 - because it is the same kind of answer: the request
+// named something the server cannot narrow to one thing, and the caller picks. The page that
+// lists the candidates is the dashboard's, rendered from this answer; there is no route of its
+// own to read them from.
+func writeAmbiguousID(w http.ResponseWriter, ambiguous *refs.ErrPrefixAmbiguous) {
+	WriteJSON(w, http.StatusConflict, map[string]any{
+		"error":      ambiguous.Error(),
+		"code":       contracts.IDAmbiguous,
+		"candidates": ambiguous.Candidates,
+	})
+}
+
+// resolveIDPrefixes rewrites a route's {id}, and the {block_id} of a document block, from an id
+// written short to the whole id it names, before anything behind it reads that value: register
+// wraps it around every route outside the two scope checks, so the check that decides whether a
+// write is the caller's to make and the handler that then makes it read one value and cannot
+// disagree about which object the path named (project_scope.go). What each route's wildcards
+// name, which routes name none of the five kinds, and what 404 each route answers for an id it
+// does not hold is idRoutes; a route that resolves nothing is returned unwrapped and pays
+// nothing.
+//
+// A value that is no id written short (text.IsIDPrefix — at least eight hex digits and hyphens,
+// never a whole uuid) is left exactly as written with no query, so a whole id, a slug, a
+// numbered id, a seven-character stub and a block id such as b1 or ship_it cost nothing and get
+// the answer they always got, the 400 of a route that parses its id included.
+//
+// A value that is one is looked for among the items of its kind, within the owner the route
+// names — the issue of /issues/{key}/messages/{id}, the document of
+// /artifacts/{id}/blocks/{block_id} — and otherwise among every item of the kind, the same set
+// a whole id is looked for in; the route then applies its own rule to the item resolved, the
+// direct-message guard and the project check included. One match rewrites the value
+// (SetPathValue). A prefix two items or more carry is 409 ID_AMBIGUOUS. One nothing carries is
+// the 404 that route answers for a whole id of its kind that names no item (idRoute.NotFound),
+// so a short id fails where a whole one fails; the one route that answers no 404 for an id it
+// does not hold keeps that answer (notFoundNone). Either way the handler never runs, which is
+// where this differs from a whole id on a request that is malformed besides: the whole id would
+// reach the handler and be refused for that other reason first, and the prefix is refused here.
+//
+// Nothing is read for a caller that did not authenticate: every route with an id in its path is
+// an authenticated one, and its own refusal is the handler's to write.
+func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
+	entry := idRoutes[route.Method+" "+route.Pattern]
+	if !entry.resolves() {
+		return handler
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		var id, blockID string
+		if entry.Kind != "" {
+			if value := r.PathValue("id"); text.IsIDPrefix(value) {
+				id = value
+			}
+		}
+		if entry.Blocks {
+			if value := r.PathValue("block_id"); text.IsIDPrefix(value) {
+				blockID = value
+			}
+		}
+		if id == "" && blockID == "" {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: every layer below and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		// Who asks, which decides only whether a direct message's first line is listed among
+		// the candidates: a person reads any, and a bearer the conversations the session it
+		// names in ?session= is in, the claim the message routes already read.
+		viewer := refs.Viewer{Human: human, Session: strings.TrimSpace(r.URL.Query().Get("session"))}
+		if id != "" {
+			scope := refs.Scope{}
+			if entry.WithinIssue {
+				scope.IssueKey = r.PathValue("key")
+			}
+			whole, ok := s.wholeID(w, r, entry.Kind, scope, id, viewer, itemNotFound(entry.NotFound, id))
+			if !ok {
+				return
+			}
+			if whole != "" {
+				r.SetPathValue("id", whole)
+			}
+		}
+		if blockID != "" {
+			// A block id is unique within its document alone, so it is matched among the
+			// blocks of the document the {id} names, read under the id the step above left
+			// there. An {id} that is no document's names no blocks to match among, and the
+			// route answers for that {id} rather than for its block.
+			document, err := s.documentRefKey(r.Context(), r.PathValue("id"))
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if document != "" {
+				whole, ok := s.wholeID(w, r, "block", refs.Scope{Document: document}, blockID, viewer, entry.BlockNotFound)
+				if !ok {
+					return
+				}
+				if whole != "" {
+					r.SetPathValue("block_id", whole)
+				}
+			}
+		}
+		handler(w, r)
+	}
+}
+
+// wholeID is the whole id prefix names within scope. ok is false once it has written the answer
+// itself: the 409 of a prefix two items or more carry, the 404 notFound names for one nothing
+// carries, or the 500 of a database that could not be read. It answers "" with ok true only
+// where notFound is notFoundNone, the route that answers no 404 for an id it does not hold.
+func (s *server) wholeID(
+	w http.ResponseWriter,
+	r *http.Request,
+	kind string,
+	scope refs.Scope,
+	prefix string,
+	viewer refs.Viewer,
+	notFound string,
+) (string, bool) {
+	candidate, err := refs.ResolvePrefix(r.Context(), s.deps.Store.Pool, kind, scope, prefix, viewer)
+	switch {
+	case err == nil:
+		return candidate.ID, true
+	case errors.Is(err, pgx.ErrNoRows):
+		if notFound == notFoundNone {
+			return "", true
+		}
+		writeError(w, notFound, http.StatusNotFound, fmt.Sprintf("no %s whose id starts with %q", kind, prefix))
+		return "", false
+	}
+	var ambiguous *refs.ErrPrefixAmbiguous
+	if errors.As(err, &ambiguous) {
+		writeAmbiguousID(w, ambiguous)
+		return "", false
+	}
+	s.writeHandlerError(w, err)
+	return "", false
+}
+
+// itemNotFound is the 404 an item prefix that names nothing gets on a route whose own is
+// notFound: that answer where the value can start a uuid, and notFoundNone where it cannot.
+//
+// A value text.IsIDPrefix accepts can still be no prefix of any id: one longer than a uuid, or
+// one writing a hyphen where a uuid has a hex digit — `a061-e3f2-…`, the spelling with a hyphen
+// after every four digits, which Postgres reads as a whole uuid and every handler behind this
+// reads as the row it names (project_scope.go, INFRA-264). Such a value matches nothing because
+// it can start no id, not because no item carries it, so it is left as written and the route
+// reads it as it always did; refs.ResolvePrefix answers both as no match, and this tells the two
+// apart by the same rule its uuidRange uses.
+func itemNotFound(notFound, prefix string) string {
+	const uuidText = "00000000-0000-0000-0000-000000000000"
+	if len(prefix) > len(uuidText) {
+		return notFoundNone
+	}
+	for index := range len(prefix) {
+		if (prefix[index] == '-') != (uuidText[index] == '-') {
+			return notFoundNone
+		}
+	}
+	return notFound
+}
+
+// documentRefKey is the ref_key of the document id names, the address refs.Scope holds a
+// document under; "" for an id that is no uuid or that no document has, which is an id the
+// route behind this is about to refuse anyway.
+func (s *server) documentRefKey(ctx context.Context, id string) (string, error) {
+	if uuid.Validate(id) != nil {
+		return "", nil
+	}
+	var refKey string
+	if err := s.deps.Store.Pool.QueryRow(ctx, `select ref_key from artifacts where id = $1::uuid`, id).Scan(&refKey); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read the document %s a block prefix is matched within: %w", id, err)
+	}
+	return refKey, nil
+}
+
 // refuseChangedLogin runs a write route's handler only for the person who pressed the write, when
 // the request names one in DispatchLoginHeader: the page sends the login of whoever was signed in
 // at the press with every write, retries included, and another tab may sign someone else in in
@@ -1153,19 +1343,35 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	writeError(w, err.code, err.status, err.message)
 }
 
-// requireUUIDPath rejects a non-uuid `{id}` path value with 400 <KIND>_ID_INPUT before it
-// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or "message".
+// requireUUIDPath rejects a `{id}` path value that is no id with 400 <KIND>_ID_INPUT before it
+// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or
+// "message".
+//
+// The value it reads is the one the prefix layer left (resolveIDPrefixes): an id written as a
+// unique prefix is already the whole id by the time this runs, and what reaches here is an id
+// nothing carries or a value that is no id at all. So the refusal states the rule a caller can
+// act on - a whole uuid, or a prefix of it long enough to name one item - rather than telling
+// them to write the whole id, which is no longer what the route needs.
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		if kind == "ask" {
-			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask IDs are UUIDs; use the full ask ID")
-		} else {
-			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
-		}
+		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, idPathProblem(kind))
 		return false
 	}
 	return true
+}
+
+// idPathProblem is how a route refuses a path id that names nothing, worded once so every route
+// that reads one says the same thing. An ask's, a comment's and a message's id is resolved from
+// a prefix before a handler sees it (idRoutes), so their rule is a whole uuid or a prefix of one
+// long enough to name a single item. A handoff's and a thread's is not, so theirs is the whole
+// uuid it has always been.
+func idPathProblem(kind string) string {
+	switch kind {
+	case "ask", "comment", "message":
+		return kind + " id must be a whole uuid or a unique prefix of 8 characters or more"
+	}
+	return kind + " id must be a full uuid"
 }
 
 func len16(value string) int {

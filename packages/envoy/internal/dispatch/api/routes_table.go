@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 )
@@ -170,6 +172,181 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
+// idRoute is what the id wildcards of one route's pattern name, which is what the prefix layer
+// reads before the scope checks and the handler see those values (resolveIDPrefixes).
+//
+// Kind is the kind the pattern's {id} names — ask, comment, message or artifact, as
+// refs.ResolvePrefix reads a kind — and WithinIssue whether a prefix of it is looked for among
+// the items of the issue the pattern's {key} names rather than among every item of that kind.
+// Blocks is whether the pattern's {block_id} is a block of the document its {id} names, matched
+// among that document's blocks once the {id} itself is resolved.
+//
+// NotFound is the code of the 404 this route already answers for a whole id of its kind that
+// names no item, which is the answer a prefix that names none gets too: a short id resolves
+// wherever a whole one does, so it fails where a whole one fails. It is read from the route
+// rather than assumed, and the routes disagree — a document's read answers ARTIFACT_NOT_FOUND,
+// a comment's thread NOT_FOUND and a comment's delivery COMMENT_NOT_FOUND — so it is written
+// per route and not per kind. BlockNotFound is the same for the {block_id}. notFoundNone is the
+// route that answers no 404 at all for an id it does not hold, which then keeps that answer.
+//
+// Reason is why a route resolves nothing, written exactly where Kind is empty and Blocks is
+// false: an id of a kind refs.ResolvePrefix does not read, which stays what its handler already
+// makes of it.
+type idRoute struct {
+	Kind          string
+	WithinIssue   bool
+	Blocks        bool
+	NotFound      string
+	BlockNotFound string
+	Reason        string
+}
+
+// notFoundNone is the NotFound of a route that answers no 404 for an id it does not hold, so a
+// prefix that names nothing is left as written and that route answers what it always answers.
+// Only DELETE /api/v1/me/asks/{id}/snooze is one: un-snoozing a row nobody snoozed is the state
+// the caller asked for, and it answers 204 whatever ask the id names.
+const notFoundNone = "none"
+
+// resolves reports whether the route reads a prefix at all, which is what makes Reason required
+// and what decides whether register wraps it (resolveIDPrefixes).
+func (route idRoute) resolves() bool { return route.Kind != "" || route.Blocks }
+
+// idRoutes is, by "<method> <pattern>", what the {id} and {block_id} of every route that
+// carries one name: the kind whose prefix is resolved into it and the 404 that route answers
+// for an id of that kind it does not hold, or the reason it resolves none. It stands beside the
+// table for writeClasses' reason — the columns would have to be written on all 155 rows, and
+// most rows carry no id at all — and it is keyed by method and pattern as writeClasses is,
+// because two methods of one pattern can answer a missing row differently: PUT
+// /api/v1/me/asks/{id}/snooze answers 404 and DELETE answers 204.
+//
+// TestEveryIDRouteIsNamed holds the two in exact correspondence: a route with an id wildcard
+// this table does not name, a row that names neither a kind nor a reason, a resolving row with
+// no 404 of its own, and a name that is no route the server serves, each fail it, so a route
+// added later cannot silently stop resolving prefixes.
+//
+// The ids this layer never sees are no part of it: an id a request's body carries (reply_to,
+// ask_id, in_reply_to) and the ?artifact= filters are in no path value, and the resolver that
+// rewrites a body's short ids as its text is indexed is their one reader (refs.Resolver).
+var idRoutes = map[string]idRoute{
+	// A document's own routes, and the caller's read mark on one: the {id} is an artifact,
+	// looked for among every document and file, as a whole artifact id is. Every one of them
+	// reads the row through loadArtifact, which answers ARTIFACT_NOT_FOUND.
+	"GET /api/v1/artifacts/{id}":                             {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/outside-schema":       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/approval-requests":          {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/asks":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/asks":                       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/blocks":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/comments":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/comments":                   {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/edits":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/events":                      {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/rebuild":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/references":                  {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/reviews":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/reviews":                    {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/subscribers":                 {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}": {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/text":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/versions":                   {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/versions/{number}":           {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/me/documents/{id}/read":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"PUT /api/v1/me/documents/{id}/read":                     {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+
+	// The two routes that also name a block of that document, each answering TARGET_NOT_FOUND
+	// for a block id the document does not hold.
+	"GET /api/v1/artifacts/{id}/blocks/{block_id}":       {Kind: "artifact", Blocks: true, NotFound: "ARTIFACT_NOT_FOUND", BlockNotFound: "TARGET_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/blocks/{block_id}/keep": {Kind: "artifact", Blocks: true, NotFound: "ARTIFACT_NOT_FOUND", BlockNotFound: "TARGET_NOT_FOUND"},
+
+	// An ask's own routes and the caller's snooze of one. Each reads the row through loadAsk
+	// or loadAskOwner, whose missing row is writeHandlerError's NOT_FOUND; the snooze write
+	// answers its own NOT_FOUND, and the un-snooze answers 204 for any ask at all.
+	"GET /api/v1/asks/{id}":                           {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PATCH /api/v1/asks/{id}":                         {Kind: "ask", NotFound: "NOT_FOUND"},
+	"POST /api/v1/asks/{id}/answer":                   {Kind: "ask", NotFound: "NOT_FOUND"},
+	"POST /api/v1/asks/{id}/resolve":                  {Kind: "ask", NotFound: "NOT_FOUND"},
+	"GET /api/v1/asks/{id}/followers":                 {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PUT /api/v1/asks/{id}/followers/{session_id}":    {Kind: "ask", NotFound: "NOT_FOUND"},
+	"DELETE /api/v1/asks/{id}/followers/{session_id}": {Kind: "ask", NotFound: "NOT_FOUND"},
+	"PUT /api/v1/me/asks/{id}/snooze":                 {Kind: "ask", NotFound: "NOT_FOUND"},
+	"DELETE /api/v1/me/asks/{id}/snooze":              {Kind: "ask", NotFound: notFoundNone},
+
+	// A comment's own routes. The reads and the thread writes answer writeHandlerError's
+	// NOT_FOUND; the two delivery routes answer COMMENT_NOT_FOUND of their own.
+	"GET /api/v1/comments/{id}":             {Kind: "comment", NotFound: "NOT_FOUND"},
+	"PATCH /api/v1/comments/{id}":           {Kind: "comment", NotFound: "NOT_FOUND"},
+	"GET /api/v1/comments/{id}/blocks":      {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/accept":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reject":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reopen":     {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/resolve":    {Kind: "comment", NotFound: "NOT_FOUND"},
+	"POST /api/v1/comments/{id}/deliveries": {Kind: "comment", NotFound: "COMMENT_NOT_FOUND"},
+	"POST /api/v1/comments/{id}/reply":      {Kind: "comment", NotFound: "COMMENT_NOT_FOUND"},
+
+	// A message, by any id in its conversation. The issue form names an owner, so a prefix of
+	// it is looked for among that issue's messages alone; the owner-free forms look among
+	// every message, a direct conversation's included. The reads answer NOT_FOUND and the
+	// three delivery routes MESSAGE_NOT_FOUND.
+	"GET /api/v1/messages/{id}":                              {Kind: "message", NotFound: "NOT_FOUND"},
+	"GET /api/v1/messages/{id}/blocks":                       {Kind: "message", NotFound: "NOT_FOUND"},
+	"POST /api/v1/messages/{id}/deliveries":                  {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"POST /api/v1/messages/{id}/deliveries/{attempt}/accept": {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"POST /api/v1/messages/{id}/reply":                       {Kind: "message", NotFound: "MESSAGE_NOT_FOUND"},
+	"GET /api/v1/issues/{key}/messages/{id}":                 {Kind: "message", WithinIssue: true, NotFound: "NOT_FOUND"},
+
+	// The routes whose id names none of the five kinds a prefix shortens — an ask, a comment,
+	// a message, a document, a document block — so the value reaches the handler exactly as
+	// it is written and the handler answers for it as it always has.
+	"GET /api/v1/broadcasts/{id}":                   {Reason: "a broadcast id: one send to many sessions"},
+	"POST /api/v1/credential-grants/{id}/revoke":    {Reason: "a credential grant id"},
+	"POST /api/v1/credential-requests/{id}/approve": {Reason: "a credential request id"},
+	"POST /api/v1/credential-requests/{id}/deny":    {Reason: "a credential request id"},
+	"GET /api/v1/delivery/runs/{id}":                {Reason: "a deploy-repository run id, a positive integer and no uuid at all"},
+	"PATCH /api/v1/delivery/session-groups/{id}":    {Reason: "a Delivery session group id"},
+	"DELETE /api/v1/delivery/session-groups/{id}":   {Reason: "a Delivery session group id"},
+	"GET /api/v1/handoffs/{id}":                     {Reason: "a handoff id: one phase's record on an issue"},
+	"POST /api/v1/machine-logins/{id}/revoke":       {Reason: "a machine login id"},
+	"DELETE /api/v1/me/agent-tokens/{id}":           {Reason: "a personal agent token id"},
+	"PUT /api/v1/me/threads/{id}/read":              {Reason: "a thread id: the root of a conversation, and no read of the message it names"},
+}
+
+// hasIDWildcard reports whether a pattern carries an id the prefix layer could resolve.
+func hasIDWildcard(pattern string) bool {
+	return strings.Contains(pattern, "{id}") || strings.Contains(pattern, "{block_id}")
+}
+
+// undecidedIDRoutes names every route whose pattern carries an id wildcard that idRoutes
+// leaves undecided: one it does not name, one that resolves nothing and gives no reason, one
+// that names a kind and a reason at once, one that resolves an id or a block without saying
+// what 404 that route answers for one it does not hold, and one that resolves nothing and
+// names such an answer anyway.
+func undecidedIDRoutes(routes []apiRoute) []string {
+	var undecided []string
+	for _, route := range routes {
+		if !hasIDWildcard(route.Pattern) {
+			continue
+		}
+		name := route.Method + " " + route.Pattern
+		entry, named := idRoutes[name]
+		switch {
+		case !named:
+			undecided = append(undecided, name+": idRoutes says neither what its id names nor why no prefix is resolved there")
+		case entry.resolves() && entry.Reason != "":
+			undecided = append(undecided, name+": idRoutes names a kind to resolve and a reason not to")
+		case !entry.resolves() && strings.TrimSpace(entry.Reason) == "":
+			undecided = append(undecided, name+": idRoutes resolves no prefix there and gives no reason")
+		case entry.Kind != "" && entry.NotFound == "":
+			undecided = append(undecided, name+": idRoutes resolves an id there and does not say what 404 the route answers for one it does not hold")
+		case entry.Blocks && entry.BlockNotFound == "":
+			undecided = append(undecided, name+": idRoutes resolves a block id there and does not say what 404 the route answers for one the document does not hold")
+		case !entry.resolves() && (entry.NotFound != "" || entry.BlockNotFound != ""):
+			undecided = append(undecided, name+": idRoutes resolves nothing there and names a not-found answer anyway")
+		}
+	}
+	sort.Strings(undecided)
+	return slices.Compact(undecided)
+}
+
 // routeRow is a row as the table writes it: the five columns every route has, written as a
 // positional literal, which is why the write class is not among them (writeClasses).
 type routeRow struct {
@@ -254,7 +431,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/issues/{key}/claim", authAny, "Release the issue's claim: its holder, any human, or anyone when the holding session is no longer live. The status does not move. The answer is the issue with legion_managed_status beside it: true when the issue carries the legion label in any case, or sits under one that does, which means the Legion daemon owns the status and a status another writer sets is undone. 409 ISSUE_CLAIMED names the holder this caller may not release (there is no force on this route); 409 CLAIM_CONTENDED means the holder changed twice while the request ran, so nothing was applied and nobody's liveness was checked.", s.releaseIssueClaim},
 		{http.MethodGet, "/api/v1/issues/{key}/events", authAny, "Page an issue's event log (after, before, ids, order, limit).", s.listIssueEvents},
 		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "The eight-hop closure of documents the issue's content references: {members, truncated}, each member a document in the closure with its depth and the node it was reached via, under an ETag (If-None-Match answers 304). ?versions=latest leaves each member's artifact.versions holding only its latest version, under its own ETag; absent, empty or all is the full answer; another value, or versions given more than once, is 400 INVALID_QUERY.", s.getIssueReferences},
-		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.", s.getReferences},
+		{http.MethodGet, "/api/v1/references", authAny, "Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds. A ?to= reference whose item id or block id is written short (8 characters or more, never a whole uuid) names the one item of the owner the reference names that carries it: the issue of dispatch://<KEY>/ask/<prefix>, the document of a #b-<prefix>; the node answered carries the whole id, a prefix two of them carry is 409 ID_AMBIGUOUS listing both, and one nothing carries is the 404 the reference as written always gave. A whole id is read whatever owner the reference names, as it always was.", s.getReferences},
+		{http.MethodGet, "/api/v1/references/questions", authAny, "The question map of one reference source's document: ?kind= one of artifact, ask, comment or message and ?id= that source's whole uuid or a unique prefix of 8 characters or more. Answers {document, questions}: document the uuid of the document the source's text belongs to - its own for a document version, the document an ask or a comment is written on or anchored to, its issue's spec for an issue message - and questions each `:::ask{#id}` block that document's latest version declares, by block id, with the whole id of the ask settlement made for it, which is what a `#id` in the source's text names. A block no ask is settled for yet is absent, and a document declaring none answers []. A source whose text belongs to no document - a direct message, an id nothing holds - is 404 NOT_FOUND; a kind that is none of the four is 400 INVALID_KIND; a missing id is 400 INVALID_QUERY; an id prefix two sources carry is 409 ID_AMBIGUOUS.", s.getReferenceQuestions},
 		{http.MethodGet, "/api/v1/block-links", authAny, "Links from blocks of one document to blocks of another: ?from=<document ref>&to=<document ref>; both block nodes, the edge kind, and when and in which version the source wrote each, newest first.", s.getBlockLinks},
 		{http.MethodGet, "/api/v1/issues/{key}/subscribers", authHuman, "Sessions subscribed to an issue's topics.", s.listIssueSubscribers},
 		{http.MethodDelete, "/api/v1/issues/{key}/subscribers/{session_id}", authHuman, "Unsubscribe a session from an issue.", s.unsubscribeIssueSession},

@@ -30,12 +30,14 @@ package api
 // For a credential that does name a project, the check fails closed: only a target that
 // resolves to that credential's own project reaches the handler. A target that resolves to
 // another project, to no project at all, or to nothing at all — no such row, or an id Postgres
-// will not read as a uuid — is refused. Each resolver sends the raw path value to Postgres, as
-// the handler behind it does, so the parser that decides what this check resolved is the parser
-// the handler then addresses its row by, and the two cannot disagree about which object a path
-// names: Go's uuid.Parse refuses spellings Postgres accepts (a hyphen after any group of four
-// digits), and a check that resolved nothing where the handler resolves a row would be a write
-// nothing judged.
+// will not read as a uuid — is refused. Each resolver sends Postgres the value the prefix layer
+// resolved, the one the handler behind it sends too: an id written as a unique prefix is the
+// whole id by the time either reads it, and anything else is the path value as written
+// (resolveIDPrefixes, which register wraps outside this check for exactly that reason). So the
+// parser that decides what this check resolved is the parser the handler then addresses its row
+// by, and the two cannot disagree about which object a path names: Go's uuid.Parse refuses
+// spellings Postgres accepts (a hyphen after any group of four digits), and a check that
+// resolved nothing where the handler resolves a row would be a write nothing judged.
 //
 // Failing closed does not close the existence oracle, and does not claim to. The two refusals
 // still read differently — a target of another project is told which project that is, and one

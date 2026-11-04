@@ -82,14 +82,34 @@ const referencesSinceWait = time.Second
 // back past referencesSinceWait: so a since read answers every mention committed before it, the
 // caller's own included, and one held back answers the mentions at or below the horizon and
 // leaves the rest to a later read.
+//
+// A ?to= reference whose item id or block id is written short is read as the one item of the
+// owner the reference names that carries it (wholeReference), so the node answered carries the
+// whole id and the page behind it reads its record under that. The owner decides a prefix and
+// nothing else: a whole id is read whatever owner the reference names, as this route has always
+// read one (refs.loadAskNodes filters on the id alone). That asymmetry is deliberate. A whole id
+// already names one row, so an owner that disagrees with it says nothing this read needs; a
+// prefix names a row only within some set, and the set the reference itself names is the one its
+// writer meant and the only one that can be answered without guessing.
 func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	_, human, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
 		return
 	}
 	query, ref, err := parseReferencesQuery(r, s.deps.ServerURL)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if query.Direction == "in" {
+		resolved, ok := s.wholeReference(w, r, ref, refs.Viewer{Human: human})
+		if !ok {
+			return
+		}
+		ref = resolved
+		target, _ := refs.TargetOf(ref)
+		query.Kind, query.ID = target.Kind, target.ID
 	}
 	var node model.GraphNode
 	if ref.Kind == "block" {
@@ -149,6 +169,130 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
+}
+
+// wholeReference is ref with its item id, or its block id, written whole where the request
+// wrote it short: the one item of the owner the reference names that carries the prefix. ok is
+// false once it has written the answer itself, the 409 of a prefix two items or more carry.
+//
+// Which owner, and so which set the prefix names one of, is read from the reference exactly as
+// the index-time resolver reads it (refs' prefixScope): an ask's, a comment's or a message's
+// within its issue, a document block's among the blocks of the document the reference names, at
+// the version it pins. A reference whose owner no scope holds is left as written, which answers
+// what it answered before: an ask's or a comment's on a project document, since
+// `dispatch://<PROJECT>/artifact/<slug>/ask/<id>` parses to the project alone and the slug a
+// document scope needs is no part of it, and a block of an ask, a comment or a message, whose
+// blocks are numbered (`b2`) and are no id a prefix shortens. A prefix nothing carries is left
+// as written too (notFoundNone), and the read answers the 404 it always did for a node it has
+// no edge of.
+func (s *server) wholeReference(w http.ResponseWriter, r *http.Request, ref text.Ref, viewer refs.Viewer) (text.Ref, bool) {
+	if ref.Kind == "block" && ref.Item == "" {
+		if !text.IsIDPrefix(ref.Block) {
+			return ref, true
+		}
+		document := ref
+		document.Kind, document.Block, document.Pin = "artifact", "", 0
+		scope := refs.Scope{Document: text.TargetID(document), Version: ref.Pin}
+		whole, ok := s.wholeID(w, r, "block", scope, ref.Block, viewer, notFoundNone)
+		if ok && whole != "" {
+			ref.Block = whole
+		}
+		return ref, ok
+	}
+	kind := ref.Kind
+	if kind == "block" {
+		kind = ref.Item
+	}
+	if ref.IssueKey == "" || !text.IsIDPrefix(ref.ID) {
+		return ref, true
+	}
+	whole, ok := s.wholeID(w, r, kind, refs.Scope{IssueKey: ref.IssueKey}, ref.ID, viewer, notFoundNone)
+	if ok && whole != "" {
+		ref.ID = whole
+	}
+	return ref, ok
+}
+
+// referenceQuestions is the question map GET /api/v1/references/questions answers: the document
+// one reference source's text belongs to, and the ask each question block of that document
+// declares, which is what a `#id` written in that text names.
+type referenceQuestions struct {
+	Document  string              `json:"document"`
+	Questions []referenceQuestion `json:"questions"`
+}
+
+// referenceQuestion is one question block of the document: the block id a `#id` writes, and the
+// whole id of the ask settlement made for it.
+type referenceQuestion struct {
+	BlockID string `json:"block_id"`
+	Ask     string `json:"ask"`
+}
+
+// questionSourceKinds are the reference sources whose text belongs to a document, the kinds
+// refs.ScopeOf reads: a document version, an ask, a comment and an issue message.
+var questionSourceKinds = []string{"artifact", "ask", "comment", "message"}
+
+// getReferenceQuestions answers the question map a `#id` in one source's text resolves against:
+// refs.ScopeOf for the document that text belongs to, then refs.QuestionMap for that document's
+// question blocks. The page that renders a text reads it once for the whole text, as the
+// indexing resolver does, rather than once per `#id`.
+//
+// ?id= takes a whole uuid or an id written short, resolved among every source of its kind, as
+// the routes that take an id in their path do (resolveIDPrefixes): one match is read, a prefix
+// two sources or more carry is 409 ID_AMBIGUOUS, and one nothing carries is the 404 of a source
+// whose text belongs to no document, which is also the answer for a direct message and for any
+// source that is on no document.
+func (s *server) getReferenceQuestions(w http.ResponseWriter, r *http.Request) {
+	_, human, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return
+	}
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if !slices.Contains(questionSourceKinds, kind) {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_KIND",
+			"kind %q is not one of %s", kind, strings.Join(questionSourceKinds, ", ")))
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_QUERY", "id is required"))
+		return
+	}
+	if text.IsIDPrefix(id) {
+		// A prefix nothing carries is left as written (notFoundNone), and the read below
+		// answers this route's own 404 for a source whose text belongs to no document.
+		whole, ok := s.wholeID(w, r, kind, refs.Scope{}, id, refs.Viewer{Human: human}, notFoundNone)
+		if !ok {
+			return
+		}
+		if whole != "" {
+			id = whole
+		}
+	}
+	document, err := refs.ScopeOf(r.Context(), s.deps.Store.Pool, kind, id)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if document == "" {
+		s.writeHandlerError(w, errorf(http.StatusNotFound, "NOT_FOUND",
+			"the text of %s %s belongs to no document", kind, id))
+		return
+	}
+	questions, err := refs.QuestionMap(r.Context(), s.deps.Store.Pool, document)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	answer := referenceQuestions{Document: document, Questions: make([]referenceQuestion, 0, len(questions))}
+	for blockID, ask := range questions {
+		answer.Questions = append(answer.Questions, referenceQuestion{BlockID: blockID, Ask: ask.ID})
+	}
+	slices.SortFunc(answer.Questions, func(left, right referenceQuestion) int {
+		return strings.Compare(left.BlockID, right.BlockID)
+	})
+	WriteJSON(w, http.StatusOK, answer)
 }
 
 // sinceHorizon is the horizon a since read caps at: H once an observation taken after the call is
