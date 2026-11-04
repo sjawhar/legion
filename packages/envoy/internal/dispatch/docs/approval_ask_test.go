@@ -12,13 +12,37 @@ import (
 )
 
 func TestApprovalAskSummaryRoundTripsTheSharedQuestion(t *testing.T) {
+	documents := []model.AskApprovalDocument{{ArtifactID: "artifact-1", Name: "spec.md", Version: 2, RequestedVersion: 2}}
 	ask := model.Ask{
 		ID:       "approval-1",
-		Question: ApprovalQuestion("spec.md", 2, "Names the rollback plan."),
-		Approval: &model.AskApproval{Name: "spec.md", Version: 2},
+		Question: ApprovalQuestion(documents, "Names the rollback plan."),
+		Approval: &model.AskApproval{Name: "spec.md", Version: 2, Documents: documents},
 	}
 	if summary, err := ApprovalAskSummary(ask); err != nil || summary != "Names the rollback plan." {
 		t.Fatalf("approval summary = %q, %v", summary, err)
+	}
+}
+
+// A request naming a spec and its issue's Verification document asks for both, each at its own
+// version, and the summary parses back out of that question too.
+func TestApprovalAskSummaryRoundTripsATwoDocumentQuestion(t *testing.T) {
+	documents := []model.AskApprovalDocument{
+		{ArtifactID: "artifact-1", Name: "spec.md", Version: 3, RequestedVersion: 3},
+		{ArtifactID: "artifact-2", Name: "verification.md", Version: 2, RequestedVersion: 2},
+	}
+	question := ApprovalQuestion(documents, "Both describe the live sync.")
+	if question != "Approve spec.md (version 3) and verification.md (version 2)? Both describe the live sync." {
+		t.Fatalf("two-document question = %q", question)
+	}
+	ask := model.Ask{ID: "approval-2", Question: question, Approval: &model.AskApproval{Documents: documents}}
+	if summary, err := ApprovalAskSummary(ask); err != nil || summary != "Both describe the live sync." {
+		t.Fatalf("two-document summary = %q, %v", summary, err)
+	}
+	// The release before the documents list rewords such a request to name its first document
+	// alone; the summary still parses back out, so a move or a hand-back after it keeps working.
+	ask.Question = ApprovalQuestion(documents[:1], "Both describe the live sync.")
+	if summary, err := ApprovalAskSummary(ask); err != nil || summary != "Both describe the live sync." {
+		t.Fatalf("summary after an older release reworded the question = %q, %v", summary, err)
 	}
 }
 
@@ -32,11 +56,12 @@ func TestRewritingAnApprovalAskWithNoLedgerIsRefusedAndRewordsNothing(t *testing
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	ctx := context.Background()
-	approval, err := EncodeApproval(&model.AskApproval{ArtifactID: artifactID, Name: "document.md", Version: 1, RequestedVersion: 1})
+	documents := []model.AskApprovalDocument{{ArtifactID: artifactID, Name: "document.md", Version: 1, RequestedVersion: 1}}
+	approval, err := EncodeApproval(&model.AskApproval{Documents: documents})
 	if err != nil {
 		t.Fatalf("encode the approval: %v", err)
 	}
-	question := ApprovalQuestion("document.md", 1, "The first cut.")
+	question := ApprovalQuestion(documents, "The first cut.")
 	// The request belongs to the document's issue, as every ask on an issue's document does; the
 	// document it asks about is the artifact its approval names.
 	if _, err := database.Pool.Exec(ctx, `
@@ -56,14 +81,17 @@ func TestRewritingAnApprovalAskWithNoLedgerIsRefusedAndRewordsNothing(t *testing
 		t.Fatalf("read the open approval request = %v, %v", ask, err)
 	}
 	mover := model.Actor{Kind: "user", ID: "alice"}
-	if err := RewriteApprovalAsk(ctx, tx, events.NewBroker(), ask, mover, 2, "The second cut.", "https://dispatch.example"); !errors.Is(err, errUnjoined) {
+	// What a version move would reword the request to: its one document at a second version,
+	// with the version its agent last handed to the human unchanged.
+	moved := []model.AskApprovalDocument{{ArtifactID: artifactID, Name: "document.md", Version: 2, RequestedVersion: 1}}
+	if err := RewriteApprovalAsk(ctx, tx, events.NewBroker(), ask, mover, moved, "The second cut.", "https://dispatch.example"); !errors.Is(err, errUnjoined) {
 		t.Fatalf("rewording an approval request with no ledger = %v, want errUnjoined", err)
 	}
 	var stored string
 	var version int
 	var editedAt *time.Time
 	if err := tx.QueryRow(ctx, `
-		select question, (approval->>'version')::int, edited_at from asks where id = $1::uuid
+		select question, (approval->'documents'->0->>'version')::int, edited_at from asks where id = $1::uuid
 	`, ask.ID).Scan(&stored, &version, &editedAt); err != nil {
 		t.Fatalf("read the approval request back: %v", err)
 	}

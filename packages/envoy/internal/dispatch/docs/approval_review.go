@@ -22,8 +22,18 @@ const (
 	ApprovalOptionRequestChanges = "Request changes"
 )
 
+// A review's kind: who gave it. ReviewKindPerson is a person's review, given by answering an
+// approval request or from the document header; ReviewKindPlanReview is a plan review's approval
+// of a plan version, which no person is asked for (the approval request route refuses a plan
+// document). A review Dispatch carries to a later version keeps the kind of the review it
+// carries (writeCarriedReview), so a restored plan version is still the plan review's approval.
+const (
+	ReviewKindPerson     = "person"
+	ReviewKindPlanReview = "plan_review"
+)
+
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
-const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at, event_seq`
+const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor, reason, ask_id::text, created_at, event_seq`
 
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
@@ -45,7 +55,7 @@ const ReviewOrder = `event_seq desc nulls last, created_at desc, artifact_review
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
 	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &review.Kind, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
 		return model.ArtifactReview{}, err
 	}
 	if err := json.Unmarshal(actor, &review.Actor); err != nil {
@@ -56,7 +66,8 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 
 // QueueReview records a review of artifact pinned to version and appends its event,
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
-// belongs to one, else the document itself. askID is the approval ask the review answers, nil
+// belongs to one, else the document itself. kind is who gave it (ReviewKindPerson,
+// ReviewKindPlanReview). askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
 // events.
@@ -74,7 +85,7 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // for any read the caller makes before it commits. The trigger then finds the row sequenced and
 // leaves it. written receives the review and its event as the batch leaves them, and the caller,
 // which owns the transaction, publishes the event after its commit.
-func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string, written func(model.ArtifactReview, model.Event)) error {
+func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Artifact, version int, state, kind string, actor model.Actor, reason *string, askID *string, written func(model.ArtifactReview, model.Event)) error {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
 		return fmt.Errorf("encode review actor: %w", err)
@@ -87,9 +98,9 @@ func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Arti
 	var review model.ArtifactReview
 	var event model.Event
 	b.Queue("", `
-		insert into artifact_reviews (id, artifact_id, version, state, actor, reason, ask_id)
-		values ($1, $2, $3, $4, $5, $6, $7)
-		returning `+ReviewColumns, id, artifact.ID, version, state, actorJSON, reason, askID).QueryRow(func(row pgx.Row) error {
+		insert into artifact_reviews (id, artifact_id, version, state, kind, actor, reason, ask_id)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		returning `+ReviewColumns, id, artifact.ID, version, state, kind, actorJSON, reason, askID).QueryRow(func(row pgx.Row) error {
 		scanned, err := ScanReview(row)
 		if err != nil {
 			return fmt.Errorf("insert artifact review: %w", err)
@@ -103,6 +114,7 @@ func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Arti
 			ArtifactID: artifact.ID,
 			Name:       artifact.Name,
 			Version:    version,
+			Kind:       kind,
 			Actor:      actor,
 			Reason:     reason,
 			AskID:      askID,
@@ -168,6 +180,37 @@ func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*m
 // was open, among others.
 func NewestReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
 	return newestReview(ctx, q, "newest review", newestReviewQuery, artifactID)
+}
+
+// NamedDocumentsApproved reports whether every document an approval request names stands
+// approved at the version the request names for it. It is the one place that rule is written:
+// the approval request route asks it to decide whether a request needs a row at all, and
+// carryApproval asks it to decide whether carrying one document's approval answers the open
+// request. known is the one document the caller has already judged - the document the request
+// was made on, or the one whose approval is being carried - and knownApproved its verdict;
+// every other document is read here.
+//
+// A document counts as approved only when its newest review, in any state, is an approval of
+// the version the request names. The newest approval alone cannot see a later request for
+// changes, so a request a person answered "Request changes" on would otherwise read as settled
+// and the person never be asked again about the document they rejected.
+func NamedDocumentsApproved(ctx context.Context, q Queryer, documents []model.AskApprovalDocument, known string, knownApproved bool) (bool, error) {
+	for _, document := range documents {
+		if document.ArtifactID == known {
+			if !knownApproved {
+				return false, nil
+			}
+			continue
+		}
+		review, err := NewestReview(ctx, q, document.ArtifactID)
+		if err != nil {
+			return false, err
+		}
+		if review == nil || review.State != "approved" || review.Version != document.Version {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -547,50 +548,83 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 	return changes, nil
 }
 
-// BlockTypes is the type of each block targets name, by node id (text.TargetID), as the block
-// index would hold it once a write to document artifactID, whose reference key is refKey, leaving
-// the blocks written (rendered, in document order, each parent before its children) is indexed,
-// read through q: a block of that document as written's node for its id (uniqueBlocks: the first
-// holder of a repeated id, and no id the index cannot key), any other as its document's current
-// blocks (document_blocks) hold it, with one query for every such target. A target no block has is
-// absent.
+// BlockTargets is where a write to document artifactID, whose reference key is refKey, lands and
+// the block each of targets names, by node id (text.TargetID), as the block index would hold it
+// once that write, leaving the blocks written (rendered, in document order, each parent before
+// its children), is indexed, read through q: a block of that document as written's node for its
+// id (uniqueBlocks: the first holder of a repeated id, and no id the index cannot key), any other
+// as its document's current blocks (document_blocks) hold it, with one query for every such
+// target. A target no block has is absent. The write lands in the document's own issue, or in
+// none when a project or a session holds it; that issue's ancestors are read only once a target
+// turns out to sit in another document (IssueAncestors), since a pointer inside the writing
+// document - a plan task's `needs`, the common case - is held to nothing above it
+// (pmdoc.CheckBlockPointers), and this runs inside the write's transaction.
 //
 // The caller hands the reference key over rather than this read taking it from the artifacts row,
 // because a transaction creating the document has only queued that row: its own reads cannot see
-// it, while the caller knows the key the queued insert will write (docs.documentRefKey).
-func BlockTypes(ctx context.Context, q Queryer, artifactID, refKey string, written []model.ArtifactBlock, targets []text.Ref) (map[string][]string, error) {
+// it, while the caller knows the key the queued insert will write (docs.documentRefKey). The
+// issue the write lands in is read from that key for the same reason: a reference key is its
+// owner's key and the document's slug (migration 0071), so the write lands in the issue holding
+// that owner key, and in none when no issue holds it - a project's or a session's document.
+func BlockTargets(ctx context.Context, q Queryer, artifactID, refKey string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
+	writing := pmdoc.BlockWriting{Document: refKey}
+	if slug := strings.LastIndex(refKey, "/"); slug > 0 {
+		owner := refKey[:slug]
+		var held bool
+		if err := q.QueryRow(ctx, `select exists (select 1 from issues where key = $1)`, owner).Scan(&held); err != nil {
+			return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the issue of document %s: %w", artifactID, err)
+		}
+		if held {
+			writing.Issue = owner
+		}
+	}
 	nodes, _, _ := uniqueBlocks(written)
 	own := make(map[string]string, len(nodes))
 	for _, node := range nodes {
 		own[node.ID] = node.Type
 	}
-	types := make(map[string][]string, len(targets))
+	found := make(map[string]pmdoc.BlockTarget, len(targets))
 	var elsewhere []string
 	for _, target := range targets {
 		nodeID := text.TargetID(target)
 		// A ref_key holds no '#', so the node id's document part ends at its first one.
-		if document, _, _ := strings.Cut(nodeID, "#"); document != refKey {
+		if document, _, _ := strings.Cut(nodeID, "#"); document != writing.Document {
 			elsewhere = append(elsewhere, nodeID)
 		} else if typ, ok := own[target.Block]; ok {
-			types[nodeID] = []string{typ}
+			found[nodeID] = pmdoc.BlockTarget{Types: []string{typ}, Document: writing.Document, Issue: writing.Issue}
 		}
 	}
 	if len(elsewhere) == 0 {
-		return types, nil
+		return writing, found, nil
 	}
-	rows, err := q.Query(ctx, `select node_id, type from document_blocks where node_id = any($1)`, elsewhere)
+	rows, err := q.Query(ctx, `
+		select d.node_id, d.type, a.ref_key, coalesce(a.issue_key, '')
+		from document_blocks d join artifacts a on a.id = d.artifact_id
+		where d.node_id = any($1)
+	`, elsewhere)
 	if err != nil {
-		return nil, fmt.Errorf("read the types of the blocks %s points at: %w", artifactID, err)
+		return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the blocks %s points at: %w", artifactID, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var nodeID, typ string
-		if err := rows.Scan(&nodeID, &typ); err != nil {
-			return nil, fmt.Errorf("scan the type of a block %s points at: %w", artifactID, err)
+		var nodeID, typ, document, issue string
+		if err := rows.Scan(&nodeID, &typ, &document, &issue); err != nil {
+			return pmdoc.BlockWriting{}, nil, fmt.Errorf("scan a block %s points at: %w", artifactID, err)
 		}
-		types[nodeID] = append(types[nodeID], typ)
+		target := found[nodeID]
+		target.Types = append(target.Types, typ)
+		target.Document, target.Issue = document, issue
+		found[nodeID] = target
 	}
-	return types, rows.Err()
+	if err := rows.Err(); err != nil {
+		return pmdoc.BlockWriting{}, nil, err
+	}
+	// Only a target in another document can sit in another issue, so the ancestor walk is paid
+	// for only here.
+	if writing.Ancestors, err = IssueAncestors(ctx, q, writing.Issue); err != nil {
+		return pmdoc.BlockWriting{}, nil, err
+	}
+	return writing, found, nil
 }
 
 // blockFirstVersion is a left join lateral, aliased alias, over the first version that held block

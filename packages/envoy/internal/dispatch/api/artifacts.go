@@ -48,8 +48,9 @@ const (
 	maxNewArtifactKeyBytes = 2692
 )
 
-// artifactColumns is the canonical artifact column list scanArtifact reads.
-const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, created_by, created_at`
+// artifactColumns is the canonical artifact column list scanArtifact reads. role is read through
+// coalesce because model.Artifact carries it as "" when the document plays no role.
+const artifactColumns = `id::text, issue_key, project_key, session_id, ref_key, slug, name, kind, is_primary, coalesce(role, ''), created_by, created_at`
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -387,9 +388,13 @@ func (s *server) queueNewArtifact(
 	if err != nil {
 		return model.Artifact{}, err
 	}
+	// The part the new document plays, which its slug decides and which is written with the row,
+	// once (documentRole): the row the insert leaves carries it, so the reads this transaction
+	// makes of the artifact it just created see it as every later reader will.
+	role := documentRole(target, kind, slug)
 	artifact := model.Artifact{
 		IssueKey: target.IssueKey, Project: deref(project), SessionID: session,
-		RefKey: target.refPrefix() + "/" + slug, Slug: slug, Name: name, Kind: kind,
+		RefKey: target.refPrefix() + "/" + slug, Slug: slug, Name: name, Kind: kind, Role: deref(role),
 	}
 	if err := json.Unmarshal(actorJSON, &artifact.CreatedBy); err != nil {
 		return model.Artifact{}, fmt.Errorf("decode artifact author: %w", err)
@@ -402,9 +407,9 @@ func (s *server) queueNewArtifact(
 	// new document names a target in that document by this key (docs.documentRefKey).
 	ledger.RegisterPendingArtifact(artifact.ID, artifact.RefKey)
 	return artifact, queueExec(ledger, `
-		insert into artifacts (id, issue_key, project_key, session_id, slug, name, kind, is_primary, created_by, created_at)
-		values ($1, $2, $3, $4, $5, $6, $7, false, $8, $9)
-	`, artifact.ID, target.IssueKey, project, session, slug, name, kind, actorJSON, artifact.CreatedAt)
+		insert into artifacts (id, issue_key, project_key, session_id, slug, name, kind, is_primary, role, created_by, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, false, $8, $9, $10)
+	`, artifact.ID, target.IssueKey, project, session, slug, name, kind, role, actorJSON, artifact.CreatedAt)
 }
 
 // queueFileVersion queues the insert of an uploaded file's or image's version and returns the row
@@ -543,6 +548,26 @@ func (s *server) storeArtifact(
 	} else if artifact.Kind != kind {
 		s.writeHandlerError(w, artifactKindMismatch(input.name, artifact, kind))
 		return
+	}
+	// A document the release before this one created during the rolling deploy carries no role:
+	// migration 20261102110000 backfills the rows that existed when it ran, and that release
+	// writes none of its own. Until the role is set the document is invisible to every reader
+	// that looks for an issue's Verification or plan document by it, so the next version written
+	// under the row repairs it from the same slug that would have set it. The slug is unique
+	// within the owner, so at most one row per issue can take either role and the partial unique
+	// index artifacts_issue_role holds. The repair is a write like every other this route makes:
+	// it is queued here and runs in the write phase, and the row in hand carries the role from
+	// here on, so the reads that follow it in this transaction read the role it writes.
+	if !created && artifact.Role == "" {
+		if role := documentRole(target, artifact.Kind, artifact.Slug); role != nil {
+			if err := queueExec(ledger, `
+				update artifacts set role = $2 where id = $1 and role is null
+			`, artifact.ID, *role); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			artifact.Role = *role
+		}
 	}
 	// A project document's owner is the artifact itself, and until here this transaction has
 	// not taken its lock: the issue branch above locks its issue, but this one only read its
@@ -1526,7 +1551,7 @@ func scanArtifact(row pgx.Row) (model.Artifact, error) {
 	var createdBy []byte
 	if err := row.Scan(
 		&artifact.ID, &artifact.IssueKey, &project, &artifact.SessionID, &artifact.RefKey, &artifact.Slug,
-		&artifact.Name, &artifact.Kind, &artifact.Primary, &createdBy, &artifact.CreatedAt,
+		&artifact.Name, &artifact.Kind, &artifact.Primary, &artifact.Role, &createdBy, &artifact.CreatedAt,
 	); err != nil {
 		return model.Artifact{}, err
 	}
@@ -1669,6 +1694,73 @@ func artifactSlug(name string) string {
 	}
 	return result
 }
+
+// roleSlugs pairs each role a document plays with the slug that names it: the one place the two
+// spellings are written. Everything that asks what part a document plays is built from it —
+// documentRole, which writes the role on a new row, the SQL predicates that hold a row to a role
+// (documentRolePredicate), and documentPlays, which asks the same of a row already read.
+var roleSlugs = map[string]string{
+	model.ArtifactRoleVerification: "verification-md",
+	model.ArtifactRolePlan:         "plan-md",
+}
+
+// documentRole is the role a document takes when its row is created: an issue's markdown
+// document whose slug roleSlugs names plays that role; every other new artifact plays none. The
+// slug decides, not the name, because the slug is the unique key the upload already took within
+// the owner (nextArtifactSlug), so a second document whose name gives a slug already in use -
+// verification-md-2 - plays no role rather than colliding with the one that holds it. The role
+// is written once, as is_primary is: a later upload of the same name is that document's next
+// version, under the row this made, and the only write that ever sets it afterwards is the
+// repair of a row the rolling deploy left with none (storeArtifact).
+func documentRole(target artifactTarget, kind, slug string) *string {
+	if target.IssueKey == nil || kind != "doc" {
+		return nil
+	}
+	for role, named := range roleSlugs {
+		if named == slug {
+			return &role
+		}
+	}
+	return nil
+}
+
+// documentPlays reports whether an artifact already read plays role: it carries that role, or it
+// carries none and its slug is the role's, for a row a rolling deploy left with no role because
+// the build that created it did not know the column. It is documentRolePredicate's answer about
+// one row, so every reader — the queries that find a document by its role and the routes that
+// judge the document in hand — agrees about the same row.
+func documentPlays(artifact model.Artifact, role string) bool {
+	return artifact.Role == role || (artifact.Role == "" && artifact.Slug == roleSlugs[role])
+}
+
+// isSpecDocument reports whether an artifact already read is an issue's spec: the primary
+// document of an issue. Both readers that ask it about an approval ask it here — the coverage
+// an approval request's answer carries (approvalCoverage), which only a spec has, and
+// include_verification, which names the spec and its issue's Verification document together
+// (requestArtifactApproval).
+func isSpecDocument(artifact model.Artifact) bool {
+	return artifact.Primary && artifact.IssueKey != nil
+}
+
+// documentRolePredicate holds the artifacts row of the table aliased `alias` to the issue's
+// document of one role: the role itself, or the slug a document of that name carries, for a row
+// a rolling deploy left with no role. `alias` is empty where the query names no alias.
+func documentRolePredicate(alias, role string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return `(` + alias + `role = '` + role + `' or (` + alias + `role is null and ` + alias + `slug = '` + roleSlugs[role] + `'))`
+}
+
+// verificationRolePredicate is documentRolePredicate for the Verification document of a query
+// that names no alias, since the queries that hold a row to it are written as string literals.
+var verificationRolePredicate = documentRolePredicate("", model.ArtifactRoleVerification)
+
+// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
+// artifacts table is aliased `a`: the issue read, the coverage read and the check resolver all
+// join it that way.
+var aliasedVerificationRole = documentRolePredicate("a", model.ArtifactRoleVerification)
+var aliasedPlanRole = documentRolePredicate("a", model.ArtifactRolePlan)
 
 // artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
 // artifact, the one the name or slug finds, whose kind is another.

@@ -485,6 +485,75 @@ func TestXidWindowApprovalRequestHandedBack(t *testing.T) {
 	})
 }
 
+// approvalRequestOverTwoDocuments uploads the issue's Verification document, a second document of
+// the harness's size, and opens one approval request naming the fixture's spec and it
+// (include_verification), each at its own settled version. It answers the ask the person answers
+// and the Verification document's id.
+func (f *xidFixture) approvalRequestOverTwoDocuments(t *testing.T) (string, string) {
+	t.Helper()
+	verification, _ := xidSpec(2)
+	uploaded := uploadDocument(t, f.handler, "/api/v1/issues/"+f.issueKey, "verification.md", verification)
+	waitForArtifactVersion(t, f.handler, uploaded.Artifact.ID, 1)
+	requested := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.specID+"/approval-requests", map[string]any{
+		"summary":              "The migration section is rewritten, and the verification follows it.",
+		"include_verification": true, "actor": sessionActor(),
+	})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval of the spec and its Verification document: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	request := decodeBody[approvalRequestAsk](t, requested)
+	if request.Ask == nil || len(request.Ask.Approval.Documents) != 2 {
+		t.Fatalf("XID RIG PROBLEM (not a finding about the code): approval ask = %#v, want one ask naming two documents", request.Ask)
+	}
+	return request.Ask.ID, uploaded.Artifact.ID
+}
+
+// A request may name several documents, and the person's one answer reviews each of them at the
+// version the request named for it: the answer closes the ask (closeAsk) and then queues one
+// review per named document (queueApprovalReviews), reading the row of every document but the one
+// the request was made on (artifactMetadata) between the queue calls. Those reads are still the
+// route's read phase: a queued write runs no statement of its own, since the ledger sends the
+// whole batch at Commit, so everything the answer is decided on - the ask under its owner's
+// advisory lock, which assigns no xid (store.LockOwner), the named document and each further
+// document's row - is read before the transaction's first write. Behind them the window holds one
+// batch: the ask's answer and its answered row, its parts' index, ask.answered, and one review row
+// with its artifact.approved per named document.
+func TestXidWindowApprovalAnswerOverTwoDocuments(t *testing.T) {
+	f := newXidFixture(t, testServerOptions{}, "")
+	askID, verificationID := f.approvalRequestOverTwoDocuments(t)
+	f.measureBatched(t, http.StatusOK, func(h http.Handler) *httptest.ResponseRecorder {
+		return dispatchRequest(t, h, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+			"selected": []string{"Approve"},
+		}, "alice")
+	})
+	// The measured request is this write path only while it reviewed both documents: a window
+	// measured over an answer that wrote one review would report a window this path never ran in.
+	for _, artifactID := range []string{f.specID, verificationID} {
+		reviews := listReviews(t, f.handler, artifactID)
+		if len(reviews) != 1 || reviews[0].State != "approved" || reviews[0].Kind != "person" ||
+			reviews[0].AskID == nil || *reviews[0].AskID != askID {
+			t.Fatalf("XID RIG PROBLEM (not a finding about the code): reviews of %s = %#v, want the one approval the measured answer wrote", artifactID, reviews)
+		}
+	}
+}
+
+// A plan is approved by the plan review an agent runs over it, never by a person, and this route
+// records that approval of one plan version (createArtifactPlanReview). Its one write is the
+// review, queued on the ledger and sent by Commit; everything it is decided on - the document's
+// row, its owner, taken under the advisory lock that assigns no xid, and its settled versions - is
+// read before it, so the window is that batch and the COMMIT ending it.
+func TestXidWindowPlanReview(t *testing.T) {
+	f := newXidFixture(t, testServerOptions{}, "")
+	markdown, _ := xidSpec(3)
+	plan := uploadDocument(t, f.handler, "/api/v1/issues/"+f.issueKey, "plan.md", markdown)
+	waitForArtifactVersion(t, f.handler, plan.Artifact.ID, 1)
+	f.measureBatched(t, http.StatusCreated, func(h http.Handler) *httptest.ResponseRecorder {
+		return sessionRequest(t, h, http.MethodPost, "/api/v1/artifacts/"+plan.Artifact.ID+"/plan-reviews", map[string]any{
+			"version": 1, "actor": sessionActor(),
+		})
+	})
+}
+
 func TestXidWindowIssueCreateWithSpec(t *testing.T) {
 	f := newXidFixture(t, testServerOptions{}, "")
 	spec, _ := xidSpec(2)

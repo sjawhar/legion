@@ -212,6 +212,19 @@ Each item below names a task and where its code is, then notes on it.
   A write is keyed: a repeat under the same `Idempotency-Key` is answered the first call's `201` and records no second version.
   Shapes: `Handoff`, `HandoffSummary`, `HandoffRecordedPayload` in `packages/contracts/src/dispatch-api.ts`
 
+- **Recorded results of an issue's checks**: `internal/dispatch/api/results.go`, `internal/dispatch/api/coverage.go`, `internal/dispatch/delivery/pull_request_heads.go`, `store/migrations/20261102122200_check_results.up.sql`
+
+  `POST /api/v1/issues/{key}/results` records one result against a `check` block of the issue's Verification document or of an ancestor's, as `check_results`, keeping the block's `changed_version` and `text_sha256` with it, and answers the pull-request body line it implies;
+  `GET` lists each check of the issue's Verification document with every result recorded against it.
+  A result's currency is computed at the read, never written by a push:
+  a `before_merge` result is `current` while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue (`pull_request_heads`, which the GitHub intake and the reconcile keep), and the check's words are the ones it proved;
+  the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;
+  an `after_merge` or `default_branch` result while the repository's default branch carries its commit (`default_branch_commits`, the App's answer cached: a yes for good, a no for five minutes);
+  `unknown` when the check's issue resolves to no repository or the App cannot read it.
+  `GET /api/v1/issues/{key}/coverage` answers what each `requirement` block of the issue's spec lacks, counting the `check` and `plan_task` blocks of the issue and of its descendants;
+  the same lines end `dispatch read --issue` and the answer to an approval request.
+  Shapes: `IssueCheckResults`, `RecordCheckResultInput`, `IssueCoverage` in `packages/contracts/src/dispatch-api.ts`
+
 - **Load test**: `loadtest/`
 
   the 2-core reproduction of the 2026-10-26 outage load:
@@ -1793,7 +1806,13 @@ Parsing mints an omitted id, while live document reads and writes validate each 
 Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a content rule.
 Tightening content, removing or renaming a type or attribute, or requiring a new attribute requires a document migration and version bump.
 
-A `block[]` attribute points at blocks; no shipped type declares one.
+The shipped types are `callout`, `ask`, and the three this release adds (`pmdoc/schema/blocks.json`, version 3), each holding `paragraph+`:
+`requirement`, one requirement of an issue's spec, with no attribute of its own;
+`plan_task`, one task of a plan, with the `block[]` attributes `serves` (the requirements it serves) and `needs` (the tasks of the same plan it needs first);
+and `check`, one thing that must be proved, with `serves`, the enum `surface` (`browser`, `cli`, `api`), the strings `run` and `negative_control`, and the enum `when` (`before_merge`, `after_merge`, `default_branch`, defaulted `before_merge`).
+A document holding them is an ordinary document: the role its name gave it (`verification`, `plan`) says which blocks a reader expects, and nothing refuses a `check` block in another document.
+
+A `block[]` attribute points at blocks; the shipped ones are a plan task's `serves` and `needs` and a check's `serves`.
 Its value is the empty string (no pointers) or canonical block references joined by exactly one space, none leading or trailing, no other whitespace and none repeated (`pmdoc.ParseBlockPointerValue`, and the renderer joins them with one space);
 anything else is refused, never normalised.
 A canonical reference is one `text.FormatBlockRef` writes back byte for byte (`text.CanonicalBlockRef`):
@@ -1809,10 +1828,13 @@ not a list item or a table's row or cell); absent or empty, it points at any blo
 Its default is absent or `[]`.
 
 Three rules enforce `targets`.
-An agent's or API write is refused when a pointer it introduces names an existing block of a type the attribute does not allow (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
+An agent's or API write is refused when a pointer it introduces names a block the attribute may not name (`pmdoc.CheckBlockPointers`, called by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
 a pointer is introduced when the tree before the write holds no pointer with the same typed block id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped into a type declaring the attribute, whatever the type before declared under that name), and every pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a rebuild whose latest version does not read back).
-`refs.BlockTypes` reads each target's type as the block index will hold it:
-a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.PlanBlocks` takes it), any other from its current `document_blocks` rows (one query for all of a write's introduced pointers), and a target no block holds is accepted.
+`refs.BlockTargets` reads each target as the block index will hold it, with the writing document's own issue and that issue's ancestors (`refs.IssueAncestors`, the server's one recursive `child_of` walk, bounded by the same depth cap as every other issue walk):
+a target in the written document from the blocks the write's render leaves (the first holder of a repeated id, as `refs.PlanBlocks` takes it), any other from its current `document_blocks` rows, each with its document and that document's issue (one query for all of a write's introduced pointers).
+Neither the writing document's reference key nor its issue is read from its `artifacts` row, which a transaction creating the document has only queued and no read of its own can see:
+`docs.refuseBlockPointers` hands `BlockTargets` the key the ledger holds for that row (`docs.documentRefKey`), and the issue is the owner that key names, a reference key being its owner's key and the document's slug - a project's or a session's document lands in no issue.
+The write is refused when the pointer names a block no document holds, a block of a type the attribute's targets do not allow, a block of an issue that is neither the writing document's own issue nor an ancestor of it, a block of another document where a project holds the writing document and no issue does, or a block of another document under `needs`, which orders the tasks of one plan and so points only inside its own document.
 The refusal is `400 INVALID_OP` on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other;
 a pointer the write leaves unchanged is never refused.
 A browser's write and the block-index reconciliation are never refused, and store the pointer as any other.
@@ -2105,7 +2127,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is;
   not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits;
   a closed issue refuses it, `409 ISSUE_CLOSED`).
-  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`:
+  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `refs.IssueRepoLateral`:
   the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null.
   The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue;
   a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default.
@@ -2236,6 +2258,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A's markdown is compared as it was stored, so a renderer change between A and N leaves N a change, as N's diff against A shows, and a version whose decision blocks differ from A's is the answer carry's alone to judge.
   The restore writes the review, the event and the request's answer the answer carry writes, with `reason` `Carried forward from the approval of version <A>: this version's text is that version's, unchanged.`, whose opening is the daemon's `intake.CarriedApprovalReasonPrefix`, so the restored approval queues no parked root and reopens a design gate as a carried approval does;
   the write that restores supersedes no approval, so its advice carries no `superseded_approval`.
+  A carried review records the `kind` of the review it carries, since it is that review's approval it follows: the newest review of a `plan.md` is the plan review that approved A, so a restored plan version reads `kind` `plan_review` and its chip still says "Approved by plan review", never a person's approval in the restoring session's name.
 
 - Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id` and `seq`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it);
   `at` is the review's `created_at`, which its event shares, and `seq` that event's sequence on the document's owner, absent for a review recorded before migration 0120 and on every read the release before it serves during a rollout or a rollback, so a missing `seq` does not prove an older review:
@@ -4471,9 +4494,10 @@ a pod whose dial or `LISTEN` failed waits the bound out, warns and serves anyway
 Once that `LISTEN` is in place the boot takes **one more whole-namespace load** before `net.Listen`, so the subscription exists before the read whose result it is meant to invalidate:
 Postgres delivers nothing to a session for a `NOTIFY` committed before that session's `LISTEN`, so without it a retag a peer served while this pod was reading the namespace would be lost here until the five-minute reload.
 A failed catch-up warns and the boot carries on, and the timeout branch takes none, there being no subscription to order a read against).
+That whole order — the first policy load, the reread listener, the wait on its first `LISTEN`, the catch-up load, then the bind — is `boot` in `cmd/broker/boot.go`, which `main` calls with a `brokerBoot` whose every collaborator is a function field, so `cmd/broker/ordering_test.go` drives each ordering against collaborators of its own, and each one goes red on its own one-line revert (the catch-up row needs a real Postgres and a real `LISTEN`, the race it pins being one Postgres itself decides, and both boot rows bind `127.0.0.1:0`).
 It runs on a context derived with `context.WithoutCancel` from the signal's, not on the signal's own, and so does the five-minute policy reload:
 a pod is sent requests for the whole of its drain, so a listener and a reload stopped at `SIGTERM` would leave the one pod the load balancer is still choosing serving the tags it read before the retag, with no backstop either.
-Both end after `srv.Shutdown` returns, where `st.Close` then releases the store.
+Both end after `srv.Shutdown` returns, where `st.Close` then releases the store; that order is `stop` in the same file, driven through a `brokerStop` of function fields for the same reason.
 The listener drops what carries its own sender id, and calls `Current.RefreshOne` under `refreshTimeout` (30 s) on the listener's one goroutine.
 It dials `store.Store.Listener`: a one-connection pool opened from `s.Pool.Config()` (so `BeforeConnect`'s RDS IAM minter still mints a token per redial) and hijacked, which costs one Postgres connection per pod outside `pool_max_conns`, held for the life of the process since a `LISTEN` ends when a pooled connection is recycled, and needs a session-mode path to Postgres, never a transaction pooler.
 A notification sent while a pod is redialing is lost and nothing is caught up (`onConnected`), deliberately:
@@ -4829,7 +4853,7 @@ turns on best-effort wake notifications to the requesting session through Envoy'
 an approval mints its credential for this long, and each refresh of its device login moves its expiry to this long from then;
 past it the machine logs in again, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60
 — `requests.Sweeper`'s tick interval, the poller's replacement, and also `enroll.ServingClock`'s beat interval, a gap of more than three beats counting as no broker serving;
-`config.Load` refuses `2*BROKER_LEASE_SECONDS <= 9*BROKER_SWEEP_SECONDS`, since a live session renews with at least two thirds of its lease left and a lease that ran out inside a three-sweep gap would be ended rather than given back), `BROKER_DRAIN_SECONDS` (default 5, min 0, max 120
+`config.Load` refuses a lease that cannot outlive a three-sweep gap plus the retries its renewer then takes to renew, walking both renewers' own schedules (`internal/broker/leasetime`, a stdlib-only leaf both client binaries can import, whose steps the renewers themselves call) and naming the shortest lease that survives: 91 s at a 1 s or a 5 s sweep, 105 s at 10, 225 s at 30 and 360 s at 60, counting each renewal the outage refuses as failing wherever it costs the renewer most, from at once to the 30-second client timeout, since a proxy that gives up or a terminating pod that resets ends one between the two; which of the two renewers is the stricter changes with the sweep, the default 900 s passes at all of them, and a deployment below its sweep's floor raises the lease before it rolls), `BROKER_DRAIN_SECONDS` (default 5, min 0, max 120
 — how long a stopping process goes on serving while `/healthz` answers 503;
 it is configuration rather than a constant because the right value is the cluster's EndpointSlice propagation time, which lives in the deployment's own repository, and 0 is for a local run), and `BROKER_TRUSTED_PROXY_HEADER` (optional;
 names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate limiters' per-address buckets trust for the caller's real address (`clientAddress`)
@@ -4860,7 +4884,7 @@ the AWS config is loaded only for the AWS store or an RDS-form database URL), an
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a `BROKER_PUBLIC_URL` on port 0.
 The broker takes no flags, and refuses any flag it is given; its one argument is the subcommand `end-sessions <login>` (above), and anything else is a usage line and exit 2.
 
-`cmd/broker`'s stop is a drain and then a shutdown, and it logs the whole budget at boot, before anything else:
+`cmd/broker`'s stop is a drain and then a shutdown (`stop`, `cmd/broker/boot.go`), and it logs the whole budget at boot, before anything else:
 `broker stop budget drain=<BROKER_DRAIN_SECONDS> shutdown=60s total=<their sum>` (`wholeSeconds`, whole seconds because its reader is a deployment's `terminationGracePeriodSeconds`).
 That line and the operate page stand in for the guard this repository cannot write, the Deployment being another repository's.
 On SIGTERM it logs `broker draining`, sets the atomic flag `api.Deps.Draining` reports, and goes on serving:
@@ -4911,13 +4935,13 @@ a deployment's daemon registering the pods it starts is not a caller that relays
 `renewAuth` alone adds `ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment.
 A store that cannot answer while authenticating is a 503 naming it.
 Every 500 is logged with its cause (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`), non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over every caller at once (the per-address bucket, which is `RereadLimitFor` of the shared bucket this process mounts
-— burst `DefaultRereadBurst` (30) and one back every `2 ×` that bucket's `Every` — and `DefaultRereadOverallLimit`, burst 10 and one back every second
-— under the GCP store `GCPRereadOverallLimit`, burst 10 and one back every 4 s, which `cmd/broker` passes as `Deps.RereadOverallLimit` — since each reread holds the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a reload;
+— burst `DefaultRereadBurst` (30) and one back every `2 ×` that bucket's `Every` — and the shared bucket `api.RereadOverallFor` derives, burst 10 and one back every `N² × 250 ms` on the default store, which is one a second at `MinReplicas` (2) and is what `DefaultRereadOverallLimit` holds
+— under the GCP store the budget is `GCPRereadFleetBudget` and the same arithmetic gives one back every 4 s at two pods (`GCPRereadOverallLimit`), the store `cmd/broker` picks the budget from and hands to `api.NewRereadRate` as `Deps.RereadRate` — since each reread holds the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a reload;
 a reread spends a token from either bucket only when both allow it (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the shared one and a reread the shared one refuses spends none of its address's;
 `429 RATE_LIMITED` with the refusing limit's `Retry-After`:
-1 s for the shared bucket, 4 s for the GCP one, and the address's own is twice whichever of those the process mounted
-— 2 s on the default store, 8 s under Secret Manager).
-The two shared buckets' **rate** is the fleet's whole store budget divided by the replica count **squared**, because one accepted reread costs the store one read per pod
+1 s for the shared bucket at two pods, 4 s for the GCP one, and the address's own is twice whichever of those the process mounted
+— 2 s on the default store, 8 s under Secret Manager, each following the rate its bucket runs at now rather than a constant).
+The two shared buckets' **rate** is the fleet's whole store budget divided by the replica count **squared**, which each pod works out for itself at each beat, because one accepted reread costs the store one read per pod
 — the pod that served it and every peer the fan-out tells
 — so the fleet spends replicas × rate × replicas (default:
 2 pods × 1 reread/s × 2 store reads = the 4 store reads a second one pod alone was allowed, which is the policy writer lock's budget and not a provider's, since AWS serves `DescribeSecret` at 40,000 a second;
@@ -4934,15 +4958,16 @@ That floor is four, measured against the live row with an overlay changing only 
 — so ten carries six tokens of headroom and that row is the burst's pin.
 The momentary cost is two quantities, never one:
 a burst lets the fleet accept `replicas × burst` rereads and each costs a store read on every pod, so the fleet's momentary store cost is `replicas² × burst` — 40, 90 and 160 store reads at two, three and four pods, twice that in metadata reads under Secret Manager (80, 180, 320), which against the cited 600 a minute is 8, 18 and 32 seconds of quota, each a transient spent once and re-bounded by the rate, which is the half of the pair that protects the provider.
-That cost grows with the square of the replica count while the rate is already divided by it, so there is a count beyond which this shape stops making sense;
-nothing in the code bounds it, because the fleet is two.
+That cost grows with the square of the replica count while the rate is already divided by it, so `MaxSupportedReplicas` (4) is the largest count this sizing was chosen for: the two pods the Deployment runs plus what a clean roll of them counts.
+Above it the rates are derived the same way and `RereadRate.SetReplicas` logs a WARN, `broker reread rate above the replica count this sizing supports`, with `replicas`, `every` and `store_reads_at_burst`.
 `RereadLimitFor` derives the per-address rate from the shared bucket **this process mounts**, rather than from a constant:
 `cmd/broker` mounts the GCP bucket only under `gcp-secret-manager`, so one constant derived from the Google figure tightened every AWS deployment fourfold for a quota it never touches.
 Half that bucket's refill means at least two addresses on either store to hold the fleet's budget at zero
 — the route takes no credential, and `AllowBothAt` charges a refusal to neither bucket, so a caller that merely keeps succeeding at the shared refill starves the fan-out for everyone.
 That is a weakening on the default store, which used to take eight;
 the eight was never designed, and buying it back costs every bulk writer there a fourfold tightening for the difference between two attackers and eight on a route with no credential.
-The two shared rates are re-derived when the replica count changes (at four pods: 4 s and 16 s), and the per-address one follows them without being touched.
+Each pod re-derives both shared rates itself from the `broker_serving` rows its serving clock counts at the end of each beat (`enroll.ServingClock.OnReplicas` → `api.RereadRate.SetReplicas`, a count below `MinReplicas` counting as `MinReplicas`): 1 s and 4 s at two pods, 2.25 s and 9 s at three, 4 s and 16 s at four, with the per-address one following them without being touched, both buckets keeping the tokens they hold (`ratelimit.Keyed.SetRatesAt`), and one INFO line, `broker reread rate` with `replicas`, `every` and `burst`, at the first beat and at each change and none in between.
+A pod uses `MinReplicas` until its first beat, and a rolling deploy counts one pod more than the Deployment runs — the surge pod beats beside the pod it replaces, and a stopped pod's row counts for three more sweeps — so a roll of two pods serves at the three-pod rate for the length of the roll, and at the four-pod rate while a stopped pod's row is still live beside the surge pod and its replacement.
 A reread `reread.Listener` drives spends no token at all, since the pod that served the original call already paid for it.
 Every other limiter is one process's and unchanged, so a fleet of N pods allows N times each:
 the per-address reread bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`.
@@ -5256,6 +5281,7 @@ A beat that finds a longer gap takes an advisory lock, reads the latest row agai
 a second broker that waited on the lock finds no gap, so two brokers beating at once give it back once.
 Until then such a lease stays live, so the sweeper never ends it.
 A beat deletes rows more than an hour behind the latest.
+Last in the same transaction, after it has written its own row, a beat counts the rows still within their own threshold and hands that count to `OnReplicas` once the transaction commits, which is where this process's reread rates come from (above); a beat that fails hands over nothing, so the last count stands.
 A revoked enrollment, and one whose lease ran out while a broker was serving, stays ended, and a renewal with another pod's or service account's token is still refused 403 `POD_IDENTITY_MISMATCH` and moves the lease not at all.
 Its limits: a broker that runs but pods cannot reach (ingress, DNS, a NetworkPolicy, a stale `AGENT_SECRETS_URL`) still counts as serving, so leases still end then;
 grant lifetimes and pending requests still run on wall-clock time;

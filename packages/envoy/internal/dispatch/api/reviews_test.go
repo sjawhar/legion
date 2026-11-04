@@ -253,7 +253,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	// "Approve spec.md (version 9999999999)?", the question at the longest version a request can
 	// reach, and the space after it leave the rest of the ask cap for the summary; each "é" is one
 	// UTF-16 unit and two bytes, and the padding around a summary is not part of it.
-	room := maxAskQuestion16 - len16(docs.ApprovalQuestion("spec.md", maxApprovalVersion, "")) - 1
+	room := maxAskQuestion16 - len16(docs.ApprovalQuestion(approvalOf("spec.md", maxApprovalVersion), "")) - 1
 	over := strings.Repeat("é", room+1)
 	overCap := "summary is 1 characters over the " + strconv.Itoa(room) + "-character limit (" + strconv.Itoa(room+1) + "/" + strconv.Itoa(room) + ")"
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), overCap) {
@@ -277,7 +277,7 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	// reading: it is refused, and the card keeps its question and its revision.
 	other := "A different summary."
 	reworded := request(issue.PrimaryArtifactID, &other)
-	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary would rewrite the card they are reading") {
+	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary or another document would rewrite the card they are reading") {
 		t.Fatalf("a different summary while the request waits on the human: status=%d body=%s", reworded.Code, reworded.Body.String())
 	}
 	if shown := readAskDetail(t, handler, opened.ID); shown.Question != opened.Question || shown.EditedAt != nil || shown.WaitingOn != "human" {
@@ -307,6 +307,11 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	}
 }
 
+// approvalOf is the one-document list an approval request names, for the question tests.
+func approvalOf(name string, version int) []model.AskApprovalDocument {
+	return []model.AskApprovalDocument{{ArtifactID: "artifact-1", Name: name, Version: version, RequestedVersion: version}}
+}
+
 // A version move rebuilds an approval request's question at the document's new version without
 // asking again, so the summary is budgeted against the longest version a request can reach: the
 // longest summary the route accepts keeps the question within the ask cap however many digits the
@@ -316,22 +321,22 @@ func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
 		for _, requested := range []int{1, 9, 12345} {
 			limit := 0
 			for length := 1; length <= maxAskQuestion16; length++ {
-				if _, err := approvalQuestion(name, requested, strings.Repeat("é", length)); err != nil {
+				if _, err := approvalQuestion(approvalOf(name, requested), strings.Repeat("é", length)); err != nil {
 					break
 				}
 				limit = length
 			}
 			summary := strings.Repeat("é", limit)
-			if _, err := approvalQuestion(name, requested, summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
+			if _, err := approvalQuestion(approvalOf(name, requested), summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
 				t.Fatalf("%s at version %d: one past the %d-unit limit = %v, want CAP_EXCEEDED", name, requested, limit, err)
 			}
 			// A move to the first version of each digit count, then to the longest of all.
 			for boundary := 9; boundary < maxApprovalVersion; boundary = boundary*10 + 9 {
-				if length := len16(docs.ApprovalQuestion(name, boundary+1, summary)); length > maxAskQuestion16 {
+				if length := len16(docs.ApprovalQuestion(approvalOf(name, boundary+1), summary)); length > maxAskQuestion16 {
 					t.Fatalf("%s requested at version %d, moved to %d: question is %d units, past the %d cap", name, requested, boundary+1, length, maxAskQuestion16)
 				}
 			}
-			if length := len16(docs.ApprovalQuestion(name, maxApprovalVersion, summary)); length != maxAskQuestion16 {
+			if length := len16(docs.ApprovalQuestion(approvalOf(name, maxApprovalVersion), summary)); length != maxAskQuestion16 {
 				t.Fatalf("%s requested at version %d, moved to the longest version: question is %d units, want exactly the %d cap", name, requested, length, maxAskQuestion16)
 			}
 		}
@@ -583,7 +588,7 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 	// fabricated: a route sends them in its write phase instead (docs.Ledger.Commit).
 	reason := "And name who runs the restore."
 	second, event, err := writeReviewInTx(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
-		model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
+		docs.ReviewKindPerson, model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
 	if err != nil {
 		t.Fatalf("write the delayed review: %v", err)
 	}
@@ -621,8 +626,8 @@ func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
 	}
 }
 
-// writeReviewInTx writes one review in tx through the statements every production review goes
-// through (docs.QueueReview), sent as a batch of their own (store.RunWrite) rather than in a
+// writeReviewInTx writes one review of kind in tx through the statements every production review
+// goes through (docs.QueueReview), sent as a batch of their own (store.RunWrite) rather than in a
 // route's write phase, for a test that holds a transaction of its own open. It returns the review
 // and its event as the batch left them; the caller commits tx and publishes the event.
 func writeReviewInTx(
@@ -631,7 +636,7 @@ func writeReviewInTx(
 	broker *events.Broker,
 	artifact model.Artifact,
 	version int,
-	state string,
+	state, kind string,
 	actor model.Actor,
 	reason *string,
 	askID *string,
@@ -639,7 +644,7 @@ func writeReviewInTx(
 	var review model.ArtifactReview
 	var event model.Event
 	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
-		return docs.QueueReview(b, broker, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, appended model.Event) {
+		return docs.QueueReview(b, broker, artifact, version, state, kind, actor, reason, askID, func(written model.ArtifactReview, appended model.Event) {
 			review, event = written, appended
 		})
 	}); err != nil {

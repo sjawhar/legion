@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askTransition is one way of closing or changing an ask's answer. Its writes are the
@@ -238,9 +237,13 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	})
-	// An approval ask's answer is a review of the document it names, pinned to the version its
-	// question named: the latest settled one, which every version write moves the request to, and
-	// the one the human reviewed (revision).
+	// An approval ask's answer is a review of every document it names, each pinned to the version
+	// its question named: that document's latest settled one, which every version write moves the
+	// request to, and the one the human reviewed (revision). A request naming a spec and its
+	// issue's Verification document writes one review on each. The reviews are queued on the
+	// ledger in the order the request names the documents (queueApprovalReviews), as the document
+	// header's review is, so the write phase writes the rows and appends their events in that
+	// order and this route publishes them.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, ask model.Ask) ([]*model.Event, error) {
 		if ask.Kind != "approval" {
 			return nil, nil
@@ -253,15 +256,11 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		event := new(model.Event)
-		if err := ledger.Queue(func(b *store.WriteBatch) error {
-			return docs.QueueReview(b, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID), func(_ model.ArtifactReview, written model.Event) {
-				*event = written
-			})
-		}); err != nil {
+		_, reviewEvents, err := s.queueApprovalReviews(ctx, tx, ledger, artifact, ask.Approval.Documents, state, actor, reason, new(ask.ID))
+		if err != nil {
 			return nil, err
 		}
-		return []*model.Event{event}, nil
+		return reviewEvents, nil
 	}
 	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, transition)
 	if err != nil {
