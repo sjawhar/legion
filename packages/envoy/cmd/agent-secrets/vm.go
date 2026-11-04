@@ -278,10 +278,11 @@ func (c *client) CreateVMEnrollment(ctx context.Context, signer proofSigner, run
 	return result.EnrollmentID, status == http.StatusOK, nil
 }
 
-// vmSessionKey is the session key in dir: the one already there, so re-running enroll on a dir
+// enrollSessionKey is the session key in dir: the one already there, so re-running enroll on a dir
 // keeps the key whose enrollment the broker holds live, or a new one written exactly as keygen
-// writes it (PKCS8 PEM, 0600, in a 0700 directory, renamed into place).
-func vmSessionKey(dir string) (*ecdsa.PrivateKey, error) {
+// writes it (PKCS8 PEM, 0600, in a 0700 directory, renamed into place). Both self-enrolling
+// modes, a VM's and a pod's, write their key dir this way.
+func enrollSessionKey(dir string) (*ecdsa.PrivateKey, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -303,15 +304,16 @@ func vmSessionKey(dir string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// enrollLockFile is the lock a VM's enrollment is serialized on, in the key dir it writes. The
+// enrollLockFile is the lock a self-enrollment is serialized on, in the key dir it writes. The
 // lane's credential helper re-runs `enroll --vm` over one directory whenever it needs a secret,
 // so two runs can overlap; without the lock the second would log in again (moving the launcher
 // credential the first is still enrolling under) and the two would race over key.pem and
-// enrollment.
+// enrollment. A pod's `enroll --pod` takes the same lock over the same files.
 const enrollLockFile = "enroll.lock"
 
 // errNoEnrollLock is lockEnrollDir's answer on a platform with no flock, where no Compute Engine
-// VM runs either: asking for --vm there is a usage error, not a failure of the machine.
+// VM runs either: asking for --vm there is a usage error, not a failure of the machine. The text
+// is a VM's; `enroll --pod` renders its own for the same sentinel (pod.go).
 var errNoEnrollLock = errors.New("enroll --vm runs only on a Linux VM: this platform has no flock to serialize concurrent enrollments on")
 
 // cmdEnrollVM implements "enroll --vm --service <name> [--audience <aud>] [--out <dir>]": the
@@ -383,7 +385,7 @@ func enrolVM(service, audience, out, base, prefix string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, vmRefusal(prefix, "log in", identity, base, err))
 		return 1
 	}
-	key, err := vmSessionKey(out)
+	key, err := enrollSessionKey(out)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s --vm: %v\n", prefix, err)
 		return 1

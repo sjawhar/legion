@@ -21,6 +21,7 @@
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets enroll --vm --service <name> [--audience <aud>] [--out <dir>]
+//	agent-secrets enroll --pod --service <name> [--pod-token-file <file>] [--out <dir>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
@@ -50,20 +51,21 @@
 // broker that the broker's own answer carries as approve_url. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
 // session (buildChildEnv). A machine session enrolls automatically through the helper's own
-// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// enroll loop, and a Legion pod's enrollment is its daemon's job — this CLI has no direct
 // enrollment path for either; on a devbox only a session key a launcher holds (a box's) enrolls
 // through it, and only via --helper (the shared broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key). A Google Cloud VM is the one runtime that enrolls
-// itself (`enroll --vm`, vm.go): it holds no credential a person installed, and the identity
-// token its own metadata server signs is what the broker trusts instead, so it needs no helper,
-// no launcher and no approval. The secret forms read AWS_PROFILE (or --profile) for
-// the person's AWS sign-in against an AWS broker, or their Google sign-in (their Application
-// Default Credentials, or their gcloud login) against a GCP one, and need no session identity at
-// all. The machine and grant forms act under this machine's login: the helper signs each call
-// with its launcher credential (sign-launcher) for a process it can show is outside every
-// registered session's process tree, the operator's own shell, and only for the broker's four
-// operator routes.
+// that hold a launcher's proof-signing key). Two runtimes enrol themselves: a Google Cloud VM
+// (`enroll --vm`, vm.go) and a Kubernetes pod an operator launches by hand (`enroll --pod`,
+// pod.go). Neither holds a credential a person installed; the identity token the VM's metadata
+// server signs, and the projected service-account token the pod's kubelet mounts, are what the
+// broker trusts instead, so each needs no helper, no launcher and no approval. The secret forms
+// read AWS_PROFILE (or --profile) for the person's AWS sign-in against an AWS broker, or their
+// Google sign-in (their Application Default Credentials, or their gcloud login) against a GCP
+// one, and need no session identity at all. The machine and grant forms act under this machine's
+// login: the helper signs each call with its launcher credential (sign-launcher) for a process
+// it can show is outside every registered session's process tree, the operator's own shell, and
+// only for the broker's four operator routes.
 package main
 
 import (
@@ -116,8 +118,8 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --vm --service <name> [--audience <aud>] [--out <dir>]",
-		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --vm, enroll this Google Cloud VM with the identity token its own metadata server\nsigns, for the broker-side service --service names. Either writes the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on stdout. --vm also writes key.pem\nthere, reusing the one already in --out: a re-run keeps that key's enrollment and renews its\nlease, so a VM that re-runs enroll needs no renewer, and runs on one directory take turns."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --vm --service <name> [--audience <aud>] [--out <dir>] | --pod --service <name> [--pod-token-file <file>] [--out <dir>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --vm or --pod, enroll this Google Cloud VM or this Kubernetes pod itself, for the\nbroker-side service --service names: a VM proves who it is with the identity token its own\nmetadata server signs, and a pod with the projected service-account token its own kubelet\nmounts (--pod-token-file, default " + defaultPodTokenFile + ").\nEach writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout. --vm and --pod also write key.pem there, reusing the one already in --out: a re-run\nkeeps that key's enrollment and renews its lease, so a VM that re-runs enroll needs no\nrenewer, and runs on one directory take turns. A pod keeps its own lease alive with\n`agent-secrets renew --pod-token-file <file>`."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",

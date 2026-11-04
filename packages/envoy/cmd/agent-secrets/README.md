@@ -71,6 +71,24 @@ it asks the metadata server for a fresh token before every renewal, since a VM e
 renewal must carry one. `GCE_METADATA_HOST` replaces the metadata server's host. Every other
 form then reads the key dir as a box's or a pod's.
 
+A Kubernetes pod an operator launches by hand enrols itself the same way, with the projected
+ServiceAccount token its own kubelet mounts in place of the metadata server's: its ServiceAccount
+must be one the broker's service logins name, and the token must be the pod's own projection, not
+one `kubectl create token` minted, since a login bound to no pod enrols nothing.
+
+```sh
+export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
+agent-secrets enroll --pod --service k8s-session
+agent-secrets renew --pod-token-file /var/run/legion/agent-secrets-token/token &
+agent-secrets DEMO_API_KEY --reason "Run the session" -- ./session.sh
+```
+
+`enroll --pod` reads `/var/run/legion/agent-secrets-token/token` unless `--pod-token-file` names
+another file, takes the pod's UID from that token's own `kubernetes.io/pod/uid` claim as the
+enrollment's runtime id, and writes the same two files `enroll --vm` writes. A pod holds its lease
+with `renew --pod-token-file <file>`, which re-reads the file before every renewal because the
+kubelet rotates the token in place.
+
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 
