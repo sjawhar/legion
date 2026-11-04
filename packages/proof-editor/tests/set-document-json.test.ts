@@ -36,9 +36,11 @@ test("setDocumentJSON draws a tree the editor never parses, a picture's own attr
 });
 
 test("setDocumentJSON keeps a mark the tree carries over its text", async () => {
-  const tree = marked(await treeOf("The plan ships behind a canary today."), "The plan ships behind a canary today.", [
-    { attrs: { by: "user:alice", id: "comment-1" }, type: "proofComment" },
-  ]);
+  const tree = marked(
+    await treeOf("The plan ships behind a canary today."),
+    "The plan ships behind a canary today.",
+    [{ attrs: { by: "user:alice", id: "comment-1" }, type: "proofComment" }]
+  );
   await withMarksEditor(
     "An older document.",
     ({ handle, view }) => {
@@ -56,9 +58,9 @@ test("setDocumentJSON refuses a type this editor has no schema for, rather than 
   await withMarksEditor(
     "An older document.",
     ({ handle, view }) => {
-      expect(() =>
-        handle.setDocumentJSON({ content: [{ type: "sparkle" }], type: "doc" })
-      ).toThrow('this editor has no node type "sparkle"');
+      expect(() => handle.setDocumentJSON({ content: [{ type: "sparkle" }], type: "doc" })).toThrow(
+        'this editor has no node type "sparkle"'
+      );
       expect(() =>
         handle.setDocumentJSON({
           content: [
