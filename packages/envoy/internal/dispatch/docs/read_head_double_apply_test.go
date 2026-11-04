@@ -16,11 +16,12 @@ import (
 // carries. Applying a committed update onto a document that already holds it changes nothing, so
 // the read answers the same document either way.
 //
-// ygo makes both halves of that a no-op. A struct whose end is at or below the clock the document
-// already holds for its client is skipped rather than integrated again (sjawhar/ygo
-// v1.55.1-sami.1, crdt/update.go:914-924, integrateGroup), and an item the document has already
-// deleted is passed over by the delete cascade (crdt/item.go:500-505, Item.delete), so the update's
-// delete set takes nothing away a second time.
+// ygo makes that a no-op. A struct whose end is at or below the clock the document already holds
+// for its client is skipped rather than integrated again (sjawhar/ygo v1.55.1-sami.1,
+// crdt/update.go:914-924, integrateGroup), and an item the document has already deleted is passed
+// over by the delete cascade (crdt/item.go:500-505, Item.delete). The test guards the first skip
+// alone: with update.go's skip defeated the second apply fails during integration, while with
+// item.go's skip defeated it still passes, so it does not show that the delete-side skip is needed.
 //
 // The test applies one committed update - inserts, a deletion and a mark - once and twice onto
 // copies of the same stored document and compares the rendered document and the state vector.

@@ -65,7 +65,7 @@ const (
 	scheduleRoom = "schedule-doc"
 	// scheduleFirstClient is the first awareness client id a schedule's readers announce. The
 	// awareness of each room is its own client (scheduleRoomClient), far from these, since ygo
-	// refuses a removal of the client an awareness was built for (awareness/awareness.go:695).
+	// refuses a removal of the client an awareness was built for (awareness/awareness.go:692-704).
 	scheduleFirstClient uint64 = 101
 	// scheduleRoomClient is the client id the room's own awareness stands under on process A; B's
 	// is the next one.

@@ -1745,7 +1745,7 @@ func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testin
 		t.Fatalf("apply the browser's margin note to the room: %v", err)
 	}
 	if class := classes.latest(t, "the browser's margin note", func(origin any) bool { return origin == "peer" }); class.contentChanged {
-		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering it kept from before the margin write's publish")
+		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering that was not the room's")
 	}
 }
 
