@@ -13,6 +13,13 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { nextFallbackModel } from "@legion/pi-shared/fallback-chain";
+import {
+  fallbackCooldownLimits,
+  LEGION_FALLBACK_ENTRY,
+  recordedFallbackCooldown,
+  restoreFallbackCooldown,
+} from "@legion/pi-shared/fallback-cooldown";
 import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -43,6 +50,7 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
+import { createModelFallback } from "../src/model-fallback";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
@@ -149,6 +157,22 @@ export default function legionExtension(pi: PiApi): void {
     const role = claimSession.capability(context.sessionManager.getSessionId())?.role;
     return role !== undefined && role !== "architect";
   };
+  // Every Legion role falls back down Oh My Pi's model chain when a provider's content filter
+  // refuses its turn (INFRA-956 R1), the architect and the controller included, so the model
+  // fallback gates on the session holding a Legion claim of any kind rather than on
+  // `phaseWorkerSession`, which excludes an architect and serves the phase reminder alone.
+  const legionClaimSession = (context: SessionContext): boolean => {
+    const sessionID = context.sessionManager.getSessionId();
+    return (
+      claimSession.capability(sessionID) !== undefined ||
+      controllerSession.isClaimedSession(sessionID)
+    );
+  };
+  // A `task` subagent walks its own chain and must not move the pane's model, and a session with
+  // no claim is nobody's Legion role; the subagent check is the same one session_start asks, so
+  // it is settled by the time any of these hooks runs.
+  const modelFallbackSession = async (context: SessionContext): Promise<boolean> =>
+    !(await checkSubagentSession(context)) && legionClaimSession(context);
   // The Envoy listener the architect notice goes to, built once and only when a notice is due:
   // this entry reaches no listener of its own otherwise. Envoy off for the session leaves it
   // undefined, and the reminder keeps coming without a notice.
@@ -182,6 +206,19 @@ export default function legionExtension(pi: PiApi): void {
     },
     project: process.env.LEGION_PROJECT,
     limits: stallLimits(process.env, logger),
+    log: logger,
+  });
+
+  // The model fallback (src/model-fallback.ts) on the cooldown machine
+  // (@legion/pi-shared/fallback-cooldown): the two waits come from this worker's own environment
+  // with the specification's defaults, as the stall limits do, and the state is kept in the
+  // transcript so a relaunched worker comes back with its due time and its doubling levels.
+  const modelFallback = createModelFallback({
+    setModel: async (model) => (await pi.setModel?.(model)) === true,
+    saveState: (state) => pi.appendEntry(LEGION_FALLBACK_ENTRY, recordedFallbackCooldown(state)),
+    now: () => Date.now(),
+    limits: fallbackCooldownLimits(process.env, logger),
+    nextModel: nextFallbackModel,
     log: logger,
   });
 
@@ -251,10 +288,14 @@ export default function legionExtension(pi: PiApi): void {
     // The session this pane's claim is on, for the reminder's timers and its record check, which
     // run outside every hook.
     paneContext = context;
+    const branch = context.sessionManager.getBranch?.() ?? [];
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open. The
     // transcript is this host's store for that record; the runner is handed the record alone.
-    phaseReminder.restore(restorePhaseStallEntry(context.sessionManager.getBranch?.() ?? []));
+    phaseReminder.restore(restorePhaseStallEntry(branch));
+    // The same for a session that fell back down the model chain before the relaunch: it comes
+    // back with the due time of its return and how often each model's wait has doubled.
+    modelFallback.restore(restoreFallbackCooldown(branch));
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
@@ -323,13 +364,34 @@ export default function legionExtension(pi: PiApi): void {
   pi.on("session_shutdown", async (_event, context) => {
     clearStartupTurn(context.sessionManager.getSessionId());
   });
-  // The recovery kept the saved copy in the process's live context, so once it is sent again
-  // every later request of this process would carry it twice: the first copy, where the history
-  // put it, is the one each request keeps.
-  pi.on("context", async (event) => {
+  // Every provider request of this session passes here, so this is where the session goes back
+  // on the model it fell back from: the host checks its own restore only when a new prompt
+  // arrives, which a long unattended tool loop never reaches (src/model-fallback.ts).
+  //
+  // The rest of the handler is the recreated-workspace notice: the recovery kept the saved copy
+  // in the process's live context, so once it is sent again every later request of this process
+  // would carry it twice: the first copy, where the history put it, is the one each request
+  // keeps.
+  pi.on("context", async (event, context) => {
+    if (await modelFallbackSession(context)) await modelFallback.maybeRestore(context);
     if (resentNoticeId === undefined) return undefined;
     const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages, resentNoticeId);
     return messages === undefined ? undefined : { messages };
+  });
+
+  // The host walked this session's own fallback chain: the plugin owns the return, since the
+  // host's restore never comes for a refusal it pinned (dispatch://INFRA-956, the plan's answer
+  // 1). A settled turn then says whether the turn that earned it was a refusal.
+  pi.on("retry_fallback_applied", async (event, context) => {
+    if (!(await modelFallbackSession(context))) return;
+    modelFallback.armFromEvent(event, context);
+  });
+
+  // A turn that has settled: a content filter the host did not walk is walked here, a clean turn
+  // puts the model's wait back to the base, and any other provider failure leaves it alone.
+  pi.on("agent_end", async (event, context) => {
+    if (!(await modelFallbackSession(context))) return;
+    await modelFallback.turnSettled(event, context);
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree

@@ -17,6 +17,7 @@ import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import type { LegionCapabilityRow } from "@legion/contracts/legion-api";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
+import { LEGION_FALLBACK_ENTRY } from "@legion/pi-shared/fallback-cooldown";
 import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
@@ -35,6 +36,7 @@ import {
 } from "@legion/pi-shared/phase-stall";
 import type {
   CommandContext,
+  HostModel,
   PiApi,
   RegisteredTool,
   SessionContext,
@@ -166,6 +168,7 @@ type TestPi = {
   readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
   readonly setSessionName: PiApi["setSessionName"];
+  readonly setModel: PiApi["setModel"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: (
@@ -302,6 +305,28 @@ type AppendedEntry = {
  * process and a `/new` clears its title in place. `set` records each `pi.setSessionName` call. */
 type HostTitle = { name?: string; source?: "auto" | "user"; readonly set: string[] };
 
+/** The session's model as the pinned host holds it, for the model fallback
+ * (`src/model-fallback.ts`). `set` records each `pi.setModel` call; `answers` is what that call
+ * answers, false being a model this session holds no credential for; `current` is the selector
+ * the session runs now; `unresolvable` are the selectors `ctx.models.resolve` answers nothing
+ * for; `suppressed` are the ones the host itself holds suppressed; and `changes` are the
+ * `model_change` entries each accepted switch appended, as the host appends one with the
+ * ordinary role (`session/model-controls.ts:249-252` at the pinned tag). */
+type HostModels = {
+  readonly set: HostModel[];
+  answers: boolean;
+  current: string;
+  readonly unresolvable: Set<string>;
+  readonly suppressed: Set<string>;
+  readonly changes: unknown[];
+};
+
+/** A selector as the host resolves it. */
+function hostModel(selector: string): HostModel {
+  const [provider, id] = selector.split("/");
+  return { provider: provider ?? "", id: id ?? "" };
+}
+
 function createPi(
   options: {
     readonly bindEnvoy?: boolean;
@@ -322,6 +347,7 @@ function createPi(
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
   readonly title: HostTitle;
+  readonly models: HostModels;
   readonly pi: TestPi;
 } {
   const commands: RegisteredCommand[] = [];
@@ -333,6 +359,14 @@ function createPi(
   const sentUserMessages: string[] = [];
   const sentUserMessageOptions: unknown[] = [];
   const entries: AppendedEntry[] = [];
+  const models: HostModels = {
+    set: [],
+    answers: true,
+    current: "anthropic/claude-opus-5-5",
+    unresolvable: new Set(),
+    suppressed: new Set(),
+    changes: [],
+  };
   const title: HostTitle = { set: [] };
   const activeTools = ["read", "task", "wait"];
   const property = (): ZodNumberProperty => ({
@@ -379,6 +413,20 @@ function createPi(
       title.set.push(name);
       title.name = name;
       title.source = "user";
+    },
+    setModel: async (model) => {
+      models.set.push(model);
+      if (!models.answers) return false;
+      const selector = `${model.provider}/${model.id}`;
+      models.changes.push({
+        type: "model_change",
+        id: `model-change-${models.changes.length + 1}`,
+        model: selector,
+        role: "default",
+        resolvedModelIsFallback: false,
+      });
+      models.current = selector;
+      return true;
     },
     on: (eventName, handler) => {
       const eventHandlers = registeredHandlers.get(eventName);
@@ -427,6 +475,7 @@ function createPi(
     entries,
     activeTools,
     title,
+    models,
     pi,
   };
 }
@@ -616,6 +665,7 @@ interface ClaimPane {
   readonly sentMessages: SentMessage[];
   readonly sentMessageOptions: unknown[];
   readonly title: HostTitle;
+  readonly models: HostModels;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
   /** Runs `session_start` for the pane's session, as Oh My Pi does when the process starts. */
@@ -759,7 +809,24 @@ async function claimPane(options: {
   );
   const context: SessionContext = {
     ...base,
-    sessionManager: { ...base.sessionManager, getBranch: () => options.branch ?? [] },
+    sessionManager: {
+      ...base.sessionManager,
+      // What the session was resumed with, then the `model_change` every accepted `pi.setModel`
+      // appended, in the order the host's branch holds them.
+      getBranch: () => [...(options.branch ?? []), ...fixture.models.changes],
+    },
+    models: {
+      list: () => [],
+      current: () => hostModel(fixture.models.current),
+      resolve: (spec) => (fixture.models.unresolvable.has(spec) ? undefined : hostModel(spec)),
+    },
+    modelRegistry: {
+      // The chain walk reaches Oh My Pi's own modules, which resolve only inside it, so no test
+      // pane walks one; the lookup is here because the runner refuses a host without it.
+      find: () => undefined,
+      hasProvider: () => true,
+      isSelectorSuppressed: (selector) => fixture.models.suppressed.has(selector),
+    },
     cwd: workspace,
     setInterval: (callback) => {
       intervals.push(callback);
@@ -787,6 +854,7 @@ async function claimPane(options: {
     sentMessages: fixture.sentMessages,
     sentMessageOptions: fixture.sentMessageOptions,
     title: fixture.title,
+    models: fixture.models,
     handlers: fixture.handlers,
     context,
     start: async () => {
@@ -5397,5 +5465,95 @@ describe("the recreated-workspace notice", () => {
     expect(
       await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
     ).toEqual({ messages: [copy(earlier), copy(id), task] });
+  });
+});
+
+// The model fallback (src/model-fallback.ts) as the entry wires it: every Legion role gets it,
+// the architect included, the arming is persisted in the transcript and restored from it, and
+// the return happens in the `context` hook, which runs before every provider request.
+describe("the model fallback", () => {
+  const OPUS = "anthropic/claude-opus-5-5";
+  const SONNET = "anthropic/claude-sonnet-5";
+  /** The `model_change` Oh My Pi appends before it emits `retry_fallback_applied` for a walk of
+   * the session's own chain (`fallback-event.ts` in sjawhar/dotfiles). */
+  const walked = {
+    type: "model_change",
+    id: "mc-fallback",
+    model: SONNET,
+    role: "fallback",
+    resolvedModelIsFallback: true,
+  };
+  const armings = (pane: ClaimPane) =>
+    pane.entries
+      .filter((saved) => saved.customType === LEGION_FALLBACK_ENTRY)
+      .map((saved) => saved.data);
+
+  test("an architect's own session arms the return and takes it when the host stops suppressing", async () => {
+    const pane = await bootPane({ role: "architect", issue: "REPO-42", branch: [walked] });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("retry_fallback_applied")?.(
+      { from: OPUS, to: SONNET, role: "default" },
+      pane.context
+    );
+    expect(armings(pane)).toEqual([
+      {
+        arming: {
+          restoreTo: OPUS,
+          entryId: "mc-fallback",
+          dueAt: expect.any(Number),
+          cause: "other",
+        },
+        levels: {},
+      },
+    ]);
+
+    // The host still holds the model suppressed, which is what this arming waits on.
+    pane.models.suppressed.add(OPUS);
+    expect(await pane.handlers.get("context")?.({ messages: [] }, pane.context)).toBeUndefined();
+    expect(pane.models.set).toEqual([]);
+
+    pane.models.suppressed.delete(OPUS);
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    expect(armings(pane)[1]).toEqual({ levels: {} });
+  });
+
+  test("a relaunched worker takes the return its transcript records", async () => {
+    const recorded = {
+      type: "custom",
+      customType: LEGION_FALLBACK_ENTRY,
+      data: {
+        arming: { restoreTo: OPUS, entryId: "mc-fallback", dueAt: 1, cause: "refusal" },
+        levels: { [OPUS]: 3 },
+      },
+    };
+    const pane = await bootPane({
+      role: "implementer",
+      issue: "REPO-43",
+      branch: [walked, recorded],
+    });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+
+    expect(pane.models.set).toEqual([{ provider: "anthropic", id: "claude-opus-5-5" }]);
+    // The levels the record carried survive the return: the next refusal of that model waits on
+    // the one it left off at.
+    expect(armings(pane)).toEqual([{ levels: { [OPUS]: 3 } }]);
+  });
+
+  test("a session that holds no Legion claim moves no model", async () => {
+    const pane = await claimPane({ role: "implementer", issue: "REPO-43", branch: [walked] });
+    pane.models.current = SONNET;
+
+    await pane.handlers.get("retry_fallback_applied")?.(
+      { from: OPUS, to: SONNET, role: "default" },
+      pane.context
+    );
+    await pane.handlers.get("context")?.({ messages: [] }, pane.context);
+
+    expect(pane.entries).toEqual([]);
+    expect(pane.models.set).toEqual([]);
   });
 });

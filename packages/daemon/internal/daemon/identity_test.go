@@ -32,9 +32,10 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	if err := os.WriteFile(rolePromptPath(stateDir, token), []byte("implement\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The six below are the whole of Env only for a daemon holding none of the stall limits a
-	// launch is told beside them (stallLimitVariables): this test's daemon holds none.
-	for _, name := range stallLimitVariables {
+	// The six below are the whole of Env only for a daemon holding none of the passthrough
+	// variables a launch is told beside them (stallLimitVariables, refusalCooldownVariables):
+	// this test's daemon holds none.
+	for _, name := range slices.Concat(stallLimitVariables, refusalCooldownVariables) {
 		t.Setenv(name, "restored-by-cleanup")
 		os.Unsetenv(name)
 	}

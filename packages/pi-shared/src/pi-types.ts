@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { ExtensionAgentsApi } from "@oh-my-pi/pi-coding-agent";
 import type { Component } from "@oh-my-pi/pi-tui";
 
@@ -16,6 +17,22 @@ import type { Component } from "@oh-my-pi/pi-tui";
 export interface HostModel {
   readonly provider: string;
   readonly id: string;
+}
+
+/** The host's `ModelRegistry`, as far as this package reads it: the two members a retry fallback
+ * chain's resolution needs as its `RetryFallbackModelLookup`
+ * (`packages/coding-agent/src/session/retry-fallback-chains.ts:37-41` at the pinned tag), and the
+ * suppression the host's own turn recovery reads before it picks a fallback
+ * (`session/turn-recovery.ts:2026`), so an extension stepping down the same chain skips what the
+ * host already skips. Each is a method of the live registry, which reads private state of its
+ * own, so a caller calls it on the registry rather than handing it over detached. */
+export interface HostModelRegistry {
+  /** The model one provider and id name, or undefined when this deployment disables the provider
+   * or holds no such model. */
+  readonly find?: (provider: string, modelId: string) => Model | undefined;
+  /** Whether the host holds any model of this provider, discovery included. */
+  readonly hasProvider?: (provider: string) => boolean;
+  readonly isSelectorSuppressed?: (selector: string) => boolean;
 }
 
 export interface SessionContext {
@@ -110,10 +127,11 @@ export interface SessionContext {
     readonly current: () => HostModel | undefined;
     readonly resolve: (spec: string) => HostModel | undefined;
   };
-  /** Whether the host itself holds a model selector suppressed, which its own turn recovery reads
-   * before it picks a fallback (`session/turn-recovery.ts:2026` at the pinned tag). An extension
-   * that steps down the same chain asks this so it skips what the host already skips. */
-  readonly modelRegistry?: { readonly isSelectorSuppressed?: (selector: string) => boolean };
+  /** The host's own `ModelRegistry` (`packages/coding-agent/src/config/model-registry.ts` at the
+   * pinned tag), as far as this package reads it. Every member is optional, as the neighbouring
+   * host declarations are: a host build that exposes none still satisfies the type, and the
+   * caller decides what it can do without. */
+  readonly modelRegistry?: HostModelRegistry;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     /**

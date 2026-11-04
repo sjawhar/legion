@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -177,9 +178,9 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		}
 		spec.Env = id.Env()
 	}
-	// After the git identity, which replaces spec.Env rather than merging into it: the stall
-	// limits are merged into whatever map the launch holds by then (stallLimitVariables).
-	for _, name := range stallLimitVariables {
+	// After the git identity, which replaces spec.Env rather than merging into it: every
+	// passthrough variable is merged into whatever map the launch holds by then.
+	for _, name := range slices.Concat(stallLimitVariables, refusalCooldownVariables) {
 		if value, ok := os.LookupEnv(name); ok {
 			spec.Env[name] = value
 		}
@@ -200,6 +201,18 @@ var stallLimitVariables = []string{
 	"LEGION_STALL_REMINDER_MS",
 	"LEGION_STALL_RESUME_MS",
 	"LEGION_STALL_WAITING_MS",
+}
+
+// refusalCooldownVariables are the two numbers a Legion role's model fallback runs on
+// (INFRA-956 R1), in name order: the longest the session stays on the weaker model after a
+// provider's content filter refused a turn, and how long the first such wait is. They ride the
+// same seam as the stall limits and are merged with them in workerSpawnSpec, which is why they
+// are a list of their own: these are no stall limit, and a list whose name said so would lie. A
+// worker told neither runs on the defaults its plugin holds
+// (packages/pi-shared/src/fallback-cooldown.ts); a live proof sets both to a few seconds.
+var refusalCooldownVariables = []string{
+	"LEGION_REFUSAL_COOLDOWN_MAX_MS",
+	"LEGION_REFUSAL_COOLDOWN_MS",
 }
 
 // stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,

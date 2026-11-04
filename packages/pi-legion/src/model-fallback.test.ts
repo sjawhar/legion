@@ -1,0 +1,351 @@
+import { beforeEach, describe, expect, test } from "bun:test";
+import type { FallbackCooldownState } from "@legion/pi-shared/fallback-cooldown";
+import type { HostModel } from "@legion/pi-shared/pi-types";
+import { createModelFallback, type ModelFallbackContext } from "./model-fallback";
+
+/**
+ * The model fallback runner against fake deps and a fake session context: no Oh My Pi, no pane.
+ * The host's own behaviour the runner leans on is written into the fixture — `pi.setModel`
+ * appends an ordinary `model_change` and the host's walk appends a fallback claim — so a test
+ * reads as the sequence the pane would see.
+ */
+
+const OPUS = "anthropic/claude-opus-5-5";
+const SONNET = "anthropic/claude-sonnet-5";
+const GPT = "openai/gpt-5.5";
+const HOUR = 3_600_000;
+
+function model(selector: string): HostModel {
+  const [provider, id] = selector.split("/");
+  return { provider: provider ?? "", id: id ?? "" };
+}
+
+/** A turn the provider ended with Anthropic's own refusal text. */
+const REFUSED = {
+  messages: [
+    { role: "assistant", stopReason: "error", errorMessage: "Refusal (reasoning_extraction): no" },
+  ],
+} as const;
+const CLEAN = { messages: [{ role: "assistant", stopReason: "stop" }] } as const;
+const OVERLOADED = {
+  messages: [{ role: "assistant", stopReason: "error", errorMessage: "529 Overloaded" }],
+} as const;
+
+let entries = 0;
+
+function fixture(startOn = OPUS) {
+  const branch: unknown[] = [];
+  const setModelCalls: string[] = [];
+  const saved: FallbackCooldownState[] = [];
+  const warnings: string[] = [];
+  /** The model below each selector in this deployment's chain. */
+  const chain = new Map<string, string>();
+  /** Selectors the host itself holds suppressed. */
+  const suppressed = new Set<string>();
+  /** Selectors this session can use no model for. */
+  const unresolvable = new Set<string>();
+  const live = { now: 1_000_000_000, current: startOn, setModelAnswers: true };
+
+  /** One `model_change` as the host appends it, and its id. */
+  const append = (to: string, role: string, fallback: boolean): string => {
+    entries += 1;
+    const id = `entry-${entries}`;
+    branch.push({ type: "model_change", id, model: to, role, resolvedModelIsFallback: fallback });
+    live.current = to;
+    return id;
+  };
+
+  const ctx: ModelFallbackContext = {
+    sessionManager: { getBranch: () => branch },
+    models: {
+      list: () => [],
+      current: () => model(live.current),
+      resolve: (spec) => (unresolvable.has(spec) ? undefined : model(spec)),
+    },
+    modelRegistry: {
+      // The chain walk itself is the `nextModel` dep here, so the lookup is never consulted; it
+      // is present because the runner refuses to walk a host that exposes no registry.
+      find: () => undefined,
+      hasProvider: () => true,
+      isSelectorSuppressed: (selector) => suppressed.has(selector),
+    },
+  };
+
+  const runner = createModelFallback({
+    setModel: async (next) => {
+      setModelCalls.push(`${next.provider}/${next.id}`);
+      if (!live.setModelAnswers) return false;
+      // `pi.setModel` clears the active retry fallback and appends an ordinary `model_change`
+      // (`session/model-controls.ts:249-252` at the pinned tag), never a fallback claim.
+      append(`${next.provider}/${next.id}`, "default", false);
+      return true;
+    },
+    saveState: (state) => void saved.push(state),
+    now: () => live.now,
+    limits: { baseMs: HOUR, maxMs: 8 * HOUR },
+    nextModel: async (_chain, current) => {
+      const next = chain.get(`${current.provider}/${current.id}`);
+      return next === undefined ? undefined : model(next);
+    },
+    log: { warn: (message) => void warnings.push(message) },
+  });
+
+  return {
+    branch,
+    setModelCalls,
+    saved,
+    warnings,
+    chain,
+    suppressed,
+    unresolvable,
+    live,
+    ctx,
+    runner,
+    /** The `model_change` the host's own fallback walk appends before it emits its event. */
+    hostFallback: (to: string) => append(to, "fallback", true),
+    /** Any other model change: the operator's `/model`, the host's own restore. */
+    modelChange: (to: string) => append(to, "default", false),
+    /** The state the last save recorded. */
+    last: () => saved[saved.length - 1],
+  };
+}
+
+/** The `retry_fallback_applied` payload the host emits for a session's own walk. */
+function applied(from: string, to: string, role = "default") {
+  return { from, to, role };
+}
+
+beforeEach(() => {
+  entries = 0;
+});
+
+describe("a fallback the host applied", () => {
+  test("is armed without a cooldown until the turn's own end calls it a refusal", () => {
+    const pane = fixture();
+    const entry = pane.hostFallback(SONNET);
+
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: pane.live.now,
+      cause: "other",
+    });
+    // Nothing is refused yet, so no selector's wait has doubled.
+    expect(pane.last()?.levels).toEqual({});
+  });
+
+  test("becomes a refusal's when the turn settles on a content filter, and is not walked twice", async () => {
+    const pane = fixture();
+    const entry = pane.hostFallback(SONNET);
+    pane.chain.set(SONNET, GPT);
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    // The host walked the chain for this refusal, so the plugin only re-reads the arming.
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: entry,
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+    // The next refusal of that model waits twice as long.
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+
+  test("keeps the model the session started on when a second step continues the same walk", () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+    const second = pane.hostFallback(GPT);
+
+    pane.runner.armFromEvent(applied(SONNET, GPT), pane.ctx);
+
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: second,
+      dueAt: pane.live.now,
+      cause: "other",
+    });
+  });
+
+  test("is dropped for the Fireworks Fast degrade and for an advisor's own fallback", () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+
+    // The host keeps the model and drops only the tier, so restoring it would fail again.
+    pane.runner.armFromEvent(applied(OPUS, SONNET, "fireworks-fast"), pane.ctx);
+    expect(pane.saved).toEqual([]);
+
+    // An advisor's failover appends no entry of its own, so the newest model change is the one
+    // the session's own walk already claimed.
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+    expect(pane.saved.length).toBe(1);
+    pane.runner.armFromEvent(applied(GPT, SONNET), pane.ctx);
+    expect(pane.saved.length).toBe(1);
+  });
+});
+
+describe("a refusal the host did not walk", () => {
+  test("steps down the chain and arms the return on the entry that switch wrote", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([SONNET]);
+    expect(pane.last()?.arming).toEqual({
+      restoreTo: OPUS,
+      entryId: `entry-${entries}`,
+      dueAt: pane.live.now + HOUR,
+      cause: "refusal",
+    });
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+
+  test("leaves the session where it is when the chain names no next model", async () => {
+    const pane = fixture();
+
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.saved).toEqual([]);
+    expect(pane.warnings).toEqual([
+      "legion: a content filter refused this turn and the chain has no next model",
+    ]);
+  });
+
+  test("arms nothing when the host refuses the switch", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    pane.live.setModelAnswers = false;
+
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([SONNET]);
+    expect(pane.saved).toEqual([]);
+    expect(pane.warnings).toEqual([
+      "legion: the next model of the chain could not be set; staying on this one",
+    ]);
+  });
+
+  test("is left alone while the host is about to retry the turn itself", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+
+    await pane.runner.turnSettled({ ...REFUSED, willContinue: true }, pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.saved).toEqual([]);
+  });
+});
+
+describe("a turn that no content filter ended", () => {
+  test("puts a clean turn's model back to the base wait", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+    pane.modelChange(OPUS);
+
+    await pane.runner.turnSettled(CLEAN, pane.ctx);
+
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 1 });
+  });
+
+  test("leaves the level alone after a provider error that is no content filter", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+    pane.modelChange(OPUS);
+    const saves = pane.saved.length;
+
+    await pane.runner.turnSettled(OVERLOADED, pane.ctx);
+
+    expect(pane.saved.length).toBe(saves);
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+});
+
+describe("the return to the session's own model", () => {
+  test("waits out a refusal's cooldown and then switches back", async () => {
+    const pane = fixture();
+    pane.chain.set(OPUS, SONNET);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+
+    pane.live.now += HOUR - 1;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([SONNET]);
+
+    pane.live.now += 1;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([SONNET, OPUS]);
+    expect(pane.last()?.arming).toBeUndefined();
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 2 });
+  });
+
+  test("waits for the host's own suppression to end when the fallback was no refusal", async () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+    pane.suppressed.add(OPUS);
+
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([]);
+
+    pane.suppressed.delete(OPUS);
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([OPUS]);
+    expect(pane.last()?.arming).toBeUndefined();
+  });
+
+  test("is dropped when another model change superseded the fallback", async () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+    // The operator's own `/model`, the host's restore, another session.
+    pane.modelChange(GPT);
+
+    await pane.runner.maybeRestore(pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.last()?.arming).toBeUndefined();
+  });
+
+  test("is dropped when the model it would go back to no longer resolves", async () => {
+    const pane = fixture();
+    pane.hostFallback(SONNET);
+    pane.runner.armFromEvent(applied(OPUS, SONNET), pane.ctx);
+    pane.unresolvable.add(OPUS);
+
+    await pane.runner.maybeRestore(pane.ctx);
+
+    expect(pane.setModelCalls).toEqual([]);
+    expect(pane.last()?.arming).toBeUndefined();
+  });
+
+  test("comes back from the transcript with its due time and its doubling level", async () => {
+    const pane = fixture(SONNET);
+    const entry = pane.hostFallback(SONNET);
+    pane.runner.restore({
+      arming: { restoreTo: OPUS, entryId: entry, dueAt: pane.live.now + 1_000, cause: "refusal" },
+      levels: { [OPUS]: 3 },
+    });
+
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([]);
+
+    pane.live.now += 1_000;
+    await pane.runner.maybeRestore(pane.ctx);
+    expect(pane.setModelCalls).toEqual([OPUS]);
+
+    // The level the record carried is the one the next refusal of that model waits on: the base
+    // doubled twice, and the level climbs again.
+    pane.chain.set(OPUS, SONNET);
+    await pane.runner.turnSettled(REFUSED, pane.ctx);
+    expect(pane.last()?.arming?.dueAt).toBe(pane.live.now + 4 * HOUR);
+    expect(pane.last()?.levels).toEqual({ [OPUS]: 4 });
+  });
+});
