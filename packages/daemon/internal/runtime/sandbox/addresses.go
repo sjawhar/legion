@@ -351,16 +351,17 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 
 // driftedInPod is what pod holds, for role, that a pod created now is not handed and whose
 // replacement is an update round's business rather than a launch's: the operator's volume and
-// mount holding every named role's overlays in role's container (movedRoleOverlays), the secrets
-// broker's enrollment its next generation is started against (movedEnrollment), and the whole
-// session store it was created under (movedSessionStore). Each is fixed for the pod's life, so the
-// pod must be replaced for the role to run as one launched now — but each leaves the workers
-// already in the pod running and able to reach this daemon, so each is a reason to open a round
-// (PodDrift) and ask them to push, where replacing the pod under them would end every turn in it
-// and take the issue's disk with it. The two facets whose worker cannot be reached at all are
-// movedInPod's and are never a round's — and for a pod no round covers (roundCovers), the project
-// controller's today, so are these three: no round is opened over such a pod, so movedInPod holds
-// every facet there and its launch replaces it, as it always did.
+// mount holding every named role's overlays and the project's memory overlays in role's container
+// (movedRoleOverlays), the secrets broker's enrollment its next generation is started against
+// (movedEnrollment), and the whole session store it was created under (movedSessionStore). Each
+// is fixed for the pod's life, so the pod must be replaced for the role to run as one launched
+// now — but each leaves the workers already in the pod running and able to reach this daemon, so
+// each is a reason to open a round (PodDrift) and ask them to push, where replacing the pod under
+// them would end every turn in it and take the issue's disk with it. The two facets whose worker
+// cannot be reached at all are movedInPod's and are never a round's — and for a pod no round
+// covers (roundCovers), the project controller's today, so are these three: no round is opened
+// over such a pod, so movedInPod holds every facet there and its launch replaces it, as it always
+// did.
 func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
 	if overlays, ok := r.movedRoleOverlays(pod.Spec, role); ok {
@@ -375,9 +376,11 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	return moved
 }
 
-// movedRoleOverlays is the first overlay of any role role_config_files names (Options.RoleConfigFiles)
-// that runs in role's container of the pod spec — every issue role shares an issue pod's one
-// container, the controller has its own pod — whose holder in a pod created now, the deepest
+// movedRoleOverlays is the first overlay of any role role_config_files names
+// (Options.RoleConfigFiles) that runs in role's container of the pod spec — every issue role
+// shares an issue pod's one container, the controller has its own pod — or of the project's own
+// (Options.MemoryConfigFiles), which every pod of the deployment is read for, since any tree may
+// be drawn into the memory group, whose holder in a pod created now, the deepest
 // operator mount at or above the file (runtime.kubernetes.pod volume_mounts) with its volume, is
 // not the deepest mount at or above the file in that container as a role sees it (an issue pod's
 // HomeMountsDir view mapped back to the image's home): another volume, sub_path or mount path, a
@@ -392,7 +395,7 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 // It is asked of a running pod's spec and of a Sandbox's stored pod template alike: the template
 // is the pod's own build, which is what a launch that keeps the pod reads.
 func (r *Runtime) movedRoleOverlays(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
-	if len(r.roleConfigFiles) == 0 {
+	if len(r.roleConfigFiles) == 0 && len(r.memoryConfigFiles) == 0 {
 		return movedAddress{}, false
 	}
 	seen, ok := roleMounts(pod, role)
@@ -409,31 +412,50 @@ func (r *Runtime) movedRoleOverlays(pod corev1.PodSpec, role claim.Role) (movedA
 			}
 		}
 	}
+	// The controller runs in no tree, so no memory group ever names it these files and a pod of
+	// its own that lacks them is no drift of its: its own overlays alone are read above.
+	if role != claim.RoleController {
+		for _, file := range r.memoryConfigFiles {
+			if held, want, moved := r.movedOverlay(seen, pod.Volumes, file); moved {
+				return movedAddress{where: memoryOverlayField + " " + file, held: held, handed: want}, true
+			}
+		}
+	}
 	return movedAddress{}, false
 }
 
-// heldRoleOverlays are the overlays role_config_files names for role (Options.RoleConfigFiles), in
-// that order, that the pod spec's own container for role holds: each file the pod carries where a
-// pod created now would (movedOverlay), none of the ones it was built too early to carry. ok is
-// false when the spec has no container for role at all, where nothing can be said of what the pod
-// holds.
+// memoryOverlayField is the project's `memory.config_files`, as a drift of one of its overlays
+// names it (movedRoleOverlays): the key an operator reads in the daemon's configuration, which
+// names no project, since a daemon runs one.
+const memoryOverlayField = "memory.config_files"
+
+// heldRoleOverlays are the overlays role_config_files names for role (Options.RoleConfigFiles) and
+// the project's own memory overlays (Options.MemoryConfigFiles), each in that order, that the pod
+// spec's own container for role holds: each file the pod carries where a pod created now would
+// (movedOverlay), none of the ones it was built too early to carry. ok is false when the spec has
+// no container for role at all, where nothing can be said of what the pod holds.
 //
 // It is what a launch that keeps a live pod builds that role's PI_CONFIG_FILES from, read from the
 // pod's stored template (relaunch's keptBy, roleOperatorEnv): Oh My Pi refuses to start on an
 // entry that is not there, so a role started in a drifted pod against the configuration as it now
-// reads would never register and never answer the round that is to replace that pod.
-func (r *Runtime) heldRoleOverlays(pod corev1.PodSpec, role claim.Role) ([]string, bool) {
+// reads would never register and never answer the round that is to replace that pod. A pod built
+// before the memory overlays were mounted holds none of them, and the memory-group role it keeps
+// is told none.
+func (r *Runtime) heldRoleOverlays(pod corev1.PodSpec, role claim.Role) (own, memory []string, ok bool) {
 	seen, ok := roleMounts(pod, role)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	var held []string
-	for _, file := range r.roleConfigFiles[role] {
-		if _, _, moved := r.movedOverlay(seen, pod.Volumes, file); !moved {
-			held = append(held, file)
+	held := func(files []string) []string {
+		var kept []string
+		for _, file := range files {
+			if _, _, moved := r.movedOverlay(seen, pod.Volumes, file); !moved {
+				kept = append(kept, file)
+			}
 		}
+		return kept
 	}
-	return held, true
+	return held(r.roleConfigFiles[role]), held(r.memoryConfigFiles), true
 }
 
 // carriesEnrollment is whether the pod spec carries the secrets broker's enrollment for role: the

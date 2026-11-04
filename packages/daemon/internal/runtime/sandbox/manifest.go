@@ -263,6 +263,12 @@ type keptPod struct {
 	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
 	// name (heldRoleOverlays, roleOperatorEnv).
 	overlays []string
+	// memory are the project's memory overlay files (Options.MemoryConfigFiles) the pod's
+	// container actually holds, in configuration order, for a launch whose tree is in the memory
+	// group (runtime.SpawnSpec.Memory) and none for every other launch: the only ones its
+	// generation's PI_CONFIG_FILES may name after the role's own (heldRoleOverlays,
+	// roleOperatorEnv).
+	memory []string
 	// store is the session store this pod was built under (heldSessionStore), the kind alone: it
 	// is all a start command names, since the URL itself is in the file the pod projects or its
 	// own launcher writes (sessionDSNFile). A pod created before the store was configured carries
@@ -305,14 +311,30 @@ func (l launch) enrolls(r *Runtime) bool {
 	return r.enrollsIn(nil, l.spec.Role)
 }
 
-// overlays are this launch's role's own settings overlays, which its generation is told in
-// PI_CONFIG_FILES (roleOperatorEnv): the ones a kept pod holds, which may be fewer than
-// role_config_files now names, and all of the configuration's for a launch that builds the pod.
+// overlays are this launch's settings overlays, which its generation is told in PI_CONFIG_FILES
+// after the operator's own (roleOperatorEnv): the role's own overlays, then, for a launch whose
+// tree is in the memory group (runtime.SpawnSpec.Memory), the project's memory overlays, which
+// outrank them. They are the ones a kept pod holds, which may be fewer than role_config_files and
+// memory.config_files now name, and all of the configuration's for a launch that builds the pod.
 func (l launch) overlays(r *Runtime) []string {
 	if l.kept != nil {
-		return l.kept.overlays
+		return withMemoryOverlays(l.kept.overlays, l.kept.memory)
 	}
-	return r.roleConfigFiles[l.spec.Role]
+	if !l.spec.Memory {
+		return r.roleConfigFiles[l.spec.Role]
+	}
+	return withMemoryOverlays(r.roleConfigFiles[l.spec.Role], r.memoryConfigFiles)
+}
+
+// withMemoryOverlays is one PI_CONFIG_FILES list: a role's own overlays and then the project's
+// memory overlays, which outrank them, and own itself where there is no memory overlay to add, so
+// a deployment whose memory is off hands every caller the list it handed before the block existed
+// (launch.overlays, probeManifest).
+func withMemoryOverlays(own, memory []string) []string {
+	if len(memory) == 0 {
+		return own
+	}
+	return slices.Concat(own, memory)
 }
 
 // sessionStore is the kind of store this launch's generation keeps its session in: the one the
@@ -440,9 +462,11 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 }
 
 // systemPrompt is the one --append-system-prompt value, the same text tmux's pane shell builds
-// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence, then
-// the deployment instructions, separated by a blank line, each file's trailing newlines dropped as
-// `$(cat …)` drops them. A pod cannot read the daemon's files, so the text is inlined here.
+// (runtime/tmux/prompt.go): the role prompt files concatenated, then the addressing sentence,
+// then the deployment instructions, then the project's memory instructions, which only a launch
+// whose tree is in the memory group is given (PromptParts.MemoryInstructionsPath), separated by a
+// blank line, each file's trailing newlines dropped as `$(cat …)` drops them. A pod cannot read
+// the daemon's files, so the text is inlined here.
 func systemPrompt(parts runtime.PromptParts) (string, error) {
 	var role strings.Builder
 	for _, path := range parts.RolePromptPaths {
@@ -456,8 +480,11 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	if parts.Addressing != "" {
 		fragments = append(fragments, parts.Addressing)
 	}
-	if parts.DeploymentInstructionsPath != "" {
-		text, err := os.ReadFile(parts.DeploymentInstructionsPath)
+	for _, path := range []string{parts.DeploymentInstructionsPath, parts.MemoryInstructionsPath} {
+		if path == "" {
+			continue
+		}
+		text, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("prompt file: %w", err)
 		}
@@ -873,10 +900,11 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 // and a role's own overlays extend (roleOperatorEnv).
 const settingsOverlays = "PI_CONFIG_FILES"
 
-// roleOperatorEnv is operatorEnv as the launch's role is told it: with that role's own overlays
-// (launch.overlays, from Options.RoleConfigFiles) after the operator's in PI_CONFIG_FILES, so each
-// of them outranks the operator's, or as PI_CONFIG_FILES in name order when the operator's pod env
-// names none. A role with none is told operatorEnv unchanged.
+// roleOperatorEnv is operatorEnv as the launch's role is told it: with the launch's own overlays
+// (launch.overlays, the role's from Options.RoleConfigFiles and then a memory-group launch's from
+// Options.MemoryConfigFiles) after the operator's in PI_CONFIG_FILES, so each of them outranks the
+// operator's, or as PI_CONFIG_FILES in name order when the operator's pod env names none. A role
+// with none is told operatorEnv unchanged.
 //
 // The overlays are the launch's, not the configuration's, so a role started in a live pod the
 // launch keeps is told only the files that pod holds (keptPod): Oh My Pi refuses to start on an

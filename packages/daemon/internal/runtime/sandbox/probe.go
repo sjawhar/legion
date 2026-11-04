@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
@@ -1319,8 +1320,10 @@ type probeSpec struct {
 // and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing from a seven-day
 // eviction window.
 // For each role role_config_files names (Options.RoleConfigFiles), in the workflow's order, it
-// passes that role's overlays (--role-config-files), which the probe reads as that role's Oh My Pi
-// will: none are passed for a deployment that names none.
+// passes that role's overlays (--role-config-files), with the project's memory overlays
+// (Options.MemoryConfigFiles) after them for every workflow role, which any tree's memory group
+// may give them to, and never for the controller, which runs in no tree: the probe reads each
+// value as that role's Oh My Pi will. None are passed for a deployment that names neither.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -1345,12 +1348,17 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if r.testPostgres {
 		command = append(command, "--test-postgres", RoleProbeDir+"/"+launcher.TestPGDirName)
 	}
-	// Each role that names overlays of its own is read as it will start: the probe pod mounts the
-	// operator's volumes as every pod does, so a file a role's PI_CONFIG_FILES names and the mounts
-	// lack refuses the boot here, naming the role and the file, rather than that role's Oh My Pi at
-	// its first launch.
+	// Each role that names overlays of its own, and every workflow role of a project whose memory
+	// overlays reach it, is read as it will start: the probe pod mounts the operator's volumes as
+	// every pod does, so a file a role's PI_CONFIG_FILES names and the mounts lack refuses the
+	// boot here, naming the role and the file, rather than that role's Oh My Pi at its first
+	// launch.
 	for _, role := range roleConfigRoles {
-		if files := r.roleConfigFiles[role]; len(files) > 0 {
+		files := r.roleConfigFiles[role]
+		if role != claim.RoleController {
+			files = withMemoryOverlays(files, r.memoryConfigFiles)
+		}
+		if len(files) > 0 {
 			command = append(command, bootprobe.RoleConfigFilesFlag, bootprobe.RoleConfigFilesValue(string(role), files))
 		}
 	}

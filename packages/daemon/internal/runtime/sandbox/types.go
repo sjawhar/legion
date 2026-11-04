@@ -133,6 +133,14 @@ type Options struct {
 	// operator's mounts', which every pod and the image probe's carry, and the image probe reads
 	// every role's (probeManifest). Nil is none.
 	RoleConfigFiles map[claim.Role][]string
+	// MemoryConfigFiles is the project's `memory.config_files`: absolute paths of Oh My Pi
+	// settings overlays a role whose tree is in the memory group (runtime.SpawnSpec.Memory) names
+	// last in PI_CONFIG_FILES, after the operator's own and the role's own, so they outrank both
+	// (roleOperatorEnv). The files are the operator's mounts', as a role's own are, and the image
+	// probe reads them with every workflow role's (probeManifest). The daemon hands them over only
+	// while the project's mode is not off, so a deployment at off builds the pod it built before
+	// the block existed. Nil is none.
+	MemoryConfigFiles []string
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
 	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
 	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,

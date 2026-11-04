@@ -53,6 +53,35 @@ func TestMemoryConfigFilesReachTheTmuxRuntimeUnlessTheModeIsOff(t *testing.T) {
 	}
 }
 
+// A project's memory overlays reach the Sandbox runtime's Options as the file settled them too,
+// and a project at mode off hands over none: such a deployment builds the pod it built before the
+// block existed, whatever its other memory keys say.
+func TestMemoryConfigFilesReachTheSandboxRuntimeUnlessTheModeIsOff(t *testing.T) {
+	for _, tc := range []struct {
+		mode config.MemoryMode
+		want []string
+	}{
+		{config.MemoryOn, memoryFiles},
+		{config.MemoryRandom, memoryFiles},
+		{config.MemoryOff, nil},
+		{"", nil},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+			cfg.Projects = map[string]config.Project{cfg.Project: {Memory: config.Memory{
+				Mode: tc.mode, ConfigFiles: memoryFiles, InstructionsPath: "/etc/legion-memory/instructions.md",
+			}}}
+			opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, cfg.Project, "", lookup(nil), quietLogger())
+			if err != nil {
+				t.Fatalf("sandboxOptions: %v", err)
+			}
+			if !reflect.DeepEqual(opts.MemoryConfigFiles, tc.want) {
+				t.Errorf("sandbox MemoryConfigFiles = %v, want %v", opts.MemoryConfigFiles, tc.want)
+			}
+		})
+	}
+}
+
 // memorySpecs is a spec builder for a project at mode whose memory instructions boot materialized,
 // over a reader that answers memory for the tree LEGION-1 alone; a nil reader is a daemon with no
 // workflow, which records no tree.
