@@ -47,6 +47,16 @@ func (memory Memory) Off() bool {
 	return memory.Mode == "" || memory.Mode == MemoryOff
 }
 
+// Word is the mode as a draw records it: one of the three words, never the empty string a project
+// that names no block leaves, so every record of a draw reads back a mode an operator could have
+// written and no reader of one needs a fourth name for the absent word.
+func (memory Memory) Word() MemoryMode {
+	if memory.Mode == "" {
+		return MemoryOff
+	}
+	return memory.Mode
+}
+
 // readMemory is a project's `memory`: `mode`, one of the three words (absent is off);
 // `config_files`, the absolute paths of the overlays a memory-group tree's roles name after their
 // own; and `instructions`, the absolute path of the file the daemon reads. A path that is relative

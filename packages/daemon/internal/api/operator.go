@@ -263,7 +263,7 @@ func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) er
 		if err != nil {
 			return err
 		}
-		_, err = s.records.DrawMemory(ctx, tx, tree, string(group), string(s.memory.Mode), time.Now())
+		_, err = s.records.DrawMemory(ctx, tx, tree, string(group), string(s.memory.Word()), time.Now())
 		return err
 	}
 }

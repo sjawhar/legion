@@ -631,17 +631,12 @@ func memorySummary(issues map[string]api.Issue) string {
 	for draw := range trees {
 		counts[groupMode{group: draw.group, mode: draw.mode}]++
 	}
-	kinds := slices.Collect(maps.Keys(counts))
-	slices.SortFunc(kinds, func(a, b groupMode) int {
+	kinds := slices.SortedFunc(maps.Keys(counts), func(a, b groupMode) int {
 		return cmp.Or(cmp.Compare(a.group, b.group), cmp.Compare(a.mode, b.mode))
 	})
 	named := make([]string, len(kinds))
 	for i, kind := range kinds {
-		mode := kind.mode
-		if mode == "" {
-			mode = "an unrecorded mode"
-		}
-		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, mode)
+		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, kind.mode)
 	}
 	noun := "trees"
 	if len(trees) == 1 {

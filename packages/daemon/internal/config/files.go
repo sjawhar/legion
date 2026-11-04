@@ -173,25 +173,10 @@ func ReadMemoryInstructions(instructionsPath string) ([]byte, error) {
 	return contents, nil
 }
 
-// MaterializeMemoryInstructions reads the project's memory instructions file and writes
-// `# Memory instructions (<legionID>)`, a blank line, and its contents verbatim to
-// `<stateDir>/memory-instructions.md`, returning that path — the file a memory-group role's one
-// `--append-system-prompt` word ends with, `$(cat <this file>)`, after the deployment's own, so
-// such a pane gets exactly what boot read and never the operator's own path, which may change
-// underneath a running daemon. legionID is `project` as the operator wrote it.
-//
-// A file ReadMemoryInstructions refuses writes nothing.
-func MaterializeMemoryInstructions(instructionsPath, stateDir, legionID string) (string, error) {
-	contents, err := ReadMemoryInstructions(instructionsPath)
-	if err != nil {
-		return "", err
-	}
-	return WriteMemoryInstructions(contents, stateDir, legionID)
-}
-
-// WriteMemoryInstructions is MaterializeMemoryInstructions' write, of contents
-// ReadMemoryInstructions answered: boot reads the file with every other refusal before it writes
-// anything, and writes this copy once, before the first pane opens.
+// WriteMemoryInstructions writes the copy of contents ReadMemoryInstructions answered: boot reads
+// the file with every other refusal before it writes anything, and writes this copy once, before
+// the first pane opens. The two are separate, where the deployment's own has a Materialize pair
+// as well, because only boot writes a memory copy and boot refuses before it writes.
 func WriteMemoryInstructions(contents []byte, stateDir, legionID string) (string, error) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return "", fmt.Errorf("create state directory %s: %w", stateDir, err)

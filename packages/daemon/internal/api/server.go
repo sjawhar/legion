@@ -523,11 +523,17 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // contract, the operator's `legion state`, a tmux pane — is served the state as this contract
 // writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
+	// A daemon that does not know its callers' pods serves every caller the state as it is, and
+	// scans nothing for it: under runtime tmux that is every request of every pane and of
+	// `legion state`.
+	if s.callerPod == nil || s.supervisor == nil {
+		return state
+	}
 	// A state with no update round on any claim view and no memory group on any issue is the body
 	// every contract reads, so it is served as it is with no read of the claims: outside a roll of
 	// a project with no memory, that is every request.
 	rounds, memory := carriesUpdateRounds(state), carriesMemory(state)
-	if s.callerPod == nil || s.supervisor == nil || (!rounds && !memory) {
+	if !rounds && !memory {
 		return state
 	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)

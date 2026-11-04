@@ -178,7 +178,6 @@ func TestMemoryReachesNoLaunchWithTheModeOffOrNoReader(t *testing.T) {
 // as a tree with no memory.
 func TestMemoryWithoutInstructionsAppendsNothingAndAFailedReadRefuses(t *testing.T) {
 	on := memorySpecs(t, config.MemoryOn, "", true)
-	on.memory.InstructionsPath = ""
 	spec := memorySpawn(t, on, "LEGION-1", "LEGION-2", claim.RoleTester)
 	if !spec.Memory || spec.Prompt.MemoryInstructionsPath != "" {
 		t.Errorf("a block with no instructions: Memory = %v, instructions = %q; want true and \"\"", spec.Memory, spec.Prompt.MemoryInstructionsPath)

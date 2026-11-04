@@ -987,7 +987,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 			return err
 		}
 		if _, err := a.store.CarryMemory(ctx, tx, stored.Key, oldTree); err != nil {
-			return fmt.Errorf("carry the memory group of %s to %s: %w", oldTree, stored.Key, err)
+			return err
 		}
 	}
 	if orphan {
@@ -1260,8 +1260,8 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 				if err != nil {
 					return admitted, returned, fmt.Errorf("draw the memory group of %s: %w", candidate.Tree, err)
 				}
-				if _, err := a.store.DrawMemory(ctx, tx, candidate.Tree, string(group), string(a.memory.Mode), a.now()); err != nil {
-					return admitted, returned, fmt.Errorf("record the memory group of %s: %w", candidate.Tree, err)
+				if _, err := a.store.DrawMemory(ctx, tx, candidate.Tree, string(group), string(a.memory.Word()), a.now()); err != nil {
+					return admitted, returned, err
 				}
 			}
 		}

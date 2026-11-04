@@ -58,16 +58,20 @@ func refusingCoin(t *testing.T) func() (bool, error) {
 func TestAdmissionDrawsEachTreesMemoryGroupUnderTheProjectsMode(t *testing.T) {
 	const root = "LEGION-1"
 	for _, tc := range []struct {
-		name  string
-		mode  config.MemoryMode
-		coin  bool
+		name string
+		mode config.MemoryMode
+		coin bool
+		// word is the mode the draw records, which is never the empty string: a project that
+		// names no block is recorded `off`, the word an operator would have written for it
+		// (config.Memory.Word).
+		word  config.MemoryMode
 		group memorygroup.Group
 	}{
-		{name: "a project with no memory block", mode: "", group: memorygroup.GroupNone},
-		{name: "off", mode: config.MemoryOff, group: memorygroup.GroupNone},
-		{name: "on", mode: config.MemoryOn, group: memorygroup.GroupMemory},
-		{name: "random, the coin memory", mode: config.MemoryRandom, coin: true, group: memorygroup.GroupMemory},
-		{name: "random, the coin none", mode: config.MemoryRandom, coin: false, group: memorygroup.GroupNone},
+		{name: "a project with no memory block", mode: "", word: config.MemoryOff, group: memorygroup.GroupNone},
+		{name: "off", mode: config.MemoryOff, word: config.MemoryOff, group: memorygroup.GroupNone},
+		{name: "on", mode: config.MemoryOn, word: config.MemoryOn, group: memorygroup.GroupMemory},
+		{name: "random, the coin memory", mode: config.MemoryRandom, word: config.MemoryRandom, coin: true, group: memorygroup.GroupMemory},
+		{name: "random, the coin none", mode: config.MemoryRandom, word: config.MemoryRandom, coin: false, group: memorygroup.GroupNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -78,7 +82,7 @@ func TestAdmissionDrawsEachTreesMemoryGroupUnderTheProjectsMode(t *testing.T) {
 
 			tick(t, pool, admission, "admit")
 
-			want := drawnAs(string(tc.group), string(tc.mode), &fixedNow)
+			want := drawnAs(string(tc.group), string(tc.word), &fixedNow)
 			if got := memoryOf(t, pool, root); got != want {
 				t.Fatalf("the admitted root carries %s, want %s", got, want)
 			}

@@ -288,10 +288,12 @@ func TestReadMemoryInstructionsAnswersTheFileOrRefusesIt(t *testing.T) {
 	}
 }
 
-// The copy a memory-group pane's prompt `$(cat)`s last: a heading naming the legion as the
-// operator wrote it, a blank line, and the operator's file verbatim, beside the deployment's own
-// copy under the state directory. A file ReadMemoryInstructions refuses writes nothing.
-func TestMaterializeMemoryInstructionsWritesTheHeadedCopy(t *testing.T) {
+// The copy a memory-group pane's prompt `$(cat)`s last, written as boot writes it — the read with
+// every other refusal first, then the write: a heading naming the legion as the operator wrote
+// it, a blank line, and the operator's file verbatim, beside the deployment's own copy under the
+// state directory. A file ReadMemoryInstructions refuses never reaches the write, so nothing is
+// written for it.
+func TestWriteMemoryInstructionsWritesTheHeadedCopy(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "memory.md")
 	content := "Your tree keeps a memory.\n\n- read it first\n"
 	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
@@ -299,11 +301,15 @@ func TestMaterializeMemoryInstructionsWritesTheHeadedCopy(t *testing.T) {
 	}
 	stateDir := filepath.Join(t.TempDir(), "state")
 
-	written, err := MaterializeMemoryInstructions(source, stateDir, "sjawhar/legion")
+	contents, err := ReadMemoryInstructions(source)
 	if err != nil {
-		t.Fatalf("MaterializeMemoryInstructions: %v", err)
+		t.Fatalf("ReadMemoryInstructions: %v", err)
 	}
-	if want := filepath.Join(stateDir, "memory-instructions.md"); written != want {
+	written, err := WriteMemoryInstructions(contents, stateDir, "sjawhar/legion")
+	if err != nil {
+		t.Fatalf("WriteMemoryInstructions: %v", err)
+	}
+	if want := filepath.Join(stateDir, MemoryInstructionsFile); written != want {
 		t.Errorf("path = %q, want %q", written, want)
 	}
 	got, err := os.ReadFile(written)
@@ -315,8 +321,8 @@ func TestMaterializeMemoryInstructionsWritesTheHeadedCopy(t *testing.T) {
 	}
 
 	refused := filepath.Join(t.TempDir(), "state")
-	if _, err := MaterializeMemoryInstructions(filepath.Join(t.TempDir(), "absent.md"), refused, "demo"); err == nil {
-		t.Fatal("a missing file was materialized")
+	if _, err := ReadMemoryInstructions(filepath.Join(t.TempDir(), "absent.md")); err == nil {
+		t.Fatal("a missing file was read")
 	}
 	if _, err := os.Stat(filepath.Join(refused, MemoryInstructionsFile)); !os.IsNotExist(err) {
 		t.Errorf("a refused file still wrote the copy (stat: %v)", err)

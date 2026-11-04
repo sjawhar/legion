@@ -829,6 +829,9 @@ func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabil
 	}
 	memory := cfg.Projects[cfg.Project].Memory
 	memoryField := "projects." + cfg.Project + ".memory.config_files"
+	// probed is each PI_CONFIG_FILES value already read, so one value shared by six roles costs
+	// one read of each of its files rather than six.
+	probed := make(map[string]struct{}, len(config.RoleConfigRoles))
 	for _, role := range config.RoleConfigRoles {
 		own := cfg.RoleConfigFiles[role]
 		field := "role_config_files." + string(role)
@@ -845,6 +848,16 @@ func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabil
 		if len(own) == 0 {
 			continue
 		}
+		// Every workflow role of a memory-group project that names no overlays of its own is
+		// given one and the same value, so each distinct value is read once rather than once per
+		// role: the runs Oh My Pi is asked for are identical, and so is their verdict. The first
+		// role holding a value Oh My Pi refuses is still the role the refusal names, since the
+		// loop reaches it before any other role of that value.
+		value := strings.Join(own, ":")
+		if _, read := probed[value]; read {
+			continue
+		}
+		probed[value] = struct{}{}
 		why, err := capabilities.CheckOverlays(ctx, image, slices.Concat(every, own), own)
 		if err != nil {
 			log.Warn("boot gate: Oh My Pi did not answer on some of a role's overlays; its files were read", "role", role, "error", err)
@@ -876,7 +889,7 @@ func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bo
 			return err
 		})
 		if err != nil {
-			return false, fmt.Errorf("read the memory group of tree %s: %w", tree, err)
+			return false, err
 		}
 		return issue != nil && issue.MemoryGroup == string(memorygroup.GroupMemory), nil
 	}
