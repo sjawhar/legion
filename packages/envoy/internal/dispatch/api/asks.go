@@ -399,6 +399,21 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The person this credential acts for, where it holds the `person` scope, resolved here and
+	// not at the author check below: resolving a credential reads the store, and the pool
+	// refuses a second connection inside the transaction the next line opens
+	// (store.ErrNestedAcquire). It is nil for every credential that is nobody's person.
+	var asThePerson *model.Actor
+	if s.callerHoldsScope(r, model.ScopePerson) {
+		person, held := s.actingPerson(w, r)
+		if !held {
+			return
+		}
+		if person, ok = actSessionFromBody(w, person, input.Actor); !ok {
+			return
+		}
+		asThePerson = &person
+	}
 
 	// A block ask's text is written into its block, so the edit queues for the writer gate of the
 	// block's document before its transaction opens. A block ask never moves to another document.
@@ -455,8 +470,18 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
-		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
-		return
+		// A session rewording its own ask is recorded as that session acting for its owner, as
+		// it always was, so nothing a session reads back of its own reword changes. Rewording
+		// somebody else's is the person's act, which needs the `person` scope: a credential of
+		// theirs that holds it is recorded as the person with the agent beside them, exactly as
+		// their browser's reword is recorded as them, and every other credential keeps the
+		// refusal.
+		if asThePerson == nil {
+			writeError(w, "NOT_AUTHOR", http.StatusForbidden,
+				"only the asking session, or a credential holding the person scope, may edit an ask")
+			return
+		}
+		actor = *asThePerson
 	}
 
 	previous := model.NewAskEditPrevious(ask)

@@ -1388,9 +1388,10 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 		})
 	}
 
+	// The inbox is one of the rows the person scope opens, and the shared token holds no scope.
 	inbox := agentRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "agent-token")
-	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	if inbox.Code != http.StatusForbidden || !strings.Contains(inbox.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's inbox: status=%d body=%s, want 403 %s", inbox.Code, inbox.Body.String(), codeScopeRequired)
 	}
 	anonymous := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "")
 	if anonymous.Code != http.StatusUnauthorized {
@@ -1429,8 +1430,8 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 		t.Fatalf("Bob state leaked Alice pin: status=%d body=%s", bob.Code, bob.Body.String())
 	}
 	session := agentRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "agent-token")
-	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("session state: status=%d body=%s", session.Code, session.Body.String())
+	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's state: status=%d body=%s, want 403 %s", session.Code, session.Body.String(), codeScopeRequired)
 	}
 }
 

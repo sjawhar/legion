@@ -163,6 +163,11 @@ type Caller struct {
 	// held to no single project. callerOf applies the broker's named-scope rule, so a reader
 	// takes this field as it stands rather than reading the scope beside it.
 	Project string
+	// ProjectScope is the broker's own `project_scope` claim, carried whole rather than read
+	// down to a flag: a reader deciding what a token may do has to tell "the broker scoped this
+	// to its person" from every other answer, and an absent or misspelt scope must not read as
+	// ProjectScopePerson.
+	ProjectScope string
 }
 
 // Options is what a Verifier needs. BrokerURL, Account, Origin, Replay and Address are required.

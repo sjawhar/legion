@@ -36,7 +36,7 @@
 #      cache off and cannot change the version), and any other input fails; it is checked for what
 #      it is, not only for what other files are not,
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, a
-#      `FROM` on `ghcr.io/sjawhar/legion/ci` — the package every image a CI job fetches is copied
+#      `FROM` on `ghcr.io/cybermonklabs/legion/ci` — the package every image a CI job fetches is copied
 #      into, named by digest — whose digest no row of `.github/ci-images.yaml` holds, or whose row
 #      copies another Bun release, an `ARG BUN_VERSION` default that disagrees with the pin, or
 #      a Dockerfile `RUN` (backslash continuations joined) that installs Bun,
@@ -108,7 +108,7 @@ SETUP_ACTION = Path(".github/actions/setup-bun/action.yml")
 # job publishes it from CI_IMAGES), so a Dockerfile's Bun base names a digest and no version.
 # The row that digest belongs to is what says which Bun it is.
 CI_IMAGES = Path(".github/ci-images.yaml")
-MIRROR_REGISTRY = "ghcr.io/sjawhar/legion/ci"
+MIRROR_REGISTRY = "ghcr.io/cybermonklabs/legion/ci"
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 MISE_FILES = {
     "mise.toml",

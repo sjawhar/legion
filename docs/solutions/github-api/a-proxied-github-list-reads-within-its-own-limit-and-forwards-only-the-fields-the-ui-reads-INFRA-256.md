@@ -34,7 +34,7 @@ When GitHub has no smaller media type for a list the web app needs:
 
 ## Evidence
 
-- `GET repos/sjawhar/legion/actions/runs?per_page=100` returned 1,291,575 bytes, about 12.8 KB a
+- `GET repos/cybermonklabs/legion/actions/runs?per_page=100` returned 1,291,575 bytes, about 12.8 KB a
   run (each run carries its repository, head repository and head commit with message and emails).
 - `packages/envoy/internal/dispatch/githubapi/proxy.go` reads `actions/runs` within
   `workflowRunsResponseLimit` (16 MiB) and writes `total_count` plus `check_suite_id`, `event` and
