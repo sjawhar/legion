@@ -8,6 +8,7 @@
 // Dispatch's relay, so that spec stands a fake daemon up and reads what reached it.
 import { expect, test } from "@playwright/test";
 
+import { baseUrl, userHeaders } from "./api";
 import { PIPELINE_SECTION_URL, seedPipelineFixture } from "./delivery-seed";
 import {
   LEGION_PROJECT,
@@ -178,6 +179,75 @@ test("a project with no Legion setting has no Legion view until the Settings pag
     await expect(
       page.getByRole("region", { name: "Implementing" }).locator('[data-legion-card="ACME-1"]')
     ).toBeVisible();
+  } finally {
+    await context.close();
+    await daemon.close();
+  }
+});
+
+// The other half of the Settings control: the URL it refuses, and the Remove that takes the
+// view away again. A state URL that is not an absolute http(s) one with a host and no path is
+// refused, and the page's own wording must be the server's own, since the page carries a second
+// copy of the rule (`legionStateUrl` in LegionDaemonsSection.tsx) and only the server's copy
+// decides what is stored.
+test("the Settings page refuses a state URL that is not a daemon's, and its Remove takes the view away @legion", async ({
+  browser,
+}) => {
+  const daemon = await startFakeLegionDaemon({});
+  await seedLegionFixture(daemon.url);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const bad = `${daemon.url}/legion/v1/state`;
+
+  try {
+    // What the server says about this URL, so the page can be held to its wording.
+    const refusal = await fetch(new URL(`/api/v1/settings/legion/${LEGION_PROJECT}`, baseUrl), {
+      body: JSON.stringify({ state_url: bad }),
+      headers: { "Content-Type": "application/json", ...(await userHeaders("alice")) },
+      method: "PUT",
+    });
+    expect(refusal.status).toBe(400);
+    const refused = (await refusal.json()) as { code: string; error: string };
+    expect(refused.code).toBe("LEGION_SETTING_INPUT");
+
+    await page.goto("/settings");
+    const section = page.locator("[data-legion-daemons]");
+    await expect(section).toContainText(daemon.url);
+
+    // The page refuses the same URL, in the server's own words, and sends no write at all.
+    let wrote = false;
+    page.on("request", (request) => {
+      if (
+        request.method() === "PUT" &&
+        request.url().endsWith(`/api/v1/settings/legion/${LEGION_PROJECT}`)
+      ) {
+        wrote = true;
+      }
+    });
+    await page.getByLabel("Legion daemon state URL").fill(bad);
+    await page
+      .getByRole("combobox", { exact: true, name: "Legion project" })
+      .selectOption(LEGION_PROJECT);
+    await page.getByRole("button", { name: "Save Legion daemon" }).click();
+    await expect(page.getByRole("alert")).toHaveText(refused.error);
+    expect(wrote).toBe(false);
+    // The refusal changed nothing: the project still reads the daemon it did.
+    await expect(section).toContainText(daemon.url);
+
+    // Remove stops the reading, and the Issues page loses its Legion view.
+    const removed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "DELETE" &&
+        response.url().endsWith(`/api/v1/settings/legion/${LEGION_PROJECT}`)
+    );
+    await page
+      .getByRole("button", { name: `Remove the Legion daemon of ${LEGION_PROJECT}` })
+      .click();
+    expect((await removed).status()).toBeLessThan(300);
+
+    await page.goto(`/projects/${LEGION_PROJECT}`);
+    await expect(page.getByRole("button", { name: "Board" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Legion" })).toHaveCount(0);
   } finally {
     await context.close();
     await daemon.close();
