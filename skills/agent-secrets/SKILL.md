@@ -44,10 +44,10 @@ agent-secrets LEGION_SLACK_BOT_TOKEN -- \
   sh -c 'curl -sS -H "Authorization: Bearer $LEGION_SLACK_BOT_TOKEN" https://slack.com/api/auth.test'
 ```
 
-The repository uses the same form for a GitHub App key in `docs/deployment.md`:
+The repository uses the same form for a GitHub App token in `docs/deployment.md`:
 
 ```sh
-agent-secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --reason=… -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64" | base64 -d'
+agent-secrets LEGION_IMPLEMENT_APP --reason=… -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP"'
 ```
 
 ## The value never reaches your transcript
@@ -100,9 +100,9 @@ run or was not found; and 129, 130, 131 and 143 from a signal at the value promp
   request id from the message, and reads the decision later with
   `agent-secrets status <request_id>`.
 - A later run with the same names and the same `--ttl` uses the live grant again and asks nobody;
-  while the first request still waits, such a run joins it. Any other run that shares a name with a
-  waiting request, with another `--ttl` or another set of names, is refused `REQUEST_PENDING`,
-  which names the request already waiting.
+  while the first request still waits, such a run joins it. Any other run that would itself wait
+  for a person and shares a name with a waiting request, with another `--ttl` or another set of
+  names, is refused `REQUEST_PENDING`, which names the request already waiting.
 - `agent-secrets identity` exits 0 when this session has a broker identity and 1 when it has none,
   and it asks the broker nothing. `agent-secrets self` prints this session's live grants.
 
@@ -115,9 +115,9 @@ prompt, a skill, or the issue you work on. There is no list to browse and nothin
   secret exists reaches a person's Inbox.
 - `UNKNOWN_SECRET` and a denial are final. Do not ask again, and do not try a name of your own.
 - A secret that a service owns, such as `LEGION_SLACK_BOT_TOKEN`, goes to that service's own pods
-  and to nothing else: `Evaluate` in `packages/envoy/internal/broker/policy/policy.go` grants a
-  service-owned secret at once when the session's own service is the secret's owner, and denies
-  every other session, with no person asked.
+  and VMs and to nothing else: `Evaluate` in `packages/envoy/internal/broker/policy/policy.go`
+  grants a service-owned secret at once when the session's own service is the secret's owner, and
+  denies every other session, with no person asked.
 - The `agent-secrets secret` forms (`list`, `show`, `create`, `set`, `retag`, `delete`, `restore`)
   act under a person's own cloud sign-in. They belong to the secret's owner, not to an agent.
 - Slack's read methods go through `curl` under this client. Every post to Slack stays a `slack_post`
@@ -168,8 +168,9 @@ messages of the thread. A `ts` that names no message answers
 `{"ok":false,"error":"thread_not_found"}`, also at exit 0, which is why the body decides and not the
 status. A thread read needs the app's `channels:history` scope in a public channel and
 `groups:history` in a private one; without them Slack answers `missing_scope`, which only a person
-in the Slack workspace can fix. Outside a Legion pod the broker denies this token, and the example
-exits 77.
+in the Slack workspace can fix. A session with a broker identity that is not one of the
+`legion-daemon` service's own is denied this token, and the example exits 77; a session with no
+broker identity exits 2.
 
 Paging: Slack recommends a `limit` of at most 200. While the answer's `has_more` is true, pass its
 `response_metadata.next_cursor` as `cursor` to the next call. Each page repeats the thread's root
