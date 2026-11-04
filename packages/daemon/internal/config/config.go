@@ -981,6 +981,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := checkRoleConfigFiles(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := checkMemory(cfg); err != nil {
+		return Config{}, err
+	}
 	if err := checkRepositoryRenames(file, &cfg); err != nil {
 		return Config{}, err
 	}
