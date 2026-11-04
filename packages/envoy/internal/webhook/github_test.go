@@ -1052,6 +1052,115 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 	})
 }
 
+// A check run GitHub names no pull request for is attributed by its check suite's head branch:
+// the handler records it under the pull request refs/pull/<n>/head names, and records nothing for
+// a suite on any other branch. A verdict so attributed passes the reviewer gate like any other.
+func TestGitHubHandlerAttributesACheckRunByItsSuiteHeadBranch(t *testing.T) {
+	const (
+		secret        = "s"
+		reviewerAppID = "12345"
+	)
+	checkRun := func(t *testing.T, name, appID string, suite map[string]any) string {
+		t.Helper()
+		run := map[string]any{
+			"id":            987654321,
+			"name":          name,
+			"status":        "completed",
+			"conclusion":    "failure",
+			"completed_at":  "2026-09-07T03:00:00Z",
+			"head_sha":      "deadbeef",
+			"app":           map[string]any{"id": appID},
+			"pull_requests": []any{},
+		}
+		if suite != nil {
+			run["check_suite"] = suite
+		}
+		body, err := json.Marshal(map[string]any{
+			"action":    "completed",
+			"check_run": run,
+			"sender":    map[string]any{"login": "github-actions[bot]", "type": "Bot"},
+			"repository": map[string]any{
+				"name": "legion", "owner": map[string]any{"login": "sjawhar"},
+				"full_name": "sjawhar/legion", "default_branch": "main",
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal the check_run: %v", err)
+		}
+		return string(body)
+	}
+	post := func(t *testing.T, reviewerApp, body string) (*mockPublisher, *mockRecorder) {
+		t.Helper()
+		pub := &mockPublisher{}
+		rec := &mockRecorder{}
+		handler := GitHubHandler(secret, "@legion", reviewerApp, pub, rec)
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", "d-head-branch")
+		req.Header.Set("X-GitHub-Event", "check_run")
+		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+		}
+		return pub, rec
+	}
+	pullHead := map[string]any{"id": 900, "head_branch": "refs/pull/7/head"}
+
+	t.Run("a run on a pull head ref is recorded under its number", func(t *testing.T) {
+		pub, rec := post(t, reviewerAppID, checkRun(t, "unit-tests", "98765", pullHead))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0]; got.Number != "7" || got.CheckName != "unit-tests" || got.Conclusion != "failure" {
+			t.Fatalf("recorded observation = %+v", got)
+		}
+		if len(pub.published) != 0 {
+			t.Fatalf("published = %d, want 0", len(pub.published))
+		}
+	})
+
+	for _, head := range []struct {
+		name  string
+		suite map[string]any
+	}{
+		{name: "the default branch", suite: map[string]any{"id": 900, "head_branch": "main"}},
+		{name: "a topic branch", suite: map[string]any{"id": 900, "head_branch": "feature/x"}},
+		{name: "a merge queue branch", suite: map[string]any{"id": 900, "head_branch": "gh-readonly-queue/main/pr-1-deadbeef"}},
+		{name: "the merge ref", suite: map[string]any{"id": 900, "head_branch": "refs/pull/7/merge"}},
+		{name: "a zero number", suite: map[string]any{"id": 900, "head_branch": "refs/pull/0/head"}},
+		{name: "a number that is not one", suite: map[string]any{"id": 900, "head_branch": "refs/pull/x/head"}},
+		{name: "an empty head branch", suite: map[string]any{"id": 900, "head_branch": ""}},
+		{name: "no check suite at all", suite: nil},
+	} {
+		t.Run("a run on "+head.name+" records nothing", func(t *testing.T) {
+			pub, rec := post(t, reviewerAppID, checkRun(t, "unit-tests", "98765", head.suite))
+			if n := len(rec.calls) + len(rec.suiteCalls); n != 0 {
+				t.Fatalf("recorder calls = %d, want 0: %+v", n, rec.calls)
+			}
+			if len(pub.published) != 0 {
+				t.Fatalf("published = %+v, want none", pub.published)
+			}
+		})
+	}
+
+	t.Run("a verdict on a pull head ref is recorded only for the review App", func(t *testing.T) {
+		_, rec := post(t, reviewerAppID, checkRun(t, "tester", reviewerAppID, pullHead))
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorder calls = %d, want 1", len(rec.calls))
+		}
+		if got := rec.calls[0]; got.Number != "7" || got.CheckName != "tester" {
+			t.Fatalf("recorded verdict = %+v", got)
+		}
+		if _, other := post(t, reviewerAppID, checkRun(t, "tester", "98765", pullHead)); len(other.calls) != 0 {
+			t.Fatalf("another App's verdict was recorded: %+v", other.calls)
+		}
+		if _, unset := post(t, "", checkRun(t, "tester", reviewerAppID, pullHead)); len(unset.calls) != 0 {
+			t.Fatalf("a verdict was recorded without a review App id: %+v", unset.calls)
+		}
+	})
+}
+
 // largePushPayload is a push listing commits commits, each carrying the fields GitHub sends for
 // one and touching several files, the shape of a large branch push.
 func largePushPayload(t *testing.T, commits int) []byte {

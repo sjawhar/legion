@@ -110,37 +110,66 @@ type CIObservation struct {
 // check runs and suites are folded into durable per-head state; neither emits a
 // raw webhook envelope.
 func GithubCIObservations(event string, body map[string]any) []CIObservation {
-	prs := githubCIPullRequests(event, body)
-	if len(prs) == 0 {
-		return nil
-	}
-	// The CI event name is also the key of its object in the body.
-	key := event
-	sha := nestedString(body, key, "head_sha")
-	if sha == "" {
-		return nil
+	numbers := githubCIPullRequests(event, body)
+	if len(numbers) == 0 {
+		// A check suite GitHub runs on a pull request's head carries that head's ref even when it
+		// lists no pull request, so the head branch attributes what pull_requests leaves
+		// unattributed (githubCIHeadBranchPullRequest).
+		number := githubCIHeadBranchPullRequest(event, body)
+		if number == "" {
+			return nil
+		}
+		numbers = []string{number}
 	}
 	owner, repo := githubRepo(body)
+	// The CI event name is also the key of its object in the body.
+	obs, ok := GithubCIObservation(event, mapValue(body[event]), owner, repo, numbers[0])
+	if !ok {
+		return nil
+	}
+	out := make([]CIObservation, 0, len(numbers))
+	for _, number := range numbers {
+		obs.Number = number
+		out = append(out, obs)
+	}
+	return out
+}
+
+// GithubCIObservation maps one GitHub check-run or check-suite object (event is "check_run" or
+// "check_suite") to the observation the CI store records under owner/repo and pull request
+// number. ok is false when the object carries nothing recordable.
+//
+// object is the object itself, not the webhook body that carries it: GitHub's REST listing
+// GET /repos/{owner}/{repo}/commits/{sha}/check-runs returns the same shape outside any webhook,
+// so a reconcile pass over that listing and the webhook produce the same observation for the same
+// object. The number comes from the caller, because that listing returns a short check_suite with
+// no head_branch to attribute by.
+func GithubCIObservation(event string, object map[string]any, owner, repo, number string) (CIObservation, bool) {
+	sha := stringValue(object["head_sha"])
+	if sha == "" {
+		return CIObservation{}, false
+	}
 	// The listener writes an observation to its CI store with a publish, so each text it copies is
 	// capped like an envelope's.
-	text := func(path ...string) string {
-		return truncateWithEllipsis(nestedString(body, append([]string{key}, path...)...), maxEnvelopeTextRunes)
+	text := func(key string) string {
+		return truncateWithEllipsis(stringValue(object[key]), maxEnvelopeTextRunes)
 	}
 	obs := CIObservation{
 		Owner:      owner,
 		Repo:       repo,
+		Number:     number,
 		SHA:        sha,
-		AppID:      nestedNumberString(body, key, "app", "id"),
+		AppID:      nestedNumberString(object, "app", "id"),
 		Status:     text("status"),
 		Conclusion: text("conclusion"),
 	}
 	if event == "check_run" {
-		checkRunID := githubPositiveUint64(nested(body, key, "id"))
+		checkRunID := githubPositiveUint64(object["id"])
 		if checkRunID == 0 {
-			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
-			return nil
+			log.Printf("github ci check run skipped: invalid id=%v", object["id"])
+			return CIObservation{}, false
 		}
-		obs.CheckName = checkName(nestedString(body, key, "name"))
+		obs.CheckName = checkName(stringValue(object["name"]))
 		obs.CheckRunID = checkRunID
 		obs.URL = text("html_url")
 		obs.ObservedAt = text("completed_at")
@@ -148,21 +177,16 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			obs.ObservedAt = text("started_at")
 		}
 		if obs.CheckName == "" {
-			return nil
+			return CIObservation{}, false
 		}
 	} else {
-		obs.SuiteID = nestedNumberString(body, key, "id")
+		obs.SuiteID = nestedNumberString(object, "id")
 		obs.ObservedAt = text("updated_at")
 		if obs.SuiteID == "" {
-			return nil
+			return CIObservation{}, false
 		}
 	}
-	out := make([]CIObservation, 0, len(prs))
-	for _, pr := range prs {
-		obs.Number = pr
-		out = append(out, obs)
-	}
-	return out
+	return obs, true
 }
 
 // checkName is a check's name as the CI store keys it: whole, or past maxEnvelopeTextRunes its first
@@ -175,6 +199,40 @@ func checkName(name string) string {
 	}
 	digest := sha256.Sum256([]byte(name))
 	return truncateWithEllipsis(name, maxEnvelopeTextRunes) + " " + hex.EncodeToString(digest[:8])
+}
+
+// ReviewerVerdict is what the shared rule says about one check run's name and the App that
+// created it, against the review App's id.
+type ReviewerVerdict int
+
+const (
+	// VerdictNotAVerdict: the check is not a verdict check (`tester`, `architect`); record it.
+	VerdictNotAVerdict ReviewerVerdict = iota
+	// VerdictNoReviewerApp: a verdict check while the review App's id is unset; drop it.
+	VerdictNoReviewerApp
+	// VerdictUntrusted: a verdict check another App created; drop it.
+	VerdictUntrusted
+	// VerdictTrusted: a verdict check the review App created; record it.
+	VerdictTrusted
+)
+
+// ReviewerVerdictDecision decides one check run: a verdict check says a review passed or failed,
+// so it is recorded only when the review App created it. The caller logs what it drops; the rule
+// itself logs nothing, so every caller of it decides alike.
+//
+// The rule is about check runs only. A check suite has no name, and its recorder runs before the
+// gate, so a suite never goes through it.
+func ReviewerVerdictDecision(checkName, appID, reviewerAppID string) ReviewerVerdict {
+	if checkName != "tester" && checkName != "architect" {
+		return VerdictNotAVerdict
+	}
+	if reviewerAppID == "" {
+		return VerdictNoReviewerApp
+	}
+	if appID != reviewerAppID {
+		return VerdictUntrusted
+	}
+	return VerdictTrusted
 }
 
 func GithubIsBotSender(body map[string]any) bool {
@@ -517,6 +575,12 @@ func githubCIEvent(event string) bool {
 // the run's id, then the job's.
 var githubActionsJobURL = regexp.MustCompile(`^https://github\.com/[^/]+/[^/]+/actions/runs/(\d+)/job/(\d+)$`)
 
+// githubPullHeadRef is the head branch GitHub gives a check suite it runs on a pull request's
+// head: the ref that head is fetched by. The number is anchored and admits no leading zero,
+// because the CI store keys a record by the number as it is written, and `refs/pull/007/head`
+// would key a second record beside the one the webhook's own pull_requests list keys.
+var githubPullHeadRef = regexp.MustCompile(`^refs/pull/([1-9][0-9]*)/head$`)
+
 // githubActionsJob reports whether a webhook is a finished GitHub Actions job on the repository's
 // default branch, of a run with no pull request, and its run and job ids: a completed check_run
 // that lists no pull request, from the GitHub Actions App, whose check suite's head_branch is the
@@ -562,6 +626,30 @@ func githubCIPullRequests(event string, body map[string]any) []string {
 		}
 	}
 	return nums
+}
+
+// githubCIHeadBranchPullRequest is the pull request a CI event's check suite names through its
+// head branch, and "" when it names none. GitHub leaves a check suite's pull_requests list empty
+// whenever it cannot resolve the pull request itself (a fork's head above all), and the listener
+// then has nothing to key the observation by; the suite's head_branch still carries the ref the
+// pull request's head is fetched by, so it attributes the event where pull_requests cannot. Only
+// refs/pull/<n>/head does: refs/pull/<n>/merge is GitHub's merge commit, a merge queue's branch
+// is the queue's own, and a branch push names no pull request at all.
+func githubCIHeadBranchPullRequest(event string, body map[string]any) string {
+	var branch string
+	switch event {
+	case "check_run":
+		branch = nestedString(body, "check_run", "check_suite", "head_branch")
+	case "check_suite":
+		branch = nestedString(body, "check_suite", "head_branch")
+	default:
+		return ""
+	}
+	match := githubPullHeadRef.FindStringSubmatch(branch)
+	if match == nil {
+		return ""
+	}
+	return match[1]
 }
 
 func githubCommentBody(event string, body map[string]any) string {
