@@ -10645,21 +10645,28 @@ console.log(JSON.stringify(args));
     // nor errors used to hold every later pass behind it for the life of the process: the pane's
     // registry record then lapsed while it ran on, and every other agent was told there was no
     // live session for it. The refresh has to keep going, tick after tick, not recover once.
-    // The ticks are hand-driven, but the age the refresh is decided on is read from the real
-    // clock (`Date.now() - registeredAt`), so the waits between them are real waits.
+    // The ticks are hand-driven, and the age the refresh is decided on is read from the real
+    // clock (`Date.now() - registeredAt`), so a tick inside that interval posts nothing: the row
+    // waits on the registration reaching the listener, and ticks again until it does, rather than
+    // reading the count after a sleep a loaded machine outruns.
     await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 5000 }, async () => {
       let wedgePass = false;
+      const wedged = Promise.withResolvers<void>();
       const answered = Promise.withResolvers<void>();
       let registrations = 0;
+      /** Told of the next registration the listener accepts, while `refreshed` waits for one. */
+      let accepted: (() => void) | undefined;
       globalThis.fetch = async (input, init) => {
         if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
           // The call the pass awaits, as a socket that is accepted and never answered leaves it:
           // nothing resolves it, and the request's abort signal goes unread.
           if (wedgePass) {
             wedgePass = false;
+            wedged.resolve();
             await answered.promise;
           } else {
             registrations += 1;
+            accepted?.();
           }
         }
         return responseWithRegistration(input, init, {});
@@ -10671,31 +10678,50 @@ console.log(JSON.stringify(args));
         ...sessionContext("ses_wedged_pass"),
         setInterval: (callback) => intervals.push(callback),
       };
+      /**
+       * Ticks until the listener has accepted one more registration, and answers with the count it
+       * reached. A tick that lands inside the refresh interval posts nothing, so the row ticks
+       * again after a grace instead of deciding on one tick, and a refresh is awaited where it
+       * shows — at the listener. The deadline only a stopped refresh reaches leaves the count as
+       * it was, so the caller's own assertion says what was missing.
+       */
+      const refreshed = async (): Promise<number> => {
+        const seen = registrations;
+        const until = Date.now() + 5_000;
+        while (registrations === seen && Date.now() < until) {
+          const waiting = Promise.withResolvers<void>();
+          accepted = () => waiting.resolve();
+          const grace = setTimeout(() => waiting.resolve(), 250);
+          intervals[0]?.();
+          await waiting.promise;
+          clearTimeout(grace);
+          accepted = undefined;
+        }
+        return registrations;
+      };
       envoyExtension(fixture.pi);
       await fixture.handlers.get("session_start")?.({}, context);
       expect(registrations).toBe(1);
 
       wedgePass = true;
       intervals[0]?.();
-      // The pass is still inside that call, so its own registration never reached the listener.
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The pass is inside that call, so its own registration never reached the listener.
+      await wedged.promise;
       expect(registrations).toBe(1);
 
-      // Two refresh intervals with nothing accepted: the tick posts the registration itself.
-      intervals[0]?.();
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(registrations).toBe(2);
+      // A refresh interval with nothing accepted: the tick posts the registration itself.
+      const second = await refreshed();
+      expect(second).toBeGreaterThan(1);
 
-      // And the tick after it does too: the refresh resumes, it does not recover once.
-      intervals[0]?.();
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(registrations).toBe(3);
+      // And the ticks after it do too: the refresh resumes, it does not recover once.
+      expect(await refreshed()).toBeGreaterThan(second);
 
       // Answer at last, so the pass settles and leaves no deadline timer behind.
       answered.resolve();
       for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
     });
-  });
+    // The row's own bound is a hang guard, the file's convention: its work is a handful of ticks.
+  }, 30_000);
 
   test("a role move that never settles still lets the next tick refresh the registration", async () => {
     // What a wedged envoy_role_set or a wedged Legion claim leaves behind: the role-move queue is
