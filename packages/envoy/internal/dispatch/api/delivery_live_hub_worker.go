@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
 // work recomputes the dirty views and the expired ones, one at a time, and keeps the freshness
@@ -158,6 +157,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	h.note(deliveryHubNote{what: "recompute read", view: spec.key, cause: cause, through: read.seq})
 
 	now := h.clock.Now()
+	classes := spec.classes()
 	h.mu.Lock()
 	heard := view.heard
 	view.computing, view.readingSeq, view.heard = false, 0, nil
@@ -165,11 +165,8 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	switch {
 	case h.views[spec.key] != view:
 		// Every sub left while it read.
-	case errors.Is(err, delivery.ErrNoSettings), errors.Is(err, legion.ErrNoSettings):
-		code, message := deliveryNotConfiguredCode, deliveryNotConfiguredMessage
-		if errors.Is(err, legion.ErrNoSettings) {
-			code, message = legionNotConfiguredCode, legionNotConfiguredMessage
-		}
+	case err != nil && errors.Is(err, classes.unconfigured):
+		code, message := classes.unconfiguredCode, classes.unconfiguredMessage
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
 			if !sub.told {
@@ -203,9 +200,9 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		view.from, view.at, view.expiry = read.from, read.at, read.expiry
 		view.issues, view.ancestors, view.sessions = read.issues, read.ancestors, read.sessions
 		sent = h.sendLocked(view)
-		if spec.kind == legionBoardView {
-			// The board reads no delivery settings, so it judges no freshness: the verdict stays
-			// the one the delivery views' own reads set.
+		if !classes.delivery {
+			// A view that reads no delivery row holds no delivery settings, so it judges no
+			// freshness: the verdict stays the one the delivery views' own reads set.
 			break
 		}
 		if !h.known {
@@ -253,75 +250,93 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec, epoch int6
 		}
 	}
 	now := h.clock.Now()
-	var body any
-	switch spec.kind {
-	case legionBoardView:
-		// The Legion board reads no delivery settings: its own are the project's Legion setting,
-		// and a deployment that configured one and not the other still shows the board.
-		board, boardErr := h.server.readLegionBoard(ctx, spec.project)
-		if boardErr != nil {
-			return read, boardErr
-		}
-		// Every issue the board names, so an event about one marks the view (dirtyIssueLocked);
-		// the board shows no session, so it names none.
-		read.issues = board.issueKeys()
-		body = legionBoardCompute(board, now)
-	case deliveryLivePipeline:
-		if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
-			return read, err
-		}
-		window := spec.pipelineWindowAt(now)
-		read.at = window.end
-		if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, window); err != nil {
-			return read, err
-		}
-		body = deliveryPipelineCompute(read.settings, read.pipe, window, now)
-		if spec.pipelineRolls() {
-			read.expiry = pipelineNextExpiry(read.pipe, now)
-		}
-		read.from = window.start()
-		read.prs, read.runs = len(read.pipe.leadTimes.prs), len(read.pipe.checks.Runs)+len(read.pipe.deploys.Runs)
-		read.unfetchable = read.pipe.leadTimes.unfetchable
-	default:
-		if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
-			return read, err
-		}
-		from, to := spec.from, spec.to
-		if spec.preset > 0 {
-			from, to = now.Add(-spec.days()), now
-		}
-		if read.pop, err = h.server.readDeliveryPopulation(ctx, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
-			return read, err
-		}
-		read.issues = map[string]struct{}{}
-		read.sessions = map[string]string{}
-		name := func(issue *string, sessions []string) {
-			if issue != nil {
-				read.issues[*issue] = struct{}{}
-			}
-			for _, session := range sessions {
-				read.sessions[session] = delivery.SessionTitle(read.pop.titles, session)
-			}
-		}
-		for _, pr := range read.pop.prs {
-			name(pr.IssueKey, pr.Sessions)
-		}
-		for _, pr := range read.pop.waiting {
-			name(pr.IssueKey, pr.Sessions)
-		}
-		if read.ancestors, err = delivery.IssueAncestors(ctx, pool, slices.Sorted(maps.Keys(read.issues)), parentDepthCap); err != nil {
-			return read, err
-		}
-		body = deliveryLiveCompute(spec.kind, read.settings, read.pop, from, to, now)
-		if spec.preset > 0 {
-			read.expiry = nextExpiry(read.pop, spec.days(), now)
-		}
-		read.from = from
-		read.prs, read.runs = len(read.pop.prs), len(read.pop.applyRuns)+len(read.pop.windowRuns)
-		read.unfetchable = read.pop.unfetchable
+	body, err := spec.classes().read(h, ctx, spec, now, &read)
+	if err != nil {
+		return read, err
 	}
 	read.body, err = encodeDeliveryBody(spec.kind, body)
 	return read, err
+}
+
+// readLegionBoardView is a Legion board's read: the project's own daemon state as the sampler
+// recorded it. It reads no delivery settings — its own are the project's Legion setting, and a
+// deployment that configured one and not the other still shows the board.
+func (h *deliveryHub) readLegionBoardView(ctx context.Context, spec deliveryLiveSpec, now time.Time, read *deliveryViewRead) (any, error) {
+	board, err := h.server.readLegionBoard(ctx, spec.project)
+	if err != nil {
+		return nil, err
+	}
+	// Every issue the board names, so an event about one marks the view (dirtyIssueLocked); the
+	// board shows no session, so it names none.
+	read.issues = board.issueKeys()
+	return legionBoardCompute(board, now), nil
+}
+
+// readPipelineView is a Pipeline section's read: the delivery settings and the runs, jobs and
+// merges of the window its spec names.
+func (h *deliveryHub) readPipelineView(ctx context.Context, spec deliveryLiveSpec, now time.Time, read *deliveryViewRead) (any, error) {
+	pool := h.server.deps.Store.Pool
+	var err error
+	if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
+		return nil, err
+	}
+	window := spec.pipelineWindowAt(now)
+	read.at = window.end
+	if read.pipe, err = h.server.readPipelinePopulation(ctx, read.settings, window); err != nil {
+		return nil, err
+	}
+	body := deliveryPipelineCompute(read.settings, read.pipe, window, now)
+	if spec.pipelineRolls() {
+		read.expiry = pipelineNextExpiry(read.pipe, now)
+	}
+	read.from = window.start()
+	read.prs, read.runs = len(read.pipe.leadTimes.prs), len(read.pipe.checks.Runs)+len(read.pipe.deploys.Runs)
+	read.unfetchable = read.pipe.leadTimes.unfetchable
+	return body, nil
+}
+
+// readDeliveryView is a timeline or measures view's read: the delivery settings, the population
+// of its window and facets, and the ancestors of every issue that population names.
+func (h *deliveryHub) readDeliveryView(ctx context.Context, spec deliveryLiveSpec, now time.Time, read *deliveryViewRead) (any, error) {
+	pool := h.server.deps.Store.Pool
+	var err error
+	if read.settings, err = delivery.GetSettings(ctx, pool); err != nil {
+		return nil, err
+	}
+	from, to := spec.from, spec.to
+	if spec.preset > 0 {
+		from, to = now.Add(-spec.days()), now
+	}
+	if read.pop, err = h.server.readDeliveryPopulation(ctx, read.settings, from, to, spec.query, spec.kind == deliveryLiveTimeline); err != nil {
+		return nil, err
+	}
+	read.issues = map[string]struct{}{}
+	read.sessions = map[string]string{}
+	name := func(issue *string, sessions []string) {
+		if issue != nil {
+			read.issues[*issue] = struct{}{}
+		}
+		for _, session := range sessions {
+			read.sessions[session] = delivery.SessionTitle(read.pop.titles, session)
+		}
+	}
+	for _, pr := range read.pop.prs {
+		name(pr.IssueKey, pr.Sessions)
+	}
+	for _, pr := range read.pop.waiting {
+		name(pr.IssueKey, pr.Sessions)
+	}
+	if read.ancestors, err = delivery.IssueAncestors(ctx, pool, slices.Sorted(maps.Keys(read.issues)), parentDepthCap); err != nil {
+		return nil, err
+	}
+	body := deliveryLiveCompute(spec.kind, read.settings, read.pop, from, to, now)
+	if spec.preset > 0 {
+		read.expiry = nextExpiry(read.pop, spec.days(), now)
+	}
+	read.from = from
+	read.prs, read.runs = len(read.pop.prs), len(read.pop.applyRuns)+len(read.pop.windowRuns)
+	read.unfetchable = read.pop.unfetchable
+	return body, nil
 }
 
 // expire answers a view whose preset window, or whose pipeline day, moved past something it holds,

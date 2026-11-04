@@ -316,9 +316,13 @@ test("a daemon no read has recorded the settings of says so rather than showing 
   );
 });
 
+// The relay answers the daemon's own body, which keys each verdict by path under `settings`
+// (`LegionSettingsChangeResponse` in @legion/contracts/legion-api, the daemon's
+// api.SettingsChangeResponse): a fake answering a flat map of paths is a fake no daemon matches,
+// which is why the shape is a contract type both ends read.
 test("a change goes to the relay route and shows what the daemon did with the key", async () => {
   const put = spyOn(api, "putLegionProjectSettings").mockResolvedValue({
-    admission_cap: { applied: "at-once" },
+    settings: { admission_cap: { applied: "at-once" } },
   });
   try {
     await renderView(board({}, SETTINGS));
@@ -345,7 +349,7 @@ test("a change goes to the relay route and shows what the daemon did with the ke
 
 test("a refused key shows the daemon's reason and leaves the value as it was", async () => {
   const put = spyOn(api, "putLegionProjectSettings").mockResolvedValue({
-    admission_cap: { refused: "a running issue holds a slot" },
+    settings: { admission_cap: { refused: "a running issue holds a slot" } },
   });
   try {
     await renderView(board({}, SETTINGS));

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/legion"
+	"github.com/sjawhar/envoy/internal/dispatch/legion/metrics"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -456,5 +457,48 @@ func TestEachProjectsLegionBoardIsItsOwn(t *testing.T) {
 		if board.Header.QueueLength != 3 {
 			t.Errorf("%s's queue is %d long, want its own three", project, board.Header.QueueLength)
 		}
+	}
+}
+
+// TestTheBoardAndTheMetricsPutAnIssueInTheSameTree: the view and the four metrics read one
+// tree-root rule (legion.TreeRoot), so no issue is a child on the board and a root on a card.
+// The chain here is 40 deep, longer than the depth cap the board's own walk once stopped at, and
+// it hangs under a tracking issue that carries no Legion work, which the metrics' population
+// holds and the daemon never reported.
+func TestTheBoardAndTheMetricsPutAnIssueInTheSameTree(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	// The tracking issue above the tree: Dispatch holds it, the daemon reports nothing of it.
+	tracking := seedLegionIssue(t, database, "INFRA", 900, "The tracking issue", "a", nil, "")
+	parent := tracking
+	for number := 901; number <= 940; number++ {
+		key := seedLegionIssue(t, database, "INFRA", number, "A deep issue", fmt.Sprintf("b%02d", number-900), nil, parent)
+		seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"implementing"`, now.Add(-time.Hour))
+		seedLegionObservation(t, database, "INFRA", key, legion.ClaimFieldPrefix+"implementer", `"working"`, now.Add(-time.Hour))
+		parent = key
+	}
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	population, err := metrics.Read(t.Context(), database.Pool, nil, "INFRA", now.Add(-14*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("read the metrics population: %v", err)
+	}
+	cards := 0
+	for _, column := range board.Columns {
+		for _, card := range column.Cards {
+			cards++
+			if root := population.TreeRoot(card.Key); root != card.Tree {
+				t.Errorf("%s is in tree %q on the board and %q in the metrics", card.Key, card.Tree, root)
+			}
+		}
+	}
+	if cards != 40 {
+		t.Fatalf("the board shows %d cards, want the 40 issues the daemon reported", cards)
+	}
+	if root := population.TreeRoot("INFRA-940"); root != "INFRA-901" {
+		t.Errorf("the deepest issue's tree root is %s, want INFRA-901 under the tracking issue", root)
 	}
 }

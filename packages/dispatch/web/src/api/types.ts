@@ -181,7 +181,15 @@ export type {
   LegionBoardHeader,
   LegionBoardResponse,
   LegionBoardWait,
+  LegionFiledIssue,
+  LegionMetricsResponse,
+  LegionMetricsScope,
+  LegionReworkIssue,
+  LegionRoleBar,
+  LegionSegments,
   LegionSettingSource,
+  LegionSplittingWeek,
+  LegionWorkTimeIssue,
   ListUsersResponse,
   LiveAgentFrame,
   LiveClientFrame,
@@ -387,17 +395,13 @@ export interface LegionSetting {
   updated_at: string;
 }
 
-/** What one key of a relayed settings change was decided: applied at once, by rebuilding the
- *  client or listener that held it, or at the next worker launch — or refused, with the daemon's
- *  own reason. The daemon decides each key and Dispatch passes its body back unchanged
- *  (packages/envoy/internal/dispatch/api/settings_legion.go, `putLegionProjectSettings`), so this
- *  is the daemon's shape, read loosely: a verdict word this build does not know is shown as the
- *  daemon wrote it rather than dropped. */
-export interface LegionSettingVerdict {
-  applied?: string;
-  refused?: string;
-}
-
-/** `PUT /api/v1/legion/{project}/settings`: the daemon's answer, one verdict per key of the
- *  change, by the dotted legion.yaml path. */
-export type LegionSettingsChangeResponse = Readonly<Record<string, LegionSettingVerdict>>;
+/** What one key of a relayed settings change was decided, and the body that carries them: the
+ *  daemon's own shapes (`api.SettingResult` and `api.SettingsChangeResponse`), since Dispatch
+ *  relays the daemon's body unchanged (packages/envoy/internal/dispatch/api/settings_legion.go,
+ *  `putLegionProjectSettings`). A verdict is `answer.settings[path]`: the daemon keys its results
+ *  under `settings`, and the one shape lives in `@legion/contracts/legion-api` beside the state
+ *  route's, so Dispatch's web client, its fakes and the daemon's own route cannot drift apart. */
+export type {
+  LegionSettingsChange as LegionSettingsChangeResponse,
+  LegionSettingVerdict,
+} from "@legion/contracts/legion-api";

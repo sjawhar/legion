@@ -207,16 +207,14 @@ func waitingOnChildrenSpans(view *issueView) []Span {
 	return spans
 }
 
-// requiresChecks reads the daemon's `requiresChecks` without assuming its shape: no daemon
-// released today carries the field, and the one that will may send a boolean, a list of contexts
-// or an object. Anything that is not absent, null, false, zero or empty says the base branch
-// requires a check.
+// requiresChecks reads the daemon's `requiresChecks`, which this change defines as the boolean
+// `record.PullRequest.Required` (api.PullRequestView.RequiresChecks, and `legionPullRequestView`
+// in packages/contracts/src/legion-api.ts): true says the base branch requires a check. Anything
+// else — the field absent, null, or a shape no daemon sends — leaves the CI-wait segment empty
+// rather than reading a check into it.
 func requiresChecks(value string) bool {
-	switch strings.TrimSpace(value) {
-	case "", "null", "false", "0", `""`, "[]", "{}":
-		return false
-	}
-	return true
+	var required bool
+	return json.Unmarshal([]byte(value), &required) == nil && required
 }
 
 // answeredAts are the moments a root's recorded wait named as answered, from the `waitingOn` the

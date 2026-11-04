@@ -12,6 +12,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
+import type { LegionSettingsChange, LegionSettingVerdict } from "@legion/contracts/legion-api";
+
 import { sql } from "./psql";
 
 const SEED_ACTOR = `'{"kind":"user","id":"alice"}'`;
@@ -112,6 +114,87 @@ export async function seedLegionFixture(stateUrl: string): Promise<void> {
   );
 }
 
+/** What the four metrics on the Delivery page count: one Legion tree that finished inside the
+ *  page's window, written as a fortnight of reading and of Dispatch's own event log would have
+ *  left it (`packages/envoy/internal/dispatch/legion/metrics`).
+ *
+ *  The root ACME-6 was designed by an architect and closed; its child ACME-7, which that
+ *  architect filed while designing it, was implemented, reviewed, sent back, implemented again
+ *  and closed by the merger. So every card has numbers: a work time for each of the two, hours
+ *  on the architect, implementer, reviewer and merger bars, a review round and a send-back, and
+ *  a filing in the tree at design. The two are in no column of the board — their phase is
+ *  `done` — so the board's own specs read the same fixture as before. */
+export async function seedLegionMetricsCorpus(): Promise<void> {
+  const session = (role: string, issue: string) =>
+    `'{"kind":"session","id":"s-${role}","origin":{"session_title":"Legion ${role} · ${issue}"}}'`;
+  const root = "ACME-6";
+  const child = "ACME-7";
+  const event = (
+    issue: string,
+    seq: number,
+    type: string,
+    actor: string,
+    payload: string,
+    ago: string
+  ) =>
+    `INSERT INTO events (issue_key, seq, type, actor, payload, notify, created_at)
+       VALUES ('${issue}', ${seq}, '${type}', ${actor}::jsonb, '${payload}'::jsonb, false, now() - interval '${ago}')`;
+  const observed = (issue: string, field: string, value: string, ago: string) =>
+    `INSERT INTO legion_observations (project, issue_key, field, value, observed_at)
+       VALUES ('${LEGION_PROJECT}', '${issue}', '${field}', '${value}'::jsonb, now() - interval '${ago}')`;
+  await sql(
+    `INSERT INTO issues (key, project_key, number, title, status, priority, created_by, rank, created_at, closed_at) VALUES
+       ('${root}', '${LEGION_PROJECT}', 6, 'The finished root', 'done', 1, ${SEED_ACTOR}, 'Z', now() - interval '60 hours', now() - interval '20 hours'),
+       ('${child}', '${LEGION_PROJECT}', 7, 'The finished child', 'done', 2, ${SEED_ACTOR}, 'Za', now() - interval '50 hours', now() - interval '24 hours')`,
+    `UPDATE issues SET parent_key = '${root}' WHERE key = '${child}'`,
+    // The root's design, the child it filed while designing, and the root's own close.
+    event(root, 1, "comment.created", session("architect", root), "{}", "58 hours"),
+    event(
+      child,
+      1,
+      "issue.created",
+      session("architect", root),
+      `{"status":"triage","parent":"${root}"}`,
+      "50 hours"
+    ),
+    event(root, 2, "issue.closed", session("architect", root), '{"status":"done"}', "20 hours"),
+    // The child's own workers, and the round it was sent back in.
+    event(child, 2, "comment.created", session("implementer", child), "{}", "48 hours"),
+    event(
+      child,
+      3,
+      "issue.updated",
+      session("reviewer", child),
+      '{"status":"needs_review"}',
+      "40 hours"
+    ),
+    event(
+      child,
+      4,
+      "issue.updated",
+      session("implementer", child),
+      '{"status":"in_progress"}',
+      "36 hours"
+    ),
+    event(child, 5, "issue.closed", session("merger", child), '{"status":"done"}', "24 hours"),
+    `INSERT INTO handoffs (issue_key, phase, version, body, author, created_at)
+       VALUES ('${child}', 'implement', 1, 'done', ${session("implementer", child)}::jsonb, now() - interval '42 hours'),
+              ('${child}', 'review', 1, 'accepted', ${session("reviewer", child)}::jsonb, now() - interval '30 hours')`,
+    // What the sampler recorded of the two while they ran.
+    observed(root, "phase", '"admitted"', "59 hours"),
+    observed(root, "slot", "2", "59 hours"),
+    observed(root, "phase", '"planning"', "52 hours"),
+    observed(root, "phase", '"done"', "20 hours"),
+    observed(child, "phase", '"implementing"', "48 hours"),
+    observed(child, "claim.implementer", '"working"', "48 hours"),
+    observed(child, "phase", '"reviewing"', "40 hours"),
+    observed(child, "claim.implementer", '"idle"', "40 hours"),
+    observed(child, "phase", '"implementing"', "36 hours"),
+    observed(child, "phase", '"merging"', "30 hours"),
+    observed(child, "phase", '"done"', "24 hours")
+  );
+}
+
 /** What a read of the daemon a minute later leaves behind: the value it found for one field, and
  *  the announcement on `legion.StateChannel` that wakes every open board of the project
  *  (`packages/envoy/internal/dispatch/legion/store.go`). `value` is the field's JSON. */
@@ -130,9 +213,11 @@ export async function pushLegionObservation(
 }
 
 /** A Legion daemon as far as Dispatch's relay is concerned: it answers
- *  `PUT /legion/v1/operator/settings` with `answer`, under `status`, and records the body and the
- *  bearer it saw. Every other route is a 404, so a sampler pass that reads its state while a spec
- *  runs records a failed read and changes no observation.
+ *  `PUT /legion/v1/operator/settings` with the verdicts given, keyed by path under `settings` as
+ *  the daemon keys them (`LegionSettingsChangeResponse`, which the daemon's own
+ *  api.SettingsChangeResponse is the Go side of), under `status`, and records the body and the
+ *  bearer it saw. Every other route is a 404, so a sampler pass that reads its state while a
+ *  spec runs records a failed read and changes no observation.
  *
  *  It listens on a port the OS chooses, on the loopback the Dispatch server reaches it by. */
 export interface FakeLegionDaemon {
@@ -145,7 +230,7 @@ export interface FakeLegionDaemon {
 }
 
 export async function startFakeLegionDaemon(
-  answer: Record<string, unknown>,
+  verdicts: Readonly<Record<string, LegionSettingVerdict>>,
   status = 200
 ): Promise<FakeLegionDaemon> {
   const changes: { by?: string; changes?: Record<string, unknown> }[] = [];
@@ -161,7 +246,8 @@ export async function startFakeLegionDaemon(
     incoming.on("end", () => {
       changes.push(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
       response.writeHead(status, { "content-type": "application/json" });
-      response.end(JSON.stringify(answer));
+      const answered: LegionSettingsChange = { settings: verdicts };
+      response.end(JSON.stringify(answered));
     });
   });
   const listening = Promise.withResolvers<void>();

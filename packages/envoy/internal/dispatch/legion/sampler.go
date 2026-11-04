@@ -43,8 +43,9 @@ func RunSampler(ctx context.Context, pool *store.Pool, leases duty.Leases) {
 }
 
 // Pass is one pass: every configured project's daemon read in turn, each recorded whatever the
-// others did. A project whose read fails keeps the observations it already has — the failure is
-// in legion_reads, and the view names it there.
+// others did, and then the reads older than ReadRetention deleted. A project whose read fails
+// keeps the observations it already has — the failure is in legion_reads, and the view names it
+// there.
 func (s *Sampler) Pass(ctx context.Context) {
 	settings, err := ListSettings(ctx, s.pool)
 	if err != nil {
@@ -54,6 +55,13 @@ func (s *Sampler) Pass(ctx context.Context) {
 	s.keepClients(settings)
 	for _, setting := range settings {
 		s.read(ctx, setting)
+	}
+	// Once a pass, under the same lease, as the delivery reconcile prunes its own change log:
+	// the table gains a row per project per minute and the view reads only the newest of each.
+	if pruned, err := PruneReads(ctx, s.pool); err != nil {
+		slog.Warn("dispatch: prune the Legion state reads", "error", err)
+	} else if pruned > 0 {
+		slog.Info("dispatch: pruned Legion state reads", "rows", pruned)
 	}
 }
 

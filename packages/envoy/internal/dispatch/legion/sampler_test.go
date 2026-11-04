@@ -312,3 +312,46 @@ func TestAProjectWithNoSettingIsNeverRead(t *testing.T) {
 		t.Errorf("legion_reads = %v, want the one read", rows)
 	}
 }
+
+// TestAPassPrunesTheReadsPastTheirRetention: legion_reads gains a row per project per minute and
+// nothing but this deletes them, so a pass drops every read older than ReadRetention — and keeps
+// each project's newest whatever its age, because that row is the freshness the board's header
+// shows.
+func TestAPassPrunesTheReadsPastTheirRetention(t *testing.T) {
+	daemon := newFakeDaemon(t, stateOf("planning", "planner"))
+	database, sampler := configured(t, daemon.URL)
+	// A project whose daemon nothing reads any more: its setting was removed, and the reads it
+	// left stay (DeleteSettings). It is here to prove the prune keeps a project's newest read
+	// however old it is, since that row is the freshness the board's header shows.
+	if _, err := database.Pool.Exec(t.Context(),
+		`insert into projects (key, name) values ('LINUX', 'LINUX')`); err != nil {
+		t.Fatalf("seed project LINUX: %v", err)
+	}
+	aged := func(project string, age time.Duration) {
+		t.Helper()
+		at := time.Now().UTC().Add(-age)
+		if err := RecordRead(t.Context(), database.Pool, project, at, 2048, nil); err != nil {
+			t.Fatalf("record a read of %s: %v", project, err)
+		}
+	}
+	for _, age := range []time.Duration{ReadRetention + time.Hour, ReadRetention + time.Minute, ReadRetention - time.Hour} {
+		aged("INFRA", age)
+	}
+	aged("LINUX", 30*24*time.Hour)
+
+	sampler.Pass(t.Context())
+
+	// INFRA: the read this pass made, and the one inside the retention; its two older rows are
+	// gone. LINUX's one ancient row stays, because it is that project's newest.
+	if rows := reads(t, database, "INFRA"); len(rows) != 2 {
+		t.Errorf("INFRA's reads = %v, want the pass's own and the one inside the retention", rows)
+	}
+	if rows := reads(t, database, "LINUX"); len(rows) != 1 {
+		t.Errorf("LINUX's reads = %v, want the one it had, old as it is", rows)
+	}
+
+	// A second pass with nothing to delete leaves the rows where they are.
+	if pruned, err := PruneReads(t.Context(), database.Pool); err != nil || pruned != 0 {
+		t.Errorf("a second prune deleted %d (err %v), want none", pruned, err)
+	}
+}

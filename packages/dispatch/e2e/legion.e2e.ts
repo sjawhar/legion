@@ -14,6 +14,7 @@ import {
   LEGION_PROJECT,
   pushLegionObservation,
   seedLegionFixture,
+  seedLegionMetricsCorpus,
   seedLegionProject,
   startFakeLegionDaemon,
 } from "./legion-seed";
@@ -302,14 +303,20 @@ test("/pipeline reaches the Delivery page's Pipeline section @legion", async ({ 
 
 // A1: "every chart on the Delivery page switching to its table, back to its graph, and to a
 // compare range". Every chart the page draws is read off the page itself, so a chart added later
-// is covered without this spec being edited.
+// is covered without this spec being edited. The Legion section is seeded here too, so its four
+// metrics' charts are among them.
 test("every chart on the Delivery page shows its table, its graph again and a compare range @legion", async ({
   browser,
 }) => {
+  // Four more charts than the Pipeline section's own: the Legion section's metrics are on this
+  // page too, and each one is toggled, compared and toggled again here.
+  test.setTimeout(120_000);
+  const daemon = await startFakeLegionDaemon({});
   await seedPipelineFixture();
+  await seedLegionFixture(daemon.url);
+  await seedLegionMetricsCorpus();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-
   try {
     await page.goto(PIPELINE_SECTION_URL);
     await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
@@ -331,12 +338,83 @@ test("every chart on the Delivery page shows its table, its graph again and a co
       await chart.locator(`select[data-chart-compare="${label}"]`).selectOption("preceding");
       await expect(chart.locator('[data-chart-range="compare"]').first()).toBeVisible();
       await view.getByRole("button", { name: "Table" }).click();
+      // The compare column's heading names whatever a row of this chart is: a UTC day for the
+      // delivery and pipeline charts, an issue, a worker type or a UTC week for the Legion ones.
       await expect(
-        chart.locator(`[data-chart-table="${label}"] th`, { hasText: "Compare day" }).first()
+        chart.locator(`[data-chart-table="${label}"] th`, { hasText: /^Compare / }).first()
       ).toBeVisible();
       await view.getByRole("button", { name: "Graph" }).click();
     }
   } finally {
     await context.close();
+    await daemon.close();
+  }
+});
+
+// Spec R3/R4 and the Design's "The Delivery page", section 1: the Legion section draws the four
+// metrics — work time to merge, phase time by worker type, rework, and splitting and
+// follow-ups — each through the one chart component, under a project picker and a toggle for
+// all issues, roots or children. The fixture's tree is one root and one child that finished in
+// the window (`seedLegionMetricsCorpus`).
+test("the Delivery page's Legion section draws the four metrics @legion", async ({ browser }) => {
+  const daemon = await startFakeLegionDaemon({});
+  await seedLegionFixture(daemon.url);
+  await seedLegionMetricsCorpus();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/delivery");
+    const section = page.getByRole("region", { name: "Legion: issue to merge" });
+    await expect(section).toBeVisible();
+
+    // One card per metric, each drawing its numbers through `Chart`, so each has the
+    // graph-or-table toggle and the compare control every chart on this page has.
+    for (const [metric, label] of [
+      ["work_time", "Work time to merge"],
+      ["phase_time", "Phase time by worker type"],
+      ["rework", "Rework"],
+      ["splitting", "Splitting and follow-ups"],
+    ]) {
+      const card = section.locator(`[data-legion-metric="${metric}"]`);
+      await expect(card).toBeVisible();
+      await expect(card.locator(`[data-chart="${label}"]`)).toBeVisible();
+      await expect(card.getByRole("group", { name: `${label} view` })).toBeVisible();
+      await expect(card.locator(`select[data-chart-compare="${label}"]`)).toBeVisible();
+    }
+    await expect(section.locator("[data-legion-metric]")).toHaveCount(4);
+
+    // The headline numbers of the two issues that finished: both are counted, the child's
+    // review round and send-back are on the rework card, and the child the architect filed
+    // while designing the root is on the splitting card.
+    const figure = (metric: string, label: string) =>
+      section.locator(`[data-legion-metric="${metric}"] [data-legion-figure="${label}"]`);
+    await expect(figure("work_time", "Issues finished")).toHaveText("2");
+    // Two issues finished: the root with no review round, the child with one.
+    await expect(figure("rework", "Median review rounds")).toHaveText("0.5");
+    await expect(figure("rework", "Sent back at least once")).toHaveText("50.0%");
+    await expect(figure("splitting", "Issues filed")).toHaveText("1");
+    await expect(figure("splitting", "Roots finished")).toHaveText("1");
+
+    // The worker types the child's work was shared out over, on the phase-time card's table.
+    const phaseTime = section.locator('[data-legion-metric="phase_time"]');
+    await phaseTime.getByRole("button", { name: "Table" }).click();
+    const table = phaseTime.locator('[data-chart-table="Phase time by worker type"]');
+    await expect(table.locator("td", { hasText: "implementer" }).first()).toBeVisible();
+    await expect(table.locator("th", { hasText: "Worker type" }).first()).toBeVisible();
+
+    // The toggle reads the metrics again for the roots alone: one of the two finished.
+    await section.getByRole("button", { name: "Roots" }).click();
+    await expect(figure("work_time", "Issues finished")).toHaveText("1");
+    await expect(section.locator("[data-legion-metrics-scope]")).toHaveAttribute(
+      "data-legion-metrics-scope",
+      "roots"
+    );
+
+    // The project picker names the one project with a daemon.
+    await expect(section.locator("[data-legion-metrics-project]")).toHaveValue(LEGION_PROJECT);
+  } finally {
+    await context.close();
+    await daemon.close();
   }
 });

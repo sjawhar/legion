@@ -78,6 +78,8 @@ import type {
   IssueReferences,
   IssueSummary,
   ItemBlocks,
+  LegionMetricsResponse,
+  LegionMetricsScope,
   LegionSetting,
   LegionSettingsChangeResponse,
   ListUsersResponse,
@@ -1473,12 +1475,12 @@ export class DispatchApiClient {
   }
 
   /** Relays an operator's `legion.yaml` change to the project's daemon, by dotted path, and
-   *  answers what the daemon decided for each key: applied at once, by a rebuild or at the next
-   *  launch, or refused with its reason. Dispatch passes the daemon's status and body back
-   *  unchanged and names the caller as the change's author, so the refusals this can raise are
-   *  Dispatch's own: `404 LEGION_NOT_CONFIGURED` for a project naming no daemon,
-   *  `503 LEGION_DAEMON_UNAVAILABLE` for one that could not be reached, and the deployment-scope
-   *  refusal a credential naming one project gets. */
+   *  answers what the daemon decided for each key, under `settings` as the daemon keys it:
+   *  applied at once, by a rebuild or at the next launch, or refused with its reason. Dispatch
+   *  passes the daemon's status and body back unchanged and names the caller as the change's
+   *  author, so the refusals this can raise are Dispatch's own: `404 LEGION_NOT_CONFIGURED` for
+   *  a project naming no daemon, `503 LEGION_DAEMON_UNAVAILABLE` for one that could not be
+   *  reached, and the deployment-scope refusal a credential naming one project gets. */
   putLegionProjectSettings(
     project: string,
     changes: Readonly<Record<string, unknown>>,
@@ -1489,6 +1491,19 @@ export class DispatchApiClient {
       { changes },
       bounds
     );
+  }
+
+  /** The Delivery page's Legion section: the four metrics over the issues of `project` that
+   *  closed in `[from, to)` with Legion phase work, counted over all of them, its roots or its
+   *  children. A deployment where no project names a daemon answers an empty report rather than
+   *  a refusal, and an unknown project is `400 INVALID_QUERY`. */
+  getLegionMetrics(query: {
+    project: string;
+    from: string;
+    to: string;
+    scope: LegionMetricsScope;
+  }): Promise<LegionMetricsResponse> {
+    return this.json<LegionMetricsResponse>(pathWithQuery("/api/v1/legion/metrics", query));
   }
 
   /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.

@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -86,7 +88,14 @@ func WithTimeout(timeout time.Duration) Option {
 func New(baseURL, tokenFile string, options ...Option) *Client {
 	client := &Client{
 		baseURL: strings.TrimSuffix(strings.TrimSpace(baseURL), "/"),
-		http:    &http.Client{Timeout: RequestTimeout},
+		http: &http.Client{
+			Timeout: RequestTimeout,
+			// A daemon answers its own routes; it redirects nowhere. Following one would read a
+			// state, or present Dispatch's projected token, at a host the project's setting does
+			// not name, so a redirect is the answer the daemon gave and a failed call
+			// (ErrUnavailable, naming the status) rather than a second call.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 	if path := strings.TrimSpace(tokenFile); path != "" {
 		client.account = brokertoken.NewAccountToken(path)
@@ -95,6 +104,24 @@ func New(baseURL, tokenFile string, options ...Option) *Client {
 		option(client)
 	}
 	return client
+}
+
+// callFailure is a failed call as legion_reads keeps it and the Legion view shows it: the
+// transport's own reason, without the address Dispatch called. net/http wraps a transport failure
+// in a *url.Error carrying the whole URL, and the dial under it in a *net.OpError carrying the
+// host and port it resolved to; the daemon's address belongs to the deployment, and every reader
+// of the project's board reads this text (legion_reads.error, the board's header), so only the
+// innermost reason is kept — "connect: connection refused", "context deadline exceeded".
+func callFailure(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		err = opErr.Err
+	}
+	return err
 }
 
 // State reads the daemon's own state: the state it answered and the bytes it sent, which the
@@ -110,7 +137,7 @@ func (c *Client) State(ctx context.Context) (State, int, error) {
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return State{}, 0, fmt.Errorf("%w: GET %s: %v", ErrUnavailable, StatePath, err)
+		return State{}, 0, fmt.Errorf("%w: GET %s: %v", ErrUnavailable, StatePath, callFailure(err))
 	}
 	defer response.Body.Close()
 	body, read, err := readBounded(response.Body)
@@ -164,7 +191,7 @@ func (c *Client) PutOperatorSettings(ctx context.Context, change SettingsChange)
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return Answer{}, fmt.Errorf("%w: PUT %s: %v", ErrUnavailable, OperatorSettingsPath, err)
+		return Answer{}, fmt.Errorf("%w: PUT %s: %v", ErrUnavailable, OperatorSettingsPath, callFailure(err))
 	}
 	defer response.Body.Close()
 	answered, _, err := readBounded(response.Body)

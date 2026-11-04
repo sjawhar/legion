@@ -117,6 +117,18 @@ export interface DeliverySectionProps {
   readonly window: WindowChoice;
 }
 
+/** What one row of a chart's table is, where it is not a UTC day: the heading of the table's
+ *  first column, and the caption's own words for the run the series draw ("<label> by <over>").
+ *  The Legion section's cards draw a measure over the window by issue, by worker type and by UTC
+ *  week; every other chart on the page draws one per UTC day. */
+export interface ChartRows {
+  readonly header: string;
+  readonly over: string;
+}
+
+/** What a run of per-day bars is: the rows every chart has unless it names its own. */
+const UTC_DAYS: ChartRows = { header: "Day", over: "UTC day" };
+
 export interface ChartProps {
   /** What the chart draws, in the reader's words: it names both controls and heads the table. */
   readonly label: string;
@@ -126,6 +138,8 @@ export interface ChartProps {
   readonly series: readonly ChartSeries[];
   /** The comparison, from the page that reads its range; omitted where none is read. */
   readonly compare?: ChartCompare;
+  /** What one row of its table is, where it is not a UTC day. */
+  readonly rows?: ChartRows;
 }
 
 /** What a day with nothing measured reads as: never a zero. */
@@ -141,7 +155,9 @@ const MODES: readonly SegmentedOption<ChartMode>[] = [
   { value: "table", label: "Table" },
 ];
 
-const fieldClass = `rounded border px-1.5 py-0.5 text-xs ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`;
+/** A small control beside a chart: the compare picker here, and the Legion section's project
+ *  picker, so one shape serves every control the page's charts sit under. */
+export const fieldClass = `rounded border px-1.5 py-0.5 text-xs ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`;
 
 const noteClass = `text-[11px] ${textMutedOnSurface}`;
 
@@ -365,15 +381,18 @@ function Graph({
   );
 }
 
-/** Every number the graph draws, in a table: one row a day, one column each number, and with a
- *  comparison the two ranges side by side with the change between them. */
+/** Every number the graph draws, in a table: one row a day (or whatever `naming` says a row is),
+ *  one column each number, and with a comparison the two ranges side by side with the change
+ *  between them. */
 function NumberTable({
   against,
   label,
+  naming,
   series,
 }: {
   against: Comparison | null;
   label: string;
+  naming: ChartRows;
   series: readonly ChartSeries[];
 }): ReactNode {
   // Every number the series draw, and every number the compare range's draw, built once per run
@@ -387,12 +406,12 @@ function NumberTable({
     [comparedSeries]
   );
   const comparing = against !== null;
-  const notes = [`${label} by UTC day`];
+  const notes = [`${label} by ${naming.over}`];
   if (against !== null) notes.push(`compared with ${rangeLabel(against.range)}`);
   for (const one of series) {
     if (one.target !== undefined) notes.push(`${one.label} target ${one.format(one.target)}`);
   }
-  notes.push(`${NOTHING} is a day with nothing measured`);
+  notes.push(`${NOTHING} is a ${naming.header.toLowerCase()} with nothing measured`);
   const rows = useMemo(
     () =>
       !comparing
@@ -409,9 +428,9 @@ function NumberTable({
         <caption className={`px-2 py-1 text-left ${noteClass}`}>{`${notes.join(". ")}.`}</caption>
         <thead className={`sticky top-0 ${surfaceBg} ${textMutedOnSurface}`}>
           <tr>
-            <th className="px-2 py-1 text-left font-normal">Day</th>
+            <th className="px-2 py-1 text-left font-normal">{naming.header}</th>
             {against === null ? null : (
-              <th className="px-2 py-1 text-left font-normal">Compare day</th>
+              <th className="px-2 py-1 text-left font-normal">{`Compare ${naming.header.toLowerCase()}`}</th>
             )}
             {table.columns.map((column) => (
               <Fragment key={column.header}>
@@ -544,7 +563,7 @@ function CompareControl({
 
 /** One chart: its series as bars or as the table of every number they draw, under the two
  *  controls every chart of a measure over a range has. */
-export function Chart({ compare, label, range, series }: ChartProps): ReactNode {
+export function Chart({ compare, label, range, rows = UTC_DAYS, series }: ChartProps): ReactNode {
   const [mode, setMode] = useState<ChartMode>("graph");
   const against: Comparison | null =
     compare === undefined || compare.range === null
@@ -555,7 +574,7 @@ export function Chart({ compare, label, range, series }: ChartProps): ReactNode 
       {mode === "graph" ? (
         <Graph against={against} range={range} series={series} />
       ) : (
-        <NumberTable against={against} label={label} series={series} />
+        <NumberTable against={against} label={label} naming={rows} series={series} />
       )}
       <div className="flex flex-wrap items-center gap-1.5">
         <SegmentedToggle label={`${label} view`} onChange={setMode} options={MODES} value={mode} />

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"hash/fnv"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
 // The Go mirror of packages/contracts/src/dispatch-api.ts's Live* and DeliveryLive* frames: what an
@@ -231,9 +233,11 @@ type LiveHeartbeat struct {
 // liveHeartbeat is the one heartbeat frame.
 var liveHeartbeat = LiveHeartbeat{Type: "heartbeat"}
 
-// deliveryLiveClasses sorts one body kind's top-level JSON fields into how a delta sends them.
-// Every field is in exactly one class (TestEveryResponseFieldHasOneClass), so a field added to a
-// response is sent live or deliberately left out, never dropped unnoticed.
+// deliveryLiveClasses is everything the hub knows of one view kind: how a delta sends its body's
+// fields, and what the hub does differently for it — what it may name, where its answer is read
+// from, and the two functions that read a subscription and an answer. A kind's behaviour is
+// declared here and nowhere else, so the hub's shared code branches on no kind's name and a new
+// kind is one entry rather than a line in each of its files.
 type deliveryLiveClasses struct {
 	// body is the response struct the matching GET route writes.
 	body reflect.Type
@@ -251,6 +255,28 @@ type deliveryLiveClasses struct {
 	// out are never in a delta: computed_at moves on every compute, and freshness goes out as
 	// its own frame.
 	out []string
+
+	// project is whether a subscribed view of this kind names the project it shows: the Legion
+	// board is one project's, and a read of that project's daemon marks it (dirtyLegionBoard).
+	project bool
+	// unownedP0 is whether the view shows the unowned P0 list, so a write of a P0 issue moves it
+	// even where its own population does not name the issue.
+	unownedP0 bool
+	// delivery is whether the view's answer is read from the deployment's delivery rows: a
+	// change of one can move it (touchedBy), its read holds the delivery settings, and its
+	// freshness is the hub's one verdict. The Legion board reads a daemon's recorded state
+	// instead, so no delivery change touches it and it judges no freshness.
+	delivery bool
+	// unconfigured is what this kind's read answers for a deployment that configured nothing it
+	// reads, with the code and message its subscribers are refused with.
+	unconfigured                          error
+	unconfiguredCode, unconfiguredMessage string
+	// parse reads a subscribed view's own fields into its spec, or refuses it: what the matching
+	// GET route reads of a query, including the key one view of this kind is held under.
+	parse func(spec *deliveryLiveSpec, view DeliveryLiveView) *LiveError
+	// read is the kind's own read and compute, outside the hub's lock: it fills the parts of the
+	// read its kind holds and answers the body, which the caller encodes by these classes.
+	read func(h *deliveryHub, ctx context.Context, spec deliveryLiveSpec, now time.Time, into *deliveryViewRead) (any, error)
 }
 
 // deliveryLiveKinds is each view kind's classes. The timeline's waiting entries have no id, and
@@ -258,19 +284,33 @@ type deliveryLiveClasses struct {
 // own computed_at, window and freshness.
 var deliveryLiveKinds = map[string]deliveryLiveClasses{
 	deliveryLiveTimeline: {
-		body:        reflect.TypeFor[deliveryTimelineWithMeasures](),
-		lists:       []string{"prs", "runs", "session_groups"},
-		maps:        []string{"issue_titles", "session_titles", "session_pr_counts", "components"},
-		counts:      []string{"facet_counts", "color_counts"},
-		whole:       map[string][]string{"waiting": nil, "measures": {"computed_at", "window", "freshness"}},
-		withChanges: []string{"window"},
-		out:         []string{"freshness"},
+		body:                reflect.TypeFor[deliveryTimelineWithMeasures](),
+		lists:               []string{"prs", "runs", "session_groups"},
+		maps:                []string{"issue_titles", "session_titles", "session_pr_counts", "components"},
+		counts:              []string{"facet_counts", "color_counts"},
+		whole:               map[string][]string{"waiting": nil, "measures": {"computed_at", "window", "freshness"}},
+		withChanges:         []string{"window"},
+		out:                 []string{"freshness"},
+		unownedP0:           true,
+		delivery:            true,
+		unconfigured:        delivery.ErrNoSettings,
+		unconfiguredCode:    deliveryNotConfiguredCode,
+		unconfiguredMessage: deliveryNotConfiguredMessage,
+		parse:               parseDeliveryWindowView,
+		read:                (*deliveryHub).readDeliveryView,
 	},
 	deliveryLiveMeasures: {
-		body:        reflect.TypeFor[deliveryMeasuresResponse](),
-		whole:       map[string][]string{"measures": nil, "flags_source": nil, "unowned_p0": nil, "targets": nil, "status": nil},
-		withChanges: []string{"window"},
-		out:         []string{"computed_at", "freshness"},
+		body:                reflect.TypeFor[deliveryMeasuresResponse](),
+		whole:               map[string][]string{"measures": nil, "flags_source": nil, "unowned_p0": nil, "targets": nil, "status": nil},
+		withChanges:         []string{"window"},
+		out:                 []string{"computed_at", "freshness"},
+		unownedP0:           true,
+		delivery:            true,
+		unconfigured:        delivery.ErrNoSettings,
+		unconfiguredCode:    deliveryNotConfiguredCode,
+		unconfiguredMessage: deliveryNotConfiguredMessage,
+		parse:               parseDeliveryWindowView,
+		read:                (*deliveryHub).readDeliveryView,
 	},
 	deliveryLivePipeline: {
 		body: reflect.TypeFor[deliveryPipelineResponse](),
@@ -278,7 +318,13 @@ var deliveryLiveKinds = map[string]deliveryLiveClasses{
 			"days": nil, "pr_checks": nil, "staging_e2e": nil, "staging_apply": nil, "production_apply": nil,
 			"merge_to_production": nil, "opened_to_merge": nil, "targets": nil,
 		},
-		out: []string{"computed_at", "freshness"},
+		out:                 []string{"computed_at", "freshness"},
+		delivery:            true,
+		unconfigured:        delivery.ErrNoSettings,
+		unconfiguredCode:    deliveryNotConfiguredCode,
+		unconfiguredMessage: deliveryNotConfiguredMessage,
+		parse:               parsePipelineLiveView,
+		read:                (*deliveryHub).readPipelineView,
 	},
 	// The Legion board is one project's small, whole picture, so every field of it but its
 	// computed_at is sent whole: its ten columns are a fixed order rather than a list a page
@@ -290,8 +336,20 @@ var deliveryLiveKinds = map[string]deliveryLiveClasses{
 		whole: map[string][]string{
 			"project": nil, "header": nil, "columns": nil, "settings": nil, "setting_sources": nil,
 		},
-		out: []string{"computed_at"},
+		out:                 []string{"computed_at"},
+		project:             true,
+		unconfigured:        legion.ErrNoSettings,
+		unconfiguredCode:    legionNotConfiguredCode,
+		unconfiguredMessage: legionNotConfiguredMessage,
+		parse:               parseLegionLiveView,
+		read:                (*deliveryHub).readLegionBoardView,
 	},
+}
+
+// classes is the view kind's own entry; a spec the hub holds always names a kind the table has,
+// since parseDeliveryLiveView refuses every other one.
+func (spec deliveryLiveSpec) classes() deliveryLiveClasses {
+	return deliveryLiveKinds[spec.kind]
 }
 
 // deliveryLiveRevision is a value's revision: the 64-bit FNV-1a of its JSON encoding, as 16

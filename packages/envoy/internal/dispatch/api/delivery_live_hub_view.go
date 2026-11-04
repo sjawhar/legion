@@ -12,86 +12,103 @@ import (
 
 // parseDeliveryLiveView resolves a subscribed view as the matching GET route reads its query, or
 // answers the error frame refusing it: INVALID_FRAME for a view of no known shape, INVALID_QUERY
-// for one the route would refuse.
+// for one the route would refuse. What each kind reads of a view is its own entry's `parse`
+// (live_frames.go), so the only thing decided here is what every kind shares.
 func parseDeliveryLiveView(view DeliveryLiveView) (deliveryLiveSpec, *LiveError) {
-	invalid := func(code, message string) (deliveryLiveSpec, *LiveError) {
-		refusal := liveRefusal("", code, message)
-		return deliveryLiveSpec{}, &refusal
+	classes, known := deliveryLiveKinds[view.Kind]
+	if !known {
+		return deliveryLiveSpec{}, invalidLiveView("INVALID_FRAME", "view.kind must be timeline, measures, pipeline or legion")
+	}
+	if view.Project != nil && !classes.project {
+		return deliveryLiveSpec{}, invalidLiveView("INVALID_FRAME", "only a legion view names a project")
 	}
 	spec := deliveryLiveSpec{kind: view.Kind}
-	if view.Project != nil && view.Kind != legionBoardView {
-		return invalid("INVALID_FRAME", "only a legion view names a project")
-	}
-	switch view.Kind {
-	case deliveryLiveTimeline, deliveryLiveMeasures:
-		if view.At != nil {
-			return invalid("INVALID_FRAME", "a "+view.Kind+" view names a window, not an at")
-		}
-		if view.Window == nil {
-			return invalid("INVALID_FRAME", "a "+view.Kind+" view names its window")
-		}
-		spec.query = url.Values{}
-		if view.Query != nil {
-			query, err := url.ParseQuery(*view.Query)
-			if err != nil {
-				return invalid("INVALID_QUERY", "query does not parse: "+err.Error())
-			}
-			spec.query = query
-		}
-		// The window names from and to; the query is everything else the GET route reads.
-		spec.query.Del("from")
-		spec.query.Del("to")
-		named, refusal := spec.readWindow(view.Window)
-		if refusal != nil {
-			return deliveryLiveSpec{}, refusal
-		}
-		spec.key = view.Kind + "|" + named + "|" + spec.query.Encode()
-	case deliveryLivePipeline:
-		// A pipeline view names its window as a timeline view does, or an at, which is the seven
-		// days ending on its day, or neither, which is the seven days ending at the present. It
-		// reads no query: the Pipeline page follows none of the timeline's facets.
-		if view.Query != nil {
-			return invalid("INVALID_FRAME", "a pipeline view names a window or an at, not a query")
-		}
-		switch {
-		case view.Window != nil && view.At != nil:
-			return invalid("INVALID_FRAME", "a pipeline view names a window or an at, not both")
-		case view.Window != nil:
-			named, refusal := spec.readWindow(view.Window)
-			if refusal != nil {
-				return deliveryLiveSpec{}, refusal
-			}
-			spec.key = "pipeline|" + named + "|"
-		case view.At != nil:
-			at, err := parseOptionalRFC3339(url.Values{"at": {*view.At}}, "at", time.Time{})
-			if err != nil {
-				return invalid("INVALID_QUERY", err.Error())
-			}
-			at = at.UTC()
-			spec.at = &at
-			spec.key = "pipeline|" + at.Format(time.RFC3339Nano) + "|"
-		default:
-			spec.key = "pipeline|now|"
-		}
-	case legionBoardView:
-		// A legion view names the project whose board it shows and nothing else: the board has no
-		// window, and the project is the only thing GET /api/v1/legion/board reads.
-		if view.Window != nil || view.At != nil || view.Query != nil {
-			return invalid("INVALID_FRAME", "a legion view names a project, not a window, an at or a query")
-		}
-		if view.Project == nil {
-			return invalid("INVALID_FRAME", "a legion view names its project")
-		}
-		project := strings.TrimSpace(*view.Project)
-		if !projectKeyPattern.MatchString(project) {
-			return invalid("INVALID_QUERY", projectKeyProblem("project", project))
-		}
-		spec.project = project
-		spec.key = legionBoardView + "|" + project + "|"
-	default:
-		return invalid("INVALID_FRAME", "view.kind must be timeline, measures, pipeline or legion")
+	if refusal := classes.parse(&spec, view); refusal != nil {
+		return deliveryLiveSpec{}, refusal
 	}
 	return spec, nil
+}
+
+// invalidLiveView is the error frame refusing a subscribed view.
+func invalidLiveView(code, message string) *LiveError {
+	refusal := liveRefusal("", code, message)
+	return &refusal
+}
+
+// parseDeliveryWindowView reads a timeline or measures view: its window, and the query the
+// matching GET route reads everything but the window from.
+func parseDeliveryWindowView(spec *deliveryLiveSpec, view DeliveryLiveView) *LiveError {
+	if view.At != nil {
+		return invalidLiveView("INVALID_FRAME", "a "+view.Kind+" view names a window, not an at")
+	}
+	if view.Window == nil {
+		return invalidLiveView("INVALID_FRAME", "a "+view.Kind+" view names its window")
+	}
+	spec.query = url.Values{}
+	if view.Query != nil {
+		query, err := url.ParseQuery(*view.Query)
+		if err != nil {
+			return invalidLiveView("INVALID_QUERY", "query does not parse: "+err.Error())
+		}
+		spec.query = query
+	}
+	// The window names from and to; the query is everything else the GET route reads.
+	spec.query.Del("from")
+	spec.query.Del("to")
+	named, refusal := spec.readWindow(view.Window)
+	if refusal != nil {
+		return refusal
+	}
+	spec.key = view.Kind + "|" + named + "|" + spec.query.Encode()
+	return nil
+}
+
+// parsePipelineLiveView reads a pipeline view: it names its window as a timeline view does, or an
+// at, which is the seven days ending on its day, or neither, which is the seven days ending at
+// the present. It reads no query: the Pipeline page follows none of the timeline's facets.
+func parsePipelineLiveView(spec *deliveryLiveSpec, view DeliveryLiveView) *LiveError {
+	if view.Query != nil {
+		return invalidLiveView("INVALID_FRAME", "a pipeline view names a window or an at, not a query")
+	}
+	switch {
+	case view.Window != nil && view.At != nil:
+		return invalidLiveView("INVALID_FRAME", "a pipeline view names a window or an at, not both")
+	case view.Window != nil:
+		named, refusal := spec.readWindow(view.Window)
+		if refusal != nil {
+			return refusal
+		}
+		spec.key = "pipeline|" + named + "|"
+	case view.At != nil:
+		at, err := parseOptionalRFC3339(url.Values{"at": {*view.At}}, "at", time.Time{})
+		if err != nil {
+			return invalidLiveView("INVALID_QUERY", err.Error())
+		}
+		at = at.UTC()
+		spec.at = &at
+		spec.key = "pipeline|" + at.Format(time.RFC3339Nano) + "|"
+	default:
+		spec.key = "pipeline|now|"
+	}
+	return nil
+}
+
+// parseLegionLiveView reads a legion view: it names the project whose board it shows and nothing
+// else, since the board has no window and the project is all GET /api/v1/legion/board reads.
+func parseLegionLiveView(spec *deliveryLiveSpec, view DeliveryLiveView) *LiveError {
+	if view.Window != nil || view.At != nil || view.Query != nil {
+		return invalidLiveView("INVALID_FRAME", "a legion view names a project, not a window, an at or a query")
+	}
+	if view.Project == nil {
+		return invalidLiveView("INVALID_FRAME", "a legion view names its project")
+	}
+	project := strings.TrimSpace(*view.Project)
+	if !projectKeyPattern.MatchString(project) {
+		return invalidLiveView("INVALID_QUERY", projectKeyProblem("project", project))
+	}
+	spec.project = project
+	spec.key = legionBoardView + "|" + project + "|"
+	return nil
 }
 
 // readWindow reads a view's window into spec, as the GET routes read from and to, and answers how

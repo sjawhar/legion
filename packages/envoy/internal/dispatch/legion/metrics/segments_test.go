@@ -150,6 +150,23 @@ func TestCIWaitNeedsAnOpenPullRequestARequiredCheckAndNoVerdict(t *testing.T) {
 		{"the daemon sent no requiresChecks at all", func(root *Issue) {
 			root.observeString(legion.FieldPullRequestState, hour(1), "open")
 		}, 0},
+		// The field this change defines is `record.PullRequest.Required`, a boolean
+		// (`legionPullRequestView` in packages/contracts/src/legion-api.ts). A value of another
+		// shape is not a check the daemon reported, so it waits on nothing: reading every
+		// non-empty value as a required check would book CI-wait hours off a null or a list no
+		// daemon sends.
+		{"null", func(root *Issue) {
+			root.observeString(legion.FieldPullRequestState, hour(1), "open").
+				observe(legion.FieldPullRequestRequiresChecks, hour(1), "null")
+		}, 0},
+		{"a list of contexts, which no daemon sends", func(root *Issue) {
+			root.observeString(legion.FieldPullRequestState, hour(1), "open").
+				observe(legion.FieldPullRequestRequiresChecks, hour(1), `["lint","test"]`)
+		}, 0},
+		{"the word true as a string", func(root *Issue) {
+			root.observeString(legion.FieldPullRequestState, hour(1), "open").
+				observe(legion.FieldPullRequestRequiresChecks, hour(1), `"true"`)
+		}, 0},
 		{"a verdict arrived", func(root *Issue) {
 			root.observeString(legion.FieldPullRequestState, hour(1), "open").
 				observe(legion.FieldPullRequestRequiresChecks, hour(1), "true").

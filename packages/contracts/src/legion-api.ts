@@ -534,6 +534,39 @@ export const LegionStateResponse = z.strictObject({
 export type LegionState = z.output<typeof LegionStateResponse>;
 export type LegionIssue = LegionState["issues"][string];
 
+/** `api.SettingResult` — one path's verdict from `PUT /legion/v1/operator/settings`. Exactly one
+ * of `applied` and `refused` is set.
+ *
+ * `applied` is when the change takes effect: `at-once` for a value every decision reads,
+ * `rebuilt` for one a client or listener holds, which the daemon has already built again, and
+ * `next-launch` for one a pod's or a pane's launch reads. `holder` names what was built again,
+ * absent where nothing holds the value. `old` and `new` are the values as the daemon's log line
+ * shows them, `(withheld)` for a credential and `(unset)` for a path the configuration did not
+ * carry. `unchanged` says the daemon was already running on that value: the path is the route's
+ * from now on, and nothing moved. `refused` is why the daemon will not change the path — a path
+ * fixed for the process, or one its class table does not hold. */
+export const LegionSettingResult = z.strictObject({
+  applied: nonEmptyString.optional(),
+  refused: nonEmptyString.optional(),
+  holder: nonEmptyString.optional(),
+  old: nonEmptyString.optional(),
+  new: nonEmptyString.optional(),
+  unchanged: z.boolean().optional(),
+});
+
+export type LegionSettingVerdict = z.output<typeof LegionSettingResult>;
+
+/** `api.SettingsChangeResponse`, the body of `PUT /legion/v1/operator/settings`: one result per
+ * dotted `legion.yaml` path the request named, keyed as the request keyed it, under `settings`.
+ * Dispatch relays this body unchanged (`PUT /api/v1/legion/{project}/settings`,
+ * packages/envoy/internal/dispatch/api/settings_legion.go), so a reader of either route reads
+ * this one shape: a verdict is `answer.settings[path]`, never `answer[path]`. */
+export const LegionSettingsChangeResponse = z.strictObject({
+  settings: z.record(z.string(), LegionSettingResult),
+});
+
+export type LegionSettingsChange = z.output<typeof LegionSettingsChangeResponse>;
+
 /** `claim.RegisterResponse`, the body of `POST /legion/v1/claims/register`: the claim the agent
  * holds, the secret its ready and exit authenticate with, and `promptAgents`, the sorted names of
  * the task agents the role's prompts dispatch — what the session's subagents check measures its

@@ -19,6 +19,7 @@ import type {
   InboxRow,
   IssueDetails,
   LegionBoardResponse,
+  LegionMetricsScope,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
@@ -342,6 +343,22 @@ export const legionBoardQuery = (view: DeliveryLiveView & { kind: "legion" }) =>
     ...LIVE,
     queryKey: ["legion", "board", view],
     queryFn: (context) => subscribeLive(context, view),
+  });
+
+/** The Delivery page's Legion section, by GET: the four metrics of one project over one range
+ *  and one scope. Not live — the section draws a window of closed issues rather than what the
+ *  daemon says now, and the page reads it a second time for its compare range, as the Pipeline
+ *  section reads its own route twice. The key holds every parameter, so a project, a range or a
+ *  scope the reader picks is its own entry and the one before it stays cached. */
+export const legionMetricsQuery = (query: {
+  project: string;
+  from: string;
+  to: string;
+  scope: LegionMetricsScope;
+}) =>
+  queryOptions({
+    queryKey: ["legion", "metrics", query],
+    queryFn: () => api.getLegionMetrics(query),
   });
 
 /** Every project's Legion setting, by project key, read once for the whole app: the Issues page's

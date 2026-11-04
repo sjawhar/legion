@@ -481,7 +481,7 @@ func (h *deliveryHub) dirtyLegionBoard(project string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, view := range h.views {
-		if view.spec.kind == legionBoardView && view.spec.project == project {
+		if view.spec.classes().project && view.spec.project == project {
 			h.markDirtyLocked(view, now, deliveryCauseChange)
 		}
 	}

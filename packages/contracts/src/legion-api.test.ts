@@ -28,6 +28,8 @@ import {
   LegionReadyRequest,
   LegionRegisterResponse,
   LegionRootCloseRequest,
+  LegionSettingResult,
+  LegionSettingsChangeResponse,
   LegionSignOffRequest,
   LegionStateResponse,
   LegionWaveReleaseRequest,
@@ -1036,4 +1038,44 @@ test("a claim's registration and the controller's are told apart by their schema
   expect(LegionControllerRegisterResponse.safeParse(controller).success).toBeTrue();
   expect(LegionRegisterResponse.safeParse(controller).success).toBeFalse();
   expect(LegionControllerRegisterResponse.safeParse(claim).success).toBeFalse();
+});
+
+// The settings route's answer, which Dispatch relays unchanged to its own web client: the daemon
+// keys each path's verdict under `settings` (api.SettingsChangeResponse), and a reader that takes
+// the body for a flat map of paths finds no verdict at all against a real daemon.
+test("a settings change answer is the daemon's own, keyed by path under settings", () => {
+  const answered = {
+    settings: {
+      admission_cap: { applied: "at-once", old: "4", new: "6" },
+      "runtime.kubernetes.image": { applied: "next-launch", holder: "the issue pods" },
+      review_round_cap: { applied: "at-once", unchanged: true },
+      postgres_dsn: { refused: "this setting is fixed for the process" },
+    },
+  };
+
+  expect(LegionSettingsChangeResponse.safeParse(answered).success).toBeTrue();
+  expect(LegionSettingResult.safeParse(answered.settings.admission_cap).success).toBeTrue();
+  // A daemon that applied nothing still answers the block, empty.
+  expect(LegionSettingsChangeResponse.safeParse({ settings: {} }).success).toBeTrue();
+});
+
+test("a flat map of paths is no settings change answer", () => {
+  const flat = { admission_cap: { applied: "at-once" } };
+
+  expect(LegionSettingsChangeResponse.safeParse(flat).success).toBeFalse();
+  // Nor is a body with the block and anything else beside it, or one with no block at all.
+  expect(
+    LegionSettingsChangeResponse.safeParse({ settings: {}, applied: "at-once" }).success
+  ).toBeFalse();
+  expect(LegionSettingsChangeResponse.safeParse({}).success).toBeFalse();
+});
+
+test("a verdict carries the daemon's own fields and nothing else", () => {
+  expect(LegionSettingResult.safeParse({ applied: "rebuilt", holder: "the NATS client" }).success)
+    .toBeTrue();
+  expect(LegionSettingResult.safeParse({ refused: "no such setting" }).success).toBeTrue();
+  expect(LegionSettingResult.safeParse({}).success).toBeTrue();
+  expect(LegionSettingResult.safeParse({ applied: "" }).success).toBeFalse();
+  expect(LegionSettingResult.safeParse({ applied: "at-once", reason: "why" }).success).toBeFalse();
+  expect(LegionSettingResult.safeParse({ unchanged: "true" }).success).toBeFalse();
 });

@@ -187,9 +187,11 @@ func newFakeLegionDaemon(t *testing.T, status int, answer string) *fakeLegionDae
 
 // TestTheLegionSettingsRelayAnswersTheDaemonsResult: the relay sends the operator's changes and
 // the caller's login to the project's daemon with the bearer the token file holds, and answers
-// the daemon's per-key result as it came back.
+// the daemon's per-key result as it came back. The daemon keys each result by path under
+// `settings` (api.SettingsChangeResponse, packages/daemon/internal/api/settings_route.go), so
+// that is the body this fake answers and the body the relay must pass through whole.
 func TestTheLegionSettingsRelayAnswersTheDaemonsResult(t *testing.T) {
-	const answer = `{"concurrency":{"applied":"at-once"},"runtime.tmux.window":{"refused":"no such setting"}}`
+	const answer = `{"settings":{"concurrency":{"applied":"at-once","old":"4","new":"6"},"runtime.tmux.window":{"refused":"no such setting"}}}`
 	daemon := newFakeLegionDaemon(t, http.StatusOK, answer)
 	tokenFile := filepath.Join(t.TempDir(), "daemon-token")
 	if err := os.WriteFile(tokenFile, []byte("a-projected-token"), 0o600); err != nil {
@@ -233,7 +235,7 @@ func TestTheLegionSettingsRelayAnswersTheDaemonsResult(t *testing.T) {
 // the relay presents nothing, and whatever the daemon answers — status and body — is what the
 // caller sees.
 func TestTheLegionSettingsRelayPassesARefusalThroughAndSendsNoBearerWithoutAFile(t *testing.T) {
-	const refusal = `{"concurrency":{"refused":"a running issue holds a slot"}}`
+	const refusal = `{"settings":{"concurrency":{"refused":"a running issue holds a slot"}}}`
 	daemon := newFakeLegionDaemon(t, http.StatusConflict, refusal)
 	handler := newTestHandler(t)
 	seedLegionProjects(t, handler, "INFRA")

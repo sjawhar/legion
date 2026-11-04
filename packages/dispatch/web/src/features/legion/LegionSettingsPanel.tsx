@@ -21,6 +21,7 @@ import { legionBoardQuery, whoAmIQuery } from "../../api/queries";
 import type {
   LegionBoardResponse,
   LegionSettingSource,
+  LegionSettingsChangeResponse,
   LegionSettingVerdict,
 } from "../../api/types";
 import { useIsHuman } from "../../hooks/useIsHuman";
@@ -124,7 +125,7 @@ export function LegionSettingsPanel({ board }: { readonly board: LegionBoardResp
   };
 
   const change = useKeyedWrite<
-    Readonly<Record<string, LegionSettingVerdict>>,
+    LegionSettingsChangeResponse,
     SettingChange,
     { readonly previous: LegionBoardResponse | undefined }
   >({
@@ -161,7 +162,10 @@ export function LegionSettingsPanel({ board }: { readonly board: LegionBoardResp
         setResults((current) => ({ ...current, [variables.key]: { kind: "unanswered" } }));
         return;
       }
-      const verdict = answer[variables.key] ?? {};
+      // The daemon keys its results by path under `settings`, and Dispatch relays that body
+      // unchanged (`LegionSettingsChangeResponse` in @legion/contracts/legion-api): a daemon
+      // that answers nothing for the key leaves an empty verdict, which reads as unanswered.
+      const verdict = answer.settings[variables.key] ?? {};
       // A key the daemon refused never changed, so the row goes back to the value it showed.
       if (verdict.refused !== undefined) {
         rollBack(variables.key, context?.previous);

@@ -695,34 +695,20 @@ func (p *Population) linkTrees() {
 	}
 }
 
-// TreeRoot is the issue's tree root: the `tree` the daemon named where a read carried one, and the
-// topmost Legion issue of its parent chain otherwise. An issue whose parent the daemon knows
-// nothing of is a root of its own, which is what keeps a Legion tree from climbing into the
-// tracking issues above it.
+// TreeRoot is the issue's tree root, by the one rule the Legion view places an issue in a tree
+// with (legion.TreeRoot): the `tree` the daemon named where a read carried one, and the topmost
+// Legion issue of its parent chain otherwise. This population holds every issue of the project,
+// Legion's and the rest, so an issue carrying Legion phase work is what the walk climbs through;
+// an issue whose parent carries none is a root of its own, which is what keeps a Legion tree from
+// climbing into the tracking issues above it.
 func (p *Population) TreeRoot(key string) string {
-	seen := map[string]bool{}
-	for current := key; ; {
-		if seen[current] {
-			return current
-		}
-		seen[current] = true
-		issue := p.Issues[current]
+	return legion.TreeRoot(key, func(key string) (legion.TreeNode, bool) {
+		issue := p.Issues[key]
 		if issue == nil {
-			return current
+			return legion.TreeNode{}, false
 		}
-		if issue.Tree != "" {
-			if issue.Tree == current || seen[issue.Tree] {
-				return issue.Tree
-			}
-			current = issue.Tree
-			continue
-		}
-		parent := p.Issues[issue.Parent]
-		if issue.Parent == "" || parent == nil || !p.hasLegionWork(parent) {
-			return current
-		}
-		current = issue.Parent
-	}
+		return legion.TreeNode{Tree: issue.Tree, Parent: issue.Parent, Legion: p.hasLegionWork(issue)}, true
+	})
 }
 
 // isRoot is whether the issue is its own tree's root.

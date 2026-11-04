@@ -362,3 +362,79 @@ func TestADaemonAnswerThatIsNotJSONIsAFailure(t *testing.T) {
 		t.Fatalf("err = %v, want a failure naming the body that is not JSON", err)
 	}
 }
+
+// TestAStateReadFollowsNoRedirect: a daemon answers its own routes and redirects nowhere, so a
+// 3xx is the answer it gave — a failed read naming the status — and not a second call. Following
+// one would read a state, or present Dispatch's projected token, at a host no project's setting
+// names.
+func TestAStateReadFollowsNoRedirect(t *testing.T) {
+	elsewhere := stateServer(t, `{"issues":{"INFRA-1":{"key":"INFRA-1","phase":"implementing"}}}`)
+	var followed int
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed++
+		http.Redirect(w, r, elsewhere.URL+StatePath, http.StatusFound)
+	}))
+	defer redirecting.Close()
+
+	state, _, err := New(redirecting.URL, "").State(t.Context())
+	if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("a read of a daemon that redirects: err = %v, want a failure naming the 302", err)
+	}
+	if len(state.Issues) != 0 {
+		t.Errorf("the read answered %v, want nothing: the daemon it names did not answer it", state.Issues)
+	}
+	if followed != 1 {
+		t.Errorf("the client made %d calls, want the one the setting's host answered", followed)
+	}
+
+	// The relay is held to the same rule: a redirect is what the daemon answered, and since no
+	// daemon's redirect carries a JSON body the relay refuses it rather than calling the host it
+	// names with Dispatch's projected token.
+	var reached int
+	elsewhereRelay := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached++
+	}))
+	defer elsewhereRelay.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhereRelay.URL+OperatorSettingsPath, http.StatusTemporaryRedirect)
+	}))
+	defer relay.Close()
+	if _, err := New(relay.URL, "").PutOperatorSettings(t.Context(), SettingsChange{
+		Changes: map[string]json.RawMessage{"concurrency": json.RawMessage("4")}, By: "alice@example.com",
+	}); !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("a relay to a daemon that redirects: err = %v, want a failure naming the 307", err)
+	}
+	if reached != 0 {
+		t.Errorf("the host the redirect named was called %d times, want none", reached)
+	}
+}
+
+// TestAFailedCallNamesNoAddress: legion_reads.error is shown on the project's board to every
+// reader of the project, and the daemon's address belongs to the deployment, so what is recorded
+// is the transport's reason without the URL net/http's *url.Error carries or the host and port
+// its *net.OpError names.
+func TestAFailedCallNamesNoAddress(t *testing.T) {
+	// A port nothing listens on: the dial fails, which is the failure a daemon that is down
+	// gives, and the one whose text names the address.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	address := strings.TrimPrefix(closed.URL, "http://")
+	closed.Close()
+
+	_, _, err := New("http://"+address, "").State(t.Context())
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("a read of a daemon that is down: err = %v, want one wrapping ErrUnavailable", err)
+	}
+	if strings.Contains(err.Error(), address) {
+		t.Errorf("the failure reads %q, want no daemon address in it", err)
+	}
+	if !strings.Contains(err.Error(), "refused") {
+		t.Errorf("the failure reads %q, want the transport's own reason", err)
+	}
+
+	_, relayErr := New("http://"+address, "").PutOperatorSettings(t.Context(), SettingsChange{
+		Changes: map[string]json.RawMessage{"concurrency": json.RawMessage("4")}, By: "alice@example.com",
+	})
+	if relayErr == nil || strings.Contains(relayErr.Error(), address) {
+		t.Errorf("the relay's failure reads %v, want no daemon address in it", relayErr)
+	}
+}

@@ -4385,6 +4385,126 @@ export interface LegionBoardResponse {
   readonly computed_at: string;
 }
 
+/** Which of a project's Legion issues an answer counts: the Legion section's own toggle. */
+export type LegionMetricsScope = "all" | "roots" | "children";
+
+/** One worker type's bar of metric 2, and the seventh bar for the phases no role works
+ *  (`no_role`): the hours of every finished issue on it, how many of them spent time on it, the
+ *  median hours per issue, and the bar split into the five segments in the precedence's order. */
+export interface LegionRoleBar {
+  readonly role: string;
+  readonly hours: number;
+  readonly issues: number;
+  readonly median_hours_per_issue: number;
+  readonly segments: LegionSegments;
+}
+
+/** One bar's hours by how they were spent, in the order each hour is claimed: waiting on a
+ *  person, in a turn, CI wait, waiting on children, idle. */
+export interface LegionSegments {
+  readonly waiting_on_person: number;
+  readonly in_a_turn: number;
+  readonly ci_wait: number;
+  readonly waiting_on_children: number;
+  readonly idle: number;
+}
+
+/** One finished issue's work time with what was taken out of it: the hours from its first worker
+ *  event to its close, less the hours it sat parked and the hours it sat back in the queue. */
+export interface LegionWorkTimeIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly priority: number | null;
+  readonly root: boolean;
+  readonly started_at: string;
+  readonly closed_at: string;
+  readonly merged_at: string | null;
+  readonly hours: number;
+  readonly parked_hours: number;
+  readonly queued_hours: number;
+}
+
+/** One finished issue's rework: its review rounds, whether it was sent back to implementing at
+ *  least once, and the implementing and testing hours after its first review. */
+export interface LegionReworkIssue {
+  readonly key: string;
+  readonly review_rounds: number;
+  readonly sent_back: boolean;
+  readonly implementing_hours_after_first_review: number;
+  readonly testing_hours_after_first_review: number;
+}
+
+/** One UTC week of metric 4: how many issues a Legion session filed in it of each class
+ *  (`in_tree_at_design`, `in_tree_later`, `out_of_tree`, `by_the_controller`), against how many
+ *  issues finished in it. `week` is the week's Monday. */
+export interface LegionSplittingWeek {
+  readonly week: string;
+  readonly filed: Readonly<Record<string, number>>;
+  readonly finished: number;
+}
+
+/** One issue a Legion session created in the window: its class, the role that filed it and the
+ *  issue that role was working (the controller files under no issue), and the phase that issue
+ *  was in then, which the table names for an issue filed in the tree after design. */
+export interface LegionFiledIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly at: string;
+  readonly class: string;
+  readonly filer: string;
+  readonly filer_issue: string;
+  readonly filer_phase: string;
+}
+
+/** `GET /api/v1/legion/metrics?project&from&to&scope`: the Delivery page's Legion section — the
+ *  four measures of the issues that closed in the window with Legion phase work, computed from
+ *  Dispatch's own event log, its handoffs and what the sampler recorded of the project's daemon.
+ *  With no `project` it answers the first project that names a daemon, and a deployment where
+ *  none does answers an empty report rather than a refusal. The Go mirror is `metrics.Report` in
+ *  packages/envoy/internal/dispatch/legion/metrics/compute.go. */
+export interface LegionMetricsResponse {
+  readonly project: string;
+  readonly from: string;
+  readonly to: string;
+  readonly scope: LegionMetricsScope;
+  readonly computed_at: string;
+  /** How many issues finished in the window under this scope: every metric's population. */
+  readonly finished: number;
+  /** Metric 1, work time to merge: the median and p90 hours, and each finished issue's own. */
+  readonly work_time: {
+    readonly median_hours: number;
+    readonly p90_hours: number;
+    readonly issues: readonly LegionWorkTimeIssue[];
+  };
+  /** Metric 2, phase time by worker type: the seven bars, and the idle hours of all of them
+   *  over their whole time. */
+  readonly phase_time: {
+    readonly bars: readonly LegionRoleBar[];
+    readonly idle_share: number;
+  };
+  /** Metric 3, rework: the median review rounds per issue, the share of issues sent back to
+   *  implementing at least once, the implementing and testing hours after the first review with
+   *  their median per issue, and each finished issue's own numbers. */
+  readonly rework: {
+    readonly median_review_rounds: number;
+    readonly sent_back_share: number;
+    readonly hours_after_first_review: number;
+    readonly median_hours_after_first_review: number;
+    readonly issues: readonly LegionReworkIssue[];
+  };
+  /** Metric 4, splitting and follow-ups: what Legion sessions filed per week by class against
+   *  the issues finished per week, every filing of the window, and, for the roots that finished,
+   *  their children per root and their median work time with and without children. */
+  readonly splitting: {
+    readonly weeks: readonly LegionSplittingWeek[];
+    readonly filed: readonly LegionFiledIssue[];
+    readonly finished_roots: number;
+    readonly children_per_root: number;
+    readonly median_hours_roots_with_children: number;
+    readonly median_hours_roots_without_children: number;
+  };
+}
+
 /** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
 export type DeliveryLiveWindow =
   | { readonly preset: 7 | 14 | 28 | 84 }

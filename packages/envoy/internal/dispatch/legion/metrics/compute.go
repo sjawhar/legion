@@ -65,7 +65,7 @@ const (
 var classes = []string{ClassInTreeAtDesign, ClassInTreeLater, ClassOutOfTree, ClassByTheController}
 
 // Report is one answer of the Legion section: the window, the issues that finished in it, and the
-// four metrics.
+// four metrics. Mirrors packages/contracts/src/dispatch-api.ts's LegionMetricsResponse exactly.
 type Report struct {
 	Project    string    `json:"project"`
 	From       time.Time `json:"from"`

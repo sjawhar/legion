@@ -85,10 +85,6 @@ var legionPhaseColumns = map[string]string{
 	legion.PhaseHeld:           legionColumnHeld,
 }
 
-// legionTreeDepthCap bounds the climb from an issue to its tree root over the parent chain, for a
-// daemon that names no `tree`. A chain longer than this, or one that loops, stops where it stands.
-const legionTreeDepthCap = 32
-
 // legionNotConfiguredCode and legionNotConfiguredMessage are the one refusal a project with no
 // Legion daemon gets, whichever route or live view asked (getLegionBoard,
 // putLegionProjectSettings, the live hub's worker).
@@ -413,35 +409,20 @@ func (p *legionBoardPopulation) issueKeys() map[string]struct{} {
 	return keys
 }
 
-// treeRoot is the issue's tree root: the `tree` the daemon named where a read carried one
-// (dispatch://INFRA-980), and the topmost issue the daemon also reports on its parent chain
-// otherwise. An issue whose parent the daemon knows nothing of is a root of its own, which keeps a
-// Legion tree from climbing into the tracking issues above it. Nothing here reads a slot: a slot
-// holder is not a root.
+// treeRoot is the issue's tree root, by the one rule the metrics place an issue in a tree with
+// (legion.TreeRoot): the `tree` the daemon named where a read carried one (dispatch://INFRA-980),
+// and the topmost issue the daemon also reports on its parent chain otherwise. Every issue this
+// population holds is one the daemon reported, so every one of them is Legion's and the walk
+// climbs through all of them; an issue whose parent the daemon knows nothing of is a root of its
+// own, which keeps a Legion tree from climbing into the tracking issues above it.
 func (p *legionBoardPopulation) treeRoot(key string) string {
-	issue := p.issues[key]
-	if issue == nil {
-		return key
-	}
-	if issue.tree != "" {
-		return issue.tree
-	}
-	root := key
-	for range legionTreeDepthCap {
-		current := p.issues[root]
-		if current == nil || current.parent == "" {
-			return root
-		}
-		above, known := p.issues[current.parent]
+	return legion.TreeRoot(key, func(key string) (legion.TreeNode, bool) {
+		issue, known := p.issues[key]
 		if !known {
-			return root
+			return legion.TreeNode{}, false
 		}
-		if above.tree != "" {
-			return above.tree
-		}
-		root = current.parent
-	}
-	return root
+		return legion.TreeNode{Tree: issue.tree, Parent: issue.parent, Legion: true}, true
+	})
 }
 
 // legionBoardCompute is GET /api/v1/legion/board's body for a population read for it. It reads

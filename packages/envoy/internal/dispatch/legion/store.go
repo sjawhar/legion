@@ -138,6 +138,36 @@ func RecordRead(ctx context.Context, pool *store.Pool, project string, at time.T
 	return nil
 }
 
+// ReadRetention is how long legion_reads keeps a read of a daemon. The Legion view reads the
+// newest row of a project and nothing reads an older one, so the rest are a week of history for
+// whoever asks why a daemon stopped answering — the horizon delivery_changes keeps for the same
+// reason, a day, measured against a table that gains a row a minute per project rather than one
+// per change.
+const ReadRetention = 7 * 24 * time.Hour
+
+// PruneReads deletes every read older than ReadRetention that is not its project's newest, and
+// answers how many it deleted: the table is append-only, one row per project per minute, and
+// delivery.PruneChanges keeps delivery_changes the same way, from the loop that writes it.
+//
+// Each project keeps its newest read whatever its age, because that row is the freshness the
+// board's header shows: a daemon nobody has read for a week reads as a stale read, never as a
+// daemon that was never read. The cutoff is the database's own now(), as each row's read_at is
+// the sampler's, so one clock decides whichever replica prunes.
+func PruneReads(ctx context.Context, pool *store.Pool) (int64, error) {
+	tag, err := pool.Exec(ctx, `
+		delete from legion_reads old
+		where old.read_at < now() - $1::interval
+		  and exists (
+		    select 1 from legion_reads newer
+		    where newer.project = old.project and (newer.read_at, newer.id) > (old.read_at, old.id)
+		  )
+	`, ReadRetention)
+	if err != nil {
+		return 0, fmt.Errorf("prune the Legion state reads: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // RecordObservations appends a row for each observation whose value differs from the newest row
 // that project, issue and field already hold, and answers how many it wrote. An unchanged value
 // writes nothing, and a first observation whose value is null writes nothing either: nothing moved
