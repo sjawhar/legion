@@ -97,7 +97,13 @@ import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
-import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import {
+  editorHighlightsPlugin,
+  pulseHighlight,
+  setActiveHighlights,
+  setBlockMarks as applyBlockMarks,
+} from './editor-highlights';
+import type { BlockMark } from './editor-highlights';
 import {
   editorChangeDecorationsPlugin,
   setChangeDecorations as applyChangeDecorations,
@@ -109,6 +115,7 @@ import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type { BlockWidget, ChangeDecorations, TextDecoration } from './editor-change-decorations';
+export type { BlockMark } from './editor-highlights';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -219,6 +226,10 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   setActiveMarks(markIds: readonly string[]): void;
   /** Highlights the blocks a host has selected without changing the document. */
   setActiveBlocks(blockIds: readonly string[]): void;
+  /** Draws a host's marks on blocks by their stable `blockId` - a class each, and a title where
+   *  it names one - without changing the document. Replaces what the last call drew; an empty
+   *  set draws nothing. See ./editor-highlights.ts. */
+  setBlockMarks(marks: readonly BlockMark[]): void;
   /** Draws what changed over and beside the document, without changing it: one text entry per
    *  run, naming its top-level block by index and the run by character offsets into that block's
    *  text, or the whole block where it names no range; one widget per piece of text the document
@@ -543,6 +554,9 @@ export async function createProofEditor(
     },
     setActiveBlocks(blockIds: readonly string[]): void {
       setActiveHighlights(view, 'block', blockIds);
+    },
+    setBlockMarks(marks: readonly BlockMark[]): void {
+      applyBlockMarks(view, marks);
     },
     setChangeDecorations(decorations: ChangeDecorations): void {
       applyChangeDecorations(view, decorations);

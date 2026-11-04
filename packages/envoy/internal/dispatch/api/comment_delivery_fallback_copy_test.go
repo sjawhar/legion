@@ -286,6 +286,13 @@ func (p *recordingOutboxPublisher) Request(_ string, item contracts.Envelope, _ 
 
 func (p *recordingOutboxPublisher) Probe(time.Duration) error { return nil }
 
+// PublishStoredAsync records the copy the outbox keeps on a role's kept lane as a published one:
+// the envelope's topic is the role's there too, so a keep shows as that role's topic. These
+// tests' roles are all held (claimedRole), so no copy of theirs is kept.
+func (p *recordingOutboxPublisher) PublishStoredAsync(_ string, item contracts.Envelope, _ string) <-chan error {
+	return p.PublishAsync(item)
+}
+
 func (p *recordingOutboxPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	p.mu.Lock()
 	p.items = append(p.items, item)

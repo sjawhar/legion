@@ -263,7 +263,12 @@ type Issue struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at"`
 	PrimaryArtifactID string     `json:"primary_artifact_id"`
-	LastSeq           int        `json:"last_seq"`
+	// VerificationArtifactID and PlanArtifactID are the issue's documents by role
+	// (Artifact.Role): the one created as verification.md and the one created as plan.md, each
+	// "" when the issue holds none. They are resolved on read, as PrimaryArtifactID is.
+	VerificationArtifactID string `json:"verification_artifact_id"`
+	PlanArtifactID         string `json:"plan_artifact_id"`
+	LastSeq                int    `json:"last_seq"`
 }
 
 // Route statuses: whether an issue's route reaches a running session right now.
@@ -637,15 +642,20 @@ type ArchitectureTreeRetired struct {
 // file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
 // `agent/<session id>/<slug>`).
 type Artifact struct {
-	ID        string    `json:"id"`
-	IssueKey  *string   `json:"issue_key"`
-	Project   string    `json:"project"`
-	SessionID *string   `json:"session_id"`
-	RefKey    string    `json:"ref_key"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	Primary   bool      `json:"primary"`
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Project   string  `json:"project"`
+	SessionID *string `json:"session_id"`
+	RefKey    string  `json:"ref_key"`
+	Slug      string  `json:"slug"`
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	Primary   bool    `json:"primary"`
+	// Role is the part an issue's document plays beside its spec: ArtifactRoleVerification for
+	// the document created as verification.md, ArtifactRolePlan for the one created as plan.md,
+	// "" for every other document. It is set from the document's slug when the row is created
+	// and never changes, as Primary never changes, and no request field sets it.
+	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Versions  []Version `json:"versions"`
@@ -654,21 +664,33 @@ type Artifact struct {
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
 
+// ArtifactRoleVerification and ArtifactRolePlan are the two parts Artifact.Role names, the
+// values the contract's union declares (dispatch-api.ts). A document that plays neither holds
+// "".
+const (
+	ArtifactRoleVerification = "verification"
+	ArtifactRolePlan         = "plan"
+)
+
 // ArtifactReview is one human review of a document, pinned to the version it was
 // given on: an approval, or a request for changes with a reason. EventSeq is the
 // sequence of the artifact.* event the review appended on its document's owner, nil
 // for a review recorded before Dispatch kept it; the approval read returns it as
 // ArtifactApproval.Seq, and the review list does not carry it.
 type ArtifactReview struct {
-	ID         string    `json:"id"`
-	ArtifactID string    `json:"artifact_id"`
-	Version    int       `json:"version"`
-	State      string    `json:"state"`
-	Actor      Actor     `json:"actor"`
-	Reason     *string   `json:"reason"`
-	AskID      *string   `json:"ask_id"`
-	CreatedAt  time.Time `json:"created_at"`
-	EventSeq   *int64    `json:"-"`
+	ID         string `json:"id"`
+	ArtifactID string `json:"artifact_id"`
+	Version    int    `json:"version"`
+	State      string `json:"state"`
+	// Kind is who gave the review: "person" for one a person gave, "plan_review" for a plan
+	// review's approval of a plan version. A review Dispatch carried forward to a later version
+	// keeps the kind of the review it carried.
+	Kind      string    `json:"kind"`
+	Actor     Actor     `json:"actor"`
+	Reason    *string   `json:"reason"`
+	AskID     *string   `json:"ask_id"`
+	CreatedAt time.Time `json:"created_at"`
+	EventSeq  *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -695,6 +717,14 @@ type ArtifactApproval struct {
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
 	WaitingOn     string  `json:"waiting_on,omitempty"`
+	// Kind is the latest review's Kind, so a reader can say an approval is a plan review's
+	// rather than a person's; empty while no review stands.
+	Kind string `json:"kind,omitempty"`
+	// Documents names every document the open request covers when it covers more than this
+	// one, each at the version the request names, this document included; empty otherwise. It
+	// is the request's own list (AskApprovalDocument), carried to the reader of a document
+	// rather than copied into a shape of its own.
+	Documents []AskApprovalDocument `json:"documents,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -705,9 +735,113 @@ type ArtifactReviewEventPayload struct {
 	ArtifactID string  `json:"artifact_id"`
 	Name       string  `json:"name"`
 	Version    int     `json:"version"`
+	Kind       string  `json:"kind"`
 	Actor      Actor   `json:"actor"`
 	Reason     *string `json:"reason"`
 	AskID      *string `json:"ask_id"`
+}
+
+// CurrencyCurrent, CurrencyOlder and CurrencyUnknown are whether a recorded result still speaks
+// for the work as it stands: CurrencyCurrent at the commit the work stands at and the words the
+// result proved, CurrencyOlder at an earlier commit or against words that have changed since,
+// and CurrencyUnknown when Dispatch cannot read the repository the check's issue resolves to.
+const (
+	CurrencyCurrent = "current"
+	CurrencyOlder   = "older"
+	CurrencyUnknown = "unknown"
+)
+
+// CheckResult is one result recorded against a `check` block of an issue's Verification
+// document (check_results). IssueKey is the issue it was recorded on, which may be a descendant
+// of CheckIssueKey, the issue whose Verification document holds the check. CheckVersion and
+// CheckSHA256 are the block's changed_version and text_sha256 when the result was recorded, so
+// a read can tell a result whose check has been reworded since. Currency is computed when the
+// results are read and is empty on the record's own answer.
+type CheckResult struct {
+	ID              string    `json:"id"`
+	IssueKey        string    `json:"issue_key"`
+	CheckIssueKey   string    `json:"check_issue_key"`
+	CheckArtifactID string    `json:"check_artifact_id"`
+	CheckBlockID    string    `json:"check_block_id"`
+	CheckVersion    int       `json:"check_version"`
+	CheckSHA256     string    `json:"check_sha256"`
+	Role            string    `json:"role"`
+	Surface         string    `json:"surface"`
+	Run             string    `json:"run"`
+	Observed        string    `json:"observed"`
+	CommitSHA       string    `json:"commit_sha"`
+	NegativeControl string    `json:"negative_control"`
+	Failed          int       `json:"failed"`
+	Skipped         int       `json:"skipped"`
+	Excluded        int       `json:"excluded"`
+	Verdict         string    `json:"verdict"`
+	Screenshots     []string  `json:"screenshots"`
+	Session         string    `json:"session"`
+	Actor           Actor     `json:"actor"`
+	CreatedAt       time.Time `json:"created_at"`
+	EventSeq        *int64    `json:"event_seq,omitempty"`
+	Currency        string    `json:"currency,omitempty"`
+}
+
+// CheckBlock is one `check` block of a Verification document as a result read shows it: where it
+// lives, its attributes, the version its words last changed in and their digest, and every
+// result recorded against it from any issue, newest first.
+type CheckBlock struct {
+	BlockID         string        `json:"block_id"`
+	Ref             string        `json:"ref"`
+	IssueKey        string        `json:"issue_key"`
+	ArtifactID      string        `json:"artifact_id"`
+	Text            string        `json:"text"`
+	When            string        `json:"when"`
+	Surface         string        `json:"surface"`
+	Run             string        `json:"run"`
+	NegativeControl string        `json:"negative_control"`
+	Version         int           `json:"version"`
+	SHA256          string        `json:"sha256"`
+	Results         []CheckResult `json:"results"`
+}
+
+// IssueCoverage is what each requirement of an issue's spec lacks: the requirements the spec
+// marks, in document order, and one Gaps line per gap, which `dispatch read --issue` prints
+// after `Coverage: `. HasPlan says whether the issue has a plan document; before it has one, a
+// requirement with no plan task is no gap, since the plan comes after the spec's approval.
+// Nothing is ever refused for a gap.
+type IssueCoverage struct {
+	Issue          string                `json:"issue"`
+	SpecArtifactID string                `json:"spec_artifact_id"`
+	HasPlan        bool                  `json:"has_plan"`
+	Requirements   []RequirementCoverage `json:"requirements"`
+	Gaps           []string              `json:"gaps"`
+}
+
+// RequirementCoverage is one `requirement` block of an issue's spec and what serves it: the
+// `check` and `plan_task` blocks of any document of that issue or of any descendant issue, at
+// any status, that name it in `serves`. Gaps is this requirement's own gap lines, the ones
+// IssueCoverage.Gaps carries for it, so a reader draws them beside the requirement without
+// parsing the sentence back.
+type RequirementCoverage struct {
+	BlockID   string   `json:"block_id"`
+	Ref       string   `json:"ref"`
+	Text      string   `json:"text"`
+	Checks    int      `json:"checks"`
+	PlanTasks int      `json:"plan_tasks"`
+	Gaps      []string `json:"gaps"`
+}
+
+// CheckResultEventPayload is the payload of result.recorded, appended on the check's issue: the
+// result, the issue it was recorded on (Issue, which is the check's issue only when the result
+// was recorded there) and the check it proves.
+type CheckResultEventPayload struct {
+	ResultID        string `json:"result_id"`
+	Issue           string `json:"issue"`
+	CheckIssue      string `json:"check_issue"`
+	CheckArtifactID string `json:"check_artifact_id"`
+	CheckBlockID    string `json:"check_block_id"`
+	CheckVersion    int    `json:"check_version"`
+	When            string `json:"when"`
+	Verdict         string `json:"verdict"`
+	Role            string `json:"role"`
+	CommitSHA       string `json:"commit_sha"`
 }
 
 // ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
@@ -727,16 +861,31 @@ type ArtifactHumanEditedEventPayload struct {
 }
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
-// lists a table block's rows and cells; nil for every other block.
+// lists a table block's rows and cells; nil for every other block. Attributes is a typed block's
+// attributes in the order its type declares them, which is the order its opening line writes
+// them; a block of no declared type carries none.
 type ArtifactBlock struct {
-	ID            string          `json:"id"`
-	Type          string          `json:"type"`
-	From          int             `json:"from"`
-	To            int             `json:"to"`
-	Token         string          `json:"token"`
-	References    BlockReferences `json:"references"`
-	Table         *BlockTable     `json:"table,omitempty"`
-	DescendantIDs []string        `json:"-"`
+	ID            string                `json:"id"`
+	Type          string                `json:"type"`
+	From          int                   `json:"from"`
+	To            int                   `json:"to"`
+	Token         string                `json:"token"`
+	References    BlockReferences       `json:"references"`
+	Attributes    []BlockAttributeValue `json:"attributes,omitempty"`
+	Table         *BlockTable           `json:"table,omitempty"`
+	DescendantIDs []string              `json:"-"`
+}
+
+// BlockAttributeValue is one attribute a typed block carries: the name its type declares it
+// under, the value the block holds, as its opening line writes it with no escape and no quotes
+// (pmdoc.TypedBlockAttributes), and the kind the block schema declares that attribute
+// (pmdoc.BlockAttributeSchema.Kind). A reader follows a block[] attribute's value as the block
+// references it holds and reads every other kind as text, rather than taking a value for a
+// pointer because it reads like one: a check's run may quote a dispatch:// URL.
+type BlockAttributeValue struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Kind  string `json:"kind"`
 }
 
 // BlockTable is a table block's rows in child order, the header row first, as GET
@@ -906,18 +1055,64 @@ type AskBlockArtifact struct {
 	Primary bool   `json:"primary"`
 }
 
-// AskApproval is the document an approval ask names. Version follows the document's latest
-// settled version while the ask remains open. RequestedVersion is the version the agent most
-// recently handed to a human, so a lower value means the agent is revising the moved request.
-// Approved names the document's newest approval as the request was opened, so a request to
-// approve again says which approval it follows; a request on a document nobody has approved
-// carries none. A version move re-encodes the whole approval, so it survives it unchanged.
+// AskApproval is what an approval ask names: Documents, one entry per document the request
+// covers, each at the version it names. A request opened on a spec with its issue's Verification
+// document names two; every other request names one. Each document's Version follows that
+// document's latest settled version while the ask remains open, and its RequestedVersion is the
+// version of it the agent most recently handed to a human, so a lower value means the agent is
+// revising the moved request. Approved names the first document's newest approval as the request
+// was opened, so a request to approve again says which approval it follows; a request on a
+// document nobody has approved carries none. A version move re-encodes the whole approval, so it
+// survives it unchanged.
+//
+// ArtifactID, Name, Version and RequestedVersion repeat Documents[0], the document the request
+// was opened on: the stored JSON stays the one-document shape the release before this one reads,
+// and asks.approval's check constraint, its indexes and every join that resolves an approval
+// ask's document go on finding that first document. MarshalJSON writes them from Documents[0]
+// on every encode, so no writer can store a lead that disagrees with the list; nothing else
+// writes them.
 type AskApproval struct {
-	ArtifactID       string               `json:"artifact_id"`
-	Name             string               `json:"name"`
-	Version          int                  `json:"version"`
-	RequestedVersion int                  `json:"requested_version"`
-	Approved         *AskApprovalApproved `json:"approved,omitempty"`
+	ArtifactID       string                `json:"artifact_id"`
+	Name             string                `json:"name"`
+	Version          int                   `json:"version"`
+	RequestedVersion int                   `json:"requested_version"`
+	Approved         *AskApprovalApproved  `json:"approved,omitempty"`
+	Documents        []AskApprovalDocument `json:"documents"`
+}
+
+// AskApprovalDocument is one document an approval request names.
+type AskApprovalDocument struct {
+	ArtifactID       string `json:"artifact_id"`
+	Name             string `json:"name"`
+	Version          int    `json:"version"`
+	RequestedVersion int    `json:"requested_version"`
+}
+
+// MarshalJSON writes the approval with its four lead fields taken from Documents[0], whatever
+// the struct in hand carries: every writer changes Documents alone, and the stored row's lead
+// follows it. An approval naming no document is written as it stands, which
+// asks_approval_kind_check refuses — a request names at least one document.
+func (approval AskApproval) MarshalJSON() ([]byte, error) {
+	type encoded AskApproval
+	shape := encoded(approval)
+	if len(approval.Documents) > 0 {
+		lead := approval.Documents[0]
+		shape.ArtifactID = lead.ArtifactID
+		shape.Name = lead.Name
+		shape.Version = lead.Version
+		shape.RequestedVersion = lead.RequestedVersion
+	}
+	return json.Marshal(shape)
+}
+
+// Document is the entry naming artifactID, or nil when the request does not name that document.
+func (approval *AskApproval) Document(artifactID string) *AskApprovalDocument {
+	for index := range approval.Documents {
+		if approval.Documents[index].ArtifactID == artifactID {
+			return &approval.Documents[index]
+		}
+	}
+	return nil
 }
 
 // AskApprovalApproved is the approval a request follows: the version a human approved, when

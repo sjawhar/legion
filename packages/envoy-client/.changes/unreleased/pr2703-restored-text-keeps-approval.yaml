@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    The line a document write prints when it superseded a person's approval no longer says that no
-    undo restores it. It now says that the approval is stale until someone approves the new version
-    or a later write stores the approved version's text again exactly, with no decision block in it
-    decided since, which Dispatch now carries the approval to.
-time: 2026-11-03T03:30:02.000000000Z
-custom:
-    Issue: pr2703

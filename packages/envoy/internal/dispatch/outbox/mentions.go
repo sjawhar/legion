@@ -541,11 +541,14 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // session, targetFallbackKeys for a target), and the row is marked published. A row whose
 // destination is a role topic is not published there - the stream captures no role subject - but
 // resolved and forwarded to the role's holder, as a batch's role route is (fallbackRoleForward,
-// roleForward.send): a resolution that reaches the destination with nothing to send settles the
-// row unpublished, and one that leaves it pending counts an attempt and backs the row off, as a
-// failed publish does. The pass never
-// writes the events row: the event's published_at, published_destinations and payload stay as its
-// own publish left them, and no destination but the row's is reached, whatever the issue's route,
+// roleForward.send): a role no live holder can take has its copy kept on the role's kept lane for
+// the holder that claims it next, and the stream's acknowledgement of that keep marks the row
+// published as a holder's receipt of a forward does; a resolution that reaches the destination
+// with nothing to send at all - the holder is the event's own actor, or the role token is one no
+// claim can ever name - settles the row unpublished, and one that leaves it pending counts an
+// attempt and backs the row off, as a failed publish does. The pass never writes the events row:
+// the event's published_at, published_destinations and payload stay as its own publish left
+// them, and no destination but the row's is reached, whatever the issue's route,
 // claimant, followers or authors are by then. A decision or a publish that fails counts an attempt
 // on the row (attempt_count) and moves its next_attempt_at out by retry.Delay of that count, the
 // schedule an event backs off by, so it is decided again once that passes; nothing about a publish
@@ -648,6 +651,9 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) (full, fa
 		answer <-chan error
 	}
 	sender := deps.Publisher.WindowUntil(hold.Deadline)
+	// One record for the pass, as a batch keeps one for its own window of sends (sendChains):
+	// what the handovers behind this pass's keeps have already handed a role's holder.
+	handed := newKeptHandovers()
 	var sent []sentCopy
 	for _, held := range copies {
 		if ctx.Err() != nil {
@@ -666,7 +672,7 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) (full, fa
 			slog.Error("dispatch outbox: decide fallback copy", "comment_id", held.commentID, "destination", held.destination, "error", err)
 			fail(held)
 		case decision == fallbackPublishes:
-			sent = append(sent, sentCopy{held: held, out: out, answer: out.send(sender)})
+			sent = append(sent, sentCopy{held: held, out: out, answer: out.send(ctx, deps, sender, handed)})
 		case decision == fallbackSettles:
 			records = append(records, fallbackRecord{held: held, settled: true})
 		default:
@@ -714,7 +720,7 @@ func publishFallbackCopies(ctx context.Context, deps Deps, hold fence) (full, fa
 				deps.countPublishFailure("holder")
 			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
 				deps.countPublishFailure("unanswered")
-			case ctx.Err() == nil || !errors.Is(err, ctx.Err()):
+			case !lostToContextEnd(ctx, err):
 				deps.countPublishFailure("failed")
 			}
 			slog.Error("dispatch outbox: publish fallback copy", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
@@ -751,25 +757,30 @@ type fallbackSend struct {
 	forward *roleForward
 }
 
-// send starts the copy's send through sender: a role destination forwarded to the role's holder
-// with a Request, every other published to its topic. A forward that resolved to no holder it
-// could reach answers its own error, as a batch's chain does (sendChains), so the row counts an
-// attempt and backs off.
-func (s fallbackSend) send(sender bus.Sender) <-chan error {
+// send starts the copy's send through sender, within ctx: a role destination forwarded to the
+// role's holder with a Request, or kept on the role's kept lane when no live holder can take it
+// (roleForward.send), and every other destination published to its topic. handed is the pass's
+// record of what the handovers behind its keeps have delivered, which a keep reads and writes
+// (keptHandovers). A forward that resolved to no holder it could reach answers its own error, as
+// a batch's chain does (sendChains), so the row counts an attempt and backs off.
+func (s fallbackSend) send(ctx context.Context, deps Deps, sender bus.Sender, handed *keptHandovers) <-chan error {
 	switch {
 	case s.forward == nil:
 		return sender.PublishAsync(s.item)
 	case s.forward.err != nil:
 		return failedAnswer(s.forward.err)
 	}
-	return s.forward.send(sender, s.item)
+	return s.forward.send(ctx, deps, sender, s.item, handed)
 }
 
 // decideFallbackCopy decides one claimed row by its key's attempts (publishFallbackCopies), and
 // returns, when the copy is to be published, the send to make: the envelope, and the role
-// forward that carries it to a role destination's holder. A role whose resolution reaches the
-// destination with nothing to send (no claim, a holder gone and its claim released, the holder
-// the event's own actor) settles the row as a sent mention does, with nothing published.
+// forward that carries it to a role destination's holder. A role no live holder can take is
+// published like any other destination: its forward keeps the copy on the role's kept lane for
+// the role's next holder (forwardOf, keptOrSkipped). Only a resolution that reaches the
+// destination with nothing to send at all - the holder is the event's own actor, or the role
+// token is one no claim can ever name - settles the row as a sent mention does, with nothing
+// published.
 func decideFallbackCopy(
 	ctx context.Context, deps Deps, held fallbackCopy, event fallbackEvent,
 ) (fallbackDecision, fallbackSend, error) {

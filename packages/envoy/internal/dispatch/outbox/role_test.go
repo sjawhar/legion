@@ -101,20 +101,20 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 }
 
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
-// roles.Buckets on the outbox's own client.
+// roles.Buckets on the outbox's own client, and that client the reader of a role's kept lane and
+// its drain cursor, which a keep's handover makes its pass over (Deps.KeptLanes).
 func (r *roleRig) deps() Deps {
 	holders := roles.NewBuckets(r.client)
-	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
+	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
+		KeptLanes: r.client}
 }
 
-// claim makes holder role's holder, registered with entry, as a session plugin's registration does.
+// claim makes holder role's holder, registered with entry, as a session plugin's registration
+// does (claimUnder), and fails the test when that did not come off.
 func (r *roleRig) claim(t *testing.T, role, holder string, entry session.SessionEntry) {
 	t.Helper()
-	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim %s for %s: %v", role, holder, err)
-	}
-	if err := r.sessions.Put(holder, entry); err != nil {
-		t.Fatalf("register %s: %v", holder, err)
+	if err := r.claimUnder(role, holder, entry); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -362,8 +362,9 @@ func TestARoleRouteToAHolderWithAServingPortIsPublishedOnTheStreamsAcknowledgeme
 }
 
 // A role nobody claims has no holder: its route counts as reached, the event is published, and
-// nothing is sent to any session.
-func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
+// nothing is sent to any session - the copy kept for the role's next holder goes to that role's
+// kept lane, which is no session's subject (TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder).
+func TestARoleRouteWithNoClaimIsPublishedWithNothingSentToASession(t *testing.T) {
 	rig := newRoleRig(t)
 	const role = "unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -383,11 +384,12 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
 	}
 }
 
-// A role route reached with nothing to send is no send of its batch. The event's first batch, with
-// no role reader, reaches the issue's topic and leaves the role route pending; once the event is
-// due again, the role, which nobody claims, is its only unreached destination, and the batch that
-// publishes it reports nothing sent.
-func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
+// The event's first batch, with no role reader, reaches the issue's topic and leaves the role
+// route pending; once the event is due again, the role, which nobody claims, is its only
+// unreached destination, and the batch that publishes it keeps the copy for the role's next
+// holder, the one send it makes. A role route reached with nothing to send at all is no send of
+// its batch, which TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept holds.
+func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *testing.T) {
 	ctx := context.Background()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
@@ -413,13 +415,14 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
 	if publishedAt(t, rig.database, event.ID) == nil {
 		t.Fatal("the event whose only route left is an unclaimed role was not published")
 	}
-	if second.sent != 0 || second.firstID != 0 || second.lastID != 0 || second.published != 1 {
-		t.Fatalf("the second batch = %+v, want it to publish the event with nothing sent", second)
+	if second.sent != 1 || second.firstID != event.ID || second.lastID != event.ID || second.published != 1 {
+		t.Fatalf("the second batch = %+v, want it to keep the event for the role's next holder and publish it", second)
 	}
 }
 
 // A claim whose holder's session is gone is released, with the listener's compare and set, and the
-// role then has no holder: the event is published with nothing sent, and the claim is gone.
+// role then has no holder: the event is published with nothing sent to its gone holder, its copy
+// kept for the role's next holder as an unclaimed role's is, and the claim is gone.
 func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
@@ -613,15 +616,6 @@ func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
 	}
 }
 
-// unclaimedRoles is a role-claim store in which no role is claimed, so a role destination is
-// reached with nothing to send (forwardOf). Its holder and release reads are heldRoles', which
-// an unclaimed role never asks.
-type unclaimedRoles struct{ heldRoles }
-
-func (unclaimedRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
-	return envoystore.RoleClaim{}, nil
-}
-
 // seedHeldRoleFallbackCopy writes a comment on issue T-1, routed to role, that mentions s1 - the
 // session the route resolved to when the comment was written - whose attempt the delivery sweep
 // resends; scans its comment.created event through deps, which holds the route's copy as a
@@ -660,8 +654,10 @@ func seedHeldRoleFallbackCopy(ctx context.Context, t *testing.T, deps Deps, role
 // batch resolves one its events route to and forwards the copy to the holder's agent subject
 // (fallbackRoleForward, roleForward.send); published to notifications.role.* instead it would be
 // refused by the stream, which captures no role subject, and the row would count a failed attempt
-// and back off for ever with the holder never given the comment. A role nobody claims is reached
-// with nothing to send, which settles the row unpublished.
+// and back off for ever with the holder never given the comment. A role nobody claims has no
+// holder to forward to, so the copy is kept on that role's kept lane for the session that claims
+// the role next, and the stream's acknowledgement of the keep settles the row published, as a
+// holder's receipt of a forward settles it.
 func TestAHeldCopyOfARoleRouteReachesTheRolesHolder(t *testing.T) {
 	const role = "reviewer"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -697,24 +693,33 @@ func TestAHeldCopyOfARoleRouteReachesTheRolesHolder(t *testing.T) {
 		}
 	})
 
-	t.Run("a role nobody claims settles the copy with nothing sent", func(t *testing.T) {
+	t.Run("a role nobody claims keeps the copy for the role's next holder", func(t *testing.T) {
 		ctx := store.WithTransactionTracking(context.Background())
 		database := storetest.Open(t)
-		publisher := &recordingPublisher{}
+		publisher := &keepRecorder{}
 		deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker(),
-			RoleClaims: unclaimedRoles{}, Sessions: unclaimedRoles{}}
+			RoleClaims: unclaimedRoles, Sessions: unclaimedRoles}
 		commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
-		sentByTheScan := len(publisher.all())
 
 		publishFallbackCopies(ctx, deps, unfenced{})
 
 		held := readHeldCopy(t, database, commentID, roleTopic)
-		if !held.settled || held.published || held.attempts != 0 {
-			t.Fatalf("the held copy of an unclaimed role is attempts=%d settled=%v published=%v, want it settled with nothing sent",
+		if !held.settled || !held.published || held.attempts != 0 {
+			t.Fatalf("the held copy of an unclaimed role is attempts=%d settled=%v published=%v, want it settled by the keep's acknowledgement",
 				held.attempts, held.settled, held.published)
 		}
-		if sent := publisher.all()[sentByTheScan:]; len(sent) != 0 {
-			t.Fatalf("the pass sent %v for a role nobody claims, want nothing", topicsOf(sent))
+		// keepRecorder records the kept publishes alone, so a copy here is one that went to the
+		// role's kept lane rather than to notifications.role.*, which the stream does not capture.
+		kept := publisher.keeps()
+		if len(kept) != 1 {
+			t.Fatalf("the pass made %d kept publishes, want the one copy kept for %s's next holder: %+v", len(kept), role, kept)
+		}
+		if kept[0].subject != bus.KeptRoleSubject(role) || kept[0].item.Topic != roleTopic {
+			t.Fatalf("the keep went to %q with topic %q, want %q with the role's own topic",
+				kept[0].subject, kept[0].item.Topic, bus.KeptRoleSubject(role))
+		}
+		if want := bus.KeptMsgID(kept[0].item.DedupeKey, role); kept[0].msgID != want {
+			t.Fatalf("the keep was made under %q, want %q, the id every writer of the lane keeps it under", kept[0].msgID, want)
 		}
 	})
 }

@@ -40,10 +40,24 @@ The delta, for anyone about to edit that list:
 - So a subject addition is a rollout with a skew window for delivery, not only for retention. Move
   every writer and every listener in one rollout, as that page already says for a *reshape*.
 
-Name every reader at the list. `streamSubjects` has now been edited twice by someone reading only
-its retention meaning, and both times a neighbouring concern silently changed:
+Name every reader at the list. `streamSubjects` has now been edited three times by someone reading
+only its retention meaning, and each time a neighbouring concern silently changed:
 docs/solutions/architecture-patterns/a-grant-built-from-a-neighbouring-concerns-list-inherits-every-narrowing-of-it-INFRA-113.md
-is the first (the hub's publish grant); this is the second.
+is the first (the hub's publish grant); the skew above is the second; sjawhar/legion#2588 is the
+third, which needed a subject the stream stores and no consumer delivers - the lane of role
+messages the listener kept for a role's next holder, which must not re-enter the delivery path it
+was taken out of.
+
+That third one carries the resolution the other two lack: when one reader needs a wider list than
+the rest, give the **widened** list the new name and leave the old name meaning what every
+existing caller already assumed. `streamSubjects` stayed the consumer list every durable filter is
+built from, a new `streamCarriedSubjects` is it plus the kept prefix, and the stream itself is
+built from the new one (`StreamSubjects()` against `StreamCarriedSubjects()`,
+`packages/envoy/internal/bus/stream.go`). Renaming the other way - widening the old name and
+leaving the narrow one new - would have moved every existing caller silently, which is this page's
+whole subject. The exhaustiveness tests then say which list is which: they walk the stream's own
+list, so a subject added to it must be classified, while one left off the consumer list is
+deliberately undelivered.
 
 ## Evidence
 

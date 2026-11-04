@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -350,8 +351,7 @@ func hostWorkspace(t *testing.T, stateDir, repo, issue string) {
 		t.Helper()
 		command := exec.Command("jj", args...)
 		command.Dir = stateDir
-		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+home, "JJ_CONFIG="+filepath.Join(home, "no-user-config.toml"),
-			"JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+		command.Env = fixtureenv.Isolated(home)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("jj %s: %v\n%s", strings.Join(args, " "), err, output)
 		}
