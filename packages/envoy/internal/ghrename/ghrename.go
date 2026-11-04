@@ -30,10 +30,18 @@ type Rename struct{ Former, Current string }
 type Renames struct {
 	// pairs are the configured pairs, in configured order.
 	pairs []Rename
-	// former is each pair's former subject prefix, keyed by the lowercased subject prefix of its
-	// current repository: one lookup per publish, and nil in the zero value so a deployment that
-	// configures no rename pays a nil map read.
-	former map[string]string
+	// former is each pair's former subject prefix and the pair itself, keyed by the lowercased
+	// subject prefix of its current repository: one lookup per publish answers both what to
+	// rewrite the subject to and which pair to name in a log line, and nil in the zero value so a
+	// deployment that configures no rename pays a nil map read.
+	former map[string]renamed
+}
+
+// renamed is what one configured pair answers for a subject of its current repository: the subject
+// prefix to put in that subject's place, and the pair as the value spelled it, for a log line.
+type renamed struct {
+	formerPrefix string
+	pair         Rename
 }
 
 // Parse reads the value of ENVOY_GITHUB_REPOSITORY_RENAMES, a comma-separated list of
@@ -115,11 +123,11 @@ func Parse(value string) (Renames, error) {
 
 	renames := Renames{
 		pairs:  make([]Rename, 0, len(accepted)),
-		former: make(map[string]string, len(accepted)),
+		former: make(map[string]renamed, len(accepted)),
 	}
 	for _, kept := range accepted {
 		renames.pairs = append(renames.pairs, kept.pair)
-		renames.former[kept.current] = kept.formerPrefix
+		renames.former[kept.current] = renamed{formerPrefix: kept.formerPrefix, pair: kept.pair}
 	}
 	return renames, nil
 }
@@ -136,26 +144,36 @@ func Parse(value string) (Renames, error) {
 // fail for ever while the publish it copies succeeds. Declining keeps that failure out of the
 // original's way; the caller logs the skip.
 func (r Renames) FormerSubject(subject string) (string, bool) {
+	former, _, named := r.rewrite(subject)
+	if !named || len(former) > contracts.SubjectMaxBytes {
+		return "", false
+	}
+	return former, true
+}
+
+// rewrite is subject under the former name of the pair whose current name it names, that pair, and
+// whether a pair names the repository at all. The rewrite is answered whatever its length, since
+// its two callers part there: FormerSubject declines one past contracts.SubjectMaxBytes, and the
+// publisher logs that one line. One walk of the subject and one map read answer both, which is what
+// every GitHub publish pays.
+func (r Renames) rewrite(subject string) (former string, pair Rename, named bool) {
 	// Every GitHub publish asks this, and a deployment that configures no rename asks it of the
 	// zero value: the nil map answers before anything is measured or lowercased.
 	if r.former == nil {
-		return "", false
+		return "", Rename{}, false
 	}
 	end := repositoryPrefixEnd(subject)
 	if end < 0 {
-		return "", false
+		return "", Rename{}, false
 	}
 	// A published subject is already lowercase wherever GitHub's own names are, and ToLower
 	// answers an all-lowercase ASCII string unchanged, so a subject no pair names allocates
 	// nothing on its way to the miss.
-	formerPrefix, found := r.former[strings.ToLower(subject[:end])]
+	renamed, found := r.former[strings.ToLower(subject[:end])]
 	if !found {
-		return "", false
+		return "", Rename{}, false
 	}
-	if len(formerPrefix)+len(subject)-end > contracts.SubjectMaxBytes {
-		return "", false
-	}
-	return formerPrefix + subject[end:], true
+	return renamed.formerPrefix + subject[end:], renamed.pair, true
 }
 
 // IsZero reports whether r holds no pair, the zero value a deployment that configures none carries.

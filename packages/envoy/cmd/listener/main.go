@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/ghrename"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -583,30 +585,38 @@ func dependencyUnavailable(dependency string, err error) string {
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
-// dependencies a webhook uses: the NATS client it publishes through and the CI store the GitHub
-// route records checks in, which main opens only when that route is configured.
+// dependencies a webhook uses: the NATS client it publishes through, the publisher that copies a
+// GitHub envelope under a renamed repository's former name, and the CI store the GitHub route
+// records checks in, which main opens only when that route is configured.
+//
+// The handler is built here, and not before webhookRoutes is called, because none of the three is
+// open when main registers the paths: the routes answer 503 until they are.
 type webhookRoute struct {
 	path    string
-	handler func(*bus.Client, *cistore.Store) http.Handler
+	handler func(*bus.Client, *ghrename.Publisher, *cistore.Store) http.Handler
 }
 
 // webhookRoutes lists the webhook routes the configuration enables. main registers the paths
 // before NATS is up, so they answer 503 while it connects, and builds the handlers once NATS and,
 // for the GitHub route, the CI store are open.
+//
+// The GitHub route alone publishes through the rename publisher. A rename pairs two names of one
+// GitHub repository, and a Slack or Ghost Wispr subject names no repository, so there is nothing
+// in those routes' subjects for a pair to address: they keep the client itself.
 func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	var routes []webhookRoute
 	if github := cfg.GitHub; github != nil {
-		routes = append(routes, webhookRoute{"/webhook/github", func(client *bus.Client, ciStore *cistore.Store) http.Handler {
-			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, client, ciStore)
+		routes = append(routes, webhookRoute{"/webhook/github", func(_ *bus.Client, renaming *ghrename.Publisher, ciStore *cistore.Store) http.Handler {
+			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, renaming, ciStore)
 		}})
 	}
 	if slack := cfg.Slack; slack != nil {
-		routes = append(routes, webhookRoute{"/webhook/slack", func(client *bus.Client, _ *cistore.Store) http.Handler {
+		routes = append(routes, webhookRoute{"/webhook/slack", func(client *bus.Client, _ *ghrename.Publisher, _ *cistore.Store) http.Handler {
 			return webhook.SlackHandler(slack.Secret, client)
 		}})
 	}
 	if ghostWispr := cfg.GhostWispr; ghostWispr != nil {
-		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(client *bus.Client, _ *cistore.Store) http.Handler {
+		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(client *bus.Client, _ *ghrename.Publisher, _ *cistore.Store) http.Handler {
 			return webhook.GhostWisprHandler(ghostWispr.Secret, client)
 		}})
 	}
@@ -658,13 +668,14 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.ServeHTTP(w, r)
 }
 
-// openWebhooks builds the webhook routes over NATS and the CI store (nil without the GitHub route)
-// and opens the webhook gate onto them. A webhook waits on nothing else, not even the interest and
-// session caches /v1 waits on, and GitHub does not redeliver a delivery refused while they warm.
-func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) {
+// openWebhooks builds the webhook routes over NATS, the rename publisher the GitHub route
+// publishes through and the CI store (both nil without the GitHub route) and opens the webhook
+// gate onto them. A webhook waits on nothing else, not even the interest and session caches /v1
+// waits on, and GitHub does not redeliver a delivery refused while they warm.
+func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, renaming *ghrename.Publisher, ciStore *cistore.Store) {
 	routes := http.NewServeMux()
 	for _, hook := range hooks {
-		routes.Handle(hook.path, hook.handler(client, ciStore))
+		routes.Handle(hook.path, hook.handler(client, renaming, ciStore))
 	}
 	gate.open(routes)
 }
@@ -736,6 +747,18 @@ func main() {
 	webhookCfg, err := webhook.LoadWebhookConfig()
 	if err != nil {
 		log.Fatal(err)
+	}
+	// The renames a deployment configures belong beside the other settings lines: an operator who
+	// reads from the top sees from them alone whether ENVOY_GITHUB_REPOSITORY_RENAMES took, and a
+	// value that configures none logs nothing, as every other repository's publishing is unchanged.
+	if github := webhookCfg.GitHub; github != nil && !github.RepositoryRenames.IsZero() {
+		pairs := github.RepositoryRenames.Pairs()
+		spelled := make([]string, 0, len(pairs))
+		for _, pair := range pairs {
+			spelled = append(spelled, pair.Former+"="+pair.Current)
+		}
+		logger.Info("github repository renames: every envelope of the current repository is published a second time under the former name",
+			slog.String("renames", strings.Join(spelled, ", ")))
 	}
 
 	// Phase 2: Serve on the socket the listener inherited (ENVOY_LISTEN_FD) or bind its address,
@@ -859,7 +882,16 @@ func main() {
 	} else {
 		logger.Info("CI store not opened: no GitHub webhook route, so this listener records and settles no checks")
 	}
-	openWebhooks(webhookGate, hooks, client, ciStore)
+	// The one publisher every GitHub envelope goes out through: the webhook route's deliveries and
+	// the CI summary loop's settlements alike, so a renamed repository's subscribers of the former
+	// name hear both. It is built here, over the open client, because it publishes through it; a
+	// listener with no GitHub route publishes no GitHub envelope and needs none, and the pairs it
+	// carries are the configured ones, which the start-up line above names.
+	var githubPublisher *ghrename.Publisher
+	if webhookCfg.GitHub != nil {
+		githubPublisher = ghrename.Publishing(client, webhookCfg.GitHub.RepositoryRenames, logger)
+	}
+	openWebhooks(webhookGate, hooks, client, githubPublisher, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
 	// The registry and its cache watcher log through the listener's own handler, so its role-restore
@@ -1134,11 +1166,13 @@ func main() {
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
 	// head or not; new runs re-arm settlement. The debounce window is ENVOY_CI_DEBOUNCE (default
 	// 5s). The loop runs a pass only on a one-second tick by which a cached record changed or fell
-	// due.
+	// due. It publishes through githubPublisher, which the CI store's own condition opens: a
+	// settlement is a GitHub envelope like any other, and a subscriber of a renamed repository's
+	// former name waits on its checks as much as on its comments.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
 		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
-		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
+		cistore.StartSummaryLoop(summaryCtx, ciStore, githubPublisher, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
