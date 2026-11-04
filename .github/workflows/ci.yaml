@@ -2431,7 +2431,9 @@ jobs:
         # MemAvailable every 5 s for the length of this step, kept for the upload below and its
         # lowest value printed at the end: the lanes' Postgres containers run outside this job's
         # cgroup, so /proc/meminfo is the one reading that counts them. The JSON report goes
-        # beside the list reporter's output, so a green run reports what it ran too.
+        # beside the list reporter's output, so a green run reports what it ran too. Both sample
+        # files and that report are written under $RUNNER_TEMP, beside the lanes' own run
+        # directory: a file this step wrote into the checkout would leave it dirty afterwards.
         #
         # Beside it, the same 5 s tick records where the CPU goes, which is the bound a run of
         # four lanes on four vCPU hits (INFRA-317): one line per process of a named group, with
@@ -2447,10 +2449,15 @@ jobs:
         # downloading the samples: it holds that loss, the runner's own work, the file-store
         # container and the sampler itself.
         run: |
-          : > e2e/memory-samples.txt
-          : > e2e/cpu-samples.txt
+          # $RUNNER_TEMP holds everything this step writes, the run directory of e2e/run.ts
+          # (mkdtempSync in os.tmpdir(), :183) among it, which is what the upload steps below
+          # read. TMPDIR is exported on the command line, not in this step's `env:`, for the
+          # reason the job's head gives.
+          export TMPDIR="$RUNNER_TEMP"
+          : > "$RUNNER_TEMP/memory-samples.txt"
+          : > "$RUNNER_TEMP/cpu-samples.txt"
           while :; do
-            awk '/^MemAvailable:/ { print $2 }' /proc/meminfo >> e2e/memory-samples.txt
+            awk '/^MemAvailable:/ { print $2 }' /proc/meminfo >> "$RUNNER_TEMP/memory-samples.txt"
             ps -eo pid=,args= | awk '
               function group(args) {
                 if (args ~ /ms-playwright/)     return "browser"
@@ -2464,7 +2471,7 @@ jobs:
               { g = group($0); if (g == "") next
                 if ((getline l < ("/proc/" $1 "/stat")) <= 0) next
                 close("/proc/" $1 "/stat"); sub(/^[^ ]+ \(.*\) /, "", l); split(l, s)
-                print $1, s[12] + s[13], g }' >> e2e/cpu-samples.txt
+                print $1, s[12] + s[13], g }' >> "$RUNNER_TEMP/cpu-samples.txt"
             sleep 5
           done &
           sampler=$!
@@ -2473,11 +2480,11 @@ jobs:
           # service used before the lanes.
           export DISPATCH_E2E_PG_IMAGE=ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
           export DISPATCH_E2E_WORKERS=4
-          export PLAYWRIGHT_JSON_OUTPUT_NAME=report.json
+          export PLAYWRIGHT_JSON_OUTPUT_NAME="$RUNNER_TEMP/report.json"
           status=0
           bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --reporter=list,json || status=$?
           kill "$sampler" 2>/dev/null || true
-          awk '$1 ~ /^[0-9]+$/ { if (++n == 1 || $1 + 0 < low) low = $1 + 0 } END { if (n) printf "::notice title=dispatch MemAvailable::the lowest MemAvailable during the browser step was %d kB, over %d samples\n", low, n; else print "::warning::the browser step took no MemAvailable sample" }' e2e/memory-samples.txt
+          awk '$1 ~ /^[0-9]+$/ { if (++n == 1 || $1 + 0 < low) low = $1 + 0 } END { if (n) printf "::notice title=dispatch MemAvailable::the lowest MemAvailable during the browser step was %d kB, over %d samples\n", low, n; else print "::warning::the browser step took no MemAvailable sample" }' "$RUNNER_TEMP/memory-samples.txt"
           awk '
             $1 == "machine" { if (samples++) busy += $2 - was; was = $2; next }
             ($1, $3) in seen { if ($2 >= seen[$1, $3]) group[$3] += $2 - seen[$1, $3]; seen[$1, $3] = $2; next }
@@ -2490,7 +2497,7 @@ jobs:
                 split_up = split_up sprintf("%s %.0f (%.0f%%), ", names[i], group[names[i]] / 100, busy ? 100 * group[names[i]] / busy : 0)
               }
               printf "::notice title=dispatch CPU::the browser step used %.0f CPU-seconds over %d samples: %severything else %.0f (%.0f%%)\n", busy / 100, samples, split_up, (busy - named) / 100, busy ? 100 * (busy - named) / busy : 0
-            }' e2e/cpu-samples.txt
+            }' "$RUNNER_TEMP/cpu-samples.txt"
           exit "$status"
         working-directory: packages/dispatch
         # The file store the step above started. Set here, not written to $GITHUB_ENV, which every
@@ -2506,13 +2513,14 @@ jobs:
         with:
           name: dispatch-e2e-report-${{ github.run_attempt }}
           path: |
-            packages/dispatch/e2e/report.json
-            packages/dispatch/e2e/memory-samples.txt
-            packages/dispatch/e2e/cpu-samples.txt
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/memory-samples.txt
+            ${{ runner.temp }}/cpu-samples.txt
       # A failed row's trace says what the browser saw; these say what its lane's own servers did,
       # which is where a lane-only failure (a port, a migration, a server that never came up) is
-      # legible. The glob is `$TMPDIR`'s run directory, whose name carries the process id, so it
-      # matches however many lanes ran.
+      # legible. The glob is the run directory e2e/run.ts made under $TMPDIR, which the step
+      # above pointed at $RUNNER_TEMP; mkdtempSync gives the directory a random suffix, so the
+      # glob matches it however many lanes ran.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:

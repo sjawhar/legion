@@ -260,15 +260,22 @@ function binariesProvider(dir: string, bin: string): LanePostgres {
         await execFileAsync("cp", ["-a", await template, data]);
         const what = `lane ${lane}'s Postgres`;
         const port = await startCluster(bin, data, laneDir, what);
-        const url = `postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`;
-        await ready(url, what, signal);
-        return {
-          port,
-          url,
-          stop: async () => {
-            await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
-          },
+        const stop = async (): Promise<void> => {
+          await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]);
         };
+        const url = `postgres://postgres@127.0.0.1:${port}/${databaseName}?sslmode=disable`;
+        try {
+          await ready(url, what, signal);
+        } catch (error) {
+          // The postmaster is up from `startCluster` on, and a wait the run's signal or the
+          // deadline ended returns no `LaneDatabase`, so no caller holds a stop for it:
+          // `e2e/run.ts` would delete this data directory under a server still serving a
+          // loopback port. A stop that fails here is a server that is already gone, which is
+          // why the failure the caller sees is the wait's.
+          await stop().catch(() => {});
+          throw error;
+        }
+        return { port, url, stop };
       }),
   };
 }

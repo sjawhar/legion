@@ -232,10 +232,22 @@ embedder_off="${DISPATCH_TEST_EMBEDDER_OFF:-1}"
 # one. The lanes are e2e/harness-ports.ts's laneCount read in shell: DISPATCH_E2E_LANES, which
 # e2e/run.ts exports for the command it runs, else the DISPATCH_E2E_WORKERS the caller asked for,
 # else one - and e2e/run.ts starts the harness before it exports the first, so a lane's own server
-# is reached by the second. One lane leaves Go's own default, since nproc / 1 is nproc, and
-# two-process mode runs one lane, so its two servers are unchanged too.
-gomaxprocs=$(( $(nproc) / ${DISPATCH_E2E_LANES:-${DISPATCH_E2E_WORKERS:-1}} ))
-[ "$gomaxprocs" -ge 1 ] || gomaxprocs=1
+# is reached by the second.
+#
+# One lane passes no GOMAXPROCS at all, which is not the same as passing nproc: the module is on
+# Go 1.27 (packages/envoy/go.mod), which sizes its own default from the cgroup CPU limit, any
+# explicit GOMAXPROCS turns that sizing off, and nproc reads CPU affinity rather than the limit.
+# So in a container with a CPU limit, passing nproc would give every one-lane caller - `bun run
+# dispatch:local`, the docs media harness, the broker and skill-scenario rigs, a one-lane suite -
+# a scheduler and a collector sized to the node instead of to its limit. Two-process mode runs
+# one lane, so its two servers are among them.
+lanes="${DISPATCH_E2E_LANES:-${DISPATCH_E2E_WORKERS:-1}}"
+gomaxprocs_env=()
+if [ "$lanes" -gt 1 ]; then
+  gomaxprocs=$(( $(nproc) / lanes ))
+  [ "$gomaxprocs" -ge 1 ] || gomaxprocs=1
+  gomaxprocs_env=(GOMAXPROCS="$gomaxprocs")
+fi
 
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
@@ -297,7 +309,7 @@ exec "${listen[@]}" env \
   DISPATCH_TEST_UNRECORDED_MARK_TTL="$unrecorded_mark_ttl" \
   DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
-  GOMAXPROCS="$gomaxprocs" \
+  "${gomaxprocs_env[@]}" \
   HOME=/nonexistent \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
