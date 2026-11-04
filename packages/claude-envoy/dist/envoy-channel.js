@@ -41784,7 +41784,7 @@ function createEnvoyClient(config) {
       session_id: input.sessionID,
       subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
       ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
+    }, { timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {
@@ -41812,6 +41812,7 @@ var REPLAY_PAGES_PER_SWEEP = 20;
 var REPLAY_FAILURES_BEFORE_NOTICE = 3;
 var REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 var REPLAY_MAX_SUBJECTS = 32;
+var START_CURSORS_TIMEOUT_MS = 2000;
 var ROLE_FORWARD_KEY_PREFIX = "envoy.role.forward.";
 var ReplayLedgerEntrySchema = object({
   event_id: string2().min(1).optional(),
@@ -41820,7 +41821,8 @@ var ReplayLedgerEntrySchema = object({
 });
 var ReplayCursorSchema = object({
   since: number2().int().nonnegative().optional(),
-  after: number2().int().nonnegative().optional()
+  after: number2().int().nonnegative().optional(),
+  from_start: number2().int().nonnegative().optional()
 });
 var ReplayPendingNoticeSchema = _enum2([
   "retention_gap",
@@ -41900,7 +41902,8 @@ function createReplayEngine(options) {
       const cursor = cursors.get(subject) ?? {};
       subjects[subject] = {
         ...cursor.since === undefined ? {} : { since: cursor.since },
-        ...!afters || cursor.after === undefined ? {} : { after: cursor.after }
+        ...!afters || cursor.after === undefined ? {} : { after: cursor.after },
+        ...cursor.from_start === undefined ? {} : { from_start: cursor.from_start }
       };
     }
     return JSON.stringify({
@@ -42106,7 +42109,10 @@ function createReplayEngine(options) {
     syncFollowed();
     const readings = new Map;
     for (const [subject, cursor] of cursors) {
-      readings.set(subject, { read: cursor.after, more: true });
+      readings.set(subject, {
+        read: cursor.from_start === undefined ? cursor.after : 0,
+        more: true
+      });
     }
     const buffer = new Map;
     const holes = new Map;
@@ -42197,6 +42203,18 @@ function createReplayEngine(options) {
       }
       for (const [, reading] of asking)
         reading.more = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        const markedAt = cursors.get(result.subject)?.from_start;
+        if (reading === undefined || markedAt === undefined || result.refused !== undefined) {
+          continue;
+        }
+        const start = Math.max(0, stream.first_seq - 1);
+        cursors.set(result.subject, { since: start, after: start });
+        cursorStarts.set(result.subject, now());
+        if (now() - markedAt < DELIVERY_DUPLICATE_WINDOW_MS)
+          reading.read = start;
+      }
       let gapped = false;
       for (const result of response.subjects) {
         const reading = readings.get(result.subject);
@@ -42312,8 +42330,65 @@ function createReplayEngine(options) {
     });
     return rerun;
   };
+  const started = (cursor) => cursor?.after !== undefined || cursor?.from_start !== undefined;
+  const startOnce = async () => {
+    const binding = bind();
+    if (binding === undefined)
+      return;
+    const { sessionID, alive } = binding;
+    const unstarted = [...new Set(host.followedSubjects())].filter((subject) => !started(cursors.get(subject)));
+    let changed = false;
+    for (let index = 0;index < unstarted.length; index += REPLAY_MAX_SUBJECTS) {
+      let response;
+      try {
+        response = await transport.replay({
+          sessionID,
+          subjects: unstarted.slice(index, index + REPLAY_MAX_SUBJECTS).map((subject) => ({ subject })),
+          timeoutMs: START_CURSORS_TIMEOUT_MS
+        });
+      } catch (error) {
+        if (!alive())
+          return;
+        const own = `${AGENT_TOPIC_PREFIX}${sessionID}`;
+        const marked = unstarted.includes(own) && !started(cursors.get(own));
+        if (marked) {
+          cursors.set(own, { from_start: now() });
+          changed = true;
+        }
+        log(marked ? `replay: could not read the stream's position for ${own} before registering while the session's NATS connection is down; its first sweep once the connection is back reads it from the stream's oldest message, so what is stored for it meanwhile is shown` : "replay: could not read the stream's position before registering while the session's NATS connection is down; the first sweep starts the cursors instead", error);
+        break;
+      }
+      if (!alive())
+        return;
+      const { stream } = response;
+      if (streamReplaced(stream))
+        break;
+      streamID = stream.id ?? streamID;
+      streamCreated = stream.created;
+      const at = now();
+      for (const result of response.subjects) {
+        if (result.refused !== undefined || started(cursors.get(result.subject)))
+          continue;
+        cursors.set(result.subject, { since: result.next_after, after: result.next_after });
+        cursorStarts.set(result.subject, at);
+        changed = true;
+      }
+    }
+    if (changed)
+      await flush(alive, true);
+  };
+  const startCursors = async () => {
+    while (running !== undefined)
+      await running;
+    running = startOnce().catch((error) => log("replay: starting the cursors failed", error)).finally(() => {
+      running = undefined;
+    });
+    await running;
+  };
   return {
     sweep,
+    startCursors,
+    startPending: () => [...cursors.values()].some((cursor) => cursor.from_start !== undefined),
     setConsumerMode(on) {
       consumerMode = on;
     },
