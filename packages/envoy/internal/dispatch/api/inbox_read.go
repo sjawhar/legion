@@ -265,7 +265,7 @@ type inboxReadThreads struct {
 
 // markInboxRead answers POST /api/v1/me/inbox/read.
 func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

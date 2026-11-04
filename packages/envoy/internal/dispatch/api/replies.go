@@ -383,7 +383,7 @@ func parseMyRepliesPage(r *http.Request) (limit *int, offset int, err error) {
 // behind one parameter list to save six lines. The unpaged total is the one line the two would
 // have shared, and it is taken once, after both.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -641,7 +641,7 @@ func nameAgentSessions(ctx context.Context, tx pgx.Tx, rows []model.MyReplyRow) 
 // Which locks that order rules out, and why the Inbox's Mark all read has to take the same one,
 // is written on markInboxReadThreads (api/inbox_read.go).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}

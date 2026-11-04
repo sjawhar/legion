@@ -170,7 +170,7 @@ var listenerSignals = []struct {
 		filters: [][2]string{
 			{"durable-refused-filter", `{ $.level = "ERROR" && $.msg = "subscribe refused, shutting down" }`},
 		},
-		description: "An Envoy listener start refused its durable consumer (`subscribe refused, shutting down`): the durable carries an idle heartbeat or an ack policy other than explicit, which NATS cannot change in place, so every replacement task exits 1 while the old task keeps serving, until the circuit breaker rolls the deployment back and the apply fails. Read /ecs/envoy-listener for the durable and the setting, then recreate the durable by the recipe in sjawhar/legion packages/envoy/AGENTS.md (Operational notes), which keeps its cursor.",
+		description: "An Envoy listener start refused its durable consumer (`subscribe refused, shutting down`): the durable carries an idle heartbeat or an ack policy other than explicit, which NATS cannot change in place, so every replacement task exits 1 while the old task keeps serving, until the circuit breaker rolls the deployment back and the apply fails. Read /ecs/envoy-listener for the durable and the setting, then recreate the durable by the recipe in cybermonklabs/legion packages/envoy/AGENTS.md (Operational notes), which keeps its cursor.",
 	},
 	{
 		alarm: "subscribe-exhausted", metric: "SubscribesExhausted",

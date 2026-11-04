@@ -1,5 +1,6 @@
 export type {
   Actor,
+  ActorAct,
   ActorOrigin,
   Agent,
   AgentLiveView,
@@ -69,6 +70,7 @@ export type {
   CommentMention,
   CommentRead,
   CreateAgentMessageInput,
+  CreateAgentTokenInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateBroadcastInput,
@@ -79,6 +81,10 @@ export type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialPendingResponse,
+  CredentialPendingRow,
+  CredentialRequestKind,
+  CredentialSession,
   Decision,
   DecisionKeep,
   DecisionLink,
@@ -130,6 +136,7 @@ export type {
   DeliveryUnownedIssue,
   DeliveryWaitingPR,
   DispatchEvent,
+  DispatchScope,
   DispatchUser,
   DocEditOp,
   DocumentRead,
@@ -230,10 +237,11 @@ export type {
   WriteSuggestion,
 } from "@legion/contracts";
 
+import type { CredentialRequestKind, CredentialSession } from "@legion/contracts";
+
 // Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
-// broker's HTTP API reference: https://sjawhar.github.io/legion/broker/reference/api/). These have
+// broker's HTTP API reference: https://cybermonklabs.github.io/legion/broker/reference/api/). These have
 // no reason to live in the shared @legion/contracts package, which is for Envoy event contracts.
-export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =
   | "pending"
   | "approved"
@@ -241,33 +249,6 @@ export type CredentialRequestState =
   | "expired"
   | "cancelled"
   | "revoked";
-
-/** A credential request's two possibly-differing session ids, read independently by the broker:
- *  `request` is the id the request itself stated (an unsigned override in its body at create
- *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
- *  null when that id was never set; a machine login (`launcher_credential`, which has no request
- *  row and no requesting enrollment) always answers both null. Optional so an older broker's
- *  response, with no `session` field at all, resolves the same as a request that names neither
- *  id. */
-export interface CredentialSession {
-  request: string | null;
-  enrollment: string | null;
-}
-
-export interface CredentialPendingRow {
-  record_id: string;
-  kind: CredentialRequestKind;
-  identifiers: string[]; // secret rule keys, or [hostname] for a launcher_credential
-  requested_at: string; // RFC3339
-  session?: CredentialSession;
-  /** An `agent_secret` row's page on the secrets broker, where a person signed in to the broker
-   *  decides it (`<BROKER_PUBLIC_URL>/approve/<record>`). Absent on a machine login's row, and on
-   *  every row from a broker older than that page. */
-  approve_url?: string;
-}
-export interface CredentialPendingResponse {
-  pending: CredentialPendingRow[];
-}
 
 export interface CredentialEnrollment {
   kind: string;

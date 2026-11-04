@@ -109,7 +109,7 @@ capabilities:
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp3
     issue_volume: 30Gi
     kubeconfig: /etc/legion/kubeconfig

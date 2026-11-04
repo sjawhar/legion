@@ -1,5 +1,48 @@
 # Changelog
 
+## [29.6.0] - 2026-11-04
+
+### Changed
+
+- The Envoy image the compose files and `deploy/scripts/autodeploy.sh` pull by default is `ghcr.io/cybermonklabs/legion/envoy`, and the broker's refusal of a `BROKER_DATABASE_URL` with no password links its RDS IAM-token guide at `https://cybermonklabs.github.io/legion/`: this repository moved to that owner.
+- Dispatch no longer refuses a bearer token on the 43 routes only a browser could call. Two OAuth scopes decide instead: `person`, which acts as the credential's person on every route the dashboard reaches, and `approve`, which adds beside it the acts that approve work or control a credential - a document review, the answer of an approval ask, a machine-login decision or revoke, and minting, changing or revoking a personal token. A browser sign-in, a personal token and a broker token the broker scoped to its person hold both; the shared agent token, a service-account token and a broker token scoped to a project hold none, and are refused `403 OAUTH_SCOPE_REQUIRED` naming the scope under `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"`. `GET /api/v1/whoami` answers every caller's scopes, `GET /api/v1` and `envoy-dispatch routes` carry each route's, `POST /api/v1/me/agent-tokens` takes the set a new token holds, and the new `PATCH /api/v1/me/agent-tokens/{id}` changes it; a credential gives a token only scopes it holds itself, and no token holds `approve` without `person`. An act an agent makes for its person is recorded with the person as the actor and an `act` field naming the acting session or token and the scopes it held, so the person can still change their own answer and every notice still reaches them; a new document version carries its approval only when every answer the carry counts was made at a browser or under an act holding `approve`, and a message an agent sent for its person is refused `409 ACCEPT_WRITTEN_BY_AGENT` by the accept route, reaching the session as a card that names the agent.
+
+## [29.5.1] - 2026-11-04
+
+### Changed
+
+- Dispatch's database does no more work than each answer needs. An issue read and an ask read count backlinks through the arms of the reference graph that can point at that kind of node, each through its own index, instead of planning a twenty-three-part view on every call. The issue list and the project list resolve each page with set-based joins rather than a lookup and two parent walks per row, and the issue list cuts its page and counts its total in the database. Search, the related-item check and the related-terms probe find a document through a table that holds its latest version's vector under a GIN index, rather than reading every version. The related-terms refresh applies the items that changed, from a queue triggers fill, instead of rebuilding every project's word counts every ten minutes. The anchored-comment reads, an issue's asks and an issue's root messages use indexes, two of which are new, and the unused partial index on open asks by artifact is dropped. The reference closure probes a block's document through its index, the agents page reads each session's last event through the session index, and an issue's children are counted from the walk that already read them. Every result is unchanged.
+
+### Fixed
+
+- A consumer-delivery registration whose `resume` names the stream's current `envoy_stream_id` at `seq` 0 now creates the session's consumer at sequence 1. Before, the listener ignored a `seq` of 0 and created the consumer at the stream's end, so a session with a cursor at 0, which has handled nothing of the stream, lost every message stored for it before it registered, such as those stored while its NATS connection was down. A `resume` without `seq` still starts the consumer at the stream's end.
+
+## [29.5.0] - 2026-11-04
+
+### Added
+
+- Add the azure-login broker secret kind: store only an Entra tenant and client id, then release the broker pod's current projected ServiceAccount token with its expiry. Only the secret named by BROKER_AZURE_LOGIN_SECRET may release it, and it must be human tier with a person's approval for that name, never an automatic grant; unset, Azure releases are disabled. Other secrets retagged to azure-login, or the configured secret retagged to agent tier, release no token. BROKER_AZURE_TOKEN_FILE selects the token file, read anew on each release; unreadable, malformed or expired tokens are refused without logging their bytes. agent-secrets secret create and retag accept the kind and list it in their help.
+
+## [29.4.1] - 2026-11-04
+
+### Changed
+
+- Dispatch's document server runs on sjawhar/ygo v1.55.1-sami.1. Browser edits travel as smaller,
+  Yjs-shaped updates (an update carries only its own deletions, and a transaction that changes
+  nothing and keeps nothing for later sends and stores nothing); a joining editor gets the
+  document once instead of twice; a browser that stops reading is closed once 128 MiB is queued
+  for it instead of holding memory without bound; a room is no longer closed while a write, a
+  read or a browser's join is inside it, so closing an issue, evicting a room or shutting down
+  waits for them and then closes it; and a browser's edit that reaches the server ahead of the
+  edit it builds on is stored at once, even when the update then fails, so a restart before
+  that earlier edit arrives no longer loses it. The stored-order check judges each parked row
+  independently: a later update that carries its newly parked content again is accepted, a
+  resolved row whose parked content is not carried again is a mismatch even while unrelated
+  edits still wait, and an unresolved row counts as awaiting. Replay keeps the part that
+  integrated immediately and compares actual parked content.
+  Every write fork reads its client ID after decoding its history, so inserted text still gets
+  the lost-write check when that decode changes the ID.
+
 ## [29.4.0] - 2026-11-04
 
 ### Added

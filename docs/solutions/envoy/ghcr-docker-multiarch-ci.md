@@ -141,7 +141,7 @@ docker:
   envoy-image-digest-*` and `merge-multiple: true`.
 
 The join is a job of its own (`image_index`) that runs `docker buildx imagetools create
---metadata-file <file> --tag ghcr.io/sjawhar/legion/envoy:<sha> <image>@sha256:<amd64>
+--metadata-file <file> --tag ghcr.io/cybermonklabs/legion/envoy:<sha> <image>@sha256:<amd64>
 <image>@sha256:<arm64>` with the runner's own docker buildx, so it checks out nothing and sets up
 no builder. It reads the index's digest from the metadata file
 (`jq -r '."containerimage.descriptor".digest'`), never back through the `envoy:<sha>` tag, which
