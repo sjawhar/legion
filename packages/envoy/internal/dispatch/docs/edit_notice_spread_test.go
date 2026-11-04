@@ -17,7 +17,7 @@ func TestEditNoticeAnAnswerInAnItemStoredSpacedSendsNone(t *testing.T) {
 	const spaced = "- Listed.\n  :::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\n" +
 		"  Which one?\n\n  - A\n  - B\n  :::\n- Second.\n"
 	const answered = "- Listed.\n  :::ask{#decision urgency=\"high\" multiple=\"false\" state=\"answered\"" +
-		" answered_by=\"alice@example.com\" answered_at=\"2026-11-02T05:00:00Z\" selected=\"[\\\"A\\\"]\"}\n" +
+		" answered_by=\"alice@example.com\" answered_at=\"2026-11-02T05:00:00Z\" selected=\"[&#x22;A&#x22;]\"}\n" +
 		"  Which one?\n  - A\n  - B\n  :::\n- Second.\n"
 	service, _ := newTestService(t)
 	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
