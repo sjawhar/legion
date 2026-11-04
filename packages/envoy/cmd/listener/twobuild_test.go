@@ -21,9 +21,6 @@ import (
 )
 
 const (
-	// tbExtraSubject is the stream subject internal/bus/stream_extra_twobuild.go adds to a binary
-	// built with the envoy_twobuild tag, and no plain build compiles in.
-	tbExtraSubject = "notifications.twobuild.>"
 	// tbEvery is how often a row publishes, each time on the next of its topics in turn.
 	tbEvery = 40 * time.Millisecond
 )
@@ -62,7 +59,7 @@ func tbTargets() []mpTarget {
 	return targets
 }
 
-// tbRegister registers every target's session through the pod, on the serving port, subscribed to
+// tbRegister registers every target's session through the pod, on consumer delivery, subscribed to
 // its topic unless the topic is its own inbox.
 func tbRegister(t *testing.T, pod *mpPod, serving *mpNATSSession, targets []mpTarget) {
 	t.Helper()
@@ -78,11 +75,11 @@ func tbRegister(t *testing.T, pod *mpPod, serving *mpNATSSession, targets []mpTa
 // tbKill SIGKILLs the pod between two publishes, once every message published so far has reached
 // its session and the durable holds none unacknowledged, and resumes publishing a second after the
 // pod has exited. A message a killed pod holds is TestTwoPodsSIGKILLHandsOverInOrderWithin15s's;
-// here the kill is the hand-over from one build to the other. Nor is a live-lane message NATS hands
-// the killed pod before the server sees its connection close publishable: the live lane delivers
-// at most once on a kill (dispatch://INFRA-14), and the second after the exit is the server's to
-// drop the dead pod's queue subscription. A message the previous steps skipped is named here, by
-// awaitAll, before the kill.
+// here the kill is the hand-over from one build to the other. Nor is a message sent over core
+// NATS, which the server hands the killed pod before it sees that pod's connection close,
+// publishable then: a core message is delivered at most once, and the second after the exit is
+// the server's to drop the dead pod's subscription. A message the previous steps skipped is
+// named here, by awaitAll, before the kill.
 func tbKill(t *testing.T, publisher *mpPublisher, serving *mpNATSSession, pod *mpPod) time.Time {
 	t.Helper()
 	publisher.mu.Lock()

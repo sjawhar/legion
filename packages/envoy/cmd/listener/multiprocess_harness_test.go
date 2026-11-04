@@ -895,13 +895,18 @@ func (s *mpNATSSession) requireOnce(t *testing.T, messages []mpMessage) {
 	}
 }
 
-// requireOnceExceptInFlight fails the test on any violation of the kill allowance
-// (killAllowanceViolations).
-func (s *mpNATSSession) requireOnceExceptInFlight(t *testing.T, messages []mpMessage, moment time.Time, window time.Duration) {
+// requireAtMostTwice fails the test unless the session took m once, or twice for the reason why
+// names, and returns how often it took it. Every restart of a session's consumer sends again
+// every frame above its ack floor (bus.SessionConsumers.RestartAtFloor), so a frame whose
+// acknowledgement a term's end, a kill or a dropped link cut off comes a second time, under its
+// own event id, which the client's dedupe writes once. A third copy is a fault, and so is none.
+func (s *mpNATSSession) requireAtMostTwice(t *testing.T, m mpMessage, why string) int {
 	t.Helper()
-	if wrong := s.killAllowanceViolations(messages, moment, window); len(wrong) > 0 {
-		t.Fatalf("%d of %d messages were prompted neither once nor, in flight at the kill, twice: %v", len(wrong), len(messages), wrong)
+	took := s.counts()[m.event]
+	if took < 1 || took > 2 {
+		t.Fatalf("%s to %s reached it %d times, want once, or twice as %s", m.event, m.session, took, why)
 	}
+	return took
 }
 
 // requireKnown fails the test when a session was prompted with an event id no message carried: a
@@ -1141,8 +1146,9 @@ func (p *mpPublisher) ackPending() int {
 
 // sessionAckPending is how many messages sessionID's own consumer has had delivered and not
 // acknowledged: what the relay of that consumer holds, where ackPending above is the machine's
-// durable. A serving-port session's stored messages are its consumer's since INFRA-557 took main's
-// per-session consumers in, so a row that waits for a pod to hold a message in hand waits here.
+// durable. A session on consumer delivery holds its stored messages in its own consumer since
+// INFRA-557 took main's per-session consumers in, so a row that waits for a pod to hold a
+// message in hand waits here.
 func (p *mpPublisher) sessionAckPending(sessionID string) int {
 	name, ok := bus.SessionConsumerName(sessionID)
 	if !ok {

@@ -297,7 +297,7 @@ func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
 	return to
 }
 
-// A graceful stop of the active pod while messages parked at a serving port that refuses them are
+// A graceful stop of the active pod while messages a session refuses are
 // outstanding on the machine's durable (mpRetryOutstanding), with a message published every
 // 100 ms to two healthy sessions. Those messages reach no pod's hands over the hand-over, so
 // the standby's settle hold never finds every outstanding message in hand: it ends on the stopping
@@ -338,11 +338,11 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 	}
 }
 
-// Graceful stops one after another, A to B to C to D, each with a prompt in hand that the serving
-// port never answers -- the relay of that session's consumer holds it -- and messages parked at a
-// port that refuses them outstanding on the machine's durable (mpRetryOutstanding), with a
+// Graceful stops one after another, A to B to C to D, each with a frame in hand that the session
+// never answers -- the relay of that session's consumer holds it -- and messages a session
+// refuses outstanding on the machine's durable (mpRetryOutstanding), with a
 // message published every 100 ms to two healthy sessions. Each stop comes a second into the
-// prompt, and the parked messages hold every next pod's settle hold open: each hand-over must end
+// frame, and the parked messages hold every next pod's settle hold open: each hand-over must end
 // on the stopping pod's clean-hand-back mark, 3 s after the subscribe, and every message to a
 // healthy session must reach it within 10 s of its publish, each session's in order. The pod
 // taking over subscribes beside the stopping pod's own linger and records stale_binding for it,
@@ -450,7 +450,7 @@ func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpNATSSess
 	}
 }
 
-// SIGKILL of the active pod while messages parked at a serving port that refuses them are
+// SIGKILL of the active pod while messages a session refuses are
 // outstanding on the machine's durable (mpRetryOutstanding), with a message published every
 // 100 ms to two healthy sessions. The standby takes the expired lease and its settle hold never
 // finds every outstanding message in hand: it ends at what the killed pod can still have

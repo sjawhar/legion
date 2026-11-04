@@ -134,10 +134,10 @@ type ledgerSettle uint8
 
 const (
 	// settleNone settles nothing. It is the outcome with no attempt of this process to settle -
-	// a skip taken before the ledger was asked, a recipient this listener does not prompt
-	// (promptsHere), a role whose holder never resolved - and the failure that deliberately
-	// leaves this process's attempt in flight, held for the pair until it reaches the ledger's
-	// takeover age (an agent delivery that failed and is neither retried nor a refused address).
+	// a skip taken before the ledger was asked, a recipient whose own consumer relays the
+	// message, a role whose holder never resolved - and the failure that deliberately leaves
+	// this process's attempt in flight, held for the pair until it reaches the ledger's
+	// takeover age (an agent delivery that failed and is not retried).
 	settleNone ledgerSettle = iota
 	// settleClear gives the attempt up (dedupe.Ledger.Clear), so a retry prompts the pair again.
 	settleClear

@@ -1,16 +1,16 @@
 // Package dedupe is the listener's delivery ledger: what it knows of each (dedupe key, session)
-// pair it prompts over HTTP or forwards on the role lane, so a message already delivered to a
-// session, or being delivered to it, is not delivered again. Every pod of one machine shares one
-// ledger (KV, over the listener state bucket), so a pod that takes the delivery lease over does not
-// prompt a session again for a message the pod before it delivered. A listener that cannot open
-// that bucket keeps its ledger in process (Memory), as one listener process alone always did.
+// pair it forwards on the role lane, or counts delivered for a session that reads the message on
+// its own NATS subscription, so a message already delivered to a session, or being delivered to
+// it, is not delivered again. Every pod of one machine shares one ledger (KV, over the listener
+// state bucket), so a pod that takes the delivery lease over does not forward to a session again
+// what the pod before it delivered. A listener that cannot open that bucket keeps its ledger in
+// process (Memory), as one listener process alone always did.
 package dedupe
 
 import "time"
 
 // The ages a record counts for. A delivered record stops repeats for DeliveredAge; an attempt the
-// delivery kept (Keep), which a prompt whose answer never came leaves (a slow server can accept
-// prompt_async and answer 204 after the HTTP client gave up, #389), for AttemptedAge.
+// delivery kept (Keep), which a pair a delivery disposed of for good leaves, for AttemptedAge.
 const (
 	DeliveredAge = 10 * time.Minute
 	AttemptedAge = 5 * time.Minute
@@ -96,8 +96,8 @@ type Attempt struct {
 	revision uint64
 }
 
-// Ledger is the delivery ledger every lane of the listener asks before it prompts a session over
-// HTTP or forwards a role-lane message to it. KV and Memory are its two implementations.
+// Ledger is the delivery ledger the listener's delivery paths ask before they forward a role-lane
+// message to a session or record a copy it read itself. KV and Memory are its two implementations.
 type Ledger interface {
 	// Attempt claims (dedupeKey, sessionID) for a delivery by this process, or says why not.
 	// An error means the ledger could not be read or written.
@@ -109,12 +109,6 @@ type Ledger interface {
 	// has since taken over or recorded is left as it is. A clear the ledger cannot write still
 	// gives the attempt up in this process: its next Attempt for the pair proceeds.
 	Clear(attempt Attempt) error
-	// InDoubt settles a Proceed attempt whose delivery was cut off before its outcome was known:
-	// the message may be at the session and may not, and no answer is coming, so neither Record
-	// nor Clear is true of it. The next Attempt for the pair proceeds, here and on every other
-	// process, since nobody will settle this one; the repeat it allows carries the same event
-	// id. An attempt another process has since taken over or recorded is left as it is.
-	InDoubt(attempt Attempt) error
 	// Keep settles a Proceed attempt whose record is to stand: a prompt whose outcome this
 	// process does not know, or a pair the delivery disposed of for good. Attempt answers InFlight
 	// for the pair until the attempt is AttemptedAge old.

@@ -287,7 +287,7 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
    most and 1.25 s after the release at least (the floor that holds the deliver subject while a
    standby subscribes), then
    drains (2 s at most) and, when all of that went through, the clean-hand-back mark is written
-   (one bucket call, 2 s at most): 10.5 s in all, and 11.75 s when the flush (1 s) and the release
+   (one bucket call, 2 s at most): 11 s in all, and 12.25 s when the flush (1 s) and the release
    (2 s) both
    run to their bounds and leave that floor past the cap. The session relays are not in that sum:
    the term's end only cancels them, and the shutdown's next step waits up to 750 ms
@@ -322,9 +322,9 @@ answered by then makes the answer `503 {"status":"unhealthy"}`.
 | `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
 | `200 {"status":"healthy","role":"standby",…}` | The pod is ready, does not deliver, and another pod of the machine holds the lease: `active_instance` names it. |
 | `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod that is the machine's deliverer and does not receive yet - it holds the lease, or runs without one, or has read no holder at all, or the record still names this pod while it no longer holds it (its renewals lapsed, and no other pod has taken the record yet): nothing of the durable reaches a session until it receives, so no such answer is healthy. `role` is `standby` and `receive` says what it waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`); when its reads, creations, corrections or subscribes of the durable fail, `error` is `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. It stays `200`, as a standby does, so a readiness probe keeps it in service. |
-| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). An active pod answers `subscription inactive` for `leaseReceiveLost` (3 s) at most: the lease reads the same signal and releases the record, after which the pod answers as a standby ("Take-over" above). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
+| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role lane subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). An active pod answers `subscription inactive` for `leaseReceiveLost` (3 s) at most: the lease reads the same signal and releases the record, after which the pod answers as a standby ("Take-over" above). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
 
-Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the
+Every healthy answer also carries the body fields it always did (`ci_cache`, the
 session registry's fields). A standby is ready: route traffic to it. A pod answers `503 starting`
 only while it cannot serve, so a readiness probe that sends traffic on `200` sends none too early.
 
@@ -342,12 +342,14 @@ Every pod of a machine id reads and writes the same records, so a pod that takes
 standby answering `/v1`, answers as the active pod would:
 
 - **Delivery ledger** (`internal/dedupe`, `delivery.<durable>.<32 hex of sha256(dedupe key)>.<session>`
-  in `envoy_listener`): four things ask it, and nothing else does — a role-lane forward, a
-  fan-out refusal, an unplaceable agent delivery's give-up, and the agent-subject delivery of a
-  message a session takes off its own subscription. Before any of them, a pod records the pair
-  attempted, and once it lands, delivered: a pair another pod delivered is not delivered again,
-  and a refusal or a give-up another pod reported is not reported twice. The relay of a
-  session's own consumer asks it for nothing ("When a session can see a message twice" below).
+  in `envoy_listener`): these ask it, and nothing else does — a role-lane forward, the kept
+  lane's drain of a role's stored copies (`keptRoleForwardAttempt`), a fan-out refusal, an
+  unplaceable agent delivery's give-up, the delivery of a message a session reads on its own NATS
+  subscription, and the publish route's confirmation of a send the recipient answered. Before any
+  of them, a pod records the pair attempted, and once it lands, delivered: a pair another pod
+  delivered is not delivered again, and a refusal or a give-up another pod reported is not
+  reported twice. The relay of a session's own consumer asks it for nothing ("When a session can
+  see a message twice" below).
   A pod skips a pair as `listener attempt-dedupe skip` only for an attempt it holds itself:
   one whose forward may still be running (less than 35 s old and not settled), or one a delivery
   kept (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of
@@ -365,28 +367,48 @@ standby answering `/v1`, answers as the active pod would:
   durable message for a retry; the role lane then delivers without it and logs
   `delivery ledger unavailable`.
 
+  **A copy the session reads itself.** A session that holds its own NATS subscription takes the
+  message off the bus, and this listener hands it to nobody. Its record is worth writing, so that
+  one event published on several of the session's topics counts one delivery rather than several,
+  but it is never worth holding the message for: the ask is best-effort, and a ledger that cannot
+  answer leaves the copy counted `skipped`, with no record, no exception and no retry. Nothing of
+  such a copy reaches anyone through this listener, so once-delivery holds whichever way the
+  ledger answers. The agent-subject path and the fan-out both follow this rule.
+
   **When a session can see a message twice.** The listener delivers a stored message to a session
   through that session's own consumer, relayed as a frame, and the consumer's ack floor — not the
-  ledger — is what says the session has it. There are exactly three cases, and each repeats the
-  message once, under the same event id:
-  - a frame the session received but had not written when the pod's receive term ended. The
-    session answers `received` once it decodes a frame and `done` once its host wrote it, and
-    only `done` says the message landed, so `done` is the reply the stopping relay waits
-    `relaySettleGrace` (750 ms) for and acks the message on; the pod taking over waits
-    `relayFormerSettle` (1 s) before it restarts the session's consumer at its ack floor, so a
-    `done` that arrives inside the grace costs nothing. A frame still unwritten when the grace
-    ends is in doubt (`session relay left a frame in doubt`), whether or not its `received` came
-    back: nothing says the session has the message, so the successor publishes it once more.
-    The session's client answers the repeat and writes it once — it joins a copy of a frame it
-    still holds, and drops one it has already written (`packages/envoy-client`'s
-    consumer delivery).
-  - a frame whose reply was lost when the pod's session-consumer links dropped, which carries
-    the reply and the message's acknowledgement alike. Nothing on this pod recorded the
-    delivery — there is no second channel it could have been recorded on — so the relay
-    restarts at the ack floor when the links come back and publishes that frame again. A frame
-    the session answered `done` before the drop was acked on those links and is passed over.
-  - a hard take-over (a killed pod, a lost node): the pod that had a frame in flight wrote
-    nothing and is waited for by nobody, so the successor publishes it again.
+  ledger — is what says the session has it. Every restart of a session's consumer
+  (`bus.SessionConsumers.RestartAtFloor`) deletes it and creates it again at the sequence after
+  its ack floor, so every frame above that floor is sent again. That includes a frame the session
+  answered `done` out of order above one it is still holding: the server cannot move the floor
+  past a frame still unacked, so the frames acked after it are above the floor and come again.
+  Every repeat carries the message's own event id, and the client's dedupe writes it once — it
+  joins a copy of a frame it still holds, and drops one it has already written
+  (`packages/envoy-client`'s consumer delivery).
+
+  A relay restarts when:
+  - a receive term ends and the pod that takes over starts the session's relay. The stopping
+    relay has `relaySettleGrace` (750 ms) to hear a `done` and ack the frame on it, and the
+    successor waits `relayFormerSettle` (1 s) before it restarts, so a `done` that arrives inside
+    the grace costs nothing. A frame still unwritten when the grace ends is in doubt
+    (`session relay left a frame in doubt`), whether or not its `received` came back: the session
+    answers `received` once it decodes a frame and `done` once its host wrote it, and only `done`
+    says the message landed;
+  - its session-consumer link drops and comes back. The frame's reply and the consumer's
+    acknowledgement ride that one link, so a frame answered under the drop was recorded nowhere,
+    and the relay restarts at the ack floor as soon as the link is back;
+  - a pod is killed or its node is lost: nothing settled the frames it had out, and the pod that
+    takes the lease over restarts the consumer at the floor;
+  - a frame drew no reply inside the relay's receipt wait, so the relay pauses and probes again
+    after 2, 4, 8, 16 and then every 30 s. This one can therefore repeat a frame more than once;
+  - a pull, a publish or a restart failed and the run retries;
+  - the session registers again under a new epoch;
+  - the session leaves the set this pod relays and rejoins it.
+
+  Outside the relay, a repeat also comes from the role lane re-forwarding a message whose holder
+  sent no receipt inside `roleReceiptTimeout`, from its take-over of a former boot's unresolved
+  attempt, and from the kept lane's drain re-forwarding a copy whose confirm never landed
+  (`role_keep.go`). Each of those carries its own event id too.
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the
   reason, so a redelivery that fails the same way publishes an exception with the same id and
   dedupe key, which the stream stores once.

@@ -409,6 +409,12 @@ describe("frames already written", () => {
   // on a reply inbox of its own. The host writes it once either way - the copy that arrives
   // while the write runs joins the frame still held, and the one that arrives after it is
   // dropped as already written - and every inbox is answered, so no copy waits out an ack wait.
+  //
+  // What this row guards: it fails with the held-redelivery join removed (the second copy is
+  // handed over a second time), and with both already-written checks removed (the third copy
+  // is). The receive-time check alone is redundant with the queue-time one: a copy the
+  // receive-time check would have dropped is dropped at its turn in the queue instead, so
+  // removing that one alone leaves the row green.
   test("a copy of a frame received but not yet written is written once and answered on every inbox", async () => {
     const clock = { now: T0 };
     const ledger = replayEngine(clock);

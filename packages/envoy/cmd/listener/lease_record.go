@@ -89,7 +89,6 @@ type leaseFields struct {
 // flight and recording, giving up or reporting its ledger attempt (roleReceiptTimeout), so the
 // ledger defers those attempts for ledgerFormerSettle rather than taking them over at once,
 // while a holder that was killed or lost its node writes nothing more and is taken over at once.
-// An attempt a former holder marked in doubt is taken over at once too: that mark is its answer.
 type formerBoot struct {
 	Boot     string    `json:"boot"`
 	Stopped  time.Time `json:"stopped"`
@@ -137,4 +136,84 @@ func decodeLeaseRecord(data []byte) (leaseRecord, error) {
 
 func (r leaseRecord) encode() ([]byte, error) {
 	return store.EncodeKeeping(r.leaseFields, r.unknown)
+}
+
+// relayFormerSettle is how long a relay waits, from this pod's acquisition, before it restarts a
+// session's consumer at its ack floor while a holder that released the lease may still be
+// settling the frames it had unanswered (FormerSettleWait, sessionRelays.relay).
+//
+// A release is a soft hand-over: the pod is alive and its session-consumer connection is up, so
+// its stopped relays have relaySettleGrace to hear the session's reply to the frame they had
+// unanswered and ack it (sessionRelays.settleStoppedFrames). A successor that restarted the
+// consumer before that ended would publish a frame the session may already have taken. This is
+// that grace and a margin: the term's end reaches the relays a moment after the release the
+// successor takes, so the successor must wait a little longer than they hold.
+//
+// It is a wait every message of the session pays once per soft take-over, so it is kept as short
+// as the grace allows rather than tied to the ledger's own wait below, which bounds something
+// else and is longer.
+const relayFormerSettle = relaySettleGrace + 250*time.Millisecond
+
+// ledgerFormerSettle is how long the delivery ledger defers the unresolved attempts of a holder
+// that released the lease, from this pod's acquisition (FormerHolder,
+// dedupe.KVConfig.GoneBoot).
+//
+// The one attempt a released pod can still be holding is a role-lane forward: it published the
+// forward and waits roleReceiptTimeout for the holder's receipt before it records, clears or
+// reports it (finishRoleForward). The role lane follows no lease, so that wait runs on past the
+// release, and taking the attempt over before its answer would forward a message the holder may
+// already have. Every other writer settles inside the call that took the attempt - the fan-out's
+// refusal and its record of the copy a self-subscribed session read, the agent path's record and
+// its unplaceable give-up, and the publish route's confirmation - and the kept lane's drain
+// forwards under the same roleReceiptTimeout, so none of them outlives a release by longer than
+// this.
+//
+// Taking either settle over early is a repeat only a hard take-over may make
+// (cmd/listener/README.md). A holder killed or cut off from the bucket releases nothing and is
+// taken over at once, so the 15 s hard take-over bound is untouched.
+const ledgerFormerSettle = roleReceiptTimeout + 250*time.Millisecond
+
+// FormerHolder reports whether boot is one of the boots that held the lease before the holder of
+// the record as this process last wrote or read it (former_boots), and how long that process may
+// still be settling a delivery it had in hand. A boot taken over by force - killed, its node
+// lost, its record left to expire - writes nothing more, so it is reported with no time at all
+// and the ledger takes its unresolved attempt over at once. One that released the record is
+// alive and its role lane has roleReceiptTimeout to finish the forward it had in flight and
+// record it, give its attempt up, or report it failed, so what is left of ledgerFormerSettle
+// since this term's acquisition is reported and the ledger defers that attempt until then. A pod
+// holding no term reports no time: it delivers nothing, so nothing of its own waits on the
+// answer.
+func (l *lease) FormerHolder(boot string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, former := range l.record.FormerBoots {
+		if former.Boot != boot {
+			continue
+		}
+		if !former.Released || l.termStarted.IsZero() {
+			return true, 0
+		}
+		return true, max(0, ledgerFormerSettle-l.now().Sub(l.termStarted))
+	}
+	return false, 0
+}
+
+// FormerSettleWait is how long any former holder that released the lease may still be settling
+// what it had in hand, counted from this term's acquisition: what is left of relayFormerSettle,
+// and zero when every former boot was taken over by force, which settles nothing, and zero for a
+// pod holding no term. A relay waits it out before it restarts a session's consumer at its ack
+// floor, so a frame the stopping pod is still acking is not published a second time
+// (sessionRelays.relay).
+func (l *lease) FormerSettleWait() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.termStarted.IsZero() {
+		return 0
+	}
+	for _, former := range l.record.FormerBoots {
+		if former.Released {
+			return max(0, relayFormerSettle-l.now().Sub(l.termStarted))
+		}
+	}
+	return 0
 }

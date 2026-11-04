@@ -46,7 +46,7 @@ func (r *durableReceiver) end(ctx context.Context) {
 // endLost ends a term whose lease was lost: it unsubscribes and stops taking messages, drops what
 // is queued while ctx is live and waits for the message in hand, and once ctx has ended (a
 // shutdown) gives the message in hand inflightGrace, cancels its handling and NAKs what is queued.
-// Either way the pushes the term handed to the serving-port workers end with it.
+// Either way the messages the term handed to the delivery paths end with it.
 func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 	r.mu.Lock()
 	sub, conn := t.sub, t.conn

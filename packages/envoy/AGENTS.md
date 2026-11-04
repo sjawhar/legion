@@ -2748,7 +2748,6 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A holder taken over by force -- killed, its node lost, its record left to expire -- writes nothing again and is taken over at once.
   One that released the record is alive, and its role lane has `roleReceiptTimeout` to hear the holder's receipt and record, clear or report the forward, so its attempt is deferred until `ledgerFormerSettle` (2.25 s) after this pod's acquisition (`lease.FormerHolder`), read on this pod's own monotonic clock from the start of its term.
   A release is a soft hand-over, and the successor reads the former holder's answer for the pair -- delivered or cleared -- rather than forwarding a role message the holder may already have.
-  An attempt marked in doubt is taken over at once, whatever time `lease.FormerHolder` reports for its writer, since nobody will settle it (`dedupe.KV.judge`).
   The relay of a session's consumer is gated apart, by `relayFormerSettle` (1 s, `lease.FormerSettleWait`): a released pod's stopped relay has `relaySettleGrace` to hear a frame's reply and ack it, and the successor restarts the session's consumer only after that ("A stopping relay's last frames" below).
   `TestTwoPodsARelayedFrameInFlightWhenTheTermEndsIsNotSentAgainByTheSuccessor` and `TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId` (build tag `multiprocess`, `cmd/listener/multiprocess_takeover_test.go`) hold both sides to real pods.
 
@@ -3903,11 +3902,12 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   a holder taken over by force - killed, its node lost, its record expired - settles nothing and is not waited for, and its successor restarts at once.
   A frame the grace ends without a `done` is in doubt, whether or not the session answered it `received`:
   `received` says the client decoded the frame, not that its host wrote the message, so only `done` says the session took it, and the stopping pod logs one WARN naming the frame (`session relay left a frame in doubt: its settle bound ended with the session's reply still out`, with the session, the topic, the event id, the frame's subject and its stream sequence) and the successor publishes that one frame again.
-  That is the one repeat this path allows, under the same event id (`cmd/listener/README.md`), and the session's client writes the repeat once:
+  Every restart of a session's consumer sends again every frame above its ack floor (`bus.SessionConsumers.RestartAtFloor`), each under its own event id (`cmd/listener/README.md`, "When a session can see a message twice"), and the session's client writes such a repeat once:
   it joins a copy of a frame it still holds and drops one it has already written (`packages/envoy-client/src/consumer-delivery.ts`).
+  A frame the session answered `done` out of order above one it still holds comes again too, since the floor cannot move past the held frame.
   `TestTwoPodsARelayedFrameReceivedButNotDoneAtAStopIsRepeatedAtMostOnceWithItsId` (build tag `multiprocess`, `cmd/listener/multiprocess_takeover_test.go`) holds that to two real pods.
   A links drop is the same case:
-  a session's reply and the relay's ack of it ride the one connection, so a drop that loses the reply loses the ack with it, and the relay restarts at the ack floor and publishes the frame again, at most once more under that id.
+  a session's reply and the relay's ack of it ride the one connection, so a drop that loses the reply loses the ack with it, and the relay restarts at the ack floor and publishes the frame again under that id.
   The relay asks the delivery ledger for none of this:
   a session on its own consumer takes each message once from that consumer, and the consumer's ack floor is the record a push to a port once needed the ledger for.
   The settle is paid on the shutdown path too, where `sessionRelays.stop` waits for it out of what the receive stop left of the shutdown's 10 s budget, and is cut short with a warning when that budget is already spent.

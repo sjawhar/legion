@@ -35,17 +35,6 @@ func mpLineWith(output string, parts ...string) string {
 	return ""
 }
 
-// awaitEventLine waits up to within for the pod to log the record msg about event, and returns it.
-func (p *mpPod) awaitEventLine(t *testing.T, within time.Duration, msg, event string) string {
-	t.Helper()
-	var line string
-	mpEventually(t, within, fmt.Sprintf("%s to log %q for %s", p.instance, msg, event), func() bool {
-		line = mpLineWith(p.Output.String(), `"msg":"`+msg+`"`, `"event_id":"`+event+`"`)
-		return line != ""
-	})
-	return line
-}
-
 // swallowNextAck has the pod's relay swallow the next acknowledgement the pod sends the durable
 // (nats.go's "+ACK"), and everything the pod sends after it on that link, so the pod handles a
 // message to its end and the durable never hears it. The returned func waits for that ack.
@@ -218,21 +207,18 @@ func TestTwoPodsRepeatAtMostOnceWhatAKilledPodDelivered(t *testing.T) {
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
 	serving.requireWithin(t, []mpMessage{m}, mpHardBound, killed)
 	time.Sleep(mpQuiet)
-	took := serving.promptsTo(sessionID)
-	if took < 1 || took > 2 {
-		t.Fatalf("%s took %s %d times, want once, or twice as the frame whose acknowledgement died with %s", sessionID, m.event, took, a.instance)
-	}
+	took := serving.requireAtMostTwice(t, m, "the frame whose acknowledgement died with "+a.instance)
 	serving.requireKnown(t, []mpMessage{m})
 	t.Logf("%s took %s %d times across the kill", sessionID, m.event, took)
 }
 
-// An attempt, then a crash: the active pod records in the shared ledger that it is prompting
-// session S and is SIGKILLed while that prompt is unanswered (the serving port holds it). The
+// An attempt, then a crash: the active pod records in the shared ledger that it is delivering to
+// session S and is SIGKILLed while that delivery is unanswered (the session holds the frame). The
 // standby takes the killed pod's expired lease, so the attempt is a former holder's: it takes the
-// attempt over at once rather than deferring it as a live pod's, and S is prompted, once, within
-// the hard take-over bound of the kill (a repeat with the same event id is allowed; the held
-// prompt was never answered). Before INFRA-557 the durable's 60 s ack wait keeps the message from
-// the standby past that bound.
+// attempt over at once rather than deferring it as a live pod's, and S is sent the message, once,
+// within the hard take-over bound of the kill (a repeat with the same event id is allowed; the
+// held frame was never answered). Before INFRA-557 the durable's 60 s ack wait keeps the message
+// from the standby past that bound.
 func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -512,9 +498,7 @@ func TestTwoPodsEveryQueuedMessageReachesTheSessionAtMostTwiceAcrossAReceiveLost
 	time.Sleep(mpQuiet)
 	serving.requireOnce(t, afterTheTakeOver)
 	for _, m := range delivered {
-		if took := serving.counts()[m.event]; took < 1 || took > 2 {
-			t.Fatalf("%s reached %s %d times, want once, or twice as a frame whose acknowledgement the drop lost", m.event, sessionID, took)
-		}
+		serving.requireAtMostTwice(t, m, "a frame whose acknowledgement the drop lost")
 	}
 	serving.requireKnown(t, messages)
 	serving.requireOrder(t, messages)

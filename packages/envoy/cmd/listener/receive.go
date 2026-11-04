@@ -100,9 +100,9 @@ import (
 // hold. handBackReleaseWait bounds the wait for the lease's loop to stop before the release, and
 // listenerStateRequestWait the mark's write.
 // The 3 s grace, its cancel's 1 s, lingerMax (the flush and the release inside it), the 2 s drain
-// and the mark's 2 s write come to 10.5 s at most besides a lease call that hangs; a flush and a
+// and the mark's 2 s write come to 11 s at most besides a lease call that hangs; a flush and a
 // release that both run to their bounds (1 s and 2 s) leave the linger holding its floor past
-// that cap, 1.25 s after the release, and 11.75 s in all. The receive stop does not wait for
+// that cap, 1.25 s after the release, and 12.25 s in all. The receive stop does not wait for
 // this pod's session relays: the term's end only cancels them (sessionRelays.setOwned), and the
 // shutdown waits for their stopped frames to settle afterwards, up to relaySettleGrace (0.75 s),
 // in its own step (shutdownListener). The 10 s the shutdown gives the receive stop, the relays

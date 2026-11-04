@@ -1019,17 +1019,15 @@ func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
 // lease holder (lease.FormerHolder) only made. A former holder that released the lease is alive
 // and its role lane is finishing the forward it had in flight, so its attempt is deferred until
 // it has had ledgerFormerSettle to record, give up or report that forward, and only a holder
-// taken over by force is taken over at once. An attempt a former holder marked in doubt is taken
-// over at once as well: nobody will settle it, and the repeat it allows carries the same event
-// id. Another pod's young attempt is otherwise
+// taken over by force is taken over at once. Another pod's young attempt is otherwise
 // deferred until it is requestLimit and ledgerTakeoverMargin old. A listener with no lease (its
 // NATS user lacks the grant for the bucket) is the machine's one deliverer and keeps the ledger
 // in process (dedupe.Memory), which a restart forgets.
 //
 // A record is keyed by the envelope's dedupe key, not its event id: fan-out normalization can
-// produce envelopes with one event id and distinct dedupe keys. Each prompt is recorded as
-// attempted before it is sent and as delivered once it lands, so a slow server that accepts
-// prompt_async but answers 204 after the HTTP client gave up is not prompted again (#389).
+// produce envelopes with one event id and distinct dedupe keys. Each forward is recorded as
+// attempted before it is sent and as delivered once the holder receipts it, so a receipt this
+// pod gave up waiting for costs no second forward.
 func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time.Duration) dedupe.Ledger {
 	takeoverAfter := requestLimit + ledgerTakeoverMargin
 	if deliveryLease == nil {
@@ -1645,8 +1643,8 @@ func shutdownListener(logger *logging.Logger, parts listenerParts, loops listene
 	// poll, the floor that holds the deliver subject while the standby subscribes) and up to
 	// lingerMax (3 s) after the NAKs, then drains (2 s) and, when the whole hand-over went
 	// through, writes the lease's clean-hand-back mark, one bucket call of 2 s at most, which
-	// ends the standby's settle hold at 3 s (durableReceiver.handBack): 10.5 s at most, and
-	// 11.75 s when the flush (1 s) and the release (2 s) both run to their bounds and leave that
+	// ends the standby's settle hold at 3 s (durableReceiver.handBack): 11 s at most, and
+	// 12.25 s when the flush (1 s) and the release (2 s) both run to their bounds and leave that
 	// floor past the cap. The relays' own settle is not in that sum: the term's end only cancels
 	// them, and step 3 below waits for it. This budget bounds none of those waits: it is how
 	// long this shutdown

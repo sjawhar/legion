@@ -3073,11 +3073,11 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 		t.Fatalf("flush delivery exception: %v", err)
 	}
 
-	// A recipient that takes the message on its own subscription costs no ledger write, and the
+	// A recipient that takes the message on its own subscription is recorded delivered, and the
 	// refusal keeps its recipient's attempt, which dedupes the exception across the copies of
 	// the event and the pods of the machine (fanoutDelivery).
-	if ledgerDelivered(t, harness.config, item.DedupeKey, capable) || ledgerAttempted(t, harness.config, item.DedupeKey, capable) {
-		t.Fatalf("the capable subscriber %s, which takes the message on its own subscription, cost a ledger write", capable)
+	if !ledgerDelivered(t, harness.config, item.DedupeKey, capable) {
+		t.Fatalf("the capable subscriber %s, which took the message on its own subscription, was recorded nowhere", capable)
 	}
 	if !ledgerAttempted(t, harness.config, item.DedupeKey, incapable) {
 		t.Fatalf("the fan-out did not keep %s's attempt beside the exception it reported", incapable)
@@ -3448,33 +3448,9 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 	return subscription, client.Conn.Flush()
 }
 
-// holdLedgerAttempt claims (dedupeKey, sessionID) in cfg's delivery ledger and leaves the attempt
-// unsettled: the record a path that is pushing the message leaves while its push is in flight,
-// which the relay of a serving-port session's consumer holds its copy against. It replaces the
-// attempt cache a listener kept per process before the machine's pods shared one ledger.
-func holdLedgerAttempt(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, sessionID string) dedupe.Attempt {
-	t.Helper()
-	attempt, err := cfg.ledger.Attempt(dedupeKey, sessionID)
-	if err != nil {
-		t.Fatalf("claim %s for %s in the delivery ledger: %v", dedupeKey, sessionID, err)
-	}
-	if attempt.Verdict != dedupe.Proceed {
-		t.Fatalf("the delivery ledger answered %s for (%s, %s), want proceed", attempt.Verdict, dedupeKey, sessionID)
-	}
-	return attempt
-}
-
-// releaseLedgerAttempt gives a held attempt up, as the push behind it ending unlanded does.
-func releaseLedgerAttempt(t *testing.T, cfg listenerDeliveryHandlerConfig, attempt dedupe.Attempt) {
-	t.Helper()
-	if err := cfg.ledger.Clear(attempt); err != nil {
-		t.Fatalf("clear the delivery ledger attempt: %v", err)
-	}
-}
-
 // ledgerVerdict reads what cfg's delivery ledger holds for the pair, leaving no claim of its own:
 // dedupe.Delivered for a pair the machine delivered, dedupe.InFlight or dedupe.Deferred for one a
-// push is in flight for, dedupe.Proceed for one it holds nothing about.
+// delivery is in flight for, dedupe.Proceed for one it holds nothing about.
 func ledgerVerdict(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, sessionID string) dedupe.Verdict {
 	t.Helper()
 	attempt, err := cfg.ledger.Attempt(dedupeKey, sessionID)
@@ -3489,7 +3465,7 @@ func ledgerVerdict(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, s
 	return attempt.Verdict
 }
 
-// ledgerAttempted reports whether the ledger says a push of the pair is in flight, on this pod or
+// ledgerAttempted reports whether the ledger says a delivery of the pair is in flight, on this pod or
 // another of the machine's: what the per-process attempt cache reported before the pods shared one ledger.
 func ledgerAttempted(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey, sessionID string) bool {
 	t.Helper()
@@ -3505,7 +3481,7 @@ func ledgerDelivered(t *testing.T, cfg listenerDeliveryHandlerConfig, dedupeKey,
 }
 
 // forgetLedgerRecord removes the pair's record from the listener state bucket, what the record's
-// own age does once it passes (dedupe.AttemptedAge): nothing says any more that a push of the
+// own age does once it passes (dedupe.AttemptedAge): nothing says any more that a delivery of the
 // message is in flight, wherever the attempt that wrote it is held.
 func forgetLedgerRecord(t *testing.T, harness listenerDeliveryHarness, dedupeKey, sessionID string) {
 	t.Helper()

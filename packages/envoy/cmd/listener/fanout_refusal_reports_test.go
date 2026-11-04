@@ -229,8 +229,8 @@ func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 // A message on a topic the session that published it follows is skipped for that session as an
 // echo: the fan-out hands it back to nobody, reports no failure of it, and writes no ledger
 // record for it, so the next event under that key still reaches it. Every other session
-// following the topic takes the message on its own subscription, which costs no ledger record
-// either: the fan-out asks the ledger for a recipient it refuses and for no other.
+// following the topic takes the message on its own subscription, which the fan-out does record
+// delivered: that copy reached the session, so the next copy of the event is a dedupe skip.
 //
 // The test drives the delivery handler directly, with a core message of an ad-hoc topic the
 // stream does not store (bus.UsesCoreTransport). No lane carries such a message to the fan-out
@@ -264,8 +264,8 @@ func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublished
 	if ledgerDelivered(t, harness.config, item.DedupeKey, sender) || ledgerAttempted(t, harness.config, item.DedupeKey, sender) {
 		t.Fatalf("the fan-out recorded %s as having been given the message it published itself", sender)
 	}
-	if ledgerDelivered(t, harness.config, item.DedupeKey, other) || ledgerAttempted(t, harness.config, item.DedupeKey, other) {
-		t.Fatalf("the fan-out wrote a ledger record for %s, which takes the message on its own subscription", other)
+	if !ledgerDelivered(t, harness.config, item.DedupeKey, other) {
+		t.Fatalf("the fan-out recorded nothing for %s, which took the message on its own subscription", other)
 	}
 	noException(t, probe)
 

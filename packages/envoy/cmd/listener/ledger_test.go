@@ -162,12 +162,11 @@ func (unavailableLedger) Attempt(string, string) (dedupe.Attempt, error) {
 	return dedupe.Attempt{}, errLedgerDown
 }
 
-// Record, Clear and InDoubt of an attempt that holds nothing touch no bucket, as dedupe.KV's do;
-// Keep touches no bucket at all.
-func (unavailableLedger) Record(attempt dedupe.Attempt) error  { return heldOnly(attempt) }
-func (unavailableLedger) Clear(attempt dedupe.Attempt) error   { return heldOnly(attempt) }
-func (unavailableLedger) InDoubt(attempt dedupe.Attempt) error { return heldOnly(attempt) }
-func (unavailableLedger) Keep(dedupe.Attempt)                  {}
+// Record and Clear of an attempt that holds nothing touch no bucket, as dedupe.KV's do; Keep
+// touches no bucket at all.
+func (unavailableLedger) Record(attempt dedupe.Attempt) error { return heldOnly(attempt) }
+func (unavailableLedger) Clear(attempt dedupe.Attempt) error  { return heldOnly(attempt) }
+func (unavailableLedger) Keep(dedupe.Attempt)                 {}
 
 func heldOnly(attempt dedupe.Attempt) error {
 	if attempt.Verdict != dedupe.Proceed {
@@ -262,18 +261,15 @@ func TestALedgerCallThatFailedInAReconnectIsMadeAgainOnceTheConnectionIsBack(t *
 	noException(t, probe)
 }
 
-// The durable lane writes nothing to the ledger for a session that receives - one reading its
-// own NATS subscription, one whose own consumer the relay pulls, one another listener owns -
-// and a message that reaches only such sessions is acked. The agent-subject path never decodes
-// one for a session that takes the stored message itself (durableNeedsDelivery), and settles a
-// session another listener owns before it asks the ledger at all. The fan-out holds to the same
-// rule: it asks the ledger for a recipient it refuses, whose exception the pair's record
-// dedupes, and for no other. A recipient that simply takes the message would otherwise cost two
-// KV round trips on the durable's handler for a delivery this pod never makes, and a 30 s retry
-// of the message for every one of its recipients while the ledger is down. The core lane's
-// agent-subject delivery does record the pair a self-subscribed session took, which is what
-// dedupes the next copy of it (TestListenerDeliveryHandler_DedupesSuccessfulDelivery).
-func TestASessionThatReceivesCostsNoLedgerWrite(t *testing.T) {
+// A session that receives without this listener costs it no ledger wait and no retry. The
+// durable acknowledges a stored message such a session takes itself before it decodes it
+// (durableNeedsDelivery), and settles a session another listener owns before it asks the ledger
+// at all, so neither reaches the ledger however down it is. The fan-out does ask for a recipient
+// that reads the message on its own subscription, to record the copy it took, but that ask is
+// best-effort: with the ledger down the copy is counted skipped under one WARN and the message
+// is acked, where a 30 s retry would hold every recipient of it back for a copy this listener
+// handed to nobody.
+func TestASessionThatReceivesCostsNoLedgerWaitOrRetry(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	cfg := harness.config
 	cfg.ledger = unavailableLedger{}
@@ -294,12 +290,16 @@ func TestASessionThatReceivesCostsNoLedgerWrite(t *testing.T) {
 			t.Fatalf("%s: settlement = %q, want an ack", sessionID, got)
 		}
 	}
+	if logs := harness.logs.String(); strings.Contains(logs, ledgerUnavailableLine) {
+		t.Fatalf("a session the durable settles before it decodes the message touched the ledger:\n%s", logs)
+	}
 
 	// The fan-out's recipients here are a self-subscribed session, which takes the message on its
 	// own subscription, and one whose entry has lapsed while its interest stands, which this
 	// listener delivers to nobody. The durable path still fans the message out, since the lapsed
 	// session's interest is no session of this machine that takes it another way
-	// (durableNeedsDelivery), and neither recipient costs a ledger call.
+	// (durableNeedsDelivery). The lapsed one costs no ledger call - its resolution failed, so
+	// there is no delivery to record - and the self-subscribed one costs the one best-effort ask.
 	const topic = "notifications.github.owner.repo.fanout-unprompted"
 	for _, sessionID := range []string{"ses_self", "ses_lapsed"} {
 		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
@@ -310,11 +310,144 @@ func TestASessionThatReceivesCostsNoLedgerWrite(t *testing.T) {
 	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
 	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
 	if got := settlement(t); got != "+ACK" {
-		t.Fatalf("the fan-out's settlement = %q, want an ack", got)
+		t.Fatalf("the fan-out's settlement = %q, want an ack with no %s retry", got, durableRetryDelay)
 	}
 
-	if logs := harness.logs.String(); strings.Contains(logs, ledgerUnavailableLine) {
-		t.Fatalf("a session this listener does not prompt touched the ledger:\n%s", logs)
+	logs := harness.logs.String()
+	if got := strings.Count(logs, `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
+		t.Fatalf("logged %d %q WARNs, want the one best-effort ask of the self-subscribed recipient:\n%s", got, ledgerUnavailableLine, logs)
+	}
+	if line := lineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
+		t.Fatalf("the best-effort ask asked for a retry: %s", line)
+	}
+}
+
+// lineWith is the first line of text containing needle, empty when none does.
+func lineWith(text, needle string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+// The copy a self-subscribed recipient read is recorded, so the second copy of the same event -
+// the same dedupe key on another topic the session follows, which normalization produces - is a
+// dedupe skip and not a second delivery. Under a ledger that cannot answer, such a copy is still
+// counted skipped and its message acked, with no record and no 30 s retry.
+func TestASecondCopyToASelfSubscribedRecipientIsADedupe(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	const self, lapsed = "ses_self_dedupe", "ses_self_dedupe_lapsed"
+	const one, two = "notifications.github.acme.self-dedupe.one", "notifications.github.acme.self-dedupe.two"
+	if err := harness.sessions.Put(self, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register the self-subscribed session: %v", err)
+	}
+	// A recipient this listener places nowhere keeps the durable from acknowledging the message
+	// unread (durableNeedsDelivery): with only the self-subscribed session interested, the
+	// fan-out would never run.
+	for _, sessionID := range []string{self, lapsed} {
+		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{one, two}); err != nil {
+			t.Fatalf("register %s's interests: %v", sessionID, err)
+		}
+	}
+	deliver := func(t *testing.T, cfg listenerDeliveryHandlerConfig, topic, dedupeKey string) string {
+		t.Helper()
+		msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, listenerTestEnvelope(topic, dedupeKey)))
+		jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+		return settlement(t)
+	}
+
+	const key = "self-dedupe-one-event"
+	if got := deliver(t, harness.config, one, key); got != "+ACK" {
+		t.Fatalf("the first copy's settlement = %q, want an ack", got)
+	}
+	if got := deliver(t, harness.config, two, key); got != "+ACK" {
+		t.Fatalf("the second copy's settlement = %q, want an ack", got)
+	}
+	body := metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - only the first copy reached %s on its own subscription:\n%s", deliveredSeries("skipped"), got, self, body)
+	}
+	if got := counterValue(t, body, deliveredSeries("dedupe")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - the second copy is judged against the record the first wrote:\n%s", deliveredSeries("dedupe"), got, body)
+	}
+
+	down := harness.config
+	down.ledger = unavailableLedger{}
+	if got := deliver(t, down, one, "self-dedupe-ledger-down"); got != "+ACK" {
+		t.Fatalf("the settlement with the ledger down = %q, want an ack with no %s retry", got, durableRetryDelay)
+	}
+	body = metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("skipped")); got != 2 {
+		t.Fatalf("%s = %d, want 2 - a copy under a ledger that cannot answer is skipped too:\n%s", deliveredSeries("skipped"), got, body)
+	}
+}
+
+// ledgerDownForSession fails every Attempt for one session and answers from Ledger for the rest:
+// a ledger outage of one pair alone, which is what tells a delay that recipient caused from one
+// another recipient caused.
+type ledgerDownForSession struct {
+	dedupe.Ledger
+	sessionID string
+}
+
+func (l ledgerDownForSession) Attempt(dedupeKey, sessionID string) (dedupe.Attempt, error) {
+	if sessionID == l.sessionID {
+		return dedupe.Attempt{}, errLedgerDown
+	}
+	return l.Ledger.Attempt(dedupeKey, sessionID)
+}
+
+// A ledger outage for a self-subscribed recipient delays and retries nothing for the other
+// recipients of the same fan-out. The message has two: a session that reads it on its own
+// subscription, whose pair the ledger cannot answer for, and one whose entry advertises no
+// delivery mode, which this listener refuses and reports. The refusal must be published and the
+// message acked. A branch that retried the message on the self-subscribed recipient's ledger
+// error would NAK it for durableRetryDelay and hold the refused recipient's answer, and every
+// other recipient's, behind that copy this listener hands to nobody.
+func TestALedgerOutageForASelfSubscribedRecipientDelaysNoOtherRecipient(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	const self, refused = "ses_outage_self", "ses_outage_refused"
+	const topic = "notifications.github.acme.ledger-outage.mention"
+	if err := harness.sessions.Put(self, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true, Capabilities: []string{"btw"}}); err != nil {
+		t.Fatalf("register the self-subscribed session: %v", err)
+	}
+	// The refused recipient takes no stored message itself, so the durable fans the message out
+	// rather than acknowledging it unread (durableNeedsDelivery), and its entry advertises no
+	// delivery mode, so the fan-out refuses it and reports that refusal.
+	if err := harness.sessions.Put(refused, session.SessionEntry{MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register the refused session: %v", err)
+	}
+	for _, sessionID := range []string{self, refused} {
+		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Fatalf("register %s's interest: %v", sessionID, err)
+		}
+	}
+	probe := exceptionProbe(t, harness.client)
+
+	cfg := harness.config
+	cfg.ledger = ledgerDownForSession{Ledger: harness.config.ledger, sessionID: self}
+	item := listenerTestEnvelope(topic, "ledger-outage-self")
+	item.Payload = `{"delivery":{"mode":"btw"}}`
+	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
+	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+
+	if got := settlement(t); got != "+ACK" {
+		t.Fatalf("settlement = %q, want an ack: a ledger outage for %s must not hold the message back for %s", got, self, durableRetryDelay)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != refused {
+		t.Fatalf("the exception names recipient %q, want %q", recipient, refused)
+	}
+	if ledgerDelivered(t, harness.config, item.DedupeKey, self) {
+		t.Fatalf("a ledger that could not answer for %s recorded its copy all the same", self)
+	}
+	body := metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - %s read the message on its own subscription:\n%s", deliveredSeries("skipped"), got, self, body)
+	}
+	if got := counterValue(t, body, deliveredSeries("failed")); got != 1 {
+		t.Fatalf("%s = %d, want the one refusal of %s:\n%s", deliveredSeries("failed"), got, refused, body)
 	}
 }
 
