@@ -84,6 +84,15 @@ export interface ApprovalRequestResponse {
   readonly artifact_id: string;
   readonly version: number;
   readonly approval: ArtifactApproval;
+  /** One line per requirement of the issue's spec with no check, or the single line `the spec
+   *  marks no requirements` for a spec that marks none, as `IssueCoverage.gaps` writes them; no
+   *  line at all for a spec every requirement of which has a check, empty for a document that is
+   *  not a spec, and never a missing plan task, since the plan comes after the approval. Absent
+   *  from a Dispatch older than requirement coverage. */
+  readonly coverage?: readonly string[];
+  /** True when the spec's coverage could not be read, so the empty `coverage` is no answer about
+   *  it. The request is recorded either way: a coverage read refuses nothing. Absent otherwise. */
+  readonly coverage_unread?: boolean;
 }
 
 export interface OpenAsk {

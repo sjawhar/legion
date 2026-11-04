@@ -17,6 +17,7 @@ import {
   artifactCommand,
   docEditCommand,
   docReadCommand,
+  planApproveCommand,
   requestApprovalCommand,
 } from "./documents";
 import { handoffReadCommand, handoffWriteCommand } from "./handoffs";
@@ -26,6 +27,8 @@ import {
   issuesCommand,
   issueUpdateCommand,
   relatedCommand,
+  resultCommand,
+  resultsCommand,
   searchCommand,
 } from "./issues";
 import { architectureSyncCommand, projectCommand, projectsCommand } from "./projects";
@@ -84,6 +87,9 @@ export const dispatchCommands: Record<DispatchToolName, DispatchCommand> = {
   dispatch_doc_edit: acting(docEditCommand),
   dispatch_doc_read: acting(docReadCommand),
   dispatch_request_approval: acting(requestApprovalCommand),
+  dispatch_plan_approve: acting(planApproveCommand),
+  dispatch_result: acting(resultCommand),
+  dispatch_results: acting(resultsCommand),
   dispatch_artifact: acting(artifactCommand),
   dispatch_handoff_write: acting(handoffWriteCommand),
   dispatch_handoff_read: acting(handoffReadCommand),

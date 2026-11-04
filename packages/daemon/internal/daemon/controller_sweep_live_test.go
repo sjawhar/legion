@@ -33,6 +33,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -75,6 +76,7 @@ type controllerSweepLive struct {
 // its volume once the claim is retired, and `deleted` for a sweep built without the fix (the
 // script's negative control), which must delete it.
 func TestTheControllerOrphanSweepLive(t *testing.T) {
+	fixtureenv.Live(t)
 	env := map[string]string{}
 	for _, name := range []string{"LEGION_E2E_KUBECONFIG", "LEGION_E2E_KUBE_CONTEXT", "LEGION_E2E_IMAGE", "LEGION_E2E_STREAM_HOST",
 		"LEGION_E2E_WORK", "LEGION_E2E_STORE_DSN", "LEGION_E2E_EXPECT"} {

@@ -23,6 +23,7 @@ import { otherAdviceLines, renderAdvice } from "./advice";
 import {
   type CommandContext,
   type DispatchToolResult,
+  numberArg,
   optionalBoolean,
   optionalNumber,
   optionalString,
@@ -158,7 +159,7 @@ async function listDocumentBlocks(
   const { bytes, blocks } = live;
   const decoder = new TextDecoder();
   const lines = [
-    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
+    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words, then a typed block's serves and needs. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
   ];
   const holders: ArtifactBlock[] = [];
   for (const block of blocks) {
@@ -175,6 +176,16 @@ async function listDocumentBlocks(
     lines.push(
       `${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`
     );
+    // Every pointer a typed block holds, in the order its type declares them: a reader follows
+    // these between documents, and a `block[]` attribute a type declares later must not go
+    // silently unprinted. A pointer is what the schema declares `block[]`, never what reads like
+    // one: a check's `run` may quote a `dispatch://` URL, and it is a command, not a pointer.
+    // Every attribute of a block is in `dispatch read` of its reference.
+    for (const attribute of block.attributes ?? []) {
+      if (attribute.kind === "block[]" && attribute.value !== "") {
+        lines.push(`${indent}  ${attribute.name}: ${attribute.value}`);
+      }
+    }
     if (block.type === "table") {
       if (block.table === undefined) {
         lines.push(
@@ -550,13 +561,33 @@ export async function requestApprovalCommand(context: CommandContext): Promise<D
       : undefined);
   const resolved = await resolveDocument(documentOwner(), artifactReference);
   await refuseOpenDecisionBlocks(client, input.tool, resolved);
+  const includeVerification = optionalBoolean(args, "include_verification") === true;
   const result = await client.requestApproval(resolved.artifact.id, {
     actor,
     summary: stringArg(args, "summary"),
+    ...(includeVerification ? { include_verification: true } : {}),
   });
+  // One line per requirement of the spec with no check, or the one line saying the spec
+  // marks none, as Dispatch names them; never a missing plan task, since the plan comes
+  // after the approval. A gap refuses nothing: the request is recorded, and a spec every
+  // requirement of which has a check carries no line at all. A coverage the server could
+  // not read says so, because silence here reads exactly like a spec with no gaps.
+  const gaps = result.coverage ?? [];
+  const coverageLines = result.coverage_unread
+    ? [
+        `Coverage of ${resolved.artifact.name}: unread. Dispatch could not read what the spec's requirements lack, so no line here says there is no gap; the request is recorded either way. Read the coverage again with dispatch read --issue, and mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+      ]
+    : gaps.length === 0
+      ? []
+      : [
+          `Coverage of ${resolved.artifact.name}: ${gaps.map((gap) => `${gap}.`).join(" ")} Mark each requirement the spec states with a requirement block and write a check that serves it, in the issue's Verification document, before the work starts.`,
+        ];
   if (result.ask === null) {
     return {
-      text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+      text: [
+        `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
+        ...coverageLines,
+      ].join("\n"),
       details: {
         ...(resolved.owner.kind === "project"
           ? documentResultDetails(resolved.artifact)
@@ -573,8 +604,36 @@ export async function requestApprovalCommand(context: CommandContext): Promise<D
     ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
     : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
   return {
-    text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+    text: [
+      `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
+      ...coverageLines,
+    ].join("\n"),
     details: { ...details, artifact: resolved.artifact.id, version: result.version },
+  };
+}
+
+/** `dispatch plan-approve`: record the plan review's approval of an issue's plan. */
+export async function planApproveCommand(context: CommandContext): Promise<DispatchToolResult> {
+  const { args, client, actor, documentOwner, resolveDocument } = context;
+  const planOwner = documentOwner();
+  const named = optionalString(args, "artifact");
+  // The server resolves a plan by its role and the dashboard by the issue's
+  // plan_artifact_id, precisely because a hand-renamed document must not displace the Plan
+  // tab; the filename is only what an issue whose detail names no plan falls back on.
+  const byRole =
+    named === undefined && planOwner.kind === "issue"
+      ? ((await client.getIssue(planOwner.issue)).plan_artifact_id ?? "")
+      : "";
+  const resolved = await resolveDocument(planOwner, named ?? (byRole || "plan.md"));
+  const version = numberArg(args, "version");
+  const review = await client.planApprove(resolved.artifact.id, { actor, version });
+  return {
+    text: `The plan review approved ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${review.version}; no human is asked to approve a plan. A later plan version makes this approval stale: run the review again and record it the same way.`,
+    details: {
+      issue: resolved.issue?.key,
+      artifact: resolved.artifact.id,
+      version: review.version,
+    },
   };
 }
 

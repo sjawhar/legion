@@ -8,6 +8,7 @@ import {
   InboundBySchema,
   InboundWriterSchema,
 } from "./dispatch-api-core";
+import { AskApprovalDocumentSchema } from "./dispatch-api-documents";
 import { type Issue, type IssueRouteReach, issueFields } from "./dispatch-api-issues";
 import { ASK_TURNS } from "./dispatch-api-limits";
 import { referenceChangesFields, threadLoginsFields } from "./dispatch-api-refs";
@@ -149,11 +150,18 @@ export const AskApprovalApprovedSchema = z
 
 export type AskApprovalApproved = z.output<typeof AskApprovalApprovedSchema>;
 
-/** The document and version an approval ask names. `requested_version` is the version the agent
- *  last handed to the human; a lower value means the agent is revising the moved request.
- *  `approved` names the document's newest approval when the request was opened, so a request to
- *  approve again says which approval it follows; it is absent on a request for a document nobody
- *  has approved. A version move re-encodes the whole approval, so it survives unchanged. */
+/** What an approval ask names: `documents`, one entry per document the request covers, each at
+ *  the version it names. A request opened on a spec with `include_verification` names the spec
+ *  and the issue's Verification document; every other request names one. A document's
+ *  `requested_version` is the version of it the agent last handed to the human; a lower value
+ *  means the agent is revising the moved request. `approved` names the first document's newest
+ *  approval when the request was opened, so a request to approve again says which approval it
+ *  follows; it is absent on a request for a document nobody has approved. A version move
+ *  re-encodes the whole approval, so it survives unchanged.
+ *
+ *  `artifact_id`, `name`, `version` and `requested_version` repeat `documents[0]`, the document
+ *  the request was opened on, so a client that reads one document reads that one. `documents` is
+ *  absent from a Dispatch older than the list. */
 export const AskApprovalSchema = z
   .strictObject({
     artifact_id: z.string(),
@@ -161,6 +169,7 @@ export const AskApprovalSchema = z
     version: z.number().int(),
     requested_version: z.number().int(),
     approved: AskApprovalApprovedSchema.optional(),
+    documents: z.array(AskApprovalDocumentSchema).optional(),
   })
   .readonly();
 

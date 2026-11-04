@@ -114,6 +114,12 @@ export function stringArg(args: Record<string, unknown>, name: string): string {
   return value;
 }
 
+export function numberArg(args: Record<string, unknown>, name: string): number {
+  const value = args[name];
+  if (typeof value !== "number") throw new Error(`${name} is required`);
+  return value;
+}
+
 export function optionalString(args: Record<string, unknown>, name: string): string | undefined {
   const value = args[name];
   return typeof value === "string" ? value : undefined;
@@ -127,6 +133,22 @@ export function optionalBoolean(args: Record<string, unknown>, name: string): bo
 export function optionalNumber(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+
+/** One field of a call's input, or no field at all when the argument was absent. An input whose
+ *  optional properties are exact (`exactOptionalPropertyTypes`, which claude-envoy compiles this
+ *  file under) takes an omitted key, never one whose value is `undefined`. */
+export function defined<K extends string, V>(name: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [name]: value }) as { [P in K]?: V };
+}
+
+/** A list of strings an argument carries, or nothing when it carries none. */
+export function optionalStringArray(
+  args: Record<string, unknown>,
+  name: string
+): string[] | undefined {
+  const value = args[name];
+  return Array.isArray(value) ? (value as string[]) : undefined;
 }
 
 /** `priority` as the server's tri-state: absent leaves it, null clears it, 0–3 set it. */

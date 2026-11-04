@@ -3,6 +3,7 @@ import type {
   Issue,
   IssueClaim,
   IssueComponents,
+  IssueCoverage,
   IssueDetails,
   IssueProgress,
   IssueReferences,
@@ -163,6 +164,7 @@ export function issueSummary(
   references: IssueReferences | string,
   graph: readonly string[],
   linkBase: string,
+  coverage: IssueCoverage | string,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -193,6 +195,12 @@ export function issueSummary(
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
+    // What the spec's requirements lack: one line per gap, or the one line that says the spec
+    // marks none. A gap refuses nothing; it is what the reader fixes before the work starts. A
+    // read the server could not answer says so rather than reading as a spec with no gaps.
+    ...(typeof coverage === "string"
+      ? [`Coverage: ${coverage}`]
+      : coverage.gaps.map((gap) => `Coverage: ${gap}`)),
     // The links a person or an agent put on the issue — the pull request that delivers it among
     // them — which the issue page renders with their state; the reference graph below carries
     // only links between Dispatch nodes.

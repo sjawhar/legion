@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { BlockAttributeKind } from "./block-schema.generated";
 import {
   type Actor,
   ActorSchema,
@@ -36,6 +37,35 @@ export type Version = z.output<typeof VersionSchema>;
 
 export type ArtifactReviewState = "approved" | "changes_requested";
 
+/** The part an issue's document plays beside its spec: `verification` for the document created
+ *  as `verification.md`, `plan` for the one created as `plan.md`. */
+export const DocumentRoleSchema = z.enum(["verification", "plan"]);
+
+export type DocumentRole = z.output<typeof DocumentRoleSchema>;
+
+/** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
+ *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the
+ *  review it carried, so a plan version restored to its approved text is still `plan_review`.
+ *  Absent from a Dispatch older than review kinds, which wrote people's reviews alone. */
+export const ArtifactReviewKindSchema = z.enum(["person", "plan_review"]);
+
+export type ArtifactReviewKind = z.output<typeof ArtifactReviewKindSchema>;
+
+/** One document an approval request names: the document, the version the request names, and
+ *  `requested_version`, the version of it the agent last handed to the human. It is read both
+ *  from the request (`AskApproval.documents`) and from a document's own approval
+ *  (`ArtifactApproval.documents`), so the two carry one shape. */
+export const AskApprovalDocumentSchema = z
+  .strictObject({
+    artifact_id: z.string(),
+    name: z.string(),
+    version: z.number().int(),
+    requested_version: z.number().int(),
+  })
+  .readonly();
+
+export type AskApprovalDocument = z.output<typeof AskApprovalDocumentSchema>;
+
 /** One human review of a document, pinned to the version it was given on. A review is given one
  *  of three ways: by answering an approval request (`ask_id` names the request), from the
  *  document header (`ask_id` null unless a request was open, which the header answers), or
@@ -58,6 +88,8 @@ export interface ArtifactReview {
   /** The display tree of `reason`, absent unless the request sent `Dispatch-Trees: 1`. */
   readonly reason_tree?: DisplayTree;
   readonly ask_id: string | null;
+  /** Who gave the review; absent from a Dispatch older than review kinds. */
+  readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
 }
 
@@ -90,6 +122,14 @@ export const ArtifactApprovalSchema = z
      *  version moved it past the one its agent last handed to the human, or a reply left it with the
      *  agent; `human` otherwise. */
     waiting_on: z.enum(ASK_TURNS).optional(),
+    /** The latest review's kind, so a reader can say an approval is a plan review's rather than a
+     *  person's; absent while no review stands, and from a Dispatch older than review kinds. */
+    kind: ArtifactReviewKindSchema.optional(),
+    /** Every document the open request covers, each at the version the request names, this one
+     *  included; absent when it covers this document alone. It is the request's own list
+     *  (`AskApprovalDocument`), so each entry carries the `requested_version` the request records
+     *  as well as the version it names. */
+    documents: z.array(AskApprovalDocumentSchema).optional(),
   })
   .readonly();
 
@@ -110,6 +150,11 @@ export const artifactFields = {
   name: z.string(),
   kind: z.enum(["doc", "image", "file"]),
   primary: z.boolean(),
+  /** The part an issue's document plays beside its spec: `verification` for the document created
+   *  as `verification.md`, `plan` for the one created as `plan.md`. It is set when the document
+   *  is created and never changes; absent for every other document and from a Dispatch older
+   *  than document roles. */
+  role: DocumentRoleSchema.optional(),
   created_by: ActorSchema,
   created_at: z.string(),
   versions: z.array(VersionSchema),
@@ -132,9 +177,26 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A typed block's attributes in the order its type declares them, which is the order its
+   *  opening line writes them, each value unescaped and unquoted; absent on a block of no
+   *  declared type, on a typed block that carries none, and on every block from a Dispatch
+   *  server older than the listing. */
+  readonly attributes?: readonly BlockAttributeValue[];
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+}
+
+/** One attribute a typed block carries: the name its type declares it under, the value the
+ *  block holds, and the kind the block schema declares that attribute (`BlockAttributeSchema`).
+ *  A reader follows a `block[]` attribute's value as the block references it holds and reads
+ *  every other kind as text, rather than taking a value for a pointer because it reads like
+ *  one: a `check`'s `run` may quote a `dispatch://` URL. Absent from a Dispatch server older
+ *  than the kinds, whose attributes say nothing about what they hold. */
+export interface BlockAttributeValue {
+  readonly name: string;
+  readonly value: string;
+  readonly kind?: BlockAttributeKind;
 }
 
 /** A table block's rows in child order, the header row first, each row and cell placed as
@@ -306,6 +368,8 @@ export const artifactReviewEventPayloadFields = {
   actor: ActorSchema,
   reason: z.string().nullable(),
   ask_id: z.string().nullable(),
+  /** Who gave the review; absent from a Dispatch older than review kinds. */
+  kind: ArtifactReviewKindSchema.optional(),
 };
 
 export const ArtifactReviewEventPayloadSchema = z

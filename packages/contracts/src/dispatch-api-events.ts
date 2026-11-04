@@ -27,6 +27,7 @@ import type {
   DecisionKeptEventPayload,
 } from "./dispatch-api-documents";
 import type {
+  CheckResultEventPayload,
   ChildEventPayload,
   ChildStatusEventPayload,
   IssueClaimEventPayload,
@@ -238,6 +239,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "block.invalid";
       readonly payload: BlockInvalidEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "result.recorded";
+      readonly payload: CheckResultEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "comment.created";

@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The daemon state contract carries one more settings key, `settings.repository_renames`: the repository pairs a deployment tells the daemon to treat as one repository wherever it compares a name, each `{from, to}` in configured order, and `[]` when it configures none. The `daemon-api` fixtures carry it.'
-time: 2026-11-02T02:58:25.830924215Z
-custom:
-    Issue: pr2648

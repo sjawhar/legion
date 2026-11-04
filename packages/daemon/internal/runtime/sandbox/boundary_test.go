@@ -31,6 +31,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
@@ -857,7 +858,7 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 	} {
 		command := exec.Command(git, argv...)
 		command.Dir = root
-		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		command.Env = fixtureenv.Isolated(t.TempDir())
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
@@ -933,7 +934,7 @@ func feedTar(remote string) ([]byte, error) {
 	clone := filepath.Join(dir, "clone.git")
 	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
 	command.Dir = dir
-	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	command.Env = fixtureenv.Isolated(dir)
 	if output, err := command.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)
 	}

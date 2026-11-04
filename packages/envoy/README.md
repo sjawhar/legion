@@ -41,6 +41,21 @@ Current secret names:
 - `ENVOY_SLACK_SIGNING_SECRET`
 - `ENVOY_GITHUB_WEBHOOK_SECRET`
 
+The secrets broker (`cmd/broker`) supports these kinds for `agent-secrets secret create --kind` and `secret retag --kind`:
+
+- `github-app`: stores an App id and private key; releases installation tokens for its listed GitHub owners.
+- `google-login`: stores an `authorized_user` credential; releases a Google access token, not the refresh token.
+- `azure-login`: stores `{"tenant_id":"<tenant>","client_id":"<client>"}`; releases JSON with `tenant_id`, `client_id`, `federated_token` and `expires_at` (RFC3339 UTC, from the token's JWT `exp`).
+  Set `BROKER_AZURE_LOGIN_SECRET` to the one agent-secret name allowed to release that token; unset, every Azure release is refused.
+  The configured secret must be human tier in the policy snapshot checked for each release, and its grant decision must record a person's approval, never an automatic grant.
+  Retagging another secret to `azure-login`, or retagging the configured secret to agent tier, releases no Azure token.
+  Each release reads the broker pod's projected ServiceAccount token from `BROKER_AZURE_TOKEN_FILE`, default `/var/run/secrets/azure/tokens/azure-identity-token`.
+  Unreadable, malformed or expired tokens refuse the release; token bytes never enter an error or log.
+  Mount the token read-only in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime.
+  Exactly one Entra identity may trust that ServiceAccount subject, since a released token can sign in to every identity that trusts it.
+
+Without a kind, the broker releases the stored value unchanged.
+
 ## Layout
 
 - `internal/contracts/generated.go` — generated Go contract output from `packages/contracts/scripts/gen-go.ts`
@@ -69,11 +84,12 @@ It builds `cmd/listener` and a throwaway NATS server of its own
 submits signed public GitHub fixtures plus a three-paragraph direct agent
 message to a stand-in session that takes every delivery from its own NATS
 consumer. The driver asserts the one-warning response for a never-seen GitHub
-repository, refuses a registration naming a port, rejects an unheld role
-publish before proving the stand-in session can claim and receive that role,
-validates settled pull-request checks, lifecycle and comment topics, PR-less
-workflow and Actions-job behavior, obsolete-topic absence, and the
-direct-message summary/body contract `renderInbound` prints.
+repository, refuses a registration naming a port, keeps an unheld role's
+publish and hands it to the stand-in session that claims that role, refuses a
+`keep: false` publish to an unheld role, validates settled pull-request checks,
+lifecycle and comment topics, PR-less workflow and Actions-job behavior,
+obsolete-topic absence, and the direct-message summary/body contract
+`renderInbound` prints.
 
 The NATS server is a process of this checkout's own build, stopped on exit with
 the listener and the two fake clients.

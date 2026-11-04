@@ -29,18 +29,31 @@ import { useDialog } from "../shell/useDialog";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function approvalLabel(approval: ArtifactApproval): string {
+  // A plan is approved by its plan review, never by a person, and its chip says so.
+  const approved = approval.kind === "plan_review" ? "Approved by plan review" : "Approved";
+  const version = approval.version ?? approval.latest_version;
   switch (approval.state) {
     case "draft":
       return "Draft";
     case "awaiting":
-      return "Awaiting approval";
+      return `Awaiting approval${approvalScope(approval)}`;
     case "approved":
-      return `Approved v${approval.version ?? approval.latest_version}`;
+      return `${approved} v${version}`;
     case "stale":
-      return `Approved v${approval.version ?? approval.latest_version} · changed since`;
+      return `${approved} v${version} · changed since`;
     case "changes_requested":
       return "Changes requested";
   }
+}
+
+/** The documents an open request covers, when it covers more than the one being read. */
+function approvalScope(approval: ArtifactApproval): string {
+  const documents = approval.documents ?? [];
+  if (documents.length < 2) {
+    return "";
+  }
+  const named = documents.map((document) => `${document.name} v${document.version}`);
+  return ` of ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
 }
 
 function ReviewsDialog({

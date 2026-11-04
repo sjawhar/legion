@@ -59,9 +59,9 @@ var typedDefaults = func() map[string]Attrs {
 	out := make(map[string]Attrs, len(schema.Types))
 	for _, typ := range schema.Types {
 		defaults := make(Attrs, len(typ.Attributes))
-		for name, attr := range typ.Attributes {
+		for _, attr := range typ.Attributes {
 			if attr.Default != nil {
-				defaults[name] = attr.Default
+				defaults[attr.Name] = attr.Default
 			}
 		}
 		out[typ.Name] = defaults

@@ -32,7 +32,9 @@ import {
   graphReferences,
   graphSectionLines,
   graphSections,
+  issueCoverageOrReason,
   issueReferencesOrUnavailable,
+  typedBlockOf,
 } from "./render-graph";
 import {
   childrenSummary,
@@ -198,7 +200,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
     // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
     // names a block no current version holds, and a pinned one's answer says which of its
     // version, that version's record or the block the server could not find.
-    const [incoming, outgoing, partOf] = await Promise.all([
+    const [incoming, outgoing, partOf, typed] = await Promise.all([
       client.getReferences({ to: blockRef }).catch((error: unknown) => {
         if (ref.pin === undefined && dispatchAnswered(error, 404)) {
           throw new Error(`No block ${ref.block} in ${holder}.`);
@@ -207,6 +209,9 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
       }),
       graphReferences(client, { from: blockRef }),
       askOfPart,
+      // The live block of its document, for its type and the attributes it carries: a block
+      // of a comment or a message has neither, and so has one no live version holds.
+      typedBlockOf(client, ref),
     ]);
     const blockID = incoming.node.block_id ?? ref.block ?? "";
     // A part whose ask the read could not name reads as a `Part`, as a part the ask does not
@@ -219,7 +224,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
           : askPartNoun(partOf.ask, incoming.node, blockID);
     return {
       text: [
-        ...blockLines(incoming.node, ref, noun),
+        ...blockLines(incoming.node, ref, typed, noun),
         ...graphSectionLines(incoming, outgoing),
       ].join("\n"),
       details: {
@@ -304,7 +309,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
   const read = await readPromise;
   // The claim's holder must read the same here as on the issue page, so the label comes
   // from the live registry — asked for only when a session holds this issue.
-  const [references, graph, titles, pictures] = await Promise.all([
+  const [references, graph, titles, pictures, coverage] = await Promise.all([
     referencesPromise,
     graphSections(client, dispatchIssueRef(read.issue.key)),
     liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
@@ -312,6 +317,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
       ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
       ...read.events.flatMap(eventTexts),
     ]),
+    issueCoverageOrReason(client, read.issue.key),
   ]);
   return {
     text: issueSummary(
@@ -320,6 +326,7 @@ export async function readCommand(context: CommandContext): Promise<DispatchTool
       references,
       [...pictures.lines, ...graph],
       linkBase,
+      coverage,
       titles
     ),
     details: { issue: read.issue.key },

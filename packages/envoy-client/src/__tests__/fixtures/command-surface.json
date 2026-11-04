@@ -1,5 +1,5 @@
 {
-  "commands": 27,
+  "commands": 30,
   "refusals": 30,
   "runs": [
     {
@@ -1020,6 +1020,38 @@
       ]
     },
     {
+      "tool": "dispatch_plan_approve",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1",
+        "version": 2
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "error",
+      "text": [
+        "document \"plan.md\" not found by slug; this issue's documents: spec-md (spec.md)"
+      ]
+    },
+    {
       "tool": "dispatch_project",
       "call": "valid",
       "args": {
@@ -1222,6 +1254,15 @@
             "Authorization": "Bearer secret"
           },
           "body": null
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/coverage",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
         }
       ],
       "outcome": "result",
@@ -1238,6 +1279,7 @@
         "Route: none",
         "Repository: owner/repo (own)",
         "Progress: none",
+        "Coverage: unavailable: unexpected request: GET /api/v1/issues/DSP-1/coverage",
         "External links:",
         "- none",
         "Documents:",
@@ -1442,6 +1484,79 @@
       "outcome": "result",
       "text": [
         "Resolved comment 01234567-0000-4000-8000-000000000001 on DSP-1."
+      ]
+    },
+    {
+      "tool": "dispatch_result",
+      "call": "valid",
+      "args": {
+        "check": "k1",
+        "commit": "1111111111111111111111111111111111111111",
+        "issue": "DSP-1",
+        "role": "implementer",
+        "verdict": "pass"
+      },
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/api/v1/issues/DSP-1/results",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "actor": {
+              "id": "session-1",
+              "kind": "session",
+              "origin": {
+                "cwd": "/workspace",
+                "host": "omp",
+                "machine": "test-machine",
+                "session_title": "Record the command surface"
+              }
+            },
+            "check": "k1",
+            "commit": "1111111111111111111111111111111111111111",
+            "role": "implementer",
+            "verdict": "pass"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/healthz",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "error",
+      "text": [
+        "unexpected request: POST /api/v1/issues/DSP-1/results"
+      ]
+    },
+    {
+      "tool": "dispatch_results",
+      "call": "valid",
+      "args": {
+        "issue": "DSP-1"
+      },
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/api/v1/issues/DSP-1/results",
+          "headers": {
+            "Accept": "application/json",
+            "Authorization": "Bearer secret"
+          },
+          "body": null
+        }
+      ],
+      "outcome": "error",
+      "text": [
+        "unexpected request: GET /api/v1/issues/DSP-1/results"
       ]
     },
     {

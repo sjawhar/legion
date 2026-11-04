@@ -464,7 +464,7 @@ func displayTypedValues(directive *typedDirective) (Attrs, bool) {
 			values[name] = raw
 			continue
 		}
-		value, err := parseTypedAttributeValue(typ.Attributes[name], raw)
+		value, err := parseTypedAttributeValue(typ.Attributes.Get(name), raw)
 		if err != nil {
 			return nil, false
 		}

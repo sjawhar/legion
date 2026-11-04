@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  type Actor,
   ActorSchema,
   type DisplayTree,
   type ExternalLink,
@@ -129,6 +130,11 @@ export const issueFields = {
   updated_at: z.string(),
   closed_at: z.string().nullable(),
   primary_artifact_id: z.string(),
+  /** The issue's Verification document, the one created as `verification.md`, and its Plan, the
+   *  one created as `plan.md` (`Artifact.role`); `""` when the issue holds none. Absent from a
+   *  Dispatch older than document roles. */
+  verification_artifact_id: z.string().optional(),
+  plan_artifact_id: z.string().optional(),
   last_seq: z.number().int(),
 };
 
@@ -209,6 +215,133 @@ export interface IssueSummaryPage {
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
+}
+
+/** What each requirement of an issue's spec lacks, from `GET /api/v1/issues/{key}/coverage`. A
+ *  requirement is a `requirement` block of the spec; it has a check when a `check` block of any
+ *  document of that issue or of any descendant issue, at any status, names it in `serves`, and a
+ *  plan task when a `plan_task` block of that set does. Nothing is ever refused for a gap. */
+export interface IssueCoverage {
+  readonly issue: string;
+  /** The issue's spec document, `""` for an issue that has none. */
+  readonly spec_artifact_id: string;
+  /** Whether the issue has a plan document. Before it has one, a requirement with no plan task
+   *  is no gap. */
+  readonly has_plan: boolean;
+  readonly requirements: readonly RequirementCoverage[];
+  /** One line per gap, `<block id> has no check` and `<block id> has no plan task`, or the
+   *  single line `the spec marks no requirements` for a spec that marks none. */
+  readonly gaps: readonly string[];
+}
+
+/** One `requirement` block of an issue's spec and what serves it. */
+export interface RequirementCoverage {
+  readonly block_id: string;
+  /** The block's reference, `dispatch://<KEY>/spec#b-<id>`. */
+  readonly ref: string;
+  /** The requirement's words, with every link and `dispatch://` reference dropped. */
+  readonly text: string;
+  readonly checks: number;
+  readonly plan_tasks: number;
+  /** This requirement's own gap lines, the ones `IssueCoverage.gaps` carries for it, so a
+   *  reader draws them beside the requirement without parsing the sentence back. */
+  readonly gaps: readonly string[];
+}
+
+/** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
+ *  work stands at and the words the result proved, `older` at an earlier commit or against words
+ *  that have changed since, and `unknown` when the check's issue resolves to no repository or
+ *  Dispatch's GitHub App cannot read it. */
+export type CheckResultCurrency = "current" | "older" | "unknown";
+
+/** One result recorded against a `check` block of an issue's Verification document.
+ *  `issue_key` is the issue it was recorded on, which may be a descendant of `check_issue_key`,
+ *  the issue whose Verification document holds the check. `check_version` and `check_sha256` are
+ *  the block's version and digest when the result was recorded, so a reworded check makes its
+ *  earlier results older. `currency` is computed when the results are read and is absent from
+ *  the record's own answer. */
+export interface CheckResult {
+  readonly id: string;
+  readonly issue_key: string;
+  readonly check_issue_key: string;
+  readonly check_artifact_id: string;
+  readonly check_block_id: string;
+  readonly check_version: number;
+  readonly check_sha256: string;
+  readonly role: string;
+  readonly surface: string;
+  readonly run: string;
+  readonly observed: string;
+  readonly commit_sha: string;
+  readonly negative_control: string;
+  readonly failed: number;
+  readonly skipped: number;
+  readonly excluded: number;
+  readonly verdict: "pass" | "fail";
+  readonly screenshots: readonly string[];
+  readonly session: string;
+  readonly actor: Actor;
+  readonly created_at: string;
+  readonly event_seq?: number;
+  readonly currency?: CheckResultCurrency;
+}
+
+/** When a check runs: before the merge, after it, or against the default branch. The closed
+ *  enum `pmdoc/schema/blocks.json` declares under the `when` attribute's `choices`. */
+export const CheckWhenSchema = z.enum(["before_merge", "after_merge", "default_branch"]);
+
+export type CheckWhen = z.output<typeof CheckWhenSchema>;
+
+/** One `check` block of a Verification document with every result recorded against it, newest
+ *  first. */
+export interface CheckBlock {
+  readonly block_id: string;
+  readonly ref: string;
+  readonly issue_key: string;
+  readonly artifact_id: string;
+  readonly text: string;
+  readonly when: CheckWhen;
+  readonly surface: string;
+  readonly run: string;
+  readonly negative_control: string;
+  readonly version: number;
+  readonly sha256: string;
+  readonly results: readonly CheckResult[];
+}
+
+/** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
+ *  document order. An issue with no Verification document answers no checks. */
+export interface IssueCheckResults {
+  readonly issue: string;
+  /** The issue's Verification document, `""` for an issue that has none. */
+  readonly verification_artifact_id: string;
+  readonly checks: readonly CheckBlock[];
+}
+
+/** `POST /api/v1/issues/{key}/results`: the stored result and the pull-request body line it
+ *  implies, which Dispatch writes so every writer writes one grammar and which carries no link
+ *  to Dispatch. */
+export interface CheckResultRecorded {
+  readonly result: CheckResult;
+  readonly line: string;
+}
+
+/** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
+ *  them is refused `400 RESULT_CONTRADICTS`. */
+export interface RecordCheckResultInput {
+  readonly actor?: Actor;
+  readonly check: string;
+  readonly role: string;
+  readonly verdict: "pass" | "fail";
+  readonly commit: string;
+  readonly surface?: string;
+  readonly run?: string;
+  readonly observed?: string;
+  readonly negative_control?: string;
+  readonly failed?: number;
+  readonly skipped?: number;
+  readonly excluded?: number;
+  readonly screenshots?: readonly string[];
 }
 
 /**
@@ -471,3 +604,22 @@ export const InboundChildStatusEventPayloadSchema = z.object({
 export const ChildEventPayloadSchema = z.strictObject({ child_key: z.string() }).readonly();
 
 export type ChildEventPayload = z.output<typeof ChildEventPayloadSchema>;
+
+/** `result.recorded`: one result recorded against a check, appended on the **check's** issue and
+ *  naming in `issue` the issue it was recorded on. */
+export const CheckResultEventPayloadSchema = z
+  .strictObject({
+    result_id: z.string(),
+    issue: z.string(),
+    check_issue: z.string(),
+    check_artifact_id: z.string(),
+    check_block_id: z.string(),
+    check_version: z.number().int(),
+    when: CheckWhenSchema,
+    verdict: z.enum(["pass", "fail"]),
+    role: z.string(),
+    commit_sha: z.string(),
+  })
+  .readonly();
+
+export type CheckResultEventPayload = z.output<typeof CheckResultEventPayloadSchema>;

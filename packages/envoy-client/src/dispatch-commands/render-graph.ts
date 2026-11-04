@@ -1,9 +1,11 @@
 import type {
   Actor,
+  ArtifactBlock,
   Ask,
   GraphEdge,
   GraphNode,
   GraphReferences,
+  IssueCoverage,
   IssueReferences,
 } from "@legion/contracts";
 import { actorText } from "../actor-text";
@@ -82,6 +84,23 @@ export async function issueReferencesOrUnavailable(
 }
 
 /**
+ * What the issue's requirements lack, or why the server could not say: a Dispatch that does not
+ * serve the coverage read yet answers `unavailable`, and any other failure is named, as the
+ * closure and graph sections do (unavailableReason). A swallowed failure would make a spec with
+ * uncovered requirements read exactly like a fully covered one.
+ */
+export async function issueCoverageOrReason(
+  client: DispatchClient,
+  key: string
+): Promise<IssueCoverage | string> {
+  try {
+    return await client.issueCoverage(key);
+  } catch (error) {
+    return unavailableReason(error);
+  }
+}
+
+/**
  * The sections every read ends with: the `Node:` line (the read node's maker, last change and
  * parent), `Referenced by:` (edges pointing at the node, mentions and structure alike) and
  * `Links:` (edges it writes), read from the reference graph in both directions. A graph the
@@ -133,24 +152,37 @@ function nodeLine(node: GraphNode): string[] {
 }
 
 /**
- * A block read's head, from the node its reference names. A document's block: the block, the
- * document it is in (`ref.document`, the reference before the `#b-`), the version its text last
- * changed in and that text. A comment's or message's block: one line naming the block, its item
- * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
- * revision 1):`), then its text. A part of an ask reads the same way, under the name `noun`
- * gives it (`Option b2 of ask <id> (changed in revision 1):`), the revision being the ask's
- * parts'. A block no current version or revision holds has neither a changed version nor text.
- * Then for a pinned ref how the block stands against the version or revision it pins and its
- * text there.
+ * A block read's head, from the node its reference names and, for a block of a document, the
+ * live block `GET /api/v1/artifacts/{id}/blocks` lists under its id (`typedBlockOf`). A
+ * document's block: the block, its type, the document it is in (`ref.document`, the reference
+ * before the `#b-`), every attribute it carries — a `check`'s `serves`, `surface`, `run`, `when`
+ * and `negative_control`, a `plan_task`'s `serves` and `needs` — the version its text last
+ * changed in and that text, the claim a `check` makes among it. A comment's or message's block:
+ * one line naming the block, its item and the comment revision its text last changed in (`Block
+ * b2 of comment <id> (changed in revision 1):`), then its text; neither has a type or attributes.
+ * A part of an ask reads the same way, under the name `noun` gives it (`Option b2 of ask <id>
+ * (changed in revision 1):`), the revision being the ask's parts'. A block no current version or
+ * revision holds has no changed version, text, type or attribute. Then for a pinned ref how the
+ * block stands against the version or revision it pins and its text there.
  */
-export function blockLines(node: GraphNode, ref: ParsedDispatchRef, noun = "Block"): string[] {
+export function blockLines(
+  node: GraphNode,
+  ref: ParsedDispatchRef,
+  typed?: ArtifactBlock | undefined,
+  noun = "Block"
+): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head =
     ref.item === undefined
       ? [
           `Block: ${blockID}`,
+          ...(typed === undefined ? [] : [`Type: ${typed.type}`]),
           `Document: ${node.document ?? ref.document}`,
+          ...(typed?.attributes ?? []).map(
+            (attribute) =>
+              `${attribute.name}: ${attribute.value === "" ? "(empty)" : attribute.value}`
+          ),
           ...(node.changed_version === undefined
             ? []
             : [`Changed in version: ${node.changed_version}`]),
@@ -175,6 +207,31 @@ export function blockLines(node: GraphNode, ref: ParsedDispatchRef, noun = "Bloc
     `Text at ${unit} ${pin.version}:`,
     pin.text,
   ];
+}
+
+/**
+ * The live block of the document a block reference names, under the id the reference carries:
+ * its type and the attributes a typed block holds. The reference names its document's owner and
+ * slug (`spec` for an issue's spec), so one read serves it and the document is never resolved.
+ * A block of a comment or a message has neither type nor attributes, and so has a block the
+ * live document no longer holds — a pinned reference's, say — so both answer nothing. A listing
+ * the caller cannot read leaves the block's head as it read before the listing, rather than
+ * failing the read.
+ */
+export async function typedBlockOf(
+  client: DispatchClient,
+  ref: ParsedDispatchRef
+): Promise<ArtifactBlock | undefined> {
+  if (ref.item !== undefined || ref.block === undefined) return undefined;
+  try {
+    const blocks =
+      ref.owner.kind === "project"
+        ? await client.projectArtifactBlocks(ref.owner.project, ref.id)
+        : await client.issueArtifactBlocks(ref.owner.issue, ref.id);
+    return blocks.find((block) => block.id === ref.block);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

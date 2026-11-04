@@ -2344,50 +2344,16 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	return head
 }
 
-// openSyncedEditor opens a spec tab on A, as openEditor does, and returns once the update the tab
-// sends as it syncs is stored, so that whatever B writes next is the only thing that can leave A's
-// room behind the durable head.
-//
-// A browser's provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
-// y-websocket does), and the room appends that update even when it changes nothing, since ygo runs
-// the room's update observer for every transaction it commits. An append from a room standing
-// behind the head is refused by the durable gate, and the refusal fails the room
-// (ErrRoomBehindHead; docs/stale_room.go names this path): the room closes and the browser
-// reconnects. That is correct for a browser, but a row timing which path closes A's room reads it
-// as some other path. So a tab whose update is still on its way when B's write lands closes its
-// own socket within milliseconds of that write, which is how the refused-notification row failed
-// 2 of 20 runs on a development machine (dispatch://INFRA-396).
-//
-// The head is read before the dial, and nothing else writes the document while the tab connects:
-// B writes only after this returns, and a settlement is at least the settle delay away (2 s by
-// default). So the head moves by exactly one, the tab's own update, and anything more fails the
-// row rather than letting it run on with that update still on its way. The wait is openEditor's
-// own ten seconds: on a loaded development machine 52 such updates were stored 16-294 ms after
-// the dial, and one was not stored within a second. A tab whose update is not stored in ten fails
-// the row: either the room stopped storing an update for a sync that changes nothing, and this
-// wait has outlived its reason, or the machine is too slow for the row. How much of the eviction
-// window a reconnect spent is the gap burstLeavingTheRoomBehind asserts.
+// openSyncedEditor checks that a tab's no-op sync leaves the durable head unchanged, so only
+// the subsequent write can leave its room behind the store.
 func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
 	t.Helper()
-	const within = 10 * time.Second
 	before := storedHead(t, pair, artifactID)
-	dialled := time.Now()
 	editor := pair.a.openEditor(t, artifactID, want)
-	for {
-		head := storedHead(t, pair, artifactID)
-		switch {
-		case head == before+1:
-			t.Logf("the tab's own sync update was stored %v after it dialled the room", time.Since(dialled))
-			return editor
-		case head > before+1:
-			t.Fatalf("the document moved from update %d to %d while a tab connected, and only the tab's own sync update was to be stored: something else wrote it, and the tab's update may still be on its way",
-				before, head)
-		case time.Since(dialled) >= within:
-			t.Fatalf("the tab's own sync update was not stored within %v of its dial: the document still stands at update %d. Either the room no longer stores an update for a sync that changes nothing, which makes this wait unnecessary, or the machine is too slow for this row.",
-				within, before)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if head := storedHead(t, pair, artifactID); head != before {
+		t.Fatalf("the durable head moved from %d to %d during a tab's no-op sync", before, head)
 	}
+	return editor
 }
 
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
@@ -2468,8 +2434,9 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	// eviction that starts the window. A reconnect that waited for the eviction's log line first
 	// put up to that poll's 50 ms between the two, so the evictor's re-examination at the window's
 	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
-	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
-	// leaves the room behind the head.
+	// own sync changes nothing in the room, so the room stores nothing for it (ygo calls no update
+	// observer for a transaction that changes nothing, reearth/ygo#350), and the trailing write
+	// alone leaves the room behind the head.
 	//
 	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
 	// removal of the room, where the dial is refused: a real browser's reconnect has the same
@@ -2893,6 +2860,57 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 	return gate
 }
 
+// waitForPassBehind waits up to within for a session of this test's database whose current
+// statement carries fragment to queue behind a lock holder's transaction owns
+// (storetest.QueuedBehind), and answers whether one did. The passes it watches run in the two
+// processes under test, whose connections no pool of this test's can give, so the statement is
+// what names the pass: a count of the backends behind the gate would also take the
+// term-statistics refresh, which writes search_term_totals, and the block-index pass, which reads
+// document_block_versions, for the reference-excerpt pass - all three queue behind the gates this
+// test holds, and a count cannot tell them apart. It reads pg_stat_activity through the pool, a
+// fresh view on each read.
+func waitForPassBehind(
+	t *testing.T, database *store.Store, holder pgx.Tx, fragment string, within time.Duration,
+) bool {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(within)
+	for {
+		rows, err := database.Pool.Query(ctx, `
+			select pid from pg_stat_activity
+			where datname = current_database() and pid <> pg_backend_pid() and position($1 in query) > 0
+		`, fragment)
+		if err != nil {
+			t.Fatalf("read the sessions running a statement carrying %q: %v", fragment, err)
+		}
+		pids, err := pgx.CollectRows(rows, pgx.RowTo[uint32])
+		if err != nil {
+			t.Fatalf("read the sessions running a statement carrying %q: %v", fragment, err)
+		}
+		for _, pid := range pids {
+			queued, err := storetest.QueuedBehind(ctx, holder, pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if queued {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The first statement of each pass this test waits for, as pg_stat_activity shows it: the
+// reference-excerpt pass's write (refs.MarkStaleExcerpts) and the block-index pass's read of the
+// documents owed an index (docs' owedDocuments).
+const (
+	referenceExcerptPassStatement = "update refs r set excerpt_version = null"
+	blockIndexPassStatement       = "from document_block_versions b"
+)
+
 // Every leased maintenance loop takes a named lease for the length of its pass, so the second
 // process's attempt finds it held and skips instead of doing the same work beside it. Each loop
 // observed here is held inside its own first statement while the other process's attempt fires -
@@ -2949,7 +2967,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
-	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
+	if !waitForPassBehind(t, pair.database, gate, referenceExcerptPassStatement, 60*time.Second) {
 		t.Fatalf("no reference-excerpt pass reached the refs lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
@@ -2962,7 +2980,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
-	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
+	if !waitForPassBehind(t, pair.database, blockGate, blockIndexPassStatement, 60*time.Second) {
 		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
 			pair.a.Output.String(), pair.b.Output.String())
 	}
