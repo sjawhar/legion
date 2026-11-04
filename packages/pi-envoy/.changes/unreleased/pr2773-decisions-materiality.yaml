@@ -1,4 +1,0 @@
-kind: Fixed
-body: Keep decisions documents limited to choices that change a disagreeing reader's action; record other choices as single spec lines.
-custom:
-  Issue: pr2773
