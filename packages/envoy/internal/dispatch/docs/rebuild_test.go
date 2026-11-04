@@ -291,3 +291,81 @@ func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
 		t.Fatalf("the rebuild that fits replaced the history %d times, want once", persist.rebuilds)
 	}
 }
+
+// An ask whose question is empty and whose options follow is kept where the document service
+// already holds it and refused where a caller writes it: the live tree stores it, since a person's
+// edit can empty a question and this package repairs such a block through its question
+// (refuseEmptyQuestionEdit); a rebuild from the document's own stored markdown restores it, so
+// nothing the store holds is left with no way back; and the same bytes written as a caller's
+// markdown, where that ask is new, are refused by name, since no one can answer options with no
+// question. A replacement that leaves the ask as it was stores, as every ask rule here is held to
+// the asks a write makes or changes (refuseChangedAsks).
+func TestAnAskWrittenWithOptionsAndNoQuestion(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := parsedBlock(t, ":::ask{#ask-options urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich month?\n\n- May\n:::\n")
+		ask.Children[0].Children = nil
+		tree.Children = append(tree.Children, ask)
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	stored, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("the tree path: %v, want the document stored", err)
+	}
+	if !strings.Contains(stored, ":::ask{#ask-options") || strings.Contains(stored, "Which month?") {
+		t.Fatalf("the tree path stored %q, want the ask with its options and no question", stored)
+	}
+
+	// A document whose latest version holds those bytes, with nothing live, rebuilds.
+	second := createDocument(t, database, "before\n")
+	if _, err := database.Pool.Exec(context.Background(),
+		`update artifact_versions set markdown = $2 where artifact_id = $1`, second, stored); err != nil {
+		t.Fatalf("store the version: %v", err)
+	}
+	// The rebuild path runs for a document that does not load, which is the maintenance case:
+	// rebuildCaptureStore{invalid: true} is how rebuild_test stands one up.
+	rebuilding := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() {
+		if err := rebuilding.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown rebuilding service: %v", err)
+		}
+	})
+	if _, _, err := rebuildDocument(t, rebuilding, second, nil); err != nil {
+		t.Fatalf("rebuilding the stored version: %v, want it rebuilt", err)
+	}
+	if text, err := rebuilding.Text(context.Background(), second); err != nil || text != stored {
+		t.Fatalf("the rebuild restored %q (%v), want the stored bytes", text, err)
+	}
+
+	// The same bytes as a caller's markdown, into a document where that ask is new.
+	var invalid *ErrInvalidAskBlock
+	third := createDocument(t, database, "")
+	fresh := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := fresh.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown fresh service: %v", err)
+		}
+	})
+	seedServiceText(t, fresh, third, "before\n")
+	if _, err := joinedReplaceText(fresh, third, stored, model.Actor{Kind: "user", ID: "alice"}); !errors.As(err, &invalid) {
+		t.Fatalf("the same bytes written into another document: %v, want ErrInvalidAskBlock", err)
+	} else if !strings.Contains(err.Error(), "options and no question") {
+		t.Fatalf("leg 3 refused with %v, want the refusal to name the missing question", err)
+	}
+	// The same bytes over the document that already holds that ask unchanged are stored,
+	// since a replacement is held to the ask rule for the asks it writes or changes
+	// (refuseChangedAsks), which is how main reads it too.
+	if _, err := joinedReplaceText(service, artifactID, stored, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("the same bytes over the document holding that ask: %v, want it stored", err)
+	}
+}

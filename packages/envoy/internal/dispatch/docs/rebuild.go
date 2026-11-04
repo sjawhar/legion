@@ -103,7 +103,18 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	if err := pmdoc.AskContentError(tree); err != nil {
+	// A caller's markdown is markdown written in whole, so an ask written with its options and no
+	// question is refused (pmdoc.AskWrittenContentError), as the markdown of such an ask was
+	// before both parsers read the empty paragraph the schema fills in ahead of its options. The
+	// latest version's own markdown is held to the tree rule instead: a person's edit can empty an
+	// ask's question in the live document, which this package keeps and repairs through that
+	// question (refuseEmptyQuestionEdit), and a document the product stores must be one a rebuild
+	// can restore - refusing it here would leave it with no way back.
+	content := pmdoc.AskWrittenContentError
+	if markdown == nil {
+		content = pmdoc.AskContentError
+	}
+	if err := content(tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {

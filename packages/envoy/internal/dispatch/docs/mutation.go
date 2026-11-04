@@ -553,7 +553,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := pmdoc.AskContentError(tree); err != nil {
+	if err := pmdoc.AskWrittenContentError(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, offsets, err := renderTreeWithOffsets(tree)
@@ -631,13 +631,13 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		// A repair is a whole new document, held to the ask content rule for every ask, as
 		// RebuildDocument holds supplied markdown, and it keeps every open ask block.
 		if repairing {
-			if err := pmdoc.AskContentError(target); err != nil {
+			if err := pmdoc.AskWrittenContentError(target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
 			if err := s.refuseDroppedAskBlocks(ctx, artifactID, target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
-		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
+		} else if err := refuseChangedAsks(current, target, pmdoc.AskWrittenContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if canonical, err = renderTree(target); err != nil {
