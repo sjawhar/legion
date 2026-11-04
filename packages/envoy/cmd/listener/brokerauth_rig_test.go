@@ -58,7 +58,9 @@ func newBrokerRig(t *testing.T) *brokerRig {
 	if err := sessions.WaitForCacheReady(ready); err != nil {
 		t.Fatalf("warm the session cache: %v", err)
 	}
-	deps := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	// The rig mounts every v1 route, so it needs the delivery the real listener always carries:
+	// the roles/set handler drains the role's kept message through it (runKeptRoleDrain).
+	deps := withRoleClaimDrain(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 
 	broker := brokertokentest.NewStubBroker(t)
 	accountFile := filepath.Join(t.TempDir(), "account-token")
