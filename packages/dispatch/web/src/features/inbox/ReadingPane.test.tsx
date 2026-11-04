@@ -13,7 +13,9 @@ import type {
   AskSnooze,
   InboxRow,
   IssueDetails,
+  MyReplyAgentRow,
   MyReplyRow,
+  MyReplyThreadRow,
   Version,
 } from "../../api/types";
 import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
@@ -625,9 +627,10 @@ test("a selection changed twice inside the settle opens the second document alon
 // The four thread bodies: what the column shows for a Reply or an Agent row.
 // ---------------------------------------------------------------------------------------------
 
-function threadRow(overrides: Partial<MyReplyRow>): MyReplyRow {
+function threadRow(overrides: Partial<MyReplyThreadRow>): MyReplyThreadRow {
   return {
     kind: "comment",
+    read_through: "2026-10-12T00:30:00Z",
     ref: "/issues/CORE-1?comment=comment-1",
     reply: {
       author: { id: "bob", kind: "user" },
@@ -640,6 +643,24 @@ function threadRow(overrides: Partial<MyReplyRow>): MyReplyRow {
     thread_id: "comment-1",
     unread: true,
     unread_count: 1,
+    ...overrides,
+  };
+}
+
+/** An Agent row, the other shape the column draws: a message the reader sent a session, with
+ *  that session's reply. */
+function agentThreadRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
+  const { reply, subject, unread, unread_count } = threadRow({});
+  return {
+    kind: "agent",
+    ref: "/agents/planner/live",
+    reply,
+    session: { id: "planner", name: "Planner" },
+    subject,
+    thread_id: "message-1",
+    unread,
+    unread_count,
+    unread_reply_ids: ["reply-1"],
     ...overrides,
   };
 }
@@ -729,15 +750,7 @@ test("an issue message conversation reads the issue's messages", async () => {
 test("an Agent row shows the session's name and reads that session's messages", async () => {
   const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue([]);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
-  const { view } = renderThread(
-    threadRow({
-      kind: "agent",
-      ref: "/agents/planner/live",
-      session: { id: "planner", name: "Planner" },
-      thread_id: "message-1",
-      unread_reply_ids: ["reply-1"],
-    })
-  );
+  const { view } = renderThread(agentThreadRow());
   try {
     expect((await paneBody()).getAttribute("data-inbox-pane-body")).toBe("agent");
     const pane = screen.getByTestId("inbox-pane");

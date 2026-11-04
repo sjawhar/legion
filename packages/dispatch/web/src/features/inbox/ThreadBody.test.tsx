@@ -11,7 +11,9 @@ import type {
   IssueDetails,
   Message,
   MessageRead,
+  MyReplyAgentRow,
   MyReplyRow,
+  MyReplyThreadRow,
 } from "../../api/types";
 import { ThreadRowCard } from "./ThreadRowCard";
 
@@ -57,7 +59,7 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
   };
 }
 
-function agentRow(overrides: Partial<MyReplyRow> = {}): MyReplyRow {
+function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
   return {
     kind: "agent",
     ref: "/agents/planner/live",
@@ -78,7 +80,7 @@ function agentRow(overrides: Partial<MyReplyRow> = {}): MyReplyRow {
   };
 }
 
-function commentRow(overrides: Partial<MyReplyRow> = {}): MyReplyRow {
+function commentRow(overrides: Partial<MyReplyThreadRow> = {}): MyReplyThreadRow {
   return {
     issue: { key: "CORE-1", title: "Fix the thing" },
     kind: "comment",

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { threadReadRequest } from "../../api/client";
 import { myRepliesKey, myRepliesOwnerQuery } from "../../api/queries";
@@ -7,6 +7,7 @@ import type { Ask } from "../../api/types";
 import { useIsHuman } from "../../hooks/useIsHuman";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { useSendMarkOnce } from "../writes/useSendMarkOnce";
+import { unreadWrites } from "./thread-layout";
 
 /** The owner a thread lives on, as `GET /api/v1/me/replies` narrows to it: an issue, or a project
  *  document (an issue's documents are the issue's). */
@@ -34,10 +35,24 @@ export interface MarkThreadReadOptions {
   /** The server timestamp of the newest reply the surface shows; with none there is nothing to
    *  read. */
   readonly newestShownAt: string | undefined;
+  /** The thread's writes, as the surface holds them, for the unread set below; none while the
+   *  thread is still loading, and none at all from a surface that wants no set. */
+  readonly writes?: readonly { readonly id: string; readonly created_at: string }[];
   /** Told the moment that reply has been on screen long enough to count as read, as the mark is
    *  made rather than when the server takes it: the Inbox holds the row it was read in on this
    *  (`features/inbox/pane-selection.ts`). */
   readonly onRead?: () => void;
+}
+
+/** What a thread's read mark answers: where the watch goes, and what the thread still holds
+ *  unread. */
+export interface ThreadRead {
+  /** The watch, for the newest message's own element. */
+  readonly ref: DwellRef;
+  /** The ids of `writes` the reader has not read, by the one rule (`unreadWrites`), read from
+   *  the same unread set the mark watches: empty while this surface marks nothing, while the
+   *  thread is not in the set, and while it holds no writes of its own. */
+  readonly unread: ReadonlySet<string>;
 }
 
 /**
@@ -53,6 +68,10 @@ export interface MarkThreadReadOptions {
  * reads that set through one shared request, and a thread the viewer never wrote in is never
  * marked. Past the set's 200 rows a thread missing from it may still be unread, so then every
  * thread is watched and the server, which writes nothing for a thread without a row, decides.
+ *
+ * That one read is also where the thread's unread writes come from: the row it holds for this
+ * thread, read by the one rule (`unreadWrites`), so no surface asks a second time to find out
+ * which of the replies in front of the reader are new.
  */
 export function useMarkThreadRead({
   enabled,
@@ -60,21 +79,25 @@ export function useMarkThreadRead({
   onRead,
   owner,
   threadId,
-}: MarkThreadReadOptions): DwellRef {
+  writes,
+}: MarkThreadReadOptions): ThreadRead {
   const queryClient = useQueryClient();
   // The routes are human-only; any other principal never asks, so never cycles on a 403.
   const human = useIsHuman();
   const watching = enabled && human && owner !== undefined && newestShownAt !== undefined;
   const unreadSet = useQuery({ ...myRepliesOwnerQuery(owner ?? NO_OWNER), enabled: watching });
   const rows = unreadSet.data;
-  const unread =
-    watching &&
-    rows !== undefined &&
-    (rows.total > rows.rows.length || rows.rows.some((row) => row.thread_id === threadId));
+  // This thread's own row of that set, which says both that it is unread and what in it is.
+  const row = watching
+    ? rows?.rows.find((candidate) => candidate.thread_id === threadId)
+    : undefined;
+  // Whether this thread is one the mark watches at all.
+  const watched =
+    watching && rows !== undefined && (rows.total > rows.rows.length || row !== undefined);
   // The newest reply this surface saw dwell, for the thread it saw it in.
   const [seen, setSeen] = useState<{ readonly at: string; readonly threadId: string }>();
   const ref = useDwell({
-    enabled: unread,
+    enabled: watched,
     onDwell: () => {
       if (newestShownAt === undefined) return;
       setSeen({ at: newestShownAt, threadId });
@@ -89,9 +112,10 @@ export function useMarkThreadRead({
         : { key: `${threadId} ${seen.at}`, value: seen.at },
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: myRepliesKey }),
     request: (readThrough: string) => threadReadRequest(threadId, readThrough),
-    shouldSend: unread,
+    shouldSend: watched,
     target: `read:thread:${threadId}`,
     wake: unreadSet.dataUpdatedAt,
   });
-  return ref;
+  const unread = useMemo(() => unreadWrites(row, writes), [row, writes]);
+  return { ref, unread };
 }

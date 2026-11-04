@@ -8,8 +8,10 @@
 -- order it answers in (api/replies.go, myRepliesEverything), so one index scan answers it.
 --
 -- Building the index takes SHARE on user_threads, so the writes its triggers make wait for the
--- build; the table is small (727 unread rows across every person on 2026-10-31) and the build
--- rewrites no row and refuses none, so the window is milliseconds and its census answers 0.
+-- build. What it reads is not the unread set: a plain create index scans the table and sorts
+-- every row the predicate keeps, which is every row carrying a replied_at, read rows included.
+-- The window is therefore one scan and sort of user_threads, a row per person per thread they
+-- have written in, with no row rewritten and none refused, and the index's census answers 0.
 -- Migrations run in one transaction, so create index concurrently is impossible here; it is a
 -- plain create index, as 0148's is. The release before this one never reads the index, so that
 -- release serves beside it unchanged.

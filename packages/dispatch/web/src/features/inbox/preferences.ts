@@ -3,6 +3,9 @@
  * the list they linked. The page and the drawer read the same values, so the two agree, and a
  * reload keeps them. Everything the address can carry - the filters, the sort, the grouping and
  * the read-thread switch - stays in the address on the page and in `useState` in the drawer.
+ *
+ * The thread order is a browser-kept choice too, but it is no Inbox setting: every thread in
+ * Dispatch reads in it, so it lives with the thread modules (`features/threads/thread-order.ts`).
  */
 
 import { useCallback } from "react";
@@ -10,26 +13,6 @@ import { useCallback } from "react";
 import type { InboxGroupBy } from "../refs/routes";
 import { useUserPreference } from "../shell/userPreference";
 import { DEFAULT_FOLDED_GROUPS } from "./grouping";
-
-/** Which way a thread's replies read: oldest first, as a conversation is written, or newest
- *  first, as a list of what has just happened. */
-export const THREAD_ORDERS = ["oldest", "newest"] as const;
-export type ThreadOrder = (typeof THREAD_ORDERS)[number];
-
-/** What each order is called in the View menu. */
-export const THREAD_ORDER_LABELS: Record<ThreadOrder, string> = {
-  newest: "Newest first",
-  oldest: "Oldest first",
-};
-
-/** The reader's thread order, kept for their browser. */
-export function useThreadOrder(): [ThreadOrder, (next: ThreadOrder) => void] {
-  return useUserPreference<ThreadOrder>(
-    "inbox.thread-order",
-    (stored) => (stored === "newest" ? "newest" : "oldest"),
-    (value) => value
-  );
-}
 
 /** The folded bands of every grouping, as the preference stores them: one list of band keys per
  *  Group by value, so folding `P1` under Priority says nothing about the Project bands. */

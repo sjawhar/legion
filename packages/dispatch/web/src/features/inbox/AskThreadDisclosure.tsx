@@ -4,8 +4,9 @@ import type { ArtifactOwner } from "../../api/client";
 import type { Ask } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
 import type { DwellRef } from "../shell/useDwell";
+import { composerFirst } from "../threads/thread-layout";
+import type { ThreadOrder } from "../threads/thread-order";
 import { AskReplyComposer, AskThread, type AskThreadQuery, type CreateReply } from "./AskThread";
-import type { ThreadOrder } from "./preferences";
 
 interface AskThreadDisclosureProps {
   ask: Ask;
@@ -97,7 +98,7 @@ export function AskThreadDisclosure({
       </>
     ) : null;
 
-  return order === "newest" ? (
+  return composerFirst(order) ? (
     <>
       {composer}
       {threadNode}

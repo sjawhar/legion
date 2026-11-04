@@ -62,6 +62,7 @@ async function indexedRow(match: (row: InboxRow) => boolean): Promise<InboxRow> 
 
 interface Seeded {
   readonly askId: string;
+  readonly askIssue: string;
   readonly blockAsk: string;
   readonly blockIssue: string;
   readonly comment: string;
@@ -115,6 +116,7 @@ async function seedThreads(replies: readonly string[] = REPLIES): Promise<Seeded
 
   return {
     askId: ask.id,
+    askIssue: askIssue.key,
     blockAsk: block.id,
     blockIssue: blockIssue.key,
     comment: comment.id,
@@ -222,6 +224,20 @@ async function openInPane(page: Page, id: string): Promise<Locator> {
   return body;
 }
 
+/**
+ * Holds every read mark the page writes, so a thread drawn for a second keeps saying what it
+ * has that the reader has not read, and the fold under it stays where the row put it. The marks
+ * themselves are `inbox-read-state.e2e.ts`'s subject, and `inbox-thread-pane.e2e.ts` holds them
+ * the same way.
+ */
+async function holdReadMarks(page: Page): Promise<void> {
+  await page.route("**/api/v1/me/threads/*/read", (route) =>
+    route.request().method() === "GET"
+      ? route.fallback()
+      : route.fulfill({ body: "{}", contentType: "application/json", status: 503 })
+  );
+}
+
 test("the Inbox's pane and its card read a thread in the chosen order, and keep it over a reload", async ({
   browser,
 }) => {
@@ -300,6 +316,9 @@ const FOLD_ORDERS = [
 
 test("an ask's thread folds and places its box by the chosen order", async ({ browser }) => {
   const seeded = await seedThreads();
+  // The Inbox's row carries the thread's read mark, and the card folds by it: read through
+  // reply 4, so the fold holds those four and replies 5 and 6 stay on screen.
+  await readAskThrough(seeded.askIssue, seeded.askId, 4);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -313,6 +332,46 @@ test("an ask's thread folds and places its box by the chosen order", async ({ br
       const thread = inboxPane(page).getByTestId(`thread-${seeded.askId}`);
       await expect(thread, order).toBeVisible();
       expect(await verticalOrder(foldParts(thread, 4)), order).toEqual(expected);
+    }
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * An unread reply is never folded away, in an ask's thread as in every other one (spec v23,
+ * A10). The Inbox's row carries the thread's read mark, and the pane passes the unread set it
+ * names down to the ask's card, so with replies 1 and 2 read the four unread ones are all on
+ * screen and the fold holds exactly those two. Folding by count alone put replies 3 and 4
+ * behind **Show 4 earlier replies**, and the row's own mark then read them through reply 6 -
+ * two writes the reader never saw, marked read.
+ *
+ * The read marks are held, so the row keeps saying what it has that the reader has not read
+ * while the thread is drawn (`inbox-thread-pane.e2e.ts` holds them the same way).
+ */
+test("an ask's thread leaves every unread reply on screen and folds only the read ones", async ({
+  browser,
+}) => {
+  const seeded = await seedThreads();
+  await readAskThrough(seeded.askIssue, seeded.askId, 2);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await holdReadMarks(page);
+    await setThreadOrder(page, "oldest");
+    const row = page.locator(`[data-inbox-row="${replyRowId(seeded.askId)}"]`);
+    await expect(row).toBeVisible();
+    await row.locator("time").first().click();
+    const thread = inboxPane(page).getByTestId(`thread-${seeded.askId}`);
+    await expect(thread).toBeVisible();
+    // The fold holds the two read replies and nothing else.
+    await expect(thread.getByRole("button", { name: "Show 2 earlier replies" })).toBeVisible();
+    for (const place of [3, 4, 5, 6]) {
+      await expect(thread.getByText(REPLIES[place - 1] ?? ""), `reply ${place}`).toBeVisible();
+    }
+    for (const place of [1, 2]) {
+      await expect(thread.getByText(REPLIES[place - 1] ?? ""), `reply ${place}`).toHaveCount(0);
     }
   } finally {
     await alice.close();

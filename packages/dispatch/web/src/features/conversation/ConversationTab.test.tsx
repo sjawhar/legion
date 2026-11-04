@@ -30,9 +30,9 @@ import type {
   UserState,
 } from "../../api/types";
 import { stubMatchMedia } from "../margin/margin-fixture";
-import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { userPreferenceStorageKey } from "../shell/userPreference";
+import { seedUnread } from "../threads/replies-fixture";
 import { writesOf } from "../writes/write-store";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";

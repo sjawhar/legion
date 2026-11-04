@@ -45,7 +45,9 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { composerFirst } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { askRepliesOwner, useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
@@ -62,9 +64,7 @@ import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { EarlierApproval } from "./EarlierApproval";
-import { useThreadOrder } from "./preferences";
 import { clearReplyDraft } from "./reply-drafts";
-import { useUnreadReplies } from "./thread-layout";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> =>
@@ -121,6 +121,11 @@ export interface AskCardProps {
    *  screen. Set only on the ask's own pages - its Conversation turn, its margin card, its
    *  decision block - so the Inbox, its drawer and the Answers page start no unread-set reads. */
   markRead?: boolean;
+  /** The ids of the ask's replies the reader has not read, from a host that holds the fact
+   *  itself: the Inbox, whose row carries the thread's read mark. Without it the card reads the
+   *  set from the mark it makes under `markRead`, and a card that does neither folds by count
+   *  alone. An unread reply is never folded away (`threads/thread-layout.ts`). */
+  unread?: ReadonlySet<string>;
   /** The reply a deep link named: the Conversation marks that reply and opens the card's
    *  collapsed thread over it. No other surface lands on a reply. */
   currentReplyId?: string;
@@ -181,6 +186,7 @@ export function AskCard({
   onAnswered,
   mode = "answer",
   markRead = false,
+  unread,
   currentReplyId,
 }: AskCardProps): ReactNode {
   const {
@@ -336,24 +342,23 @@ export function AskCard({
   const answerIsNewest =
     recordedAnswer !== null &&
     (newestReply === undefined || compareTimestamps(recordedAnswer.at, newestReply.created_at) > 0);
-  const markNewest = useMarkThreadRead({
+  // The mark the card makes, and with it which of the replies on screen are still unread: an
+  // unread reply is never folded away. A card that marks nothing read reads nothing, so it takes
+  // what its host passes, and folds by count alone where the host passes none.
+  const threadRead = useMarkThreadRead({
     enabled: markRead,
     newestShownAt: answerIsNewest ? recordedAnswer?.at : newestReply?.created_at,
     owner: askRepliesOwner(displayedAsk),
     threadId: displayedAsk.id,
+    writes: threadQuery.data?.replies,
   });
-  // The one order every thread reads in, the reader's own (`preferences.ts`): it places the
-  // replies, this card's options and answer box, and the thread's reply composer.
+  const markNewest = threadRead.ref;
+  const unreadReplies = unread ?? threadRead.unread;
+  // The one order every thread reads in, the reader's own (`threads/thread-order.ts`): it places
+  // the replies, this card's options and answer box, and the thread's reply composer. Where the
+  // box goes is the layout's own rule, which this card reads rather than works out again.
   const [threadOrder] = useThreadOrder();
-  const answerFirst = threadOrder === "newest";
-  // Which replies are unread, from the same set the mark above watches: an unread reply is never
-  // folded away. A card that marks nothing read reads nothing, so it folds by count alone.
-  const unreadReplies = useUnreadReplies({
-    enabled: markRead,
-    owner: askRepliesOwner(displayedAsk),
-    replies: threadQuery.data?.replies,
-    threadId: displayedAsk.id,
-  });
+  const answerFirst = composerFirst(threadOrder);
   const referencedByNode =
     reference === undefined || referencedByCount === 0 ? null : (
       <div className="mt-3">

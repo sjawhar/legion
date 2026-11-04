@@ -334,8 +334,9 @@ func TestInboxReadRefusesWhatItCannotMark(t *testing.T) {
 
 // A mark-all and a session's reply in one of the threads it marks, at once: neither waits on the
 // other forever, the mark is never lost and the reply's time is never lost either. The mark-all
-// takes the thread's issue and its project before it touches any user_threads row, which is the
-// order the comment writer takes them in, so the two cannot close a cycle.
+// takes the thread's issue `for share` before it touches any user_threads row, and the comment
+// writer holds that issue `for no key update` while its trigger moves those rows, so one of the
+// two waits at the issue holding nothing the other wants.
 func TestInboxReadRacingASessionReply(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Race", "A spec")
@@ -374,5 +375,55 @@ func TestInboxReadRacingASessionReply(t *testing.T) {
 	}
 	if marks == 0 {
 		t.Fatalf("over %d rounds the mark-all marked nothing: the race never took the write path", raceRounds)
+	}
+}
+
+// A mark-all and one thread's own PUT /api/v1/me/threads/{id}/read, for the same person and a
+// thread the mark-all marks, at once. Both move that user_threads row and both append under its
+// project, and the thread's owner orders neither of them: each takes it `for share`, and two
+// share locks do not conflict. Only taking the row and the project in one order does, so a
+// round where one held the row while the other held the project would die of a deadlock (40P01)
+// its caller answers 500.
+//
+// A second unread thread in the same project keeps the mark-all on its write path whichever of
+// the two reaches the shared row first: it marks that thread every round, so it takes the
+// project lock every round, which is the lock the pair can cross on.
+func TestInboxReadRacingOneThreadsOwnMark(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Mark race", "A spec")
+	comments := "/api/v1/issues/" + issue.Key + "/comments"
+	shared := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Racing"}, "alice")
+	other := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Also racing"}, "alice")
+	for round := range raceRounds {
+		// A session's reply in each thread leaves both of Alice's rows unread again.
+		sessionComment(t, handler, comments, map[string]any{"body": "Reply", "reply_to": shared.ID})
+		sessionComment(t, handler, comments, map[string]any{"body": "Reply", "reply_to": other.ID})
+		mark := time.Now()
+		all, one := race(t, round,
+			func() *httptest.ResponseRecorder {
+				return postInboxRead(t, handler, "alice", map[string]any{
+					"read_through": mark.UTC().Format(time.RFC3339Nano),
+				})
+			},
+			func() *httptest.ResponseRecorder { return markThreadRead(t, handler, "alice", shared.ID, mark) })
+		if all.Code != http.StatusOK || one.Code != http.StatusNoContent {
+			t.Fatalf("round %d: mark-all %d %s, thread mark %d %s",
+				round, all.Code, all.Body.String(), one.Code, one.Body.String())
+		}
+		marked := decodeBody[struct {
+			Marked int `json:"marked"`
+		}](t, all).Marked
+		if marked == 0 {
+			t.Fatalf("round %d: the mark-all marked nothing, so it never took the write path", round)
+		}
+		// Each thread is read through the mark both writers wrote, whichever of them moved the
+		// shared row: a mark that landed is never lost, and a mark that moves forward every
+		// round can never have moved back.
+		for name, thread := range map[string]string{"the shared thread": shared.ID, "the other thread": other.ID} {
+			through, unread := threadMark(t, database, "alice", thread)
+			if through.Before(mark.Truncate(time.Microsecond)) || unread {
+				t.Fatalf("round %d: %s's read mark %s lost the mark %s (unread %v)", round, name, through, mark, unread)
+			}
+		}
 	}
 }

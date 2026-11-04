@@ -11,8 +11,8 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { INBOX_GROUP_BYS, INBOX_SORTS, type InboxGroupBy, type InboxSort } from "../refs/routes";
+import { THREAD_ORDER_LABELS, THREAD_ORDERS, type ThreadOrder } from "../threads/thread-order";
 import { DIMENSION_LABELS } from "./grouping";
-import { THREAD_ORDER_LABELS, THREAD_ORDERS, type ThreadOrder } from "./preferences";
 
 /** How the list may be ordered, as the menu names each choice. */
 const SORT_LABELS: Record<InboxSort, string> = { ...DIMENSION_LABELS, newest: "Newest first" };
@@ -99,7 +99,7 @@ export interface ViewMenuProps {
  * the reader has already read are in it, and which way a thread's own replies read.
  *
  * The first three are the list's, so they ride in the address and a link carries them; the
- * thread order is the reader's own and is kept for their browser (`preferences.ts`).
+ * thread order is the reader's own and is kept for their browser (`threads/thread-order.ts`).
  */
 export function ViewMenu({
   allThreadCount,

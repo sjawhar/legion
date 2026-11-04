@@ -13,8 +13,8 @@ import { answerThreadReads } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import { myRepliesOwnerQuery } from "../../api/queries";
 import type { AnswerAskInput, Ask, AskAnswer, AskRead, Comment } from "../../api/types";
-import { replyRow, seedUnread } from "../replies/replies-fixture";
 import { userPreferenceStorageKey } from "../shell/userPreference";
+import { replyRow, seedUnread } from "../threads/replies-fixture";
 import { AskCard } from "./AskCard";
 import { answerDraft } from "./answer-drafts";
 

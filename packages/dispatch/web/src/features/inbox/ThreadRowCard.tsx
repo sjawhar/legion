@@ -12,17 +12,15 @@ import {
   linkHoverText,
   linkText,
   textMutedOnCanvas,
-  textPrimaryOnCanvas,
-  unreadDotBg,
 } from "../../theme/classes";
 import { storeAgentState } from "../agents/unread";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { ThreadOwnerLine } from "./AskOwnerLink";
 import { rowPriority, rowType } from "./list-row";
-import { questionLine } from "./question-line";
 import { RowKindIcon, RowPriorityTag } from "./RowMarks";
 import { ThreadBody } from "./ThreadBody";
+import { ThreadTitle } from "./ThreadTitle";
 
 /**
  * A Reply or an Agent row as a card: the layout below the reading pane's width, and the one the
@@ -36,15 +34,19 @@ import { ThreadBody } from "./ThreadBody";
  */
 export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
-  const session = thread.session?.id;
+  const session = thread.kind === "agent" ? thread.session.id : undefined;
   const markRead = useKeyedWrite<UserAgentState | undefined>({
     label: () => "Thread marked read",
     // An Agent row is read by id, as every read of one is: its session's own read mark covers
     // replies in the live conversation and in its other threads, which this press has not
     // shown. Every other row carries a thread mark, which this moves to its newest write.
     write: async (_variables, bounds) => {
-      if (thread.kind === "agent" && session !== undefined) {
-        return api.putAgentState(session, { read_replies: thread.unread_reply_ids ?? [] }, bounds);
+      if (thread.kind === "agent") {
+        return api.putAgentState(
+          thread.session.id,
+          { read_replies: thread.unread_reply_ids },
+          bounds
+        );
       }
       await api.markThreadRead(thread.thread_id, thread.reply.created_at, bounds);
       return undefined;
@@ -57,26 +59,11 @@ export function ThreadRowCard({ thread }: { thread: MyReplyRow }): ReactNode {
     },
   });
   const row = { kind: "thread", thread } as const;
-  const title = questionLine(thread.subject);
   return (
     <div className={`rounded-xl border p-3 ${card} ${borderDefault}`} data-inbox-thread-card="">
       <div className="flex min-w-0 items-baseline gap-2">
         <RowKindIcon type={rowType(row)} />
-        <span
-          className={`min-w-0 grow truncate text-sm ${
-            thread.unread ? `font-semibold ${textPrimaryOnCanvas}` : textMutedOnCanvas
-          }`}
-          title={title}
-        >
-          {title}
-        </span>
-        {thread.unread ? (
-          <span
-            aria-label="Unread"
-            className={`size-2 shrink-0 rounded-full ${unreadDotBg}`}
-            role="img"
-          />
-        ) : null}
+        <ThreadTitle className="min-w-0 grow truncate text-sm" thread={thread} />
         <span className={`shrink-0 text-xs ${textMutedOnCanvas}`}>
           <Timestamp at={thread.reply.created_at} />
         </span>

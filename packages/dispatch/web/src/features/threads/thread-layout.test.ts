@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { ThreadOrder } from "./preferences";
 import { earlierRepliesLabel, threadLayout } from "./thread-layout";
+import type { ThreadOrder } from "./thread-order";
 
 /** Six replies, oldest first, named by their place in the thread. */
 const REPLIES = [1, 2, 3, 4, 5, 6].map((place) => ({ id: `reply-${place}` }));

@@ -171,13 +171,14 @@ const (
 	myRepliesAllPageQuery = myRepliesPage + myRepliesEverything + myRepliesPageRest
 )
 
-// parseMyRepliesOwner reads the optional ?issue= or ?artifact= that narrows the Replies rows to one
-// thread owner: the read a mounted thread makes to learn whether it is unread. Both together are
-// refused, as is an artifact that is not a uuid.
-func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err error) {
-	query := r.URL.Query()
-	issue = strings.TrimSpace(query.Get("issue"))
-	rawArtifact := strings.TrimSpace(query.Get("artifact"))
+// parseThreadOwner reads the owner that narrows an Inbox read to one thread owner: an issue key
+// or a project document's id, the read a mounted thread makes to learn whether it is unread.
+// Both together are refused, as is a document that is not a uuid. The list route reads the two
+// off its query (parseMyRepliesOwner) and the mark-all route off its body (parseInboxReadScope),
+// and both refuse the same input with the same words.
+func parseThreadOwner(rawIssue, rawArtifact string) (issue string, artifact *string, err error) {
+	issue = strings.TrimSpace(rawIssue)
+	rawArtifact = strings.TrimSpace(rawArtifact)
 	if issue != "" && rawArtifact != "" {
 		return "", nil, errorf(http.StatusBadRequest, "INVALID_QUERY", "name issue or artifact, not both")
 	}
@@ -190,6 +191,12 @@ func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err e
 		artifact = &canonical
 	}
 	return issue, artifact, nil
+}
+
+// parseMyRepliesOwner reads the optional ?issue= or ?artifact= of GET /api/v1/me/replies.
+func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err error) {
+	query := r.URL.Query()
+	return parseThreadOwner(query.Get("issue"), query.Get("artifact"))
 }
 
 // myAgentRows reads the caller's one-off agent threads in one state, newest reply first. Its rows
@@ -279,10 +286,12 @@ const (
 	myRepliesStateAll = "all"
 )
 
-// parseMyRepliesKinds reads ?kind=, a comma-separated list of reply and agent. An empty list is
-// the default, reply alone; any other value is refused.
-func parseMyRepliesKinds(r *http.Request) (reply, agent bool, err error) {
-	for _, value := range strings.Split(r.URL.Query().Get("kind"), ",") {
+// parseThreadKinds reads the kinds of row an Inbox read names: reply and agent, a value named
+// twice counting once, an empty value skipped (the list route splits an absent ?kind= into one),
+// and any other value refused. Both false is a request that named none, which each route
+// defaults for itself: reply alone for the list, both for the mark-all.
+func parseThreadKinds(values []string) (reply, agent bool, err error) {
+	for _, value := range values {
 		switch strings.TrimSpace(value) {
 		case "":
 		case myReplyKindReply:
@@ -293,6 +302,16 @@ func parseMyRepliesKinds(r *http.Request) (reply, agent bool, err error) {
 			return false, false, errorf(http.StatusBadRequest, "INVALID_QUERY",
 				"kind takes %s and %s", myReplyKindReply, myReplyKindAgent)
 		}
+	}
+	return reply, agent, nil
+}
+
+// parseMyRepliesKinds reads ?kind=, a comma-separated list of reply and agent. A request that
+// named none reads reply alone, what it read before the Inbox took the Agent rows.
+func parseMyRepliesKinds(r *http.Request) (reply, agent bool, err error) {
+	reply, agent, err = parseThreadKinds(strings.Split(r.URL.Query().Get("kind"), ","))
+	if err != nil {
+		return false, false, err
 	}
 	if !reply && !agent {
 		reply = true
@@ -348,6 +367,12 @@ func parseMyRepliesPage(r *http.Request) (limit *int, offset int, err error) {
 // snapshot over the same filter it reads every matching row, so what it read is the total. The
 // Agent rows' sessions are named after the cut (nameAgentSessions), so a row the page throws away
 // costs no title.
+//
+// The two kinds' blocks below stay two blocks. They share a shape - count when the read is
+// paged, read the rows, add to the total - but every line of it differs: a pair of queries each,
+// a login with an owner narrowing against a session read's own arguments, a row read of its own,
+// and an error of its own to report. One block over a per-kind callback would hide four
+// differences behind one parameter list to save six lines.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.requireHuman(w, r)
 	if !ok {
@@ -606,8 +631,11 @@ func nameAgentSessions(ctx context.Context, tx pgx.Tx, rows []model.MyReplyRow) 
 // The transaction locks the thread's owner row `for share` before it touches the caller's row:
 // every writer that moves a user_threads row (a comment, an answer, an issue message) holds that
 // owner `for no key update` before its trigger fires, so a mark that took the row first could wait
-// on a writer waiting on it. Owner first, then the project the event names, is the order every
-// multi-owner transaction takes (LockOwners).
+// on a writer waiting on it. Owner, then the caller's row, then the project the event names is
+// also the order the Inbox's Mark all read takes (api/inbox_read.go, inboxReadLockDocuments),
+// and the two need the same one: both take the owner `for share`, two share locks do not
+// conflict, so the owner orders nothing between them, and only the row and the project in one
+// order keeps the pair off a deadlock.
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

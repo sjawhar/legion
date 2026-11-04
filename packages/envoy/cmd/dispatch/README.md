@@ -1400,8 +1400,10 @@ It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two befor
 Migration `20261103071942_user_threads_login_replied` creates `user_threads_login_replied` on `user_threads (login, replied_at desc, thread_id desc) where replied_at is not null`, the index behind the Inbox's `?state=all` read of a person's threads.
 `user_threads_unread` (`0095`) is partial on the stored `unread` flag and does not cover that state, so without this index the read is a scan of `user_threads`;
 the column order is the read's own, the login it narrows to and then the order it answers in, so one index scan answers it.
-Building it takes `SHARE` on `user_threads`, so the writes its triggers make wait for the build;
-the table is small (727 unread rows across every person on 2026-10-31), the build rewrites no row and refuses none, so the window is milliseconds and its census answers `0`.
+Building it takes `SHARE` on `user_threads`, so the writes its triggers make wait for the build.
+What the build reads is not the unread set:
+a plain `create index` scans the table and sorts every row the predicate keeps, which is every row carrying a `replied_at`, read rows included.
+The window is one scan and sort of `user_threads` — a row per person per thread they have written in — with no row rewritten and none refused, and its census answers `0`.
 Migrations run in one transaction, so `create index concurrently` is impossible here, as for `0148`.
 The release before it never reads the index and serves beside it unchanged.
 

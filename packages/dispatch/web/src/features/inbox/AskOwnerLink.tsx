@@ -7,7 +7,6 @@ import { linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes"
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { askIssueKey } from "./ask-name";
-import { TYPE_LABELS } from "./grouping";
 import { threadOwner } from "./list-row";
 
 /** The issue or project document an ask belongs to, as one truncating link: the issue's key and
@@ -94,9 +93,9 @@ export function ThreadOwnerLine({
   className: string;
   thread: MyReplyRow;
 }): ReactNode {
-  const owner = threadOwner(thread);
-  if (owner === null) {
-    return <span className={className}>{thread.session?.name ?? TYPE_LABELS.agent}</span>;
+  if (thread.kind === "agent") {
+    return <span className={className}>{thread.session.name}</span>;
   }
-  return <AskOwnerLink className="grow" owner={owner} />;
+  const owner = threadOwner(thread);
+  return owner === null ? null : <AskOwnerLink className="grow" owner={owner} />;
 }

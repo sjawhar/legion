@@ -7,8 +7,8 @@ import { MemoryRouter } from "react-router-dom";
 import { answerInboxReads } from "../../__tests__/send-answers";
 import { ApiError } from "../../api/client";
 import { inboxThreadsQuery, myRepliesCountQuery, whoAmIQuery } from "../../api/queries";
-import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
-import { replyRow } from "../replies/replies-fixture";
+import type { MyRepliesResponse, MyReplyAgentRow, MyReplyRow } from "../../api/types";
+import { replyRow, agentRow as sharedAgentRow } from "../threads/replies-fixture";
 import { InboxBar, type InboxFilters } from "./InboxBar";
 import type { InboxListRow } from "./list-row";
 import { MARK_ALL_REFUSED_TEXT, markAllReadBody, marksThread, useMarkAllRead } from "./mark-all";
@@ -22,17 +22,13 @@ function threadsRead(rows: readonly MyReplyRow[]): MyRepliesResponse {
   return { as_of: AS_OF, limit: 0, offset: 0, rows: [...rows], total: rows.length };
 }
 
-function agentRow(overrides: Partial<MyReplyRow> = {}): MyReplyRow {
-  const base = replyRow("message-1");
-  return {
-    ...base,
-    issue: undefined,
-    kind: "agent",
+function agentRow(overrides: Partial<MyReplyAgentRow> = {}): MyReplyAgentRow {
+  return sharedAgentRow("message-1", {
     ref: "/agents/planner/live",
     session: { id: "planner", name: "Planner" },
     unread_reply_ids: ["reply-1"],
     ...overrides,
-  };
+  });
 }
 
 function noop(): void {}

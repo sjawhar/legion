@@ -45,7 +45,8 @@ export function rowLastActivityAt(row: InboxListRow): string {
 /** The owning issue's coarse priority, or null where there is none to show: a thread with no
  *  issue, an issue with no priority set, and every Agent row. */
 export function rowPriority(row: InboxListRow): IssuePriority | null {
-  return row.kind === "ask" ? row.ask.priority : (row.thread.priority ?? null);
+  if (row.kind === "ask") return row.ask.priority;
+  return row.thread.kind === "agent" ? null : (row.thread.priority ?? null);
 }
 
 /** The ask's urgency. A thread has none at all - urgency is a property of a question - so the
@@ -59,7 +60,9 @@ export function rowUrgency(row: InboxListRow): AskUrgency | null {
  *  it was asked on. A project key holds no hyphen, so the part of an issue key before the first
  *  one is its project: `CORE-12` belongs to `CORE`. */
 export function rowProject(row: InboxListRow): string | null {
-  if (row.kind === "thread") return row.thread.project ?? null;
+  if (row.kind === "thread") {
+    return row.thread.kind === "agent" ? null : (row.thread.project ?? null);
+  }
   const issue = row.ask.issue?.key ?? row.ask.issue_key;
   if (issue !== null && issue !== undefined) return issue.split("-")[0] ?? issue;
   return row.ask.document?.project ?? null;
@@ -88,6 +91,7 @@ export function rowType(row: InboxListRow): InboxRowType {
 /** The issue or project document a thread belongs to, or null for an Agent row, which belongs
  *  to neither: its thread is a message the reader sent a session. */
 export function threadOwner(thread: MyReplyRow): OpenAskOwner | null {
+  if (thread.kind === "agent") return null;
   if (thread.issue !== undefined) return { issue: thread.issue };
   return thread.document === undefined ? null : { document: thread.document };
 }

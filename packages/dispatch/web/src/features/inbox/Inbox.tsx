@@ -2,17 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import {
-  inboxAllThreadCountQuery,
-  inboxQuery,
-  inboxThreadsQuery,
-  whoAmIQuery,
-} from "../../api/queries";
+import { inboxQuery, whoAmIQuery } from "../../api/queries";
 import type { InboxRow, MyReplyRow } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
-import { useIsHuman } from "../../hooks/useIsHuman";
 import {
   checkboxAccent,
   dangerText,
@@ -20,8 +14,6 @@ import {
   surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurfaceMuted,
-  textPrimaryOnCanvas,
-  unreadDotBg,
 } from "../../theme/classes";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { type CredentialRequests, useCredentialRequests } from "../credentials/pending";
@@ -39,6 +31,7 @@ import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { READING_PANE_QUERY, useMediaQuery } from "../shell/useDialog";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { useThreadOrder } from "../threads/thread-order";
 import { AskCard } from "./AskCard";
 import { InboxOwnerLink, ThreadOwnerLine } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
@@ -64,7 +57,7 @@ import { useMarkAllRead } from "./mark-all";
 import { useMotionHold } from "./motion-hold";
 import { PaneDivider, usePaneWidth } from "./PaneDivider";
 import { type PlacedRow, ReadHoldContext, usePaneSelection } from "./pane-selection";
-import { useFoldedGroups, useThreadOrder } from "./preferences";
+import { useFoldedGroups } from "./preferences";
 import { questionLine } from "./question-line";
 import { ReadingPane } from "./ReadingPane";
 import { RowKindIcon, RowPriorityTag, RowUrgencyMark } from "./RowMarks";
@@ -78,7 +71,9 @@ import {
   sectionTitles,
 } from "./sections";
 import { ThreadRowCard } from "./ThreadRowCard";
+import { ThreadTitle } from "./ThreadTitle";
 import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
+import { useInboxThreadRows } from "./useInboxThreadRows";
 
 /** When an agent replied last on a row that still needs the viewer, that reply is surfaced so
  *  the viewer knows to look before answering. Whose turn it is ("Waiting on you" / "Waiting on
@@ -141,24 +136,20 @@ interface InboxRowProps {
   section: InboxSection;
 }
 
-/** The row's own checkbox, the pointer's way to the mark `x` makes - and, on a thread row, the
- *  space that checkbox would take, so every row's title starts at the same place. Snoozing,
- *  marking and the bulk bar are an open question's; a thread is read or it is not. */
+/** The row's own checkbox, the pointer's way to the mark `x` makes. Snoozing, marking and the
+ *  bulk bar are an open question's; a thread is read or it is not, so a thread row draws the
+ *  space this takes and no control of its own (`ThreadShortRow`). */
 function MarkCheckbox({
+  ask,
   marked,
   name,
   onMark,
-  row,
 }: {
+  ask: InboxRow;
   marked: boolean;
   name: string;
   onMark: (askId: string) => void;
-  row: InboxListRow;
 }): ReactNode {
-  if (row.kind === "thread") {
-    return <span aria-hidden="true" className="size-4 shrink-0" />;
-  }
-  const ask = row.ask;
   return (
     <input
       aria-label={`Select ${name}`}
@@ -235,55 +226,44 @@ function InboxRowShell({
   );
 }
 
-/** A thread row's title: a link to the thread's own page, bold with a dot while it holds a
- *  write the reader has not read. `o` follows it, which is why it wears `data-inbox-owner`. */
-function ThreadTitle({ thread }: { thread: MyReplyRow }): ReactNode {
-  const title = questionLine(thread.subject);
-  return (
-    <>
-      <a
-        className={`min-w-0 grow truncate text-sm ${
-          thread.unread ? `font-semibold ${textPrimaryOnCanvas}` : textMutedOnCanvas
-        }`}
-        data-inbox-owner=""
-        href={thread.ref}
-        title={title}
-      >
-        {title}
-      </a>
-      {thread.unread ? (
-        <span
-          aria-label="Unread"
-          className={`size-2 shrink-0 rounded-full ${unreadDotBg}`}
-          role="img"
-        />
-      ) : null}
-    </>
-  );
-}
-
-/**
- * The row beside the reading column, two lines deep: the kind's icon at the left edge, then
- * what the row is about and when it was last written in; under them the priority tag, an ask's
- * urgency, and the whole issue key with its title. Every mark is `shrink-0`, so the title is
- * what shortens and neither the marks nor the key are ever cut.
- */
-function InboxShortRow({
-  group: groupKey,
-  marked,
-  onMark,
-  onRelease,
-  onSelect,
-  ordinal,
-  row,
-  section,
-  selected,
-}: InboxRowProps & {
+/** What a short row adds to every row layout's props: beside the reading column the row is
+ *  selectable, and the one the column shows is drawn as selected. */
+interface ShortRowProps {
   onSelect: (id: string) => void;
   /** Whether this is the row the reading column is showing. */
   selected: boolean;
+}
+
+/**
+ * The frame both short rows draw in, two lines deep: the kind's icon at the left edge, then
+ * what the row is about and when it was last written in; under them the priority tag, an ask's
+ * urgency, and what the row says about its owner. Every mark is `shrink-0`, so the title is
+ * what shortens and neither the marks nor the key are ever cut.
+ */
+function ShortRowFrame({
+  age,
+  check,
+  group: groupKey,
+  onRelease,
+  onSelect,
+  owner,
+  row,
+  section,
+  selected,
+  title,
+}: ShortRowProps & {
+  /** When the row was last written in, as its own kind reads a time. */
+  age: ReactNode;
+  /** The mark checkbox, or the space a row that takes no mark leaves where it would be. */
+  check: ReactNode;
+  group: string;
+  onRelease: (() => void) | undefined;
+  /** The second line below the marks: the row's owner, and whatever it carries beside it. */
+  owner: ReactNode;
+  row: InboxListRow;
+  section: InboxSection;
+  title: ReactNode;
 }): ReactNode {
-  const reference = row.kind === "thread" ? threadReferenceRoute(row.thread) : undefined;
   return (
     <InboxRowShell
       group={groupKey}
@@ -295,44 +275,92 @@ function InboxShortRow({
     >
       <div className="flex flex-col gap-0.5 py-1.5">
         <div className="flex items-center gap-2">
-          <MarkCheckbox
-            marked={marked}
-            name={row.kind === "ask" ? controlName(row.ask, ordinal) : ""}
-            onMark={onMark}
-            row={row}
-          />
+          {check}
           <RowKindIcon type={rowType(row)} />
-          {row.kind === "ask" ? (
-            <span className="min-w-0 grow truncate text-sm">{questionLine(row.ask.question)}</span>
-          ) : (
-            <ThreadTitle thread={row.thread} />
-          )}
+          {title}
           <time
             className={`shrink-0 text-xs ${textMutedOnSurfaceMuted}`}
             dateTime={rowLastActivityAt(row)}
           >
-            {row.kind === "ask" ? (
-              formatAskAge(rowLastActivityAt(row))
-            ) : (
-              <Timestamp at={rowLastActivityAt(row)} />
-            )}
+            {age}
           </time>
         </div>
         <div className="flex min-w-0 items-baseline gap-2 pl-6">
           <RowPriorityTag priority={rowPriority(row)} />
           <RowUrgencyMark urgency={rowUrgency(row)} />
-          {row.kind === "ask" ? (
-            <InboxOwnerLink ask={row.ask} rowOwner />
-          ) : (
-            <ThreadOwnerLine
-              className={`truncate text-sm ${textMutedOnCanvas}`}
-              thread={row.thread}
-            />
-          )}
-          {reference === undefined ? null : <CopyRefButton route={reference} />}
+          {owner}
         </div>
       </div>
     </InboxRowShell>
+  );
+}
+
+/** An open question beside the reading column: its first line, how long it has waited, and the
+ *  issue or document it belongs to. */
+function AskShortRow({
+  ask,
+  group: groupKey,
+  marked,
+  onMark,
+  onRelease,
+  onSelect,
+  ordinal,
+  row,
+  section,
+  selected,
+}: InboxRowProps & ShortRowProps & { ask: InboxRow }): ReactNode {
+  return (
+    <ShortRowFrame
+      age={formatAskAge(rowLastActivityAt(row))}
+      check={
+        <MarkCheckbox ask={ask} marked={marked} name={controlName(ask, ordinal)} onMark={onMark} />
+      }
+      group={groupKey}
+      onRelease={onRelease}
+      onSelect={onSelect}
+      owner={<InboxOwnerLink ask={ask} rowOwner />}
+      row={row}
+      section={section}
+      selected={selected}
+      title={<span className="min-w-0 grow truncate text-sm">{questionLine(ask.question)}</span>}
+    />
+  );
+}
+
+/** A Reply or an Agent row beside the reading column: the thread's subject as a link to the
+ *  thread itself, when it was last written in, and whose it is. */
+function ThreadShortRow({
+  group: groupKey,
+  onRelease,
+  onSelect,
+  row,
+  section,
+  selected,
+  thread,
+}: InboxRowProps & ShortRowProps & { thread: MyReplyRow }): ReactNode {
+  const reference = threadReferenceRoute(thread);
+  return (
+    <ShortRowFrame
+      age={<Timestamp at={rowLastActivityAt(row)} />}
+      // A thread takes no mark, so the row draws the space the checkbox would take: every
+      // row's title starts in the same place.
+      check={<span aria-hidden="true" className="size-4 shrink-0" />}
+      group={groupKey}
+      onRelease={onRelease}
+      onSelect={onSelect}
+      owner={
+        <>
+          <ThreadOwnerLine className={`truncate text-sm ${textMutedOnCanvas}`} thread={thread} />
+          {reference === undefined ? null : <CopyRefButton route={reference} />}
+        </>
+      }
+      row={row}
+      section={section}
+      selected={selected}
+      title={
+        <ThreadTitle className="min-w-0 grow truncate text-sm" href={thread.ref} thread={thread} />
+      }
+    />
   );
 }
 
@@ -383,7 +411,7 @@ function InboxCardRow({
           Assign to me is a full-width row inside the right group, so it never draws over the
           issue key. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <MarkCheckbox marked={marked} name={name} onMark={onMark} row={row} />
+        <MarkCheckbox ask={ask} marked={marked} name={name} onMark={onMark} />
         <RowKindIcon type={rowType(row)} />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           <InboxOwnerLink ask={ask} rowOwner />
@@ -593,21 +621,11 @@ export function Inbox({
   // list below is a client-side partition of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
-  // The reader's own threads, in one unpaged read: Unread by default, every one of them with
-  // the switch on. Human-only, as the route is.
-  const human = useIsHuman();
   const threadState = filter.threads === "all" ? "all" : "unread";
-  const threads = useQuery({ ...inboxThreadsQuery(threadState), enabled: human });
-  // The count the switch's other side carries. With the switch on, the unpaged read above
-  // counts every thread and the unread ones are the rows that say so; with it off, that read
-  // counts only the unread, so how many there are in all is a count-only read of its own. It
-  // is the costliest shape this route answers, and the View menu's open panel is the only
-  // place its number is drawn, so nothing asks for it until the reader has opened that menu.
+  // Whether the reader has opened the View menu, which is the only place the count of every
+  // thread is drawn - and the costliest shape this route answers, so nothing asks for it
+  // until they have (`useInboxThreadRows`).
   const [viewOpened, setViewOpened] = useState(false);
-  const allThreads = useQuery({
-    ...inboxAllThreadCountQuery(),
-    enabled: human && threadState !== "all" && viewOpened,
-  });
   const listRef = useRef<HTMLElement>(null);
   /** The list column, which scrolls in itself beside the reading column. */
   const listScroller = useRef<HTMLDivElement>(null);
@@ -620,7 +638,6 @@ export function Inbox({
   const [paneWidth, setPaneWidth] = usePaneWidth();
   // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
   const adoptedInbox = useMotionHold(inbox.data, listRef);
-  const adoptedThreads = useMotionHold(threads.data?.rows, listRef);
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
@@ -762,22 +779,18 @@ export function Inbox({
   const askRows: InboxListRow[] = (
     filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent
   ).map((ask) => ({ ask, kind: "ask" }));
-  // The thread rows the list draws: what the server last answered, plus every row the reader
-  // read in place that answer no longer holds (`paneSelection.readHeld`). A row read while the
-  // column shows it, or read as a card where there is no column, stays where it was read and is
-  // drawn as read, so neither the next list read nor a live refresh moves the list under them.
-  const listedThreads = asksOnly ? [] : (adoptedThreads ?? []);
-  const listedThreadIds = new Set(listedThreads.map((thread) => rowId({ kind: "thread", thread })));
-  const threadRows: InboxListRow[] = [
-    ...listedThreads.map((thread): InboxListRow => ({ kind: "thread", thread })),
-    ...(asksOnly
-      ? []
-      : [...paneSelection.readHeld]
-          .filter(([id]) => !listedThreadIds.has(id))
-          .map(([, thread]): InboxListRow => ({ kind: "thread", thread }))),
-  ];
+  // The thread side of this list, in one hook: the reader's own threads, the rows they read in
+  // place that the server's answer no longer holds, and the two numbers the **Show read
+  // threads** switch carries.
+  const threads = useInboxThreadRows({
+    asksOnly,
+    listRef,
+    readHeld: paneSelection.readHeld,
+    state: threadState,
+    viewOpened,
+  });
   /** Every row this list could hold before its five fields narrow it: what the bar counts. */
-  const candidates = [...askRows, ...threadRows];
+  const candidates = [...askRows, ...threads.rows];
   // The filters decide what is listed, with one exception: a row whose "Assign to me" write is
   // live stays. Taking a question under the Unassigned filter is exactly that case - the row
   // stops matching the moment the optimistic assignment lands - and unmounting the control
@@ -795,7 +808,7 @@ export function Inbox({
   // The bar's **Mark all read**, over exactly this list: its filters, the read mark of the list
   // read it is showing, and the rows it is showing.
   const markAll = useMarkAllRead({
-    asOf: threads.data?.as_of,
+    asOf: threads.asOf,
     filters,
     rows: shown,
     state: threadState,
@@ -1172,15 +1185,6 @@ export function Inbox({
       refusal={bulkRefusal}
     />
   ) : null;
-  // The two numbers the **Show read threads** switch carries, each read from the side of it
-  // that knows: the unpaged read counts its own state's rows, and the count-only read above
-  // answers for the other.
-  const threadRowsRead = adoptedThreads ?? [];
-  const unreadThreadCount =
-    threadState === "all"
-      ? threadRowsRead.filter((thread) => thread.unread).length
-      : threadRowsRead.length;
-  const allThreadCount = threadState === "all" ? threads.data?.total : allThreads.data;
   // Everything above the list, the same whether or not any band has a row, and a sibling of the
   // scrolling list rather than an item in it: the bar stays put while the rows move.
   const header = (
@@ -1200,7 +1204,7 @@ export function Inbox({
         rows={candidates}
         selection={selection}
         view={{
-          allThreadCount,
+          allThreadCount: threads.allThreadCount,
           group: groupBy,
           onGroupChange: (next) => changeFilter({ ...filter, group: next }),
           onShowReadThreadsChange: (next) =>
@@ -1210,7 +1214,7 @@ export function Inbox({
           showReadThreads: threadState === "all",
           sort,
           threadOrder,
-          unreadThreadCount,
+          unreadThreadCount: threads.unreadThreadCount,
         }}
         viewer={viewer}
       />
@@ -1293,7 +1297,7 @@ export function Inbox({
     });
     const threadLine = emptyThreadLine({
       asksOnly,
-      readThreadsBehindSwitch: (allThreadCount ?? 0) > unreadThreadCount,
+      readThreadsBehindSwitch: (threads.allThreadCount ?? 0) > threads.unreadThreadCount,
       showReadThreads: threadState === "all",
     });
     // Nothing to read, so nothing to select and no column beside the list. The one question that
@@ -1361,12 +1365,21 @@ export function Inbox({
       section,
     };
     if (paneShown) {
-      return (
-        <InboxShortRow
+      return row.kind === "ask" ? (
+        <AskShortRow
+          {...shared}
+          ask={row.ask}
+          key={id}
+          onSelect={paneSelection.select}
+          selected={id === paneSelection.id}
+        />
+      ) : (
+        <ThreadShortRow
           {...shared}
           key={id}
           onSelect={paneSelection.select}
           selected={id === paneSelection.id}
+          thread={row.thread}
         />
       );
     }

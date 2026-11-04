@@ -37,8 +37,6 @@ import {
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
-import { useThreadOrder } from "../inbox/preferences";
-import { threadLayout } from "../inbox/thread-layout";
 import { writePin } from "../issue/pin-write";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
 import { ThreadCard } from "../margin/ThreadCard";
@@ -55,10 +53,12 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { threadLayout } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 import { Avatar } from "./Avatar";
@@ -281,9 +281,9 @@ function Thread({
     newestShownAt: newest?.created_at,
     owner: { issue: issueKey },
     threadId: root.root.id,
-  });
+  }).ref;
   // A thread in the Conversation folds nothing: the reader's order alone places its replies
-  // (`features/inbox/thread-layout.ts`).
+  // (`features/threads/thread-layout.ts`).
   const [threadOrder] = useThreadOrder();
   const { shown } = threadLayout({ collapse: false, order: threadOrder, replies: root.replies });
   if (root.replies.length === 0) return null;

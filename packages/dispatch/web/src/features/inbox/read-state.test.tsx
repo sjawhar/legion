@@ -30,10 +30,11 @@ import type {
   Message,
   MessageRead,
   MyRepliesResponse,
+  MyReplyAgentRow,
   MyReplyRow,
 } from "../../api/types";
-import { replyRow } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { replyRow, agentRow as sharedAgentRow } from "../threads/replies-fixture";
 import { Inbox } from "./Inbox";
 import { ThreadRowCard } from "./ThreadRowCard";
 
@@ -261,12 +262,8 @@ function message(id: string, body: string, overrides: Partial<Message> = {}): Me
   };
 }
 
-function agentRow(): MyReplyRow {
-  return {
-    ...replyRow("message-1"),
-    issue: undefined,
-    kind: "agent",
-    read_through: undefined,
+function agentRow(): MyReplyAgentRow {
+  return sharedAgentRow("message-1", {
     ref: "/agents/planner/live",
     reply: {
       author: { id: "planner", kind: "session" },
@@ -278,7 +275,7 @@ function agentRow(): MyReplyRow {
     session: { id: "planner", name: "Planner" },
     subject: "Have a look at the build",
     unread_reply_ids: ["reply-1"],
-  };
+  });
 }
 
 test("an Agent thread is read by reply id, and moves no session read mark", async () => {

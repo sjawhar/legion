@@ -116,7 +116,7 @@ function inboxThreadRowsOf(key: string): RefreshTarget {
     queryKey: inboxThreadsKey,
     when: (data) =>
       rowsOf<MyReplyRow>((data as MyRepliesResponse | undefined)?.rows).some(
-        (row) => row.issue?.key === key
+        (row) => row.kind !== "agent" && row.issue?.key === key
       ),
   };
 }

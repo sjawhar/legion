@@ -20,8 +20,7 @@ import {
   railSecondaryText,
 } from "../../theme/classes";
 import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
-import { useNeedsYouCount } from "../inbox/BlockedOnYou";
-import { useUnreadThreadCount } from "../inbox/useUnreadThreadCount";
+import { useInboxCount } from "../inbox/useUnreadThreadCount";
 import {
   buildIssuePath,
   buildProjectPath,
@@ -90,10 +89,9 @@ export function Sidebar({
     queryFn: () => api.listIssues({ pinned: true }),
   });
   const projects = useQuery(projectsQuery());
-  // One number on Inbox: the work waiting on the reader - open asks whose turn is theirs and
-  // every pending credential request - and the threads they have not read, which the Inbox
-  // lists beside those asks now.
-  const inboxCount = useNeedsYouCount() + useUnreadThreadCount();
+  // One number on Inbox, composed in one place (`useUnreadThreadCount.ts`): the work waiting on
+  // the reader plus the threads they have not read, which the Inbox lists beside those asks now.
+  const inboxCount = useInboxCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;

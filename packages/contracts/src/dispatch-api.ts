@@ -1076,30 +1076,18 @@ export interface MyReplyReply {
   readonly created_at: string;
 }
 
-/** One thread the caller is reading in the Inbox on `GET /api/v1/me/replies`: a Reply row - an
- *  ask's thread, a comment thread by its root, or an issue message thread by its root, which
- *  somebody else has written in - or an Agent row, one of the caller's one-off messages to an
- *  agent session with a reply from that session. */
-export interface MyReplyRow {
+/** What every thread the caller is reading in the Inbox carries on `GET /api/v1/me/replies`,
+ *  whichever of the two row shapes below it is. */
+interface MyReplyRowBase {
   /** The ask's id, the comment or message thread's root id, or an Agent row's root message id:
    *  what `PUT /api/v1/me/threads/{id}/read` marks. */
   readonly thread_id: string;
-  readonly kind: "ask" | "comment" | "message" | "agent";
   /** Relative Dispatch deep link to the thread's root, never to the reply; the session's live
    *  view, `/agents/<session id>/live`, for an Agent row. */
   readonly ref: string;
-  readonly issue?: Pick<Issue, "key" | "title">;
-  readonly document?: InboxDocument;
-  /** The owning issue's coarse priority, absent on a row with no issue or none set. */
-  readonly priority?: IssuePriority;
-  /** The thread owner's project key, absent on an Agent row, which has no owner. */
-  readonly project?: string;
   /** The ask's question, or the root's first line, at most 160 characters. */
   readonly subject: string;
   readonly reply: MyReplyReply;
-  /** The caller's read mark on the thread (`user_threads.read_through`), absent on an Agent row,
-   *  whose replies are read by id rather than by a mark. */
-  readonly read_through?: string;
   /** Whether the row still holds a write the caller has not read: always true under
    *  `state=unread`, either way under `state=all`. */
   readonly unread: boolean;
@@ -1107,14 +1095,44 @@ export interface MyReplyRow {
    *  messages and answers somebody else wrote after `read_through`, for an Agent row the session
    *  replies in `unread_reply_ids`. */
   readonly unread_count: number;
-  /** An Agent row's unread session replies, which the Inbox marks read by id. */
-  readonly unread_reply_ids?: string[];
+}
+
+/** A Reply row: an ask's thread, a comment thread by its root, or an issue message thread by its
+ *  root, which somebody else has written in. */
+export interface MyReplyThreadRow extends MyReplyRowBase {
+  readonly kind: "ask" | "comment" | "message";
+  readonly issue?: Pick<Issue, "key" | "title">;
+  readonly document?: InboxDocument;
+  /** The owning issue's coarse priority, absent on a row with no issue or none set. */
+  readonly priority?: IssuePriority;
+  /** The thread owner's project key, absent where the owner carries none. */
+  readonly project?: string;
+  /** The caller's read mark on the thread (`user_threads.read_through`), which every Reply row
+   *  carries: the column is not null, and a thread the caller has never read is marked at the
+   *  moment it became theirs, so a write after the mark is one they have not read. */
+  readonly read_through: string;
   /** The document mark the thread's root is anchored to, when it has one. */
   readonly anchor?: Anchor;
-  /** The agent session an Agent row's thread was sent to: its id and the name Dispatch knows it
-   *  by (its newest stamped session title, or the id when it has stamped none). */
-  readonly session?: { readonly id: string; readonly name: string };
 }
+
+/** An Agent row: one of the caller's one-off messages to an agent session, with a reply from
+ *  that session. It is on no issue and in no document, so it carries no owner, no priority, no
+ *  project, no anchor and no read mark - its replies are read by id. */
+export interface MyReplyAgentRow extends MyReplyRowBase {
+  readonly kind: "agent";
+  /** The agent session the thread was sent to: its id and the name Dispatch knows it by (its
+   *  newest stamped session title, or the id when it has stamped none). */
+  readonly session: { readonly id: string; readonly name: string };
+  /** The unread session replies, which the Inbox marks read by id; empty on a read row. */
+  readonly unread_reply_ids: string[];
+}
+
+/** One thread the caller is reading in the Inbox on `GET /api/v1/me/replies`: a Reply row - an
+ *  ask's thread, a comment thread by its root, or an issue message thread by its root, which
+ *  somebody else has written in - or an Agent row, one of the caller's one-off messages to an
+ *  agent session with a reply from that session. The JSON names which it is in `kind`, and each
+ *  shape's own fields are always sent for it. */
+export type MyReplyRow = MyReplyThreadRow | MyReplyAgentRow;
 
 export interface MyRepliesResponse {
   readonly rows: MyReplyRow[];

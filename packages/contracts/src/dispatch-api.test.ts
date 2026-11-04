@@ -557,14 +557,24 @@ test("models the Inbox's Reply and Agent rows and the read mark's event", () => 
     payload: read,
   } satisfies DispatchEvent;
 
+  const agent = page.rows[3];
   expect([
     page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
     page.rows.map((row) => row.unread_count),
-    page.rows[3]?.session?.name,
+    // Each kind carries its own fields and only those: a Reply row the read mark it counts
+    // against, an Agent row the ids its replies are read by and the session they came from.
+    page.rows.map((row) => (row.kind === "agent" ? row.unread_reply_ids : [row.read_through])),
+    agent?.kind === "agent" ? agent.session.name : undefined,
     event.payload.thread_id,
   ]).toEqual([
     ["comment:reply", "ask:answer", "comment:reply", "agent:reply"],
     [1, 1, 0, 1],
+    [
+      ["2026-10-11T23:00:00Z"],
+      ["2026-10-11T23:00:00Z"],
+      ["2026-10-11T23:00:00Z"],
+      ["message-2"],
+    ],
     "planner",
     "comment-1",
   ]);

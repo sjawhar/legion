@@ -23,7 +23,7 @@ function unreadSet(rows: MyReplyRow[], total = rows.length): MyRepliesResponse {
 }
 
 function Thread({ at, threadId }: { at: string | undefined; threadId: string }): ReactNode {
-  const ref = useMarkThreadRead({
+  const { ref } = useMarkThreadRead({
     enabled: true,
     newestShownAt: at,
     owner: { issue: "CORE-1" },

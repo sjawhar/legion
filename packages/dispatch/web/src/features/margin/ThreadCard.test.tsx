@@ -21,8 +21,8 @@ import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
-import { seedUnread } from "../replies/replies-fixture";
 import { userPreferenceStorageKey } from "../shell/userPreference";
+import { seedUnread } from "../threads/replies-fixture";
 import { ThreadCard } from "./ThreadCard";
 import type { Thread } from "./useMarginItems";
 

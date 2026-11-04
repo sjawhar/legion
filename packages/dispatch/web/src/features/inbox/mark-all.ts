@@ -29,19 +29,18 @@ import type {
   MyReplyRow,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
-import { INBOX_PRIORITY_VALUES, INBOX_URGENCY_VALUES, NO_FILTER_VALUE } from "../refs/routes";
+import { INBOX_PRIORITY_VALUES, INBOX_URGENCY_VALUES } from "../refs/routes";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { inFieldFilter } from "./grouping";
 import type { InboxFilters } from "./InboxBar";
 import { type InboxListRow, rowId, rowType } from "./list-row";
 
 /** What the page says when the server refused the press and nothing was marked. */
 export const MARK_ALL_REFUSED_TEXT = "Nothing was marked read.";
 
-/** The ids one optimistic press matches a cached row by, which is `rowId`'s own: an ask and a
- *  message can share neither id nor kind, so the pair names a row exactly. */
-function threadListRow(thread: MyReplyRow): InboxListRow {
-  return { kind: "thread", thread };
-}
+/** The viewer `inFieldFilter` takes for the assignee field, which is not one of the fields read
+ *  below: a thread row is the reader's own, so no press ever narrows by holder. */
+const NO_VIEWER = "";
 
 /** Whether a filter list, absent for every value, holds `value`. The server reads an absent list
  *  the same way (`parseInboxReadScope`), so a filter the reader has not touched is left out of
@@ -98,17 +97,18 @@ export function markAllReadBody(filters: InboxFilters, readThrough: string): Mar
  * page takes off exactly the rows the request takes. A thread written in since the read mark
  * stays - the reader has not seen that write - and an Agent row, which carries no issue, no
  * project, no priority and no urgency, is marked only while each of those filters admits a row
- * that has none.
+ * that has none. Priority, urgency and project are read through the Filter's own rule
+ * (`inFieldFilter`), so a value the list spells one way is marked by that same spelling.
  */
 export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boolean {
   if (!thread.unread) return false;
   if (compareTimestamps(thread.reply.created_at, body.read_through) > 0) return false;
-  if (!allows(body.kind, rowType(threadListRow(thread)))) return false;
-  const priority = thread.priority;
+  const row: InboxListRow = { kind: "thread", thread };
+  if (!allows(body.kind, rowType(row))) return false;
   return (
-    allows(body.priority, priority === undefined ? NO_FILTER_VALUE : `P${priority}`) &&
-    allows(body.urgency, NO_FILTER_VALUE) &&
-    allows(body.project, thread.project ?? NO_FILTER_VALUE)
+    inFieldFilter(row, "priority", body.priority, NO_VIEWER) &&
+    inFieldFilter(row, "urgency", body.urgency, NO_VIEWER) &&
+    inFieldFilter(row, "project", body.project, NO_VIEWER)
   );
 }
 
@@ -117,9 +117,10 @@ export function marksThread(thread: MyReplyRow, body: MarkInboxReadRequest): boo
  *  unread ids are emptied. The press reads every row it marks through this, and so does a card
  *  the reader dwelt on (`pane-selection.ts`), which marks itself at its own newest reply. */
 export function readRow(thread: MyReplyRow, readThrough: string): MyReplyRow {
-  const read = { ...thread, unread: false, unread_count: 0 };
-  if (thread.kind === "agent") return { ...read, unread_reply_ids: [] };
-  return { ...read, read_through: readThrough };
+  if (thread.kind === "agent") {
+    return { ...thread, unread: false, unread_count: 0, unread_reply_ids: [] };
+  }
+  return { ...thread, read_through: readThrough, unread: false, unread_count: 0 };
 }
 
 /**
@@ -138,11 +139,11 @@ export function applyMarkAll(
     return {
       ...answer,
       rows: answer.rows.map((row) =>
-        marked.has(rowId(threadListRow(row))) ? readRow(row, readThrough) : row
+        marked.has(rowId({ kind: "thread", thread: row })) ? readRow(row, readThrough) : row
       ),
     };
   }
-  const rows = answer.rows.filter((row) => !marked.has(rowId(threadListRow(row))));
+  const rows = answer.rows.filter((row) => !marked.has(rowId({ kind: "thread", thread: row })));
   return { ...answer, rows, total: Math.max(0, answer.total - (answer.rows.length - rows.length)) };
 }
 
@@ -214,7 +215,7 @@ export function useMarkAllRead({
       const marked = new Set(
         (threads?.rows ?? [])
           .filter((thread) => marksThread(thread, input))
-          .map((thread) => rowId(threadListRow(thread)))
+          .map((thread) => rowId({ kind: "thread", thread }))
       );
       if (threads !== undefined) {
         queryClient.setQueryData(

@@ -2566,8 +2566,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a thread written in since stays unread, and one already read past the mark keeps its later mark.
   An Agent row carries no issue, no document, no project and no priority, so any narrowing to one of those leaves it out;
   no thread of either kind carries an urgency - only an ask the Inbox lists in Waiting on you does - so a request that names urgencies without `none` marks nothing at all.
-  The transaction takes every owner row it can write under `for share` first, in the one ascending owner-key order `LockOwners` sorts by (documents, then issues, then projects), since a comment writer holds its issue row while its trigger moves the thread's `user_threads` rows and takes the project owner after that:
-  a mark-all that took the project first would close the cycle and one of the two would deadlock.
+  The transaction takes the owner row of every thread it marks `for share` first - its documents, then its issues, the ascending owner-key order `LockOwners` sorts by - then moves the `user_threads` rows, then takes the project of each row it moved to append its event.
+  Owner, then rows, then project is the order `PUT /api/v1/me/threads/{id}/read` takes too, and the two need it:
+  both take the owner `for share`, two share locks do not conflict, so only the row and the project in one order keep the pair off a `40P01` the caller reads as a 500.
+  An ordinary writer is ordered by the owner instead, whichever order it reaches the project in:
+  it takes its issue or document `for no key update` before its trigger moves the thread's `user_threads` rows, that level conflicts with the `for share` taken here, and every row such a trigger moves belongs to a thread on an owner this transaction holds too.
   Every statement runs under a ten-second `statement_timeout`, because that transaction holds those owner rows and a statement that hangs holds every comment, answer and issue message on them behind it.
   It appends one `user_thread_state.updated` per project it marked in, naming no thread (`{login}`, the payload's `thread_id` being optional for exactly this), and one `user_agent_state.updated` per session whose replies it wrote, as `putUserAgentState` appends one.
   A request that moved nothing appends none and answers `{"marked": 0}`.

@@ -33,8 +33,6 @@ import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { passageItem, ReplyQuote } from "../conversation/ReplyQuote";
 import type { SaveCommentEdit } from "../conversation/send-request";
-import { useThreadOrder } from "../inbox/preferences";
-import { threadLayout } from "../inbox/thread-layout";
 import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -42,7 +40,9 @@ import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { threadLayout } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -272,9 +272,9 @@ export function ThreadCard({
     newestShownAt: newestReply?.created_at,
     owner: owner.kind === "issue" ? { issue: owner.key } : { artifact: owner.artifactId },
     threadId: root.id,
-  });
+  }).ref;
   // A margin thread folds nothing - it is the thread's own page - so the order alone places its
-  // replies and the reply box (`features/inbox/thread-layout.ts`).
+  // replies and the reply box (`features/threads/thread-layout.ts`).
   const [threadOrder] = useThreadOrder();
   const { composerFirst, shown } = threadLayout({
     collapse: false,

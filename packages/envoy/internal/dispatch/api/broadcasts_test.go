@@ -152,6 +152,10 @@ func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
 		if got := itemBlockRefs(t, database, "message", recipient.Message.ID); len(got) != 0 {
 			t.Fatalf("%s message block mentions = %v, want none", recipient.SessionID, got)
 		}
+		// Its message.created names the sender, as every other direct root's event names its
+		// author: the one Inbox an Agent row of this conversation can sit in once the recipient
+		// replies. An event naming nobody would send every viewer's Inbox back for a refetch.
+		requireThreadLogins(t, database, "message.created", recipient.Message.ID, "alice")
 	}
 	delivered := awaitBroadcastDeliveries(t, handler, created.ID)
 	for _, recipient := range delivered.Recipients {

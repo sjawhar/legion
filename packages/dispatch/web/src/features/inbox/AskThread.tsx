@@ -12,8 +12,6 @@ import {
   borderStrong,
   enabledCardHoverBorder,
   inputClasses,
-  linkHoverText,
-  linkText,
   surfaceMutedBg,
   textMutedOnSurfaceMuted,
   textPrimaryOnSurfaceMuted,
@@ -25,10 +23,11 @@ import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
+import { EarlierReplies } from "../threads/EarlierReplies";
+import { threadLayout } from "../threads/thread-layout";
+import type { ThreadOrder } from "../threads/thread-order";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import type { ThreadOrder } from "./preferences";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
-import { earlierRepliesLabel, threadLayout } from "./thread-layout";
 
 export type CreateReply = (
   issueKey: string,
@@ -189,7 +188,7 @@ export interface AskThreadProps {
    *  `aria-current`, and the fold over the older replies opens when it is one of them. */
   currentReplyId?: string;
   /** The order the thread reads in: the reader's own choice, which the card holds
-   *  (`preferences.ts`). */
+   *  (`threads/thread-order.ts`). */
   order: ThreadOrder;
   /** The ids of the replies the reader has not read (`useUnreadReplies`): an unread reply is
    *  never folded away. */
@@ -199,9 +198,10 @@ export interface AskThreadProps {
 /**
  * The reply thread under a question: every comment that replies directly to the ask
  * (Comment.ask_id) plus their own reply chains, in the reader's thread order, with the replies
- * outside the newest two folded behind **Show N earlier replies** (`thread-layout.ts`). Answered
- * asks keep a plain reply composer, at the end of that order; open asks reserve their single
- * composer for answering or asking back, and a resolved ask keeps its history without a
+ * outside the newest two folded behind **Show N earlier replies** (`threads/thread-layout.ts`,
+ * drawn by `threads/EarlierReplies.tsx`, the fold control the Inbox's thread body shares).
+ * Answered asks keep a plain reply composer, at the end of that order; open asks reserve their
+ * single composer for answering or asking back, and a resolved ask keeps its history without a
  * composer.
  */
 export function AskThread({
@@ -216,7 +216,6 @@ export function AskThread({
   order,
   unread,
 }: AskThreadProps): ReactNode {
-  const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState<boolean>();
   const { composerFirst, folded, shown } = threadLayout({
@@ -246,31 +245,20 @@ export function AskThread({
     );
   // The fold and what it holds are one block, drawn furthest from the newest message: under the
   // question in Oldest first, at the foot of the thread in Newest first.
-  const fold =
-    folded.length === 0 ? null : (
-      <>
-        <button
-          aria-controls={olderRepliesId}
-          aria-expanded={showAll}
-          className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
-          onClick={() => setShowAllReplies(!showAll)}
-          type="button"
-        >
-          {showAll ? "Show fewer replies" : earlierRepliesLabel(folded.length)}
-        </button>
-        {showAll ? (
-          <ul className="space-y-2" id={olderRepliesId}>
-            {folded.map((comment) => (
-              <AskReply
-                comment={comment}
-                current={comment.id === currentReplyId}
-                key={comment.id}
-              />
-            ))}
-          </ul>
-        ) : null}
-      </>
-    );
+  const fold = (
+    <EarlierReplies
+      count={folded.length}
+      onToggle={() => setShowAllReplies(!showAll)}
+      open={showAll}
+      replies={(id) => (
+        <ul className="space-y-2" id={id}>
+          {folded.map((comment) => (
+            <AskReply comment={comment} current={comment.id === currentReplyId} key={comment.id} />
+          ))}
+        </ul>
+      )}
+    />
+  );
   const composer =
     showComposer && ask.state === "answered" ? (
       <AskReplyComposer ask={ask} createReply={reply} uploadOwner={uploadOwner} />

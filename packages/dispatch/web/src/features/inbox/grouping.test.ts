@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { InboxRow, MyReplyRow } from "../../api/types";
-import { replyRow } from "../replies/replies-fixture";
+import type { InboxRow, MyReplyThreadRow } from "../../api/types";
+import { agentRow, replyRow } from "../threads/replies-fixture";
 import { dimensionValue, filterCounts, group, inFieldFilter, sortRows } from "./grouping";
 import { issueAsk } from "./inbox-fixture";
 import type { InboxListRow } from "./list-row";
@@ -15,8 +15,12 @@ function ask(overrides: Partial<InboxRow>): InboxListRow {
   return { ask: issueAsk(overrides), kind: "ask" };
 }
 
-function thread(overrides: Partial<MyReplyRow>): InboxListRow {
+function thread(overrides: Partial<MyReplyThreadRow>): InboxListRow {
   return { kind: "thread", thread: replyRow(overrides.thread_id ?? "t", overrides) };
+}
+
+function agentListRow(threadId: string): InboxListRow {
+  return { kind: "thread", thread: agentRow(threadId) };
 }
 
 const keysOf = (rows: readonly InboxListRow[], by: Parameters<typeof group>[1]) =>
@@ -24,12 +28,7 @@ const keysOf = (rows: readonly InboxListRow[], by: Parameters<typeof group>[1]) 
 
 test("every dimension reads the same word off an ask and off a thread", () => {
   const p1 = ask({ id: "a", issue_key: "CORE-1", priority: 1, urgency: "high" });
-  const agentThread = thread({
-    issue: undefined,
-    kind: "agent",
-    project: undefined,
-    thread_id: "t1",
-  });
+  const agentThread = agentListRow("t1");
 
   expect(dimensionValue(p1, "priority", viewer)).toBe("P1");
   expect(dimensionValue(p1, "urgency", viewer)).toBe("high");
@@ -79,7 +78,7 @@ test("grouping bands by the chosen field, each field in its own order", () => {
   expect(keysOf(rows, "priority")).toEqual(["P0", "P2", "none"]);
 
   const typed = [
-    thread({ kind: "agent", thread_id: "agent" }),
+    agentListRow("agent"),
     ask({ id: "question" }),
     ask({ id: "approval", kind: "approval" }),
     thread({ thread_id: "reply" }),
