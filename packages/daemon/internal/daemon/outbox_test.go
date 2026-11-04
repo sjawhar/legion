@@ -706,6 +706,70 @@ func TestAMessagePostDispatchRefusesIsFinishedAndItsArchitectTold(t *testing.T) 
 	}
 }
 
+// A done write posts its reason as a message before it writes the status, and Dispatch refuses a
+// body past its own bounds on every attempt. The row finishes, and the status is written all the
+// same: it is what the issue's lifecycle stands on, and the daemon's own record already reads
+// done. The architect is told what Dispatch refused, that the status stands, and how the reason
+// began, since the reason is on no issue and nothing else would say so.
+func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArchitect(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	const reason = "Closed by its architect before its first phase: the human decided no change.\nThe rest of the reason."
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
+		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal}
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: client,
+		now: func() time.Time { return now },
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+
+	if fmt.Sprint(client.statuses) != "[done]" {
+		t.Fatalf("statuses written = %v, want done written though its reason was refused", client.statuses)
+	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done was set on the issue all the same") ||
+		!strings.Contains(notice.Reason, "Closed by its architect before its first phase: the human decided no change.") ||
+		strings.Contains(notice.Reason, "The rest of the reason.") ||
+		!strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want it naming the status it set, the reason's first line alone and Dispatch's refusal", notice)
+	}
+}
+
+// The status Dispatch itself refuses is not set by the write that follows the refusal either, and
+// the architect is told that the issue keeps the status it has.
+func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *testing.T) {
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "INVALID_STATUS", Message: "no such status"}
+	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"}, refusal,
+		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal))
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, "The status done was not set either, so the issue keeps the status it has") {
+		t.Fatalf("the notice = %+v, want it saying the status did not land", notice)
+	}
+	if strings.Contains(notice.Reason, "begins") {
+		t.Fatalf("the notice = %+v, want no reason quoted for a write that carried none", notice)
+	}
+}
+
 // A controller notice row goes to the controller topic of the daemon's own project, the one its
 // controller subscribes to, and to no issue topic, under the row's own key, as the Notice it is.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {

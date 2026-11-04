@@ -344,9 +344,10 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 // A status Dispatch refuses outright — the issue is gone, or the status is one it will not take —
 // can never be written, and an issue's status writes run one at a time: retried forever, it held
 // every later status of that issue behind it, so nothing the workflow decided afterwards ever
-// reached the board. The refused row is finished and said so, and the issue's later writes run.
-// What each of them then does is the ordinary rule: this one finds the board at a status neither
-// its own nor the one it was made from, takes that for someone else's move, and leaves it.
+// reached the board. The refused row is finished, its architect is told that the status did not
+// land (statusWriteRefused), and the issue's later writes run. What each of them then does is the
+// ordinary rule: this one finds the board at a status neither its own nor the one it was made
+// from, takes that for someone else's move, and leaves it.
 func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -366,12 +367,23 @@ func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *te
 		runner.now = func() time.Time { return now }
 	}
 
-	var rows int
-	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = 'LEGION-208'").Scan(&rows); err != nil {
+	var kinds []string
+	rows, err := pool.Query(context.Background(), "select kind from outbox where issue = 'LEGION-208' order by id")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if rows != 0 {
-		t.Fatalf("outbox holds %d rows for LEGION-208, want none: the refused row is finished and the one behind it runs", rows)
+	for rows.Next() {
+		var kind string
+		if err := rows.Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		kinds = append(kinds, kind)
+	}
+	if rows.Err() != nil {
+		t.Fatal(rows.Err())
+	}
+	if fmt.Sprint(kinds) != "[notice]" {
+		t.Fatalf("outbox holds %v for LEGION-208, want the architect's notice alone: the refused row is finished and the one behind it runs", kinds)
 	}
 	if board.reads < 2 {
 		t.Fatalf("Dispatch was read %d times, want the later write to have run too", board.reads)

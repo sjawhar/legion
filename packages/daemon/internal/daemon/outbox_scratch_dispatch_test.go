@@ -175,6 +175,67 @@ func TestOutboxFinishesAPostDispatchRefusesAndTellsTheArchitectAgainstScratchDis
 	}
 }
 
+// A done write posts its reason on the issue before it writes the status, and the reason here is
+// one block over Dispatch's own block bound, which Dispatch refuses on every attempt. Against the
+// real server: no message is on the issue, the status is set all the same, and the issue's
+// architect is told what was refused and that the status stands. Without that, the daemon's
+// record would read done while the Dispatch issue kept the status it had, and nobody would know.
+func TestOutboxSetsTheStatusOfAWriteWhoseReasonDispatchRefusesAgainstScratchDispatch(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := createScratchDispatchIssue(t, baseURL)
+	client := dispatch.New(baseURL, token)
+	before, err := client.GetIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("read the scratch issue: %v", err)
+	}
+	now := time.Now().UTC()
+	reason := "Closed by its architect before its first phase: " + strings.Repeat("x", 32001)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue,
+		record.StatusWrite{ObservedStatus: before.Status, Status: "done", Reason: reason}, now))
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
+		now: func() time.Time { return now },
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+
+	bodies, err := client.MessageBodiesSince(context.Background(), issue, now.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("read real Dispatch messages: %v", err)
+	}
+	if len(bodies) != 0 {
+		t.Fatalf("Dispatch messages = %#v, want the refused reason on no issue", bodies)
+	}
+	after, err := client.GetIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("read the scratch issue after the run: %v", err)
+	}
+	if after.Status != "done" {
+		t.Fatalf("the issue stands at %q, want done written though its reason was refused", after.Status)
+	}
+	var kind string
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
+		!strings.Contains(notice.Reason, issue) || !strings.Contains(notice.Reason, "CAP_EXCEEDED") ||
+		!strings.Contains(notice.Reason, "The status done was set on the issue all the same") {
+		t.Fatalf("the notice = %+v, want message-refused to the architect naming %s, Dispatch's refusal and the status it set", notice, issue)
+	}
+}
+
 // messageCreatedEvent is the issue's message.created event as Dispatch serves it: the body the
 // event carries, and whether Dispatch says that body is only the first part of the message's.
 func messageCreatedEvent(t *testing.T, baseURL, token, issue string) (string, bool) {

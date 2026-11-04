@@ -64,12 +64,22 @@ whoever unblocks it. Never bypass a rule.
 
 ## `message-refused`
 
-Its `reason` names the issue, how long the message was, its first line and Dispatch's own answer.
-Dispatch refused the message the way it would refuse every attempt, a block of the body over
-Dispatch's own block bound being the common one, so the message is on no issue and the daemon
-will not post it again. Nothing else about the issue changed: no phase moved, and no worker was
-told. Read the reason for which message it was. A READY packet refused this way is the merger's
-to rebuild shorter: tell it with `envoy_publish` to its role topic to send a packet whose every
-block is under the bound, linking the pull request body's `## Verification` section rather than
-quoting it, and to end its phase again. For any other message, post what it said on the issue
-yourself with `dispatch comment` when a person still needs it.
+Its `reason` names the issue, Dispatch's own answer, and what the write carried: a message, with
+how long it was and its first line, or a status write, with the status and whether it was set.
+Dispatch refused that write the way it would refuse every attempt, so the daemon makes it no
+more.
+
+A close reason and a READY packet are checked against Dispatch's own bounds at the call that
+carries them — `close_root` answers `CLOSE_REASON_TOO_LONG` and `handoff_complete` answers
+`READY_PACKET_TOO_LONG`, each naming the bound and how far over the text is — so this notice is a
+refusal those checks did not predict.
+
+On a status write the daemon set the status all the same, and only the reason beside it is on no
+issue: the issue's lifecycle stands and nothing waits on you. On a message the message is on no
+issue and nothing else about the issue changed: no phase moved, and no worker was told.
+
+Either way, what a person still needs is yours to post on the issue with `dispatch comment`. A
+refused READY packet is nobody's to send again: the issue is in `awaiting_merge`, where no worker
+holds a phase, and its merger's phase is over, so a completion from it is refused. Write that
+comment yourself, naming the pull request at READY's head and where its verification stands; the
+merge the daemon submits is unaffected and closes the issue when GitHub completes it.

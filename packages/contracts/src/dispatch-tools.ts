@@ -415,23 +415,21 @@ function isJsonObjectText(text: string): boolean {
   }
 }
 
-/** The refusal of the first rule a handoff call breaks, or undefined when it keeps them: the phase
- *  slug, then (on a write) the body's byte cap and its being one JSON object. */
+/** The refusal of the first rule a handoff call breaks, or undefined when it keeps them: the
+ *  phase slug, then (on a write) the body's being one JSON object. No length is among them: the
+ *  server owns every bound and names what passed it, so a body over
+ *  `DISPATCH_HANDOFF_BODY_MAX` bytes is refused there, with `413 CAP_EXCEEDED`, and not here. */
 function handoffProblem(value: unknown): string | undefined {
   const { phase, body } = value as { readonly phase?: unknown; readonly body?: unknown };
   if (typeof phase === "string" && !HANDOFF_PHASE_PATTERN.test(phase)) return HANDOFF_PHASE_RULE;
   if (typeof body !== "string") return undefined;
-  const bytes = new TextEncoder().encode(body).length;
-  if (bytes > DISPATCH_HANDOFF_BODY_MAX) {
-    return `body is ${bytes - DISPATCH_HANDOFF_BODY_MAX} bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${bytes}/${DISPATCH_HANDOFF_BODY_MAX})`;
-  }
   if (!isJsonObjectText(body)) {
     return 'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}';
   }
   return undefined;
 }
 
-const HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object of at most ${DISPATCH_HANDOFF_BODY_MAX} bytes.`;
+const HANDOFF_RULE = `${HANDOFF_PHASE_RULE}; the body is one JSON object.`;
 
 const handoffValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => handoffProblem(value) === undefined,

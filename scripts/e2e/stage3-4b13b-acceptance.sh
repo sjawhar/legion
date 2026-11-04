@@ -1067,10 +1067,11 @@ begin merger-pane-mints-no-grant
 # from this shell with a grant the merger's bash hook had minted into the pane's LEGION_GRANT_FILE
 # before a `legion state --json` command. Neither exists (LEGION-631): the `legion` tool mints its
 # grants in-process for its own daemon calls, no pane carries a grant file, no agent runs `legion`
-# from bash, and the CLI has no `handoff complete`. The daemon holds a READY packet to no length of
-# its own: Dispatch bounds a message body block by block and refuses a block over that bound, which
-# the daemon's own tests measure (internal/daemon/outbox_scratch_dispatch_test.go: a 40,000-
-# character packet posted whole, and a block over the bound refused and told to the architect).
+# from bash, and the CLI has no `handoff complete`. The daemon carries no length of its own: it
+# holds a READY packet to the bounds Dispatch publishes, refusing one past them at
+# handoff_complete (READY_PACKET_TOO_LONG), which the daemon's own tests measure
+# (internal/api/handoff_test.go, and internal/daemon/outbox_scratch_dispatch_test.go for a
+# 40,000-character packet posted whole).
 # What stands here is the absence: the merger's pane environment names no grant, its gh reads the
 # role's files under GH_CONFIG_DIR, and no bash command the merger has run invokes `legion`.
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"

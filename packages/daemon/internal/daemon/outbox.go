@@ -292,7 +292,12 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 // whose lease expired, or was taken by a reopen (record's readyMergeConflict), commits nothing
 // beside the one that holds the row now.
 //
-// A status row Dispatch refused finishes so it no longer holds its issue's later writes back. A
+// A status row Dispatch refused finishes so it no longer holds its issue's later writes back, and
+// its status is written again before the finish (statusAfterRefusal): the row makes two writes —
+// the reason, posted as a message, and the status after it — and the one the issue's lifecycle
+// stands on is the status, so a reason Dispatch would not take no longer costs the issue its
+// status. The architect is told what Dispatch refused and whether the status stands
+// (statusWriteRefused), since the reason is on no issue and nothing else would say so. A
 // hand-over's row drops its fence with it: the write that would hand the child to Legion never
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
@@ -325,6 +330,17 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
 					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
 			}
+			break
+		}
+		applied := r.statusAfterRefusal(ctx, row, value)
+		notice, err := record.NewOutboxRow(row.Issue, statusWriteRefused(row.Issue, value, cause, applied), r.now().UTC())
+		if err != nil {
+			return err
+		}
+		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
+		told = func() {
+			r.log.Error("outbox status write refused by Dispatch; its architect is told what the issue holds now",
+				"row", row.ID, "issue", row.Issue, "status", value.Status, "applied", applied == nil, "error", cause)
 		}
 	case record.MessagePost:
 		notice, err := record.NewOutboxRow(row.Issue, messagePostRefused(row.Issue, value, cause), r.now().UTC())
@@ -381,13 +397,52 @@ const messageRefusedPreview = 200
 // what it carries. The reason names the issue, how long the message is, its first line (a READY
 // packet opens with its own `READY #<n> at <sha>` line) and Dispatch's own refusal.
 func messagePostRefused(issue string, payload record.MessagePost, cause error) record.Notice {
-	first, _, _ := strings.Cut(payload.Body, "\n")
-	if runes := []rune(first); len(runes) > messageRefusedPreview {
-		first = string(runes[:messageRefusedPreview]) + "…"
-	}
 	return record.Notice{Kind: "message-refused", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("Dispatch refused the message Legion was posting on %s, so it is on no issue and the daemon will not post it again. The message is %d characters and begins %q. Dispatch answered: %s",
-			issue, utf8.RuneCountInString(payload.Body), first, cause)}
+			issue, utf8.RuneCountInString(payload.Body), refusedPreview(payload.Body), cause)}
+}
+
+// refusedPreview is the first line of a body a notice quotes, cut to messageRefusedPreview.
+func refusedPreview(body string) string {
+	first, _, _ := strings.Cut(body, "\n")
+	if runes := []rune(first); len(runes) > messageRefusedPreview {
+		return string(runes[:messageRefusedPreview]) + "…"
+	}
+	return first
+}
+
+// statusAfterRefusal writes the status of a row Dispatch refused, so a reason Dispatch would not
+// take does not cost the issue its status: a done write posts its reason as a message before the
+// status (status), and that post's refusal leaves the status unmade though the daemon's own
+// record already reads done. It answers nil when the status stands and the refusal otherwise,
+// which is what Dispatch says again when the status itself was what it refused.
+func (r *outbox) statusAfterRefusal(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) error {
+	if r.dispatch == nil {
+		return errors.New("dispatch status executor has no Dispatch client")
+	}
+	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
+		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+	}
+	return nil
+}
+
+// statusWriteRefused is the architect's notice of a status row Dispatch refused: what it refused,
+// whether the status stands (applied, statusAfterRefusal's answer), and the reason the row would
+// have posted beside the status, which is on no issue. A close's reason is the daemon's only word
+// on why the issue ended, so the architect is told how long it was and how it began, and posts
+// what a person still needs itself.
+func statusWriteRefused(issue string, payload record.StatusWrite, cause error, applied error) record.Notice {
+	told := fmt.Sprintf("Dispatch refused a write Legion was making on %s and the daemon will not make it again. Dispatch answered: %s.", issue, cause)
+	if applied == nil {
+		told += fmt.Sprintf(" The status %s was set on the issue all the same.", payload.Status)
+	} else {
+		told += fmt.Sprintf(" The status %s was not set either, so the issue keeps the status it has: %s.", payload.Status, applied)
+	}
+	if payload.Reason != "" {
+		told += fmt.Sprintf(" The reason the write posts beside the status is on no issue. It is %d characters and begins %q; post what a person still needs yourself.",
+			utf8.RuneCountInString(payload.Reason), refusedPreview(payload.Reason))
+	}
+	return record.Notice{Kind: "message-refused", Role: claim.RoleArchitect, Reason: told}
 }
 
 // retry returns row to the outbox, due again after its backoff, or after the wait GitHub asks for

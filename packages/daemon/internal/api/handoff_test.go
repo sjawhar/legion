@@ -1094,11 +1094,14 @@ func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testin
 	}
 }
 
-// The daemon posts the READY packet as one Dispatch message with the outbox's marker, and Dispatch
-// bounds that body block by block rather than whole, so the route holds a packet to no length of
-// its own: a long packet is applied and posted. Dispatch's own refusal of a block over its bound
-// reaches the issue's architect from the outbox (daemon's messagePostRefused), not this route.
-func TestHandoffCompleteAppliesALongREADYPacket(t *testing.T) {
+// The daemon posts the READY packet as one Dispatch message with the outbox's marker, and
+// Dispatch bounds that body block by block, so the route holds the packet to those bounds: a
+// packet whose one block passes the block bound is refused here, naming the bound and how far
+// over it is, and records nothing — the issue stays in merging and this merger's shortened
+// packet at the same commit is applied. A packet long in blocks Dispatch takes is applied whole.
+// The bound counts UTF-16 units, as Dispatch does, so a character outside the Basic Multilingual
+// Plane counts twice.
+func TestHandoffCompleteRefusesAREADYPacketDispatchWouldRefuseAndAppliesTheShortenedRetry(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
@@ -1106,14 +1109,22 @@ func TestHandoffCompleteAppliesALongREADYPacket(t *testing.T) {
 	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	const emoji = "\U0001F600"
-	long := emoji + strings.Repeat("x", 40000)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: long, Ready: true, Commit: headSHA}))
-	got := facts.recorded()
-	if len(got) != 1 {
-		t.Fatalf("handoff facts = %#v, want the long READY", got)
+	over := emoji + strings.Repeat("x", dispatch.BlockUnits-1)
+	refusal := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: over, Ready: true, Commit: headSHA}),
+		http.StatusBadRequest, "READY_PACKET_TOO_LONG")
+	if want := fmt.Sprintf("block 1 is 1 characters over the %d-character block limit", dispatch.BlockUnits); !strings.Contains(refusal, want) {
+		t.Fatalf("refusal = %q, want it naming %q", refusal, want)
 	}
-	if fact, ok := got[0].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != headSHA || fact.Summary != long {
-		t.Fatalf("applied fact = %#v, want the long READY at %s whole", got[0], headSHA)
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts after the refusal = %#v, want none recorded", got)
+	}
+
+	// The same merger, still in merging, completes again one unit shorter, and that READY is
+	// applied: the refusal recorded nothing that would answer it ALREADY_RECORDED.
+	shortened := emoji + strings.Repeat("x", dispatch.BlockUnits-2)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: headSHA}))
+	if fact := lastCompletion(t, facts); !fact.Ready || fact.Commit != headSHA || fact.Summary != shortened {
+		t.Fatalf("applied fact = %#v, want the shortened READY at %s", fact, headSHA)
 	}
 }
 
@@ -1808,11 +1819,24 @@ func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T
 	}
 }
 
-// The packet the daemon tells for a by-hand READY carries its note above the merger's packet. No
-// length bounds the told packet here: a long one is applied whole, with its note recorded.
-func TestHandoffCompleteReadyAppliesALongByHandPacketWithItsNote(t *testing.T) {
+// The packet the daemon tells for a by-hand READY carries its note above the merger's packet, so
+// the blocks the bounds are read against are the told packet's: the note is block 1 and the
+// merger's own first block is block 2. A packet with a block over the bound is refused naming
+// the note's share, and records nothing; one long in blocks Dispatch takes is applied whole,
+// with its note.
+func TestHandoffCompleteReadyRefusesAByHandPacketWithABlockOverTheBound(t *testing.T) {
 	h, facts, merger := newReadyHarness(t, byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`))
-	long := strings.Repeat("x", 40000)
+	over := strings.Repeat("x", dispatch.BlockUnits+1)
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: over, Ready: true, Commit: headSHA}),
+		http.StatusBadRequest, "READY_PACKET_TOO_LONG")
+	if !strings.Contains(message, "by-hand note") || !strings.Contains(message, "block 2 is 1 characters over") {
+		t.Fatalf("a by-hand READY whose block passes the bound = %q, want it naming the by-hand note and block 2", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+
+	long := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", 6665)+"\n\n", 6), "\n\n")
 	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: long, Ready: true, Commit: headSHA}))
 	last := lastCompletion(t, facts)
 	if last.Summary != long || !strings.HasPrefix(last.MergeNote, "MANUAL_MERGE_REQUIRED:") {

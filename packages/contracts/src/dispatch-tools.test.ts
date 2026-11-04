@@ -491,18 +491,17 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
-  test("dispatch_handoff_write takes one JSON object body up to the byte cap, and a phase slug", () => {
+  test("dispatch_handoff_write takes one JSON object body of any length, and a phase slug", () => {
     const schema = schemaFor("dispatch_handoff_write");
     const refusals = (args: Record<string, unknown>) =>
       schema.safeParse(args).error?.issues.map((issue) => issue.message);
     const call = { issue: "DSP-1", phase: "implement" };
 
-    // A body of exactly the cap, counted in UTF-8 bytes: "é" is two of them.
+    // A body of exactly the server's cap, counted in UTF-8 bytes ("é" is two of them), and one
+    // a byte over it: the server owns that bound and answers 413 CAP_EXCEEDED, so both reach it.
     const filler = "é".repeat((DISPATCH_HANDOFF_BODY_MAX - '{"a":""}'.length) / 2);
     expect(schema.safeParse({ ...call, body: `{"a":"${filler}"}` }).success).toBe(true);
-    expect(refusals({ ...call, body: `{"a":"${filler}x"}` })).toEqual([
-      `body is 1 bytes over the ${DISPATCH_HANDOFF_BODY_MAX}-byte limit (${DISPATCH_HANDOFF_BODY_MAX + 1}/${DISPATCH_HANDOFF_BODY_MAX})`,
-    ]);
+    expect(schema.safeParse({ ...call, body: `{"a":"${filler}x"}` }).success).toBe(true);
     for (const body of ["[1]", '"text"', "null", "{not json", "{} {}"]) {
       expect(refusals({ ...call, body }), body).toEqual([
         'body is not one JSON object: a handoff body is a JSON object such as {"schemaVersion":1}',

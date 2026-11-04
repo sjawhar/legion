@@ -1158,7 +1158,8 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 }
 
 // closeRoot ends the architect's tree while its root is admitted and no phase has started
-// (workflow's closeRoot): the root's own architect only.
+// (workflow's closeRoot): the root's own architect only, with a reason Dispatch takes as a
+// message.
 func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	var req RootCloseRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {
@@ -1169,6 +1170,16 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fact := intake.CloseRoot{Issue: req.Issue, Reason: req.Reason}
+	// The close posts the reason on the issue and writes the status after it (the outbox's status
+	// row), and Dispatch refuses a body past the bounds it publishes, so a reason it would refuse
+	// is refused here, before anything is recorded. Refused on the post instead, the reason would
+	// be on no issue, and the daemon's record would read done while the Dispatch issue kept the
+	// status it had.
+	if over := dispatch.CheckBody(fact.Message()); over != nil {
+		writeFailure(w, http.StatusBadRequest, "CLOSE_REASON_TOO_LONG",
+			fmt.Sprintf("the reason makes a message Dispatch refuses: %s; shorten it", over))
+		return
+	}
 	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, closeRootRoute) {
 		return

@@ -176,10 +176,22 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
 	// the summary out, while a refusal here records nothing, and the corrected retry at the same
-	// commit is applied.
+	// commit is applied. That holds for the packet Dispatch takes too. The daemon posts the packet
+	// it tells (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as
+	// one Dispatch message, and Dispatch refuses a body past the bounds it publishes on every
+	// attempt, so a packet it would refuse would never reach the human. Refused only by the post,
+	// the issue would already be in awaiting_merge, where no worker holds a phase and this
+	// merger's completion is over: nobody could send the shorter packet. Refused here, the issue
+	// stays in merging and the merger completes again with it.
 	var answer readyAnswer
 	if req.Ready {
 		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
+			return
+		}
+		if over := dispatch.CheckBody(record.ReadyPacket(req.Summary, answer.mergeNote)); over != nil {
+			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
+				"the READY packet%s is one Dispatch refuses: %s: link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				byHandShare(answer.mergeNote), over))
 			return
 		}
 	}
@@ -479,6 +491,15 @@ func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant crede
 		return
 	}
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
+}
+
+// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet
+// with, empty when READY carries none.
+func byHandShare(mergeNote string) string {
+	if mergeNote == "" {
+		return ""
+	}
+	return ", with the by-hand note the daemon tells above it,"
 }
 
 // readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
