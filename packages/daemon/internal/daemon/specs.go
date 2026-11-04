@@ -33,6 +33,18 @@ type specs struct {
 	instructions string
 	secrets      map[string]string
 	prompts      *prompts.Composer
+	// memory is the project's `memory` block (config.Memory): while its mode is off no launch
+	// carries memory at all, whatever a tree's record says, so a project moved to off runs every
+	// tree as it ran before the block existed.
+	memory config.Memory
+	// memoryInstructions is the daemon's copy of the block's instructions file
+	// (config.WriteMemoryInstructions), the last fragment of a memory-group launch's system
+	// prompt; "" when the block names none, which `mode: on` may, and nothing is then appended.
+	memoryInstructions string
+	// memoryGroup is whether tree's root record carries the memory group
+	// (workflowRuntime.treeMemoryGroup); nil for a daemon with no workflow, which records no tree,
+	// draws for none, and so launches nothing with memory.
+	memoryGroup func(ctx context.Context, tree string) (bool, error)
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
@@ -81,9 +93,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 }
 
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
-// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
-// deployment instructions — and its repository with that repository's default branch, whose
-// workspace is on the daemon's host by then when the runtime leaves workspaces to the daemon
+// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, the
+// deployment instructions and, for a tree in the project's memory group, the memory instructions
+// — and its repository with that repository's default branch, whose workspace is on the daemon's
+// host by then when the runtime leaves workspaces to the daemon
 // (ensureWorkspace). The controller's launch (controllerSpawnSpec) is its own. Both name the
 // backend the role runs on and are told its prompt part after the role's parts (launchBackend).
 // Plugins carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the
@@ -131,7 +144,10 @@ func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
 	return backend, s.prompts.Part(info.PromptPart), nil
 }
 
-// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. It is the one
+// launch that may carry memory: whether the claim's tree is in the project's memory group
+// (memoryGroup), which decides both the overlays each runtime names last in PI_CONFIG_FILES
+// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -169,6 +185,20 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		RolePromptPaths:            promptPaths,
 		Addressing:                 addressing,
 		DeploymentInstructionsPath: s.instructions,
+	}
+	// The memory group is the tree's, read from its root's record and asked for only while the
+	// project's mode is not off: a daemon with no workflow (memoryGroup nil) records no tree, so
+	// none of its launches carries memory. A project whose block names no instructions file
+	// appends nothing, and its memory-group panes are the overlays alone.
+	if !s.memory.Off() && s.memoryGroup != nil {
+		memory, err := s.memoryGroup(ctx, c.Tree)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the memory group of tree %s: %w", c.Tree, err)
+		}
+		if memory {
+			spec.Memory = true
+			spec.Prompt.MemoryInstructionsPath = s.memoryInstructions
+		}
 	}
 	if s.identity != nil {
 		id, err := s.identity(ctx, c.Role, spec.Repository)
@@ -238,7 +268,8 @@ func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *r
 // runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
 // controller was launched under and relaunches it when they change; a spec cannot set that variable.
 // It has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// commits nothing. It is in no memory group and is told no memory instructions whatever the
+// project's mode is: a memory group is a tree's, and the controller runs in none.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")

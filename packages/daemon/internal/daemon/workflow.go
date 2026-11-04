@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -604,6 +605,21 @@ func (w *workflowRuntime) treeClosable(ctx context.Context, c supervise.Claim) (
 		return false, fmt.Errorf("read whether a workflow issue backs tree %s: %w", c.Tree, err)
 	}
 	return issue == nil, nil
+}
+
+// treeMemoryGroup is whether tree's root record carries the memory group, the word the draw stored
+// on it once and every later launch of the tree reads (record.Issue.MemoryGroup,
+// memorygroup.GroupMemory). An issue's memory group is its tree root's, and the root key is the
+// claim's own tree, so there is no ancestor walk; a tree the workflow does not record, and a root
+// first opened before the setting existed, carry no group and run without memory. It is what
+// every launch of a project whose mode is not off asks (specs.workerSpawnSpec), in a transaction
+// of its own, as the supervisor's own predicates read a record (recordedIssue).
+func (w *workflowRuntime) treeMemoryGroup(ctx context.Context, tree string) (bool, error) {
+	issue, err := w.recordedIssue(ctx, tree)
+	if err != nil {
+		return false, fmt.Errorf("read the memory group of tree %s: %w", tree, err)
+	}
+	return issue != nil && issue.MemoryGroup == string(memorygroup.GroupMemory), nil
 }
 
 // recordedIssue reads one issue in a transaction of its own, which is what both supervisor

@@ -205,11 +205,14 @@ type PaneInputs struct {
 	// nil.
 	GHOwnersDir, GHDefault, GH string
 	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env), PiConfigFiles the
-	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files), and
-	// RoleConfigFiles the ones this pane's role alone names (role_config_files); nil for none.
-	OperatorEnv     map[string]string
-	PiConfigFiles   []string
-	RoleConfigFiles []string
+	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files),
+	// RoleConfigFiles the ones this pane's role alone names (role_config_files), and
+	// MemoryConfigFiles the project's own (memory.config_files), which only a pane whose tree is
+	// in the memory group is given (runtime.SpawnSpec.Memory); nil for none.
+	OperatorEnv       map[string]string
+	PiConfigFiles     []string
+	RoleConfigFiles   []string
+	MemoryConfigFiles []string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -221,8 +224,9 @@ type PaneInputs struct {
 // file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, and nothing of
-// Legion's own, which names no settings overlay at all — empty where neither names one), the
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
+// project's memory overlays for a memory-group pane, and nothing of Legion's own, which names no
+// settings overlay at all — empty where none of the three names one), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
 // them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
@@ -264,7 +268,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles), ":"))
+	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, in.MemoryConfigFiles), ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
@@ -428,7 +432,8 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
-	for _, path := range append(append([]string{}, spec.Prompt.RolePromptPaths...), spec.Prompt.DeploymentInstructionsPath) {
+	for _, path := range slices.Concat(spec.Prompt.RolePromptPaths,
+		[]string{spec.Prompt.DeploymentInstructionsPath, spec.Prompt.MemoryInstructionsPath}) {
 		if path == "" {
 			continue
 		}
@@ -510,10 +515,17 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, err
 	}
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
+	// Only a pane whose tree was drawn into the memory group names the project's memory overlays;
+	// every other pane's PI_CONFIG_FILES is the one it had before the block existed.
+	var memoryOverlays []string
+	if spec.Memory {
+		memoryOverlays = r.memoryConfigFiles
+	}
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: credential.root, GHDefault: ghDefault, GH: r.gh,
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
+		MemoryConfigFiles: memoryOverlays,
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }

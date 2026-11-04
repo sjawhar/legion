@@ -13,6 +13,10 @@ import (
 // under the state directory.
 const DeploymentInstructionsFile = "deployment-instructions.md"
 
+// MemoryInstructionsFile is the copy of the project's memory instructions every memory-group
+// pane's prompt reads, under the state directory.
+const MemoryInstructionsFile = "memory-instructions.md"
+
 // ReadSecretPointer is the trimmed contents of the file a pointer key names — `variable` is the
 // key as the operator wrote it (`envoy_token_file`, `operator_token_file`), so the refusal reads
 // in their words. A set pointer is authoritative: a missing, unreadable, or blank file is a
@@ -147,6 +151,53 @@ func WriteDeploymentInstructions(contents []byte, stateDir, legionID string) (st
 	}
 	target := filepath.Join(stateDir, DeploymentInstructionsFile)
 	body := fmt.Sprintf("# Deployment instructions (%s)\n\n%s", legionID, contents)
+	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", target, err)
+	}
+	return target, nil
+}
+
+// ReadMemoryInstructions is the project's memory instructions file
+// (`projects.<KEY>.memory.instructions`), refused naming the operator's path when it is missing,
+// unreadable, or blank: a configured file with nothing in it is a misconfiguration, not an empty
+// fragment. It writes nothing, so boot reads it with every other refusal before it writes
+// anything.
+func ReadMemoryInstructions(instructionsPath string) ([]byte, error) {
+	contents, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("memory instructions file %s could not be read: %w", instructionsPath, err)
+	}
+	if strings.TrimSpace(string(contents)) == "" {
+		return nil, fmt.Errorf("memory instructions file %s is empty", instructionsPath)
+	}
+	return contents, nil
+}
+
+// MaterializeMemoryInstructions reads the project's memory instructions file and writes
+// `# Memory instructions (<legionID>)`, a blank line, and its contents verbatim to
+// `<stateDir>/memory-instructions.md`, returning that path — the file a memory-group role's one
+// `--append-system-prompt` word ends with, `$(cat <this file>)`, after the deployment's own, so
+// such a pane gets exactly what boot read and never the operator's own path, which may change
+// underneath a running daemon. legionID is `project` as the operator wrote it.
+//
+// A file ReadMemoryInstructions refuses writes nothing.
+func MaterializeMemoryInstructions(instructionsPath, stateDir, legionID string) (string, error) {
+	contents, err := ReadMemoryInstructions(instructionsPath)
+	if err != nil {
+		return "", err
+	}
+	return WriteMemoryInstructions(contents, stateDir, legionID)
+}
+
+// WriteMemoryInstructions is MaterializeMemoryInstructions' write, of contents
+// ReadMemoryInstructions answered: boot reads the file with every other refusal before it writes
+// anything, and writes this copy once, before the first pane opens.
+func WriteMemoryInstructions(contents []byte, stateDir, legionID string) (string, error) {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", fmt.Errorf("create state directory %s: %w", stateDir, err)
+	}
+	target := filepath.Join(stateDir, MemoryInstructionsFile)
+	body := fmt.Sprintf("# Memory instructions (%s)\n\n%s", legionID, contents)
 	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
 		return "", fmt.Errorf("write %s: %w", target, err)
 	}
