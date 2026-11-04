@@ -166,9 +166,10 @@ func TestAWindowRequestReportsAForwardNATSDenies(t *testing.T) {
 
 // The server's refusal of the core subscription the client sent again on reconnecting reads as an
 // inactive subscription until a server that grants it accepts it again. nats.go keeps a refused
-// subscription valid and only records the refusal, so the listener's live topics lane, reconnected
-// onto a server restarted without its grant on notifications.>, would deliver nothing while its
-// /healthz answered healthy and subscribed.
+// subscription valid and only records the refusal, so the listener's role lane, reconnected onto
+// a server restarted without its grant on notifications.role.>, would deliver nothing while its
+// /healthz answered healthy and subscribed. CoreSubOK is what that check reads
+// (cmd/listener/main.go, "role lane subscription inactive").
 func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T) {
 	const (
 		subject = "notifications.>"

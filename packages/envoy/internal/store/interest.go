@@ -55,6 +55,8 @@ func Remove(item Interest, topics []string) Interest {
 	return item
 }
 
+<<<<<<< conflict 1 of 1
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // dropPrivateStreamTopics removes from topics every one reaching a private stream subject that is
 // not sessionID's own (bus.ReachesPrivateStreamSubject): another session's inbox, a
 // failed-delivery lane, a controller notice lane of a project whose controller role roles does not
@@ -67,6 +69,25 @@ func Remove(item Interest, topics []string) Interest {
 // session_id its stored value names. It filters topics in place, so callers pass a slice they own
 // (Merge's and Remove's results are).
 func dropPrivateStreamTopics(sessionID string, roles []string, topics []string) []string {
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // dropPrivateStreamTopics removes from topics every one reaching a private stream subject other
+ // than sessionID's own agent subject (bus.ReachesPrivateStreamSubject): another session's inbox, a
+ // failed-delivery lane, the Legion controller lane, or a wildcard overlapping one. Registry.Match
+-// fans a stored topic out to its serve-port session, so such a topic would hand that session
+-// messages meant for another session or for the controller's role holder. The listener refuses
+-// one at /v1/interests/subscribe; this drops one a row stored before that guard holds, so every
+-// write of a row (Upsert, Remove) cleans it. sessionID is the row's key, not the session_id its
+-// stored value names. It filters topics in place, so callers pass a slice they own (Merge's and
+-// Remove's results are).
++// fans a stored topic out to the listener the row names, which delivers it to that row's session,
++// so such a topic would hand that session messages meant for another session or for the
++// controller's role holder. The listener refuses one at /v1/interests/subscribe; this drops one a
++// row stored before that guard holds, so every write of a row (Upsert, Remove) cleans it.
++// sessionID is the row's key, not the session_id its stored value names. It filters topics in
++// place, so callers pass a slice they own (Merge's and Remove's results are).
+ func dropPrivateStreamTopics(sessionID string, topics []string) []string {
+>>>>>>> conflict 1 of 1 ends
 	return slices.DeleteFunc(topics, func(topic string) bool {
 		return bus.ReachesPrivateStreamSubject(sessionID, topic, roles)
 	})

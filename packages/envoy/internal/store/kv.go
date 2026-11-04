@@ -810,6 +810,8 @@ func (r *Registry) recordInterest(merged Interest, revision uint64, getErr error
 // not the transient case, its topics are ones this build never routed (the cache holds no record
 // it cannot decode), and the session's own subscribe is the authority on its record.
 //
+<<<<<<< conflict 1 of 2
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // The merged row keeps no topic reaching a private stream subject that is not the session's own,
 // and holds them sorted (MergedTopics): a row stored before the listener refused such a topic is
 // cleaned at the session's next registration. plan is the topics to merge in and the roles the
@@ -818,17 +820,44 @@ func (r *Registry) recordInterest(merged Interest, revision uint64, getErr error
 // it holds. The listener's registration route filters the session's consumer on the row this
 // merge produces, having planned it with these same roles (PlanInterest).
 func mergeForUpsert(cur Interest, getErr error, item Interest, now int64, plan InterestPlan) (Interest, error) {
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // The merged row keeps no topic reaching a private stream subject other than the
+ // session's own agent subject (dropPrivateStreamTopics): a row stored before the
+ // listener refused such a topic is cleaned at the session's next registration.
++//
++// The machine id and the directory are the requesting registration's, and the stored row is the
++// fallback for whichever of the two the request leaves empty. A session that registers again
++// through another listener therefore moves its row to that listener, and every reader of the row
++// - the fan-out index (subjectIndex.set, which moves the session's subjects to the new root),
++// Registry.Match, the durable path's ownership check and the sender stamp of a message the
++// session sends (cmd/listener's senderStamp) - names the listener the session is registered
++// through now. A request that names no machine or no directory says nothing about where the
++// session runs, so for it the stored value stands: a role claim carries the claiming listener's
++// machine id and no directory (SetRoleWithPrevious), and claiming a role must not clear the
++// row's Cwd.
+ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
+>>>>>>> conflict 1 of 2 ends
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
-	sessionID := item.SessionID
+	requested := item
 	if getErr == nil {
 		item = cur
 	}
-	item.MachineID = first(item.MachineID, curValue(cur.MachineID))
-	item.Dir = first(item.Dir, curValue(cur.Dir))
+	item.MachineID = first(requested.MachineID, cur.MachineID)
+	item.Dir = first(requested.Dir, cur.Dir)
 	item.UpdatedAt = now
+<<<<<<< conflict 2 of 2
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 	item.Topics = MergedTopics(sessionID, plan.Roles, item.Topics, plan.Topics)
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ 	item = Merge(item, topics)
+-	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
++	item.Topics = dropPrivateStreamTopics(requested.SessionID, item.Topics)
+ 	sort.Strings(item.Topics)
+>>>>>>> conflict 2 of 2 ends
 	return item, nil
 }
 
@@ -1503,10 +1532,6 @@ func first(value string, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func curValue(value string) string {
-	return value
 }
 
 const (

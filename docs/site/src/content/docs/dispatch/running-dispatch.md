@@ -332,10 +332,23 @@ It answers in the Prometheus text format with one counter,
 publish that was not reached, labelled `reason`. `denied` is a publish NATS refused under the
 server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
 forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
-kept, a read that failed), `unanswered` a forward NATS took whose stored copy the stream did not
-acknowledge - which is the whole of a forward's answer, for every holder alike - and `failed` any
-other failure. A denied publish also logs
-`dispatch outbox: publish event` at ERROR, naming the subject.
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+-kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
+-holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the
+-stored copy - and `failed` any other failure. A denied publish also logs
++kept, a read that failed), `unanswered` a forward NATS took whose stored copy the stream did not
++acknowledge - which is the whole of a forward's answer, for every holder alike - and `failed` any
++other failure. A denied publish also logs
+ `dispatch outbox: publish event` at ERROR, naming the subject.
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
+holder's receipt - and `failed` any other failure. A holder whose entry an earlier listener
+stored with a port is counted on the stream's acknowledgement of the stored copy, until that
+entry lapses. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the
+subject.
+>>>>>>> conflict 1 of 1 ends
 
 ## Behind a proxy
 

@@ -202,10 +202,20 @@ func TestSmoke(t *testing.T) {
 	})
 
 	t.Run("subscribe_and_verify", func(t *testing.T) {
-		// A notifications.team.<name> topic is one the stream stores; the route leaves out of the
-		// row a notifications. topic no stream subject captures, with a warning naming it, since
-		// nothing would be delivered on it.
-		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.team.smoke"],"port":8080}`
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+-		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":8080}`
++		// A notifications.team.<name> topic is one the stream stores; the route leaves out of the
++		// row a notifications. topic no stream subject captures, with a warning naming it, since
++		// nothing would be delivered on it.
++		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.team.smoke"],"port":8080}`
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+		// No port: this listener delivers nothing to a session's port and refuses a registration
+		// that names one (subscribeHandler). self_subscribed is what writes the session entry,
+		// so the session is in GET /v1/sessions below.
+		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":0,"self_subscribed":true}`
+>>>>>>> conflict 1 of 1 ends
 		resp, err := apiRequest(http.MethodPost, baseURL+"/v1/interests/subscribe", subBody)
 		if err != nil {
 			t.Fatalf("POST /v1/interests/subscribe: %v", err)

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"errors"
-	"net/http"
 	"strings"
 	"testing"
 
@@ -16,15 +14,31 @@ import (
 // subject index) before it decodes the message, and acknowledges at once one no session needs from
 // it: on a subject nobody here follows, on one only a session whose own consumer holds the message
 // follows (counted as its skipped delivery), or on the agent subject of another listener's session.
-// A followed subject, and the agent subject of a session nobody has, are decoded as before. Every
-// message here is undecodable, so a decode shows as the handler's decode failure.
+// A followed subject whose session the durable path must still deliver to, and the agent subject
+// of a session nobody has, are decoded as before. Every message here is undecodable, so a decode
+// shows as the handler's decode failure.
 func TestSubjectIndexAcksADurableMessageNoSessionNeedsBeforeDecodingIt(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("unexpected prompt_async request")
-	}))
-	harness.registerTarget(t, "ses_core", "notifications.dispatch.issue.FOLLOWED-1.>")
-	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_relayed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
-		t.Fatalf("register the relayed session's interest: %v", err)
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+ 	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+ 		return nil, errors.New("unexpected prompt_async request")
+ 	}))
+ 	harness.registerTarget(t, "ses_core", "notifications.dispatch.issue.FOLLOWED-1.>")
+-	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_self", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
+-		t.Fatalf("register the self-subscribed session's interest: %v", err)
++	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_relayed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
++		t.Fatalf("register the relayed session's interest: %v", err)
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+	harness := newListenerDeliveryHarness(t)
+	// An interest whose session entry has lapsed: the durable cannot read a record saying the
+	// session takes the message itself, so it decodes and delivers it (durableNeedsDelivery).
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_followed", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.FOLLOWED-1.>"}); err != nil {
+		t.Fatalf("register the followed session's interest: %v", err)
+	}
+	if _, err := harness.registry.Upsert(store.Interest{SessionID: "ses_self", MachineID: "test-machine"}, []string{"notifications.dispatch.issue.SELF-1.*"}); err != nil {
+		t.Fatalf("register the self-subscribed session's interest: %v", err)
+>>>>>>> conflict 1 of 1 ends
 	}
 	if err := harness.sessions.Put("ses_relayed", session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Delivery: session.DeliveryConsumer, Epoch: "e"}); err != nil {
 		t.Fatalf("register the relayed session: %v", err)

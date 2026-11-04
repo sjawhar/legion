@@ -23,6 +23,7 @@ mock.module("nats", () => ({
     isClosed: () => false,
     close: async () => undefined,
     drain: async () => undefined,
+    flush: async () => undefined,
     subscribe: () => ({
       unsubscribe: () => undefined,
       [Symbol.asyncIterator]: async function* () {

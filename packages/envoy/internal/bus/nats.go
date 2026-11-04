@@ -1688,11 +1688,25 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 // ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey
 // sent to subject: the key, a colon, the subject. A publish and a window's
 // JetStream send stamp an envelope that earns a MsgId with it
+<<<<<<< conflict 1 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // (publishJetStream, window.sendJetStream), and a forward passes it to
 // StartRequestStoredTo as the forward's Nats-Msg-Id. A stream that captures
 // subject stores a forward sent again to the same subject once, within its
 // duplicate window, and one sent to another subject again, as a message of its
 // own there.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // (publishJetStream, window.sendJetStream), so each topic one upstream event
+-// is published on keeps its own copy, and a forward passes it to startForward
+-// (for RequestCoreTo, StartRequestCoreTo and StartRequestStoredTo alike) as
+-// the forward's Nats-Msg-Id. A stream that captures subject stores a forward
++// is published on keeps its own copy, and a forward passes it to
++// StartRequestCoreTo, which RequestCoreTo publishes through, as the forward's
++// Nats-Msg-Id. A stream that captures subject stores a forward
+ // sent again to the same subject once, within its duplicate window, and one
+ // sent to another subject again, as a message of its own there.
+>>>>>>> conflict 1 of 5 ends
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }
@@ -1719,6 +1733,8 @@ var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storin
 // the holder's session consumer delivers through the listener's relay, with acknowledgement and
 // redelivery.
 //
+<<<<<<< conflict 2 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // The forward carries msgID as its Nats-Msg-Id header, and an empty msgID is refused
 // ErrNoForwardMsgID before anything is sent. A sender that forwards one
 // envelope again under one MsgId until it is stored leaves the stream one copy per message and
@@ -1730,6 +1746,52 @@ func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, m
 	if msgID == "" {
 		return nil, fmt.Errorf("%w: to %q", ErrNoForwardMsgID, subject)
 	}
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // It is StartRequestCoreTo followed by the returned forward's Wait.
+ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error {
+ 	forward, err := c.StartRequestCoreTo(subject, item, msgID, timeout)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	return forward.Wait()
+ }
+ 
+ // StartRequestCoreTo publishes RequestCoreTo's forward and returns once the server has it, leaving
+ // the wait for its two replies to the returned forward's Wait, so a caller can publish forwards in
+ // order on one goroutine and wait for each on another. The window, timeout, starts with this call.
+ // An error is RequestCoreTo's own before any reply could arrive (a denied or invalid forward, a
+ // connection that never came back within timeout); every returned forward must be waited for, which
+ // releases its reply subscription.
+ func (c *Client) StartRequestCoreTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+-	return c.startForward(subject, item, msgID, timeout, false)
+-}
+-
+-// StartRequestStoredTo publishes a forward as StartRequestCoreTo does, under the same msgID rule,
+-// for a holder with no NATS subscriber to answer it: a serving-port session whose stored messages
+-// its session consumer delivers, with acknowledgement and redelivery, through the listener's relay.
+-// Its Wait succeeds on the stream's acknowledgement alone, which is that delivery's one lasting
+-// copy, and ignores any receipt. No acknowledgement by the deadline, the stream's error answer, or
+-// the server's no-responders answer (nothing captured the subject) is ErrForwardNotStored (wrapping
+-// the reason, and the one publishConfirmed could not confirm the publish for, when it could not).
+-func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (*PendingForward, error) {
+-	return c.startForward(subject, item, msgID, timeout, true)
+-}
+-
+-// PendingForward is a forward StartRequestCoreTo or StartRequestStoredTo published, whose replies
+-// Wait reads.
+-type PendingForward struct {
+-	receipt  *nats.Subscription
+-	deadline time.Time
+-	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
+-	// may still overrule; nil when it confirmed the publish.
+-	unconfirmed error
+-	// storedOnly is set for StartRequestStoredTo's forward, which needs no receipt.
+-	storedOnly bool
+-}
+-
+-func (c *Client) startForward(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (*PendingForward, error) {
+>>>>>>> conflict 2 of 5 ends
 	if err := checkSubject(subject); err != nil {
 		return nil, err
 	}
@@ -1760,6 +1822,8 @@ func (c *Client) StartRequestStoredTo(subject string, item contracts.Envelope, m
 		_ = replies.Unsubscribe()
 		return nil, err
 	}
+<<<<<<< conflict 3 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 	return &PendingForward{replies: replies, deadline: deadline, unconfirmed: err}, nil
 }
 
@@ -1778,6 +1842,26 @@ type PendingForward struct {
 // error answer, and the server's no-responders answer (nothing captured the subject) are each
 // ErrForwardNotStored, wrapping the reason and, when publishConfirmed could not confirm the
 // publish, the reason for that.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err, storedOnly: storedOnly}, nil
++	return &PendingForward{receipt: receipt, deadline: deadline, unconfirmed: err}, nil
++}
++
++// PendingForward is a forward StartRequestCoreTo published, whose replies Wait reads.
++type PendingForward struct {
++	receipt  *nats.Subscription
++	deadline time.Time
++	// unconfirmed is publishConfirmed's error for a publish it could not confirm, which the replies
++	// may still overrule; nil when it confirmed the publish.
++	unconfirmed error
+ }
+ 
+ // Wait reads the forward's replies until its outcome is known or its window ends, and releases its
+-// reply subscription. Its errors are RequestCoreTo's for a forward StartRequestCoreTo published, and
+-// StartRequestStoredTo's for one that published.
++// reply subscription. Its errors are RequestCoreTo's.
+>>>>>>> conflict 3 of 5 ends
 func (f *PendingForward) Wait() error {
 	defer f.replies.Unsubscribe()
 	for {
@@ -1790,12 +1874,20 @@ func (f *PendingForward) Wait() error {
 			break
 		}
 		if err != nil {
-			// The server's no-responders answer: nothing, not even a stream, took the forward.
-			if errors.Is(err, nats.ErrNoResponders) {
-				return fmt.Errorf("%w: %w", ErrForwardNotStored, err)
-			}
+<<<<<<< conflict 4 of 5
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+ 			// The server's no-responders answer: nothing, not even a stream, took the forward.
+-			if f.storedOnly && errors.Is(err, nats.ErrNoResponders) {
++			if errors.Is(err, nats.ErrNoResponders) {
+ 				return fmt.Errorf("%w: %w", ErrForwardNotStored, err)
+ 			}
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+>>>>>>> conflict 4 of 5 ends
 			return err
 		}
+<<<<<<< conflict 5 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 		ack, ok := readPublishAcknowledgement(response.Data)
 		if !ok {
 			continue
@@ -1808,6 +1900,42 @@ func (f *PendingForward) Wait() error {
 	}
 	if f.unconfirmed != nil {
 		return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ 		if len(response.Data) == 0 && len(response.Header) == 0 {
+ 			received = true
+ 		} else if ack, ok := readPublishAcknowledgement(response.Data); ok {
+ 			if ack.Error != nil {
+ 				refused = ack.Error
+ 			} else {
+ 				stored = true
+ 			}
+ 		}
+-		if f.storedOnly {
+-			if stored {
+-				return nil
+-			}
+-			if refused != nil {
+-				return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
+-			}
+-			continue
+-		}
+ 		if received && stored {
+ 			return nil
+ 		}
+ 		if received && refused != nil {
+ 			return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
+ 		}
+ 	}
+-	if f.storedOnly {
+-		if f.unconfirmed != nil {
+-			return fmt.Errorf("%w: %w", ErrForwardNotStored, f.unconfirmed)
+-		}
+-		return ErrForwardNotStored
+-	}
+ 	if !received {
+ 		return cmp.Or(f.unconfirmed, ErrReceiptTimeout)
+>>>>>>> conflict 5 of 5 ends
 	}
 	return ErrForwardNotStored
 }

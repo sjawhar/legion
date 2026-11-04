@@ -41,7 +41,7 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 		{"a webhook envelope sent twice", "ses_forward_webhook", []contracts.Envelope{webhook, webhook}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			harness := newListenerDeliveryHarness(t, nil)
+			harness := newListenerDeliveryHarness(t)
 			const role = "forward-dedupe"
 			if err := harness.sessions.Put(tc.holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 				t.Fatalf("register the holder: %v", err)
@@ -61,6 +61,8 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 				forwards := 0
 				cfg.forwardRole = func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
 					forwards++
+<<<<<<< conflict 1 of 1
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 					wait, err := forwardThrough(subject, item, msgID, timeout)
 					if err != nil {
 						forwardErr = err
@@ -72,6 +74,14 @@ func TestARoleForwardIsStoredOncePerMessageAndTwoUnderOneChosenKeyTwice(t *testi
 					}, nil
 				}
 				cfg = wireTestDeliveryWorkers(t, cfg)
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ 					forwardErr = harness.client.RequestCoreTo(subject, item, msgID, timeout)
+ 					return forwardErr
+ 				})
+-				cfg = wireTestDeliveryWorkers(t, cfg)
++				cfg = wireTestRoleForwarder(t, cfg)
+>>>>>>> conflict 1 of 1 ends
 				item.Topic = contracts.RoleTopicPrefix + role
 				item.Payload = `{"type":"worker-queued"}`
 				item.IssuedAt = contracts.NowMillis()

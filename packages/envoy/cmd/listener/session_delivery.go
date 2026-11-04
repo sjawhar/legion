@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -56,9 +57,19 @@ const noGrantBackoff = 10 * time.Minute
 // what is left of the HTTP stop's budget.
 const sessionConsumerDrain = 2 * time.Second
 
+<<<<<<< conflict 1 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery).
 // Every registration this listener answers at all carries one: the session's consumer is held and
 // relayed, which is the only way a message reaches a session.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // deliveryAnswer is the delivery field of a registration's answer (subscribeResponse.Delivery),
+-// present whenever the registration carried delivery or registered a serving port. A listener of an
+-// earlier release answers without it, which the plugin reads as core.
++// present whenever the registration carried a delivery object. A listener of an earlier release
++// answers without it, which the plugin reads as core.
+>>>>>>> conflict 1 of 5 ends
 type deliveryAnswer struct {
 	Mode string `json:"mode"`
 	// Subject is the session's relay subject (bus.DeliverSubject).
@@ -95,6 +106,9 @@ type sessionDeliveryOutcome struct {
 	// beside the epoch: the durable path still delivers a stored message below it, which is in no
 	// consumer (session.SessionEntry.ConsumerStart).
 	consumerStart uint64
+	// heard is the registration's mark (sessionDelivery.mark), taken once its topics were stored
+	// and its consumer created or updated, when the session is relayed.
+	heard uint64
 }
 
 // relayed reports whether the session's entry records consumer delivery (session.DeliveryConsumer):
@@ -109,9 +123,20 @@ func (o sessionDeliveryOutcome) relayed() bool {
 type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
 	// epochChanged is set when the entry it replaced did not hold consumer delivery with the same
-	// epoch: the plugin connected anew, so the relay restarts the session's consumer at its ack
-	// floor before it relays again.
-	registered(sessionID string, epochChanged bool)
+<<<<<<< conflict 2 of 5
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+-	// epoch: the plugin connected anew, or came over from the core path, so the relay restarts
+-	// the session's consumer at its ack floor before it relays again.
++	// epoch: the plugin connected anew, so the relay restarts the session's consumer at its ack
++	// floor before it relays again.
+ 	registered(sessionID string, epochChanged bool)
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+	// epoch: the plugin connected anew, or came over from the core path, so the relay restarts
+	// the session's consumer at its ack floor before it relays again, unless the relay's run
+	// restarted the consumer after heard, the registration's mark (sessionDelivery.mark).
+	registered(sessionID string, epochChanged bool, heard uint64)
+>>>>>>> conflict 2 of 5 ends
 }
 
 // sessionDelivery manages the session consumers (bus.SessionConsumers) for the listener's
@@ -127,6 +152,8 @@ type sessionDelivery struct {
 	// consumers has one (startSessionRelays sets it before /v1 opens, and main's start ends when
 	// that relay cannot start), so a registration answered consumer is relayed.
 	relay sessionRelay
+	// marks is the last mark taken (mark).
+	marks atomic.Uint64
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
 	// beforeRegister runs at the top of each register call, before the consumer's filter is set;
@@ -138,7 +165,9 @@ type sessionDelivery struct {
 	beforeRegister func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
-	// deletes the consumer and creates it again when a message awaits an ack. A create landing
+	// deletes the consumer and creates it again when a message awaits an ack. Each reads the
+	// session's stored topics under the lock, so the filter the last of them writes is the stored
+	// set as it stood then, never a set read before another call wrote a newer one. A create landing
 	// between that delete and create would start the consumer at the stream's end and skip what the
 	// session has not acked. Under the lock a restart that read the floor and failed after its
 	// delete or create leaves that floor pending, and the next call that finds the consumer missing,
@@ -177,6 +206,14 @@ func (m *sessionDelivery) close() {
 	}
 }
 
+// mark returns the next of the marks that order registrations against the relay's restarts: a
+// registration takes one once its topics are stored and its consumer created or updated, and a
+// relay restart takes one, under the session's lock, before it reads the session's topics and
+// consumer. A restart whose mark is above a registration's read everything that registration
+// wrote, after the plugin subscribed the connection the registration names, so every frame it
+// sent reaches that connection.
+func (m *sessionDelivery) mark() uint64 { return m.marks.Add(1) }
+
 // drain drains the session-consumer connection, so the acks the relays sent reach the server,
 // within sessionConsumerDrain or what is left of ctx if that is less; with nothing left of ctx it
 // closes the connection. The relays are stopped first (sessionRelays.stop).
@@ -197,6 +234,8 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 	}
 }
 
+<<<<<<< conflict 3 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // register gives a registration the session consumer every portless session is delivered through,
 // filtered on topics, the topics the registration's interest row will hold. One this listener
 // cannot give a consumer is refused by name, and the handler then writes nothing.
@@ -230,6 +269,32 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 				body.SessionID),
 			Reason: deliveryReasonNotRequested,
 		}
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-// register gives a registration the delivery it asks for, once its topics are stored: topics are
+-// the session's stored interest topics. A registration that carried delivery with consumer set, or
+-// registered a serving port, gets the session's consumer, created when the stream holds none (at
+-// the sequence after its resume point when that names the stream's current identity, else at the
+-// stream's end) and otherwise updated to the current filter, before the registration answers.
+-func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) sessionDeliveryOutcome {
+-	if body.Delivery == nil && body.Port <= 0 {
++// register gives a registration the delivery it asks for, once its topics are stored in registry.
++// A registration that carried delivery with consumer set gets the session's consumer, created
++// when the stream holds none (at the sequence after its resume point when that names the stream's
++// current identity, else at the stream's end) and otherwise updated to the current filter, before
++// the registration answers. The filter is the session's stored interest topics as they stand under
++// the session's lock, not as this registration stored them: another call storing topics for the
++// session meanwhile (a registration, a follow) writes its own filter under that lock first, and
++// this one must not put the older set back over it. A registration that asks for nothing stays on
++// the core path: it takes its messages off its own NATS subscription.
++func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, registry *store.Registry) sessionDeliveryOutcome {
++	if body.Delivery == nil {
+ 		return sessionDeliveryOutcome{}
+ 	}
+-	if body.Port <= 0 && !body.Delivery.Consumer {
++	if !body.Delivery.Consumer {
+ 		return coreDeliveryOutcome(deliveryReasonNotRequested)
+>>>>>>> conflict 3 of 5 ends
 	}
 	if _, ok := bus.SessionConsumerName(body.SessionID); !ok {
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
@@ -256,14 +321,16 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
 	}
 	var startSeq uint64
-	var epoch string
-	if body.Delivery != nil {
-		epoch = body.Delivery.Epoch
-		if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
-			startSeq = resume.Seq + 1
-		}
+	epoch := body.Delivery.Epoch
+	if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
+		startSeq = resume.Seq + 1
 	}
 	unlock := m.locks.lock(body.SessionID)
+	topics, err := storedInterestTopics(ctx, registry, body.SessionID)
+	if err != nil {
+		unlock()
+		return m.refused(body.SessionID, err)
+	}
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
 	unlock()
 	if err != nil {
@@ -280,6 +347,8 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 		},
 		epoch:         epoch,
 		consumerStart: start.StartSeq,
+<<<<<<< conflict 4 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 	}, nil
 }
 
@@ -290,6 +359,10 @@ func noGrantRefusal(sessionID string) *deliveryRefusal {
 		status: http.StatusServiceUnavailable,
 		Error:  "this listener may not manage session consumers, so it can give " + sessionID + " none",
 		Reason: deliveryReasonNoGrant,
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
++		heard:         m.mark(),
+>>>>>>> conflict 4 of 5 ends
 	}
 }
 
@@ -342,11 +415,24 @@ func (m *sessionDelivery) granted() {
 }
 
 // refollow sets the filter of sessionID's consumer to its stored interest topics after a change
+<<<<<<< conflict 5 of 5
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // that removed some (an unsubscribe), when the session's entry records consumer delivery; a
 // session whose entry records none, an entry the previous build wrote, or whose consumer is gone,
 // is left alone, and its next registration sets the filter. A failure is logged, not returned:
 // the consumer then still delivers a topic the session no longer follows, and the plugin drops a
 // frame no followed topic matches.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // that removed some (an unsubscribe), when the session's entry records consumer delivery; a session
+ // on the core path, or whose consumer is gone, is left alone, and its next registration sets the
+-// filter. A failure is logged, not returned: the consumer then still delivers a topic the session
+-// no longer follows, and the plugin drops a frame no followed topic matches.
++// filter. The topics are read under the session's lock, as register reads them, so a registration
++// that stored more topics meanwhile and wrote its filter first is not overwritten with the set
++// read before it. A failure is logged, not returned: the consumer then still delivers a topic the
++// session no longer follows, and the plugin drops a frame no followed topic matches.
+>>>>>>> conflict 5 of 5 ends
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -355,15 +441,16 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
+	defer cancel()
+	unlock := m.locks.lock(sessionID)
 	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
 	if err != nil {
+		unlock()
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
-	defer cancel()
-	unlock := m.locks.lock(sessionID)
 	err = m.consumers.UpdateFilter(ctx, sessionID, sessionConsumerFilter(sessionID, topics))
 	unlock()
 	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {

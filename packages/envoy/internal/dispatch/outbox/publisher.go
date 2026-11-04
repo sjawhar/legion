@@ -99,9 +99,21 @@ type Deps struct {
 // reason: "denied" for a send the server refused under this connection's own publish permissions,
 // "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
 // holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
+<<<<<<< conflict 1 of 1
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // stored copy the stream did not acknowledge (roleForward.send) - and "failed" for every other
 // failure (sendChains). Every increment goes through here: a Deps built without a counter - the
 // package's own tests - then counts nothing instead of dereferencing nil.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
+-// for a holder with a serving port (roleForward.send) - and "failed" for every other failure
+-// (sendChains). Every increment goes through here: a Deps built without a counter - the package's
+-// own tests - then counts nothing instead of dereferencing nil.
++// for a holder whose entry records a port (roleForward.send) - and "failed" for every other
++// failure (sendChains). Every increment goes through here: a Deps built without a counter - the
++// package's own tests - then counts nothing instead of dereferencing nil.
+>>>>>>> conflict 1 of 1 ends
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return

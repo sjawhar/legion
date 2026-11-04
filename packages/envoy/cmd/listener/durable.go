@@ -396,11 +396,23 @@ func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, sto
 }
 
 // agentSubjectNeedsDelivery is durableNeedsDelivery for sessionID's agent subject: not needed when
+<<<<<<< conflict 1 of 1
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // the session's live entry holds it in its own consumer (one skipped delivery), nor when its
 // cached interest names another listener, which delivers it (session.HandleAgentMessage's
 // OwnedElsewhere). Everything else is decoded and delivered: a serving-port session of this
 // machine, an entry the previous build wrote for a session on no consumer, for which the path
 // raises its unreachable exception, and a session nobody has, for which it raises no_holder.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // the session's live entry takes it another way (takesStoredMessagesItself, one skipped delivery),
+ // nor when its cached interest names another listener, which delivers it
+ // (session.HandleAgentMessage's OwnedElsewhere). Everything else is decoded and delivered: a
+-// serving-port or core-path session of this machine, and a session nobody has, for which the path
+-// raises its no_holder exception.
++// session of this machine whose entry records neither way of taking it, or whose entry read did
++// not answer, and a session nobody has, for which the path raises its no_holder exception.
+>>>>>>> conflict 1 of 1 ends
 func agentSubjectNeedsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) (needed bool, skipped int) {
 	if entry, err := cfg.sessions.Get(sessionID); err == nil && entry.ConsumerHoldsStored(storedSeq) {
 		return false, 1

@@ -111,11 +111,25 @@ func pauseBeforeRetry(ctx context.Context) bool {
 // forwardAndWait forwards item to subject, under msgID as its Nats-Msg-Id when that is not empty,
 // through the delivery configuration's forwardRole and waits for its outcome, which is the form a
 // route needs: it answers its sender with what the forward did, where the role lane hands the wait
+<<<<<<< conflict 1 of 4
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // over and reports it later. The outcome is the stream's acknowledgement that it stored the
 // forward, nothing more: the holder answers no receipt and reads the stored copy from its session
 // consumer (startRoleForward).
 func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, msgID string, window time.Duration) error {
 	wait, err := d.delivery.forwardRole(subject, item, msgID, window)
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-// over and reports it later. storedOnly asks for a forward that counts as delivered once the
+-// stream acknowledges storing it, with no receipt (roleForwardStoredOnly): a holder served on a
+-// port has no NATS subscriber to answer one, and takes the stored copy through its listener
+-// instead.
+-func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, msgID string, window time.Duration, storedOnly bool) error {
+-	wait, err := d.delivery.forwardRole(subject, item, msgID, window, storedOnly)
++// over and reports it later.
++func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, msgID string, window time.Duration) error {
++	wait, err := d.delivery.forwardRole(subject, item, msgID, window)
+>>>>>>> conflict 1 of 4 ends
 	if err != nil {
 		return err
 	}
@@ -132,8 +146,16 @@ func forwardRefused(err error) bool {
 
 // confirm records that the stream stored the message under dedupeKey for sessionID through the
 // route. The route's own record (listenerDeps.confirmed) is what a later send of the same key
+<<<<<<< conflict 2 of 4
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // reads, so envoy-client's retry of a send skips a recipient the first attempt stored it for; the
 // delivery handlers' cache is told too, so they do not push the same key to it again.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // reads, so envoy-client's retry of a send skips a recipient the first attempt confirmed; the
+-// delivery handlers' cache is told too, so they do not push the same key to it again.
++// delivery handlers' cache is told too, so they do not deliver the same key to it again.
+>>>>>>> conflict 2 of 4 ends
 func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 	d.confirmed.Record(dedupeKey, sessionID)
 	d.delivery.dedupeCache.Record(dedupeKey, sessionID)
@@ -244,9 +266,18 @@ func (s *roleSend) timedOut() {
 // recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
+<<<<<<< conflict 3 of 4
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for every push
 // they make or hand over, so a role send under a key one of them saw would be answered 200 for a
 // holder the route never forwarded it to.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
+-// session whose push they skipped, having heard nothing from it, so a role send under a key one of
++// session whose delivery they skipped, having heard nothing from it, so a role send under a key one of
+ // them saw would be answered 200 for a holder that never confirmed it.
+>>>>>>> conflict 3 of 4 ends
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
 	switch verdict.kind {
@@ -365,5 +396,190 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			break
 		}
 	}
+<<<<<<< conflict 4 of 4
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 	send.timedOut()
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+ 	send.timedOut(lastForward)
+ }
+ 
+ // topicRecipients lists the sessions an ad-hoc topic send confirms the message with: every session
+ // whose registered interests match the topic on any machine (store.Registry.MatchAll), whose
+ // session entry is live and self-subscribed, other than the sender. A self-subscribed session holds
+-// its own NATS connection and answers a receipt on its agent subject; a session served on a port
+-// does not, and keeps the live lane's delivery.
++// its own NATS connection and answers a receipt on its agent subject; a session that holds none
++// answers nothing, so the route confirms nothing with it.
+ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
+ 	var recipients []string
+ 	for _, interest := range d.registry.MatchAll(item.Topic) {
+ 		if interest.SessionID == item.SourceSession {
+ 			continue
+ 		}
+ 		if entry, err := d.sessions.Get(interest.SessionID); err == nil && entry.SelfSubscribed {
+ 			recipients = append(recipients, interest.SessionID)
+ 		}
+ 	}
+ 	return recipients
+ }
+ 
+ // confirmTopicRecipient forwards item, unchanged, to sessionID's agent subject until its receipt
+ // arrives or ctx ends, by a role send's retry rule, and reports how the recipient ended: delivered,
+ // dedupe (it had confirmed this key through the route already), receipt_timeout or delivery_failed.
+ // The recipient is checked live and self-subscribed before each attempt, and one that confirmed the
+ // key already is not sent it again. A forward refused however often it is sent (forwardRefused)
+ // ends this recipient alone as delivery_failed: the envelope itself already passed the topic's
+ // publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
+ //
+ // Only a receipt that arrived through the route counts, which is why it reads the route's own
+-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
+-// on, the lane receives this send's own publish on the topic, and its fanout records there every
+-// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
++// record (listenerDeps.confirmed) and not the delivery handlers' dedupe cache: that cache holds
++// the session a delivery handed the message to and the session whose delivery it skipped alike,
++// and neither entry is a recipient's word that it has the message. An ad-hoc topic's own publish
++// is core NATS, which the stream does not store (sendToTopic below), so no delivery handler reads
++// this send back at all: the receipts this loop records are the only account of who took it.
+ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
+ 	var lastForward error
+ 	for {
+ 		if d.confirmed.Seen(item.DedupeKey, sessionID) {
+ 			return sendDedupe
+ 		}
+ 		if entry, err := d.sessions.Get(sessionID); err == nil && entry.SelfSubscribed {
+ 			window := receiptWindow(ctx)
+ 			if window <= 0 {
+ 				break
+ 			}
+ 			subject := contracts.AgentSubject(sessionID)
+ 			// As a role send's forward does: one stored copy per message and recipient,
+ 			// however many attempts this recipient takes.
+-			err := d.forwardAndWait(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), window, false)
++			err := d.forwardAndWait(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), window)
+ 			if err == nil {
+ 				d.confirm(item.DedupeKey, sessionID)
+ 				return sendDelivered
+ 			}
+ 			if forwardRefused(err) {
+ 				outcome := sendDeliveryFailed
+ 				d.delivery.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, outcome.deliveryStatus(),
+ 					slog.String("reason", string(outcome)), slog.String("error", err.Error()))
+ 				return outcome
+ 			}
+ 			lastForward = err
+ 		}
+ 		if !pauseBeforeRetry(ctx) {
+ 			break
+ 		}
+ 	}
+ 	return unconfirmedReason(lastForward)
+ }
+ 
+ // sendToTopic delivers an ad-hoc topic message through the publish route: a topic no stream subject
+ // captures (bus.UsesCoreTransport), which core NATS hands once to whoever is subscribed at that
+-// moment. It still publishes the envelope on the topic, for the serve-port sessions the live lane
+-// delivers to and any subscriber the registry does not know; then it forwards the same envelope,
+-// topic, event_id and dedupe_key unchanged, to the agent subject of every recipient
+-// (topicRecipients) in parallel and answers once each confirmed, or 504 not_confirmed naming each
+-// that did not once publishDeliveryWindow from arrived has passed. A recipient that took both
+-// copies drops the second by its event_id.
++// moment. It still publishes the envelope on the topic, for any subscriber the registry does not
++// know; then it forwards the same envelope, topic, event_id and dedupe_key unchanged, to the
++// agent subject of every recipient (topicRecipients) in parallel and answers once each confirmed,
++// or 504 not_confirmed naming each that did not once publishDeliveryWindow from arrived has
++// passed. A recipient that took both copies drops the second by its event_id.
+ //
+ // A send whose own publish on the topic did not reach NATS answers 504 publish_failed, whether the
+ // window ended first (the publish's reconnect wait used it up) or the publish failed at once on a
+ // connection that is down, so its status does not depend on how soon the failure came; nothing was
+ // forwarded, and with no recipient the send is answered 200 only once the topic was published. A
+ // publish NATS refuses however often it is sent (forwardRefused) is the sender's input or the
+ // grant's, answered as requestRecord.refuseBusUnavailable maps it. Every answer goes through
+ // record, the route's one line per request, under the outcome it answers.
+ func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
+ 	recipients := topicRecipients(d, item)
+ 	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
+ 		switch outcome {
+ 		case sendPublishFailed, sendFailed:
+ 			// The send forwarded nothing, so each recipient it did not reach counts failed, as
+ 			// not_confirmed counts each recipient that did not confirm; a send with no recipient
+ 			// counts nothing. Every other outcome's recipients are counted as each one ended.
+ 			for range recipients {
+ 				d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
+ 			}
+ 		}
+ 		level := slog.LevelInfo
+ 		if outcome != sendDelivered {
+ 			level = slog.LevelWarn
+ 		}
+ 		attrs = append([]slog.Attr{
+ 			slog.String("reason", string(outcome)),
+ 			slog.String("dedupe_key", item.DedupeKey),
+ 			slog.Any("delivered", delivered),
+ 			slog.Any("undelivered", undelivered),
+ 			slog.String("elapsed", time.Since(arrived).String()),
+ 		}, attrs...)
+ 		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, outcome.deliveryStatus(), attrs...)
+ 	}
+ 	// The sender stamp's read takes no more of the window than senderStampReadTimeout, and a read
+ 	// that does not answer only leaves the stamp short: the publish below meets the same bus.
+ 	item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
+ 	// The topic's own core publish waits for a reconnecting connection as long as the send's window
+ 	// lasts and no longer, so a hub that is down is answered inside the window, never after the
+ 	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
+ 	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
+ 		if forwardRefused(err) {
+ 			record.refuseBusUnavailable(w, err)
+ 			settle(sendFailed, nil, nil, slog.String("error", err.Error()))
+ 			return
+ 		}
+ 		record.refuseWith(w, http.StatusGatewayTimeout, outcomePublishFailed, topicPublishFailure{
+ 			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, err),
+ 			Reason:    sendPublishFailed,
+ 			EventID:   item.EventID,
+ 			DedupeKey: item.DedupeKey,
+ 		})
+ 		settle(sendPublishFailed, nil, nil, slog.String("error", err.Error()))
+ 		return
+ 	}
+ 	outcomes := make([]sendOutcome, len(recipients))
+ 	var wg sync.WaitGroup
+ 	for i, sessionID := range recipients {
+ 		wg.Go(func() { outcomes[i] = confirmTopicRecipient(ctx, d, item, sessionID) })
+ 	}
+ 	wg.Wait()
+ 	delivered := []string{}
+ 	undelivered := []undeliveredRecipient{}
+ 	for i, outcome := range outcomes {
+ 		d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
+ 		switch outcome {
+ 		case sendDelivered, sendDedupe:
+ 			delivered = append(delivered, recipients[i])
+ 		default:
+ 			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome})
+ 		}
+ 	}
+ 	if len(undelivered) > 0 {
+ 		// The error names each session, since a client that shows only the error (envoy-client's
+ 		// EnvoyApiError) must still tell its agent which sessions did not take the message.
+ 		named := make([]string, len(undelivered))
+ 		for i, recipient := range undelivered {
+ 			named[i] = fmt.Sprintf("%s (%s)", recipient.SessionID, recipient.Reason)
+ 		}
+ 		record.refuseWith(w, http.StatusGatewayTimeout, outcomeNotConfirmed, topicSendFailure{
+ 			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
+ 				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
+ 			Reason:      sendNotConfirmed,
+ 			EventID:     item.EventID,
+ 			DedupeKey:   item.DedupeKey,
+ 			Delivered:   delivered,
+ 			Undelivered: undelivered,
+ 		})
+ 		settle(sendNotConfirmed, delivered, undelivered)
+ 		return
+ 	}
+ 	record.accept(w, publishResponse{Envelope: item})
+ 	settle(sendDelivered, delivered, undelivered)
+>>>>>>> conflict 4 of 4 ends
 }

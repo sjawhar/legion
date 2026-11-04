@@ -1,10 +1,7 @@
 package main
 
 import (
-	"io"
-	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,29 +12,19 @@ import (
 )
 
 // The fan-out reports its own refusal of a message on a followed topic for every recipient it
-// delivers to: a session on the core path, portless or on a serving port, and one whose entry is
-// gone. Each refusal records its recipient before publishing its exception, so an identical
-// redelivery inside the attempt window is a dedupe skip rather than a second exception
-// (TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery). Two tests already
-// hold that for a serving-port recipient on the core path: an unadvertised mode refused for one
-// of them leaves a capable one its message
-// (TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode), and a mode that cannot be
-// read is refused for every one of them, whatever each advertises
-// (TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode). The recipients
-// below are the ones they leave: a portless session on the core path, and one with no entry.
+// delivers to: a session on the core path and one whose entry is gone. Each refusal records its
+// recipient before publishing its exception, so an identical redelivery inside the attempt window
+// is a dedupe skip rather than a second exception
+// (TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery).
 //
-// None of them is on consumer delivery, so this test pins what the fan-out does where no consumer
-// relays the message: the two core-path rows pass on the tree before round 6's fix as after it,
-// and are not evidence for that fix. The branch the fix changes, a portless consumer session's
-// refusal, is pinned by TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery and
-// TestAPortlessConsumerSessionIsReportedAnUnreadableDeliveryMode, which fail on that tree.
+// Neither recipient is on consumer delivery, so this test pins what the fan-out does where no
+// consumer holds the message. The recipient whose own consumer does is pinned by
+// TestTheFanoutReportsARefusalOfASessionOnConsumerDelivery below.
 //
 // A session with no entry leaves no attempt record whichever refusal it meets (INFRA-594): a
 // mode it does not advertise cannot be judged against an entry there is none of, so the message
 // is taken and the resolution that then fails records nothing, and a mode that cannot be read is
-// refused before the entry is read at all but recorded only where the resolution succeeded. So
-// nothing is left for the relay of a session that registers again to hold a later copy under
-// (TestAnUnreadableDeliveryModeToASessionWithNoEntryLeavesNoHoldForItsRelay).
+// refused before the entry is read at all but recorded only where the resolution succeeded.
 func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -52,14 +39,14 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 		// makes a redelivery inside the window a dedupe skip rather than a second exception.
 		wantAttempt bool
 		// core hands the message to the core lane rather than to the durable, for a recipient the
-		// durable path never fans out to: a portless self-subscribed session takes a stored
-		// message on its own subscription, so the durable acknowledges it unread
-		// (durableNeedsDelivery, takesStoredMessagesItself) and only a live or core message
-		// reaches the fan-out for such a session.
+		// durable path never fans out to: a self-subscribed session takes a stored message on its
+		// own subscription, so the durable acknowledges it unread (durableNeedsDelivery,
+		// takesStoredMessagesItself) and only a core message reaches the fan-out for such a
+		// session.
 		core bool
 	}{
 		{
-			name:          "a portless session on the core path does not advertise the mode",
+			name:          "a self-subscribed session on the core path does not advertise the mode",
 			entry:         &session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"},
 			payload:       `{"delivery":{"mode":"btw"}}`,
 			wantException: true,
@@ -68,7 +55,7 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 			core:          true,
 		},
 		{
-			name:          "a portless session on the core path is sent a mode that cannot be read",
+			name:          "a self-subscribed session on the core path is sent a mode that cannot be read",
 			entry:         &session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine", Capabilities: []string{"btw"}},
 			payload:       `{"delivery":{"mode":"bogus"}}`,
 			wantException: true,
@@ -79,9 +66,8 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 		{
 			// Refused, since judgeFollowedTopic reads a mode nobody can advertise before it looks
 			// for an entry, but recorded nowhere: the resolution of this recipient fails
-			// (session.ErrNoSessionRecord), and an attempt record naming a push that was never
-			// made is one the session's own relay would hold this message under once the session
-			// registers again on a serving port.
+			// (session.ErrNoSessionRecord), and an attempt record names a delivery that was never
+			// made.
 			name:          "a session with no entry is sent a mode that cannot be read",
 			payload:       `{"delivery":{"mode":"bogus"}}`,
 			wantException: true,
@@ -97,11 +83,7 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var pushes atomic.Int32
-			harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-				pushes.Add(1)
-				return listenerDeliveryResponse(http.StatusNoContent), nil
-			}))
+			harness := newListenerDeliveryHarness(t)
 			sessionID := "ses_fanout_refusal_" + id.New()
 			topic := "notifications.github.acme.fanout-refusal-" + id.New() + ".mention"
 			if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
@@ -132,8 +114,8 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 			} else {
 				noException(t, probe)
 			}
-			if got := pushes.Load(); got != 0 {
-				t.Fatalf("the fan-out pushed %s %d times, want none", sessionID, got)
+			if harness.config.dedupeCache.Seen(item.DedupeKey, sessionID) {
+				t.Fatalf("the fan-out recorded %s as having taken a message it was refused", sessionID)
 			}
 			if logs := harness.logs.String(); !strings.Contains(logs, tc.wantLog) {
 				t.Fatalf("the fan-out never logged %q:\n%s", tc.wantLog, logs)
@@ -145,6 +127,8 @@ func TestTheFanoutReportsItsOwnRefusalsForTheSessionsItDeliversTo(t *testing.T) 
 	}
 }
 
+<<<<<<< conflict 1 of 1
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // A recipient the fan-out read an entry for and can push nothing to -- a portless entry with no
 // consumer of its own (session.ErrNoPushTarget), the record a build before dispatch://INFRA-771
 // left for a session on the core path -- has its attempt recorded before the exception of its
@@ -211,31 +195,32 @@ func TestTheFanoutRecordsARecipientItCanPushNothingToBeforeItsException(t *testi
 // its targeted delivery mode is one the session does not advertise, or one no session can be
 // shown to advertise because it cannot be read unambiguously -- is reported by the durable path's
 // fan-out, with one delivery_failed exception for that session.
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-// A message on a followed topic that a portless session on consumer delivery cannot be given --
+-// its targeted delivery mode is one the session does not advertise, or one no session can be
+-// shown to advertise because it cannot be read unambiguously -- is reported by the durable path's
+-// fan-out, with one delivery_failed exception for that session.
++// A message on a followed topic that a session on consumer delivery cannot be given -- its
++// targeted delivery mode is one the session does not advertise, or one no session can be shown to
++// advertise because it cannot be read unambiguously -- is reported by the durable path's fan-out,
++// with one delivery_failed exception for that session.
+>>>>>>> conflict 1 of 1 ends
 //
-// Only a serving-port session's relay judges what it pushes
-// (sessionRelays.followedTopicVerdict), and the fan-out leaves that session's refusals to it
-// (TestServePortRelayRefusesAnUnadvertisedModeTheFanoutAlsoRefused). A portless session's relay
-// publishes every frame unjudged (sessionRelays.relayNATS) and the plugin drops a frame whose
-// delivery mode it cannot read without a word, so a refusal left to that relay would be reported
-// by nobody. The fan-out records no attempt for it: judgeFollowedTopic is what reads such a
-// record back, and the relay of a serving-port session's consumer applies that same judgement,
-// so a record would make the relay of this session hold its copy -- and the session's later
-// messages behind it -- until it expired (attemptCacheTTL) once the session is on a serving port
-// (INFRA-594).
-func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing.T) {
-	const corePort = 4097
+// A session's relay publishes every frame unjudged (sessionRelays.relayNATS) and the plugin drops
+// a frame whose delivery mode it cannot read without a word, so a refusal left to that relay
+// would be reported by nobody. The fan-out records no attempt for it: it hands the message to
+// nobody, so a record would have the relay's own copy of the next event under that key skipped as
+// one already on its way (INFRA-594).
+func TestTheFanoutReportsARefusalOfASessionOnConsumerDelivery(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// payload is what the publisher sends, and coreTakesIt whether the core-path session,
-		// which advertises "btw", is given the message: a mode that cannot be read is refused for
-		// every session, so that one is refused too.
-		payload     string
-		coreTakesIt bool
+		// payload is what the publisher sends.
+		payload string
 	}{
 		{
-			name:        "the session does not advertise the mode",
-			payload:     `{"delivery":{"mode":"btw"}}`,
-			coreTakesIt: true,
+			name:    "the session does not advertise the mode",
+			payload: `{"delivery":{"mode":"btw"}}`,
 		},
 		{
 			// Any publisher can send this: the publish route reads the mode only for sends and
@@ -248,118 +233,63 @@ func TestTheFanoutReportsARefusalOfAPortlessSessionOnConsumerDelivery(t *testing
 			// Unowned, so no relay runs: the fan-out is the only path that reads the message, and
 			// the test orders them by construction rather than by timing.
 			rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
-			relayed := "ses_portless_relayed_" + id.New()
-			core := "ses_portless_core_" + id.New()
-			topic := "notifications.github.acme.portless-mode-" + id.New() + ".mention"
-			corePushes := make(chan string, 8)
-			rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
-				body, err := io.ReadAll(request.Body)
-				if err != nil {
-					return nil, err
-				}
-				corePushes <- string(body)
-				return listenerDeliveryResponse(http.StatusNoContent), nil
-			})}
+			relayed := "ses_consumer_mode_" + id.New()
+			topic := "notifications.github.acme.consumer-mode-" + id.New() + ".mention"
 			exceptions := exceptionProbe(t, rig.harness.client)
 
-			// The session under test: no port, on consumer delivery, following the topic, and
-			// advertising no delivery mode at all.
+			// The session under test: on consumer delivery, following the topic, and advertising
+			// no delivery mode at all.
 			rig.subscribe(t, consumerRegistration(relayed, "epoch-1", topic))
-			if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer || entry.Port != 0 {
-				t.Fatalf("the session's entry records delivery %q at port %d, want the consumer's at no port", entry.Delivery, entry.Port)
+			if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
+				t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
 			}
-			// A second interest on the topic, a serving-port session of this machine on the core
-			// path that does advertise the mode: the durable path reads the message for it and
-			// fans it out over every interest, this machine's consumer-delivery session included.
-			if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
-				t.Fatalf("register %s's interest: %v", core, err)
-			}
-			if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1", Capabilities: []string{"btw"}}); err != nil {
-				t.Fatalf("register %s's entry: %v", core, err)
-			}
-			durable := "listener-portless-mode-" + id.New()
+			keepTheDurableReading(t, rig, topic)
+			durable := "listener-consumer-mode-" + id.New()
 			bindTestDurable(t, rig, durable, topic)
 
-			item := listenerTestEnvelope(topic, "portless-mode-"+id.New())
+			item := listenerTestEnvelope(topic, "consumer-mode-"+id.New())
 			item.Payload = tc.payload
 			ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
 			if err != nil {
 				t.Fatalf("store the message: %v", err)
 			}
-			if tc.coreTakesIt {
-				select {
-				case body := <-corePushes:
-					if !strings.Contains(body, item.EventID) {
-						t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
-					}
-				case <-time.After(15 * time.Second):
-					t.Fatal("the durable path never pushed the message to the core-path session")
-				}
-			} else {
-				awaitLogLine(t, rig, "listener delivery mode cannot be read unambiguously", 15*time.Second)
-			}
 			awaitFanoutFinished(t, rig, durable, ack.Sequence)
 
 			if reasons := deliveryExceptionsFor(t, exceptions, relayed, 2*time.Second); len(reasons) != 1 || reasons[0] != "delivery_failed" {
-				t.Fatalf("the exception lanes carried %v for the portless session, want one delivery_failed: its relay judges nothing, so the fan-out reports the refusal", reasons)
+				t.Fatalf("the exception lanes carried %v for the session on consumer delivery, want one delivery_failed: its relay judges nothing, so the fan-out reports the refusal", reasons)
 			}
 			if rig.harness.config.attemptCache.Seen(item.DedupeKey, relayed) {
-				t.Fatalf("the fan-out recorded an attempt for %s: a relay of that session on a serving port would hold its copy under it for attemptCacheTTL", relayed)
+				t.Fatalf("the fan-out recorded an attempt for %s, which it handed the message to nobody for", relayed)
 			}
 		})
 	}
 }
 
-// A message on a followed topic a portless session on consumer delivery takes reaches it as a
-// relay frame when another interest on that topic sends the same message down the durable path:
-// the session's consumer holds it and its relay is what sends it, so the fan-out pushes nothing
-// and records neither an attempt nor a dedupe key for it -- records the relay of the same session
-// on a serving port would hold its copy under, or ack it by (INFRA-594).
-func TestThePortlessRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
-	const corePort = 4097
+// A message on a followed topic a session on consumer delivery takes reaches it as a relay frame
+// when another interest on that topic sends the same message down the durable path: the session's
+// consumer holds it and its relay is what sends it, so the fan-out hands it to nobody and records
+// neither an attempt nor a dedupe key for it -- records that would have the next copy of the same
+// event skipped as one the session already has (INFRA-594).
+func TestTheRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
 	// Unowned, so no relay runs until the fan-out has read the message: the test orders the two
 	// paths by construction rather than by timing.
 	rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
-	relayed := "ses_portless_take_" + id.New()
-	core := "ses_portless_take_core_" + id.New()
-	topic := "notifications.github.acme.portless-take-" + id.New() + ".mention"
-	corePushes := make(chan string, 8)
-	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(request.Body)
-		if err != nil {
-			return nil, err
-		}
-		corePushes <- string(body)
-		return listenerDeliveryResponse(http.StatusNoContent), nil
-	})}
+	relayed := "ses_consumer_take_" + id.New()
+	topic := "notifications.github.acme.consumer-take-" + id.New() + ".mention"
 
 	standIn := startSessionStandIn(t, rig.url, relayed, answerDone)
 	rig.subscribe(t, consumerRegistration(relayed, "epoch-1", topic))
-	if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer || entry.Port != 0 {
-		t.Fatalf("the session's entry records delivery %q at port %d, want the consumer's at no port", entry.Delivery, entry.Port)
+	if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
+		t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
 	}
-	if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
-		t.Fatalf("register %s's interest: %v", core, err)
-	}
-	if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1"}); err != nil {
-		t.Fatalf("register %s's entry: %v", core, err)
-	}
-	durable := "listener-portless-take-" + id.New()
+	keepTheDurableReading(t, rig, topic)
+	durable := "listener-consumer-take-" + id.New()
 	bindTestDurable(t, rig, durable, topic)
 
-	item := listenerTestEnvelope(topic, "portless-take-"+id.New())
+	item := listenerTestEnvelope(topic, "consumer-take-"+id.New())
 	ack, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item))
 	if err != nil {
 		t.Fatalf("store the message: %v", err)
-	}
-	// The durable path has read the message once the core-path session's port has it.
-	select {
-	case body := <-corePushes:
-		if !strings.Contains(body, item.EventID) {
-			t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("the durable path never pushed the message to the core-path session")
 	}
 	awaitFanoutFinished(t, rig, durable, ack.Sequence)
 	if rig.harness.config.attemptCache.Seen(item.DedupeKey, relayed) || rig.harness.config.dedupeCache.Seen(item.DedupeKey, relayed) {
@@ -369,4 +299,57 @@ func TestThePortlessRelaySendsAFollowedTopicTheDurablePathAlsoReads(t *testing.T
 	rig.relays.setOwned(true)
 	requireFrames(t, standIn.collect(t, 1, 15*time.Second), item)
 	standIn.none(t, time.Second)
+}
+
+// A message on a topic the session that published it follows is skipped for that session as an
+// echo: the fan-out hands it back to nobody, reports no failure of it, and records neither a
+// dedupe key nor an attempt for it, so the next event under that key still reaches it. Every
+// other session following the topic is taken the message as usual, recorded once.
+//
+// The test drives the delivery handler directly, with a core message of an ad-hoc topic the
+// stream does not store (bus.UsesCoreTransport). No lane carries such a message to the fan-out
+// in production: the listener's core handler is wired to the role lane alone
+// (bus.ConnectRoleLane on notifications.role.>), so the fan-out runs for durable messages only.
+// The verdict is the same either way, because judgeFollowedTopic is never told the lane: its
+// signature takes no deliveryMessage, so a core message earns the verdict a durable one would.
+func TestTheFanoutSkipsAMessageOnAFollowedTopicAsAnEchoOfTheSessionThatPublishedIt(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	run := id.New()
+	sender := "ses_echo_sender_" + run
+	other := "ses_echo_other_" + run
+	topic := "notifications.team.echo-" + run
+	for _, sessionID := range []string{sender, other} {
+		if _, err := harness.registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{topic}); err != nil {
+			t.Fatalf("register %s's interest: %v", sessionID, err)
+		}
+		if err := harness.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
+			t.Fatalf("register %s's entry: %v", sessionID, err)
+		}
+	}
+	probe := exceptionProbe(t, harness.client)
+
+	item := listenerTestEnvelope(topic, "echo-"+run)
+	item.SourceSession = sender
+	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush what the fan-out published: %v", err)
+	}
+
+	if harness.config.dedupeCache.Seen(item.DedupeKey, sender) || harness.config.attemptCache.Seen(item.DedupeKey, sender) {
+		t.Fatalf("the fan-out recorded %s as having been given the message it published itself", sender)
+	}
+	if !harness.config.dedupeCache.Seen(item.DedupeKey, other) {
+		t.Fatalf("the fan-out never recorded %s as having taken the message it follows the topic for", other)
+	}
+	noException(t, probe)
+
+	var echoes []string
+	for _, line := range strings.Split(harness.logs.String(), "\n") {
+		if strings.Contains(line, "listener skip echo") {
+			echoes = append(echoes, line)
+		}
+	}
+	if len(echoes) != 1 || !strings.Contains(echoes[0], sender) {
+		t.Fatalf("the fan-out logged %d echoes, want one naming %s:\n%s", len(echoes), sender, harness.logs.String())
+	}
 }

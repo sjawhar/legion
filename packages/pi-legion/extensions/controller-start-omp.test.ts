@@ -1239,6 +1239,10 @@ test.skipIf(skip)(
 // which has no default key, to alt+n, whose handler runs the `/new` flow from any view. The
 // subagent's own request is held, so it is still running when its view is focused (alt+a opens
 // the agent hub, Enter focuses the selected agent).
+// Oh My Pi 18.16.0 no longer posts the `Viewing agent …` status its predecessor did, because "the
+// status line and Tern's composer already show which agent is in view", so the case reads the
+// focused view from the status line's own breadcrumb, which carries the name Oh My Pi generated
+// for this subagent, and checks that breadcrumb is absent before the hub is opened.
 test.skipIf(skip)(
   "the operator sees a refused re-claim after /new from a focused subagent view",
   async () => {
@@ -1299,10 +1303,25 @@ test.skipIf(skip)(
         : undefined
     );
 
+    // The breadcrumb carries the name Oh My Pi generated for this subagent, which the Subagents
+    // panel's row for it (`  └─ ⟳ StuckCobra Reply with done.`) holds as the last token before the
+    // assignment; the spinner frame before the name changes, so the row is not matched on it.
+    const subagent = await session.until("the subagent's row in the Subagents panel", () => {
+      for (const line of session.terminal.screen().split("\n")) {
+        const at = line.indexOf("Reply with done.");
+        if (at < 0 || !line.includes("└─")) continue;
+        const name = line.slice(0, at).trim().split(/\s+/).at(-1);
+        if (name !== undefined && /^[A-Za-z]/.test(name)) return name;
+      }
+      return undefined;
+    });
+    const focusedView = `👻 ${subagent}`;
+    expect(session.terminal.screen()).not.toContain(focusedView);
+
     session.terminal.write("\x1ba");
     await session.shows("the agent hub with the running subagent", "Agent Hub", "1 running");
     session.terminal.write("\r");
-    await session.shows("the subagent's view focused", "Viewing agent", "Reply with done.");
+    await session.shows("the subagent's view focused", focusedView, "Reply with done.");
 
     session.terminal.write("\x1bn");
     await session.until("the re-claim's registration", () =>

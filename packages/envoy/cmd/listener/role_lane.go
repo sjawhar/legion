@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +108,14 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleForwardTimeout)
+<<<<<<< conflict 1 of 3
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
+-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout, forward.storedOnly)
++		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleForwardTimeout)
++++++++ lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), forward.msgID(subject), roleReceiptTimeout)
+>>>>>>> conflict 1 of 3 ends
 		if err != nil {
 			f.finish(forward, err)
 			continue
@@ -138,6 +144,8 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 	return waitWithin(ctx, &f.pending)
 }
 
+<<<<<<< conflict 2 of 3
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 // startRoleForward is forwardRole over client: every forward is stored-only
 // (bus.Client.StartRequestStoredTo), so it counts as delivered once the stream acknowledges
 // storing it. No session holds a core subscription any more, so no holder answers a receipt: the
@@ -148,6 +156,24 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
 	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
 		forward, err := client.StartRequestStoredTo(subject, item, msgID, timeout)
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-// startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
+-// for the stream's acknowledgement and the receipt (bus.Client.StartRequestCoreTo), and one to a
+-// holder that answers none for the acknowledgement alone (bus.Client.StartRequestStoredTo).
+-func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+-	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration, storedOnly bool) (func() error, error) {
+-		start := client.StartRequestCoreTo
+-		if storedOnly {
+-			start = client.StartRequestStoredTo
+-		}
+-		forward, err := start(subject, item, msgID, timeout)
++// startRoleForward is forwardRole over client: a forward waits for the stream's acknowledgement
++// and the holder's receipt (bus.Client.StartRequestCoreTo).
++func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
++	return func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) (func() error, error) {
++		forward, err := client.StartRequestCoreTo(subject, item, msgID, timeout)
+>>>>>>> conflict 2 of 3 ends
 		if err != nil {
 			return nil, err
 		}
@@ -199,6 +225,8 @@ func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *l
 		}
 	}
 }
+<<<<<<< conflict 3 of 3
++++++++ zwxwlryn 92c90c86 "merge: main into INFRA-771, past f5bdbada so worker-image/build has repo-paths.sh"
 
 // storedForwardCopyIsDelivery reports whether the stored copy of a forward on sessionID's agent
 // subject, stored at stream sequence storedSeq, is that session's own delivery rather than a copy
@@ -250,3 +278,66 @@ func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message delivery
 	cfg.attemptCache.Record(item.DedupeKey, holder)
 	handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, settle: message.settle, storedSeq: message.storedSeq(), forward: true, logLine: "listener role forward pushed"})
 }
+%%%%%%% diff from: rmmmynwt 8bfdf258 "fix(dispatch): a version that restores the approved text keeps its approval (#2703)"
+\\\\\\\        to: lmonpkut e2b93abb "ci: the envoy-go lane gets 60 minutes, and its test steps time out inside it (#2739)"
+-
+-// roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session on a
+-// serving port has no NATS subscriber. The stream's copy of the forward reaches its port with
+-// acknowledgement and redelivery: from its session consumer, which the listener's relay pushes,
+-// when its entry records consumer delivery, else from the owning listener's durable
+-// (roleForwardCopyDelivery). Its forward counts as delivered once the stream acknowledges storing it.
+-func roleForwardStoredOnly(holder session.SessionEntry) bool {
+-	return holder.Port > 0
+-}
+-
+-// storedForwardCopyIsDelivery reports whether the stored copy of a forward on sessionID's agent
+-// subject, stored at stream sequence storedSeq, is that session's own delivery rather than a copy
+-// of one it already has (listenerDeliveryHandler). Only a serving-port session of this listener's
+-// is: it answers no receipt, and its consumer does not hold this copy, so the copy pushed to its
+-// port is how it receives the message (roleForwardCopyDelivery). Every other recipient took the
+-// forward on its own NATS connection or takes the stored copy another way
+-// (takesStoredMessagesItself), and a session with no entry, or one on another listener, is nobody
+-// here to push to.
+-func storedForwardCopyIsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) bool {
+-	entry, err := cfg.sessions.Get(sessionID)
+-	if err != nil || takesStoredMessagesItself(entry, storedSeq) {
+-		return false
+-	}
+-	return ownsServingPortSession(cfg, sessionID, entry)
+-}
+-
+-// roleForwardCopyDelivery handles the stored copy of a role forward (roleForward.forwarded), which
+-// the durable reads on its holder's agent subject. A holder on NATS took the forward over its own
+-// subscription, a holder whose consumer holds this copy takes it from there, and a holder another
+-// listener owns is that listener's, so the copy is acknowledged. A serving-port holder this listener
+-// owns has no subscriber: the copy is pushed to its port and acknowledged only on the port's 204,
+-// by the holder's serving-port worker on the durable path, so its order behind the holder's earlier
+-// messages holds; a copy the workers cannot take goes back to the durable.
+-//
+-// Whether the holder's consumer holds this copy is read from the copy's own stream sequence
+-// (takesStoredMessagesItself), as every other path reads it: a copy stored below that consumer's
+-// start - one stored while the holder had no consumer, NAKed or left unacked, and redelivered
+-// after the holder registered again - is in no consumer, and this push is how the holder gets it.
+-// Acknowledging it on the holder's delivery mode alone loses it, and the forward was stored-only
+-// (roleForwardStoredOnly), so its sender was already told it was delivered.
+-func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
+-	holder, ok := "", false
+-	if message.mode == durableDelivery {
+-		holder, ok = strings.CutPrefix(message.msg.Subject, contracts.AgentTopicPrefix)
+-	}
+-	if !ok {
+-		message.finalize(false)
+-		return
+-	}
+-	if !storedForwardCopyIsDelivery(cfg, holder, message.storedSeq()) {
+-		message.finalize(false)
+-		return
+-	}
+-	if cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
+-		message.finalize(false)
+-		return
+-	}
+-	cfg.attemptCache.Record(item.DedupeKey, holder)
+-	handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, settle: message.settle, storedSeq: message.storedSeq(), forward: true, logLine: "listener role forward pushed"})
+-}
+>>>>>>> conflict 3 of 3 ends

@@ -385,6 +385,7 @@ jobs:
               - 'packages/daemon/internal/registry/*'
               - 'packages/daemon/internal/repocache/*'
               - 'packages/daemon/internal/requiredchecks/*'
+              - 'packages/daemon/internal/rescue/*'
               - 'packages/daemon/internal/runtime/*'
               - 'packages/daemon/internal/runtime/sandbox/*'
               - 'packages/daemon/internal/runtime/shellprefix/*'
@@ -466,9 +467,11 @@ jobs:
               - '.github/actions/install-jj/**'
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
-            # What `go test ./...` in packages/daemon reads, for the test job's "Test the Go daemon"
-            # step. The packages it compiles, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what its tests read
+            # What the test job's two Go steps read together — the plain step, which tests every
+            # package of packages/daemon but the four concurrent ones, and the race step, which
+            # tests those four — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server
+            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -539,7 +542,8 @@ jobs:
               # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
               # scripts/build-inputs.txt matches.
               - '.github/workflows/claude-envoy-rebuild.yaml'
-            # The daemon's tests (`go test ./...`, the -race subset, and the daemon
+            # The daemon's tests (every package once: the four concurrent packages under the race
+            # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
               - '.github/workflows/ci.yaml'
@@ -657,13 +661,17 @@ jobs:
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
               # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
               # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
-              # tables, and scripts/gen-go.test.ts checks both files scripts/gen-go.ts writes are
-              # current.
+              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - two
+              # Go files, pmdoc's generated block schema and contracts' own generated TypeScript -
+              # is current. pmdoc/schema is the block schema those generated types are the shape
+              # of, so a change to it is a change to what this job generates for.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/typed-block-id-spellings.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
+              - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
               - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
@@ -847,7 +855,9 @@ jobs:
               # (internal/dispatch/api/lock_level_test.go:120-133).
               - 'packages/envoy/**'
               # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
-              # and sources and checks the daemon's generated copy too (gen-go.ts:445).
+              # and sources, renders pmdoc's generated block schema from
+              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
+              # (its outputs list, the files the generator owns).
               - 'packages/contracts/scripts/gen-go.ts'
               - 'packages/contracts/schemas/**'
               - 'packages/contracts/src/**'
@@ -885,6 +895,10 @@ jobs:
               - 'packages/envoy/internal/cmdtest/*'
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/dispatch/githubapp/**'
+              # delivery/pull_request_heads.go imports internal/dispatch/refs, which imports
+              # internal/dispatch/text, so the natslive run compiles that package and the check
+              # counts its testdata among what this job reads.
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
@@ -1665,7 +1679,15 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
+    # prints the goroutine dump that names it. A step's worst case is therefore its largest
+    # measured green duration plus its own -timeout, not its compile plus its -timeout: 325 s of
+    # setup before the plain step starts, then that step's 839 s (measured while it still ran
+    # internal/daemon, so an upper bound for it now) and its 15 minutes, then the race step's
+    # 694 s and its 30, then 13 s for the steps after it and 7 s for the cache save that runs only
+    # on a miss, which is 4578 s, or about 76 minutes (dispatch://INFRA-1052 measured them over the
+    # 30 newest counted test jobs of main push runs).
+    timeout-minutes: 80
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1879,18 +1901,31 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
+      # The step runs every package of the module except the four the race step below tests, so
+      # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
+      # failed go list, or a pattern that matches every package, fail the step rather than pass it
+      # with nothing tested.
       - name: Test the Go daemon
-        run: go test -count=1 -timeout 20m ./...
+        run: |
+          set -o pipefail
+          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
       # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run again under the race detector; so do the session proxy and the
-      # launcher that wires it, whose accept loop, copy pairs, pair tracking and bounded drain share
-      # state across goroutines. The detector needs cgo, which the runners have gcc for. The lane
-      # tests hold a fake clock, so they are deterministic under it.
+      # their store live in run under the race detector once per job, the plain step above leaving
+      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
+      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
+      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
+      # deterministic under it.
+      #
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
+      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
+      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof
@@ -2505,7 +2540,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_go == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
+    # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
+    # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
+    # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
+    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
