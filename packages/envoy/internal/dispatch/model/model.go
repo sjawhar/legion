@@ -471,17 +471,21 @@ type WriteSuggestion struct {
 // Missing is set, to the reason the check was not made, exactly when Outcome is "not_made", so a
 // client built before Outcome still says the check was skipped. SearchQuery is two or three of
 // the words the keyword search used, spelled as the text spells them, for a reader to search with
-// by hand. TitleMatches is the issues whose titles near-duplicate a new issue's when the create
-// was forced past that refusal. Related is always an array, never null.
+// by hand. TitleMatches is the issues the near-copy refusal named when the create was forced past
+// it. LikelyDuplicate is the closest open issue of an unforced create whose near-copy score
+// reached the nudge bar but not the refusal's: a field of its own, because every released client
+// prints each TitleMatches entry as something the filer forced past. Related is always an array,
+// never null.
 type Suggestions struct {
-	Outcome      string               `json:"outcome"`
-	Search       string               `json:"search,omitempty"`
-	SearchNote   string               `json:"search_note,omitempty"`
-	SearchQuery  string               `json:"search_query,omitempty"`
-	Related      []WriteSuggestion    `json:"related"`
-	Decision     *WriteSuggestion     `json:"decision,omitempty"`
-	Missing      string               `json:"missing,omitempty"`
-	TitleMatches []DuplicateCandidate `json:"title_matches,omitempty"`
+	Outcome         string               `json:"outcome"`
+	Search          string               `json:"search,omitempty"`
+	SearchNote      string               `json:"search_note,omitempty"`
+	SearchQuery     string               `json:"search_query,omitempty"`
+	Related         []WriteSuggestion    `json:"related"`
+	Decision        *WriteSuggestion     `json:"decision,omitempty"`
+	Missing         string               `json:"missing,omitempty"`
+	TitleMatches    []DuplicateCandidate `json:"title_matches,omitempty"`
+	LikelyDuplicate *DuplicateCandidate  `json:"likely_duplicate,omitempty"`
 }
 
 // RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in
@@ -1224,12 +1228,26 @@ type AskAnsweredEventPayload struct {
 // whose Replies count the move can change: for a close or a reopen every login with a Replies row
 // on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
 // Each is absent from an event written before them.
+//
+// Forced is on an `issue.created` alone, and only when the create went in with `force` and the
+// near-copy refusal would have stopped it: Past names the issues that refusal named, and is the
+// empty list when the check did not answer. A forced create the refusal would not have stopped
+// carries no Forced at all, so the three states are told apart (dispatch://INFRA-1160/spec#b-r3).
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
-	Changed      []string `json:"changed,omitzero"`
-	Ancestors    []string `json:"ancestors,omitzero"`
-	ThreadLogins []string `json:"thread_logins,omitzero"`
+	Changed      []string      `json:"changed,omitzero"`
+	Ancestors    []string      `json:"ancestors,omitzero"`
+	ThreadLogins []string      `json:"thread_logins,omitzero"`
+	Forced       *ForcedCreate `json:"forced,omitempty"`
+}
+
+// ForcedCreate is IssueEventPayload.Forced: what the near-copy refusal named when a create went
+// past it with `force`. Past carries no omitempty and no omitzero, so an empty list survives the
+// write: that is the create whose check did not answer, which the weekly count reports apart
+// from the overrides.
+type ForcedCreate struct {
+	Past []string `json:"past"`
 }
 
 // NewIssueEventPayload builds the payload of an `issue.*` event. A write that indexes no text

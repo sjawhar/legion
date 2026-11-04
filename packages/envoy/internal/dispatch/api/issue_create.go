@@ -1,11 +1,9 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -199,36 +197,47 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The title-overlap refusal, and under force the same overlaps named in the result instead
-	// a forced create is told what it forced past, but a slow or failing overlap read
-	// must not refuse a create its caller already insisted on, so it is bounded on its own and its
-	// failure only logged.
-	var titleMatches []model.DuplicateCandidate
+	// The near-copy gate, run once for every create whatever `force` says: a forced create's
+	// record of what it went past must be the refusal an unforced create would have met, and two
+	// reads would drift. The gate bounds and logs its own read (duplicateGate); an unforced
+	// create is refused with that read's error, as this handler has always answered a failed
+	// check, while a forced one goes in with the gate's answer marked absent.
+	//
+	// The gate's candidate set leaves out the new issue's whole ancestor chain, which is read
+	// here, before the transaction. A parent that does not exist or sits in another project
+	// yields an empty chain and still gets its own refusal inside the transaction, so no error
+	// changes order.
+	var gate duplicateGateResult
 	if input.External == "" {
-		if input.Force {
-			matchCtx, cancel := context.WithTimeout(r.Context(), forcedTitleMatchTimeout)
-			candidates, err := s.duplicateCandidates(matchCtx, s.deps.Store.Pool, input.Project, input.Title, parentKey)
-			cancel()
-			if err != nil {
-				slog.Warn("dispatch: forced issue create names no title overlaps", "project", input.Project, "error", err)
-			} else {
-				titleMatches = candidates
-			}
-		} else {
-			candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
+		ancestors := []string{}
+		if parentKey != "" {
+			chain, err := refs.IssueAncestors(r.Context(), s.deps.Store.Pool, parentKey)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			if len(candidates) > 0 {
+			ancestors = append([]string{parentKey}, chain...)
+		}
+		spec := ""
+		if input.Spec != nil {
+			spec = *input.Spec
+		}
+		result, err := s.duplicateGate(r.Context(), input.Project, input.Title, spec, ancestors)
+		if !input.Force {
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if refusals := result.refusals(); len(refusals) > 0 {
 				WriteJSON(w, http.StatusConflict, map[string]any{
-					"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
+					"error":      fmt.Sprintf("possible duplicate of %s: %s", refusals[0].Key, refusals[0].Title),
 					"code":       "POSSIBLE_DUPLICATE",
-					"candidates": candidates,
+					"candidates": refusals,
 				})
 				return
 			}
 		}
+		gate = result
 	}
 
 	tx, err := s.begin(r.Context())
@@ -423,6 +432,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	payload.Forced = forcedCreateRecord(input.Force, gate)
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event("issue.created", actor, payload))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -457,13 +467,58 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
 		record:  true,
 	})
-	suggestions.TitleMatches = titleMatches
+	suggestions.TitleMatches = gateTitleMatches(input.Force, gate)
+	if !input.Force {
+		suggestions.LikelyDuplicate = gate.nudge()
+	}
 	WriteJSON(w, http.StatusCreated, withSuggestions(issue, advice, suggestions))
 }
 
-// forcedTitleMatchTimeout bounds the title-overlap read a forced issue create runs only to name
-// what it forced past: the create is not refused on it, so it must not wait long on it either.
+// forcedTitleMatchTimeout bounds the near-copy gate's read: a create waits on it, and a forced
+// create, which is not refused on it, must not wait long on it either.
 const forcedTitleMatchTimeout = time.Second
+
+// forcedCreateRecord is what the issue.created event stores about a create that went in with
+// `force`, in the three states dispatch://INFRA-1160/spec#b-r3 names:
+//
+//	forced past a refusal       {"past": ["INFRA-724"]}
+//	the check did not answer    {"past": []}
+//	the refusal would not have stopped it, or no force   nothing
+//
+// Past carries no omitempty, so the empty list survives the write and a reader can tell the
+// second state from the third. The weekly count reads it from the event.
+func forcedCreateRecord(force bool, gate duplicateGateResult) *model.ForcedCreate {
+	if !force {
+		return nil
+	}
+	if !gate.Answered {
+		return &model.ForcedCreate{Past: []string{}}
+	}
+	past := []string{}
+	for _, candidate := range gate.refusals() {
+		past = append(past, candidate.Key)
+	}
+	if len(past) == 0 {
+		return nil
+	}
+	return &model.ForcedCreate{Past: past}
+}
+
+// gateTitleMatches is advice.suggestions.title_matches: the issues a forced create went past,
+// which every released client prints as "Title overlaps you forced past". An unforced create
+// never fills it, whatever the gate found - its nudge rides in likely_duplicate, a field of its
+// own, because Dispatch deploys before the CLI reaches agents and a nudge carried here would
+// tell every nudged filer it forced past something it did not.
+func gateTitleMatches(force bool, gate duplicateGateResult) []model.DuplicateCandidate {
+	if !force || !gate.Answered {
+		return nil
+	}
+	matches := gate.refusals()
+	if len(matches) == 0 {
+		return nil
+	}
+	return matches
+}
 
 // respondWithExistingExternalIssue answers a create naming a GitHub issue Dispatch already holds
 // with that issue. Nothing was created, so no related-item check is made, and the result says so

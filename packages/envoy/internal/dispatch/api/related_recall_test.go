@@ -29,7 +29,12 @@ type recallRecord struct {
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Spec      string    `json:"spec"`
+	// Status and ClosedAt are the issue as the server holds it now. A done issue is loaded done,
+	// so the open-first order the check applies is the order a reader of that server would see,
+	// and R1's count, which is of pairs whose target is open, can leave the rest out.
+	Status   string     `json:"status"`
+	ClosedAt *time.Time `json:"closed_at"`
+	Spec     string     `json:"spec"`
 	// SpecVersions holds the versions a pair needs besides the latest: a query's first, a
 	// target's as of each of its queries' filing.
 	SpecVersions []struct {
@@ -150,10 +155,11 @@ func issueNumber(t *testing.T, key string) int {
 
 // loadRecallCorpus creates the corpus's project and issues in a fresh database under their own
 // keys (a text naming an issue key matches that issue, as on the server it came from), each with
-// its latest title and spec and its server's creation and update times, every one open, so the
-// open-before-done order favours neither query. recallStagePair sets a pair's two issues as they
-// stood at its query's filing. Then it refreshes the project's term statistics, as the leased pass
-// would have, and answers how long that took.
+// its latest title and spec and its server's creation and update times, and each done issue
+// closed as the server holds it, so a target that is done ranks where a reader would find it.
+// recallStagePair sets a pair's two issues as they stood at its query's filing. Then it
+// refreshes the project's term statistics, as the leased pass would have, and answers how long
+// that took.
 func loadRecallCorpus(t *testing.T, corpus recallCorpus) (*server, *store.Store, time.Duration) {
 	t.Helper()
 	ctx := context.Background()
@@ -185,6 +191,17 @@ func loadRecallCorpus(t *testing.T, corpus recallCorpus) (*server, *store.Store,
 		if _, err := database.Pool.Exec(ctx, `update issues set created_at = $2, updated_at = $3 where key = $1`,
 			key, issue.CreatedAt, issue.UpdatedAt); err != nil {
 			t.Fatalf("date %s: %v", key, err)
+		}
+		if issue.Status == "done" {
+			closedAt := issue.UpdatedAt
+			if issue.ClosedAt != nil {
+				closedAt = *issue.ClosedAt
+			}
+			if _, err := database.Pool.Exec(ctx, `
+				update issues set status = 'done', closed_at = $2 where key = $1
+			`, key, closedAt); err != nil {
+				t.Fatalf("close %s: %v", key, err)
+			}
 		}
 	}
 
@@ -315,20 +332,31 @@ func recallRank(results []model.SearchResult, target string) int {
 	return 0
 }
 
-// recallListed is the owners of the check's related items for results, in order: an issue's key,
-// or a project document's id. Every query's results go through the check's own post-processing
-// (fillRelatedItems): the query's own items left out, one item per owner, open owners first, the
-// best three.
-func recallListed(ctx context.Context, srv *server, project, query string, results []model.SearchResult) []string {
+// recallItem is one of the check's related items as the harness reports it: the owner it fills
+// a place for (an issue's key, or a project document's id) and the kind of item that was
+// matched. R1 is about which kinds take the three places, so the kind is recorded beside the
+// owner rather than thrown away.
+type recallItem struct {
+	owner string
+	kind  string
+}
+
+func (item recallItem) String() string { return item.owner + "(" + item.kind + ")" }
+
+// recallListed is the check's related items for results, in order. Every query's results go
+// through the check's own post-processing (fillRelatedItems): the query's own items left out,
+// one item per owner, open issues first, then other items on open owners, then everything a
+// done issue owns, and the best three of those.
+func recallListed(ctx context.Context, srv *server, project, query string, results []model.SearchResult) []recallItem {
 	suggestions := &model.Suggestions{}
 	srv.fillRelatedItems(ctx, relatedInput{project: project, source: suggestionSource{kind: "issue", issueKey: query}}, results, suggestions)
-	listed := make([]string, 0, len(suggestions.Related))
+	listed := make([]recallItem, 0, len(suggestions.Related))
 	for _, item := range suggestions.Related {
+		owner := item.Owner.ArtifactID
 		if key := suggestedIssueKey(item); key != nil {
-			listed = append(listed, *key)
-		} else {
-			listed = append(listed, item.Owner.ArtifactID)
+			owner = *key
 		}
+		listed = append(listed, recallItem{owner: owner, kind: item.Kind})
 	}
 	return listed
 }
@@ -339,10 +367,14 @@ func recallListed(ctx context.Context, srv *server, project, query string, resul
 // later-filed one's text as it was filed (the query) against every other issue of its project?
 // The query is the closed issue (forward) or, when the issue it was closed into was filed later,
 // that issue (reversed). It runs the old 40-word OR query and the check's keyword query under
-// identical post-processing, and prints for each pair its wording and direction, where the target
-// ranked among each search's results and whether it was listed, then each query's count per
-// wording and over every pair. DISPATCH_RECALL_REQUIRE_NO_LOSS=1 fails it if the check lists
-// fewer targets than the old query.
+// ranked among each search's results, which kind of item took each of the three places, and
+// whether it was listed, then each query's count per wording and over every pair.
+//
+// The counts are of the pairs whose target is open, which is the population R1 is about: a
+// target already done is one the check deliberately ranks below every open item, so counting it
+// would measure the rule the check applies against the rule it does not. Every pair is still
+// replayed and printed; the pairs with a done target are counted apart.
+// DISPATCH_RECALL_REQUIRE_NO_LOSS=1 fails it if the check lists fewer targets than the old query.
 func TestRelatedRecallOnDuplicates(t *testing.T) {
 	path := os.Getenv("DISPATCH_RECALL_CORPUS")
 	if path == "" {
@@ -360,6 +392,8 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 	// counts each wording's pairs.
 	listed := map[string][]int{}
 	pairs := map[string]int{}
+	// done counts the replayed pairs R1 leaves out: those whose target is already closed.
+	done := 0
 	for _, pair := range corpus.pairs {
 		restore := recallStagePair(t, database, corpus, pair)
 		text := corpus.queryText(pair)
@@ -374,27 +408,38 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 		if searches[1], err = recallNewSearch(ctx, srv, corpus.project, picked); err != nil {
 			t.Fatalf("the check's keyword query for %s: %v", pair.Query, err)
 		}
-		if listed[pair.Wording] == nil {
-			listed[pair.Wording] = make([]int, len(rankings))
+		counted := corpus.issues[pair.Target].Status != "done"
+		if !counted {
+			done++
 		}
-		pairs[pair.Wording]++
+		if counted {
+			if listed[pair.Wording] == nil {
+				listed[pair.Wording] = make([]int, len(rankings))
+			}
+			pairs[pair.Wording]++
+		}
 		var report []string
 		for index, results := range searches {
 			rank := "absent"
 			if position := recallRank(results, pair.Target); position > 0 {
 				rank = fmt.Sprintf("%d of %d", position, len(results))
 			}
-			owners := recallListed(ctx, srv, corpus.project, pair.Query, results)
+			items := recallListed(ctx, srv, corpus.project, pair.Query, results)
 			shown := "not listed"
-			if position := slices.Index(owners, pair.Target); position >= 0 {
-				shown = fmt.Sprintf("listed %d of %d", position+1, len(owners))
-				listed[pair.Wording][index]++
+			position := slices.IndexFunc(items, func(item recallItem) bool { return item.owner == pair.Target })
+			if position >= 0 {
+				shown = fmt.Sprintf("listed %d of %d", position+1, len(items))
+				if counted {
+					listed[pair.Wording][index]++
+				}
 			}
-			report = append(report, fmt.Sprintf("%s: ranked %s, %s %v", rankings[index], rank, shown, owners))
+			report = append(report, fmt.Sprintf("%s: ranked %s, %s %v", rankings[index], rank, shown, items))
 		}
 		restore()
-		t.Logf("%s %q %s, %s: query %s, target %s (%d terms): %s",
-			pair.Closed, pair.Wording, pair.Survivor, pair.Direction, pair.Query, pair.Target, len(picked.Terms), strings.Join(report, "; "))
+		t.Logf("%s %q %s, %s: query %s, target %s [%s]%s (%d terms): %s",
+			pair.Closed, pair.Wording, pair.Survivor, pair.Direction, pair.Query, pair.Target,
+			corpus.issues[pair.Target].Status, map[bool]string{false: " not counted"}[counted],
+			len(picked.Terms), strings.Join(report, "; "))
 	}
 
 	wordings := make([]string, 0, len(pairs))
@@ -418,7 +463,10 @@ func TestRelatedRecallOnDuplicates(t *testing.T) {
 	for _, wording := range wordings {
 		totals(fmt.Sprintf("%q", wording), listed[wording], pairs[wording])
 	}
-	totals("every pair", total, len(corpus.pairs))
+	counted := len(corpus.pairs) - done
+	totals("every pair whose target is open", total, counted)
+	t.Logf("pairs replayed: %d; counted (target open): %d; left out (target done): %d",
+		len(corpus.pairs), counted, done)
 	if os.Getenv("DISPATCH_RECALL_REQUIRE_NO_LOSS") == "1" && total[1] < total[0] {
 		t.Fatalf("the check's ranking lists %d targets, the old query %d", total[1], total[0])
 	}

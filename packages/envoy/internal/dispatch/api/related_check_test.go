@@ -643,29 +643,23 @@ func TestRelatedCheckBoundsBlankTextIsNotMade(t *testing.T) {
 	}
 }
 
-// A forced create is told the title overlaps it forced past even when the search behind its check
-// cannot run, and the issue is created.
+// A forced create is told the near copies it forced past even when the check behind it cannot
+// run, and the issue is created.
+//
+// The check is stopped by its own allowance rather than by a lock: the near-copy gate picks the
+// text's terms with the check's own picker, so a lock on a table the picker probes stops both,
+// and R3 records that case as a check that did not answer
+// (TestCreateIssueForcedWithNoAnswerRecordsAnEmptyList).
 func TestCreateIssueForceNamesTitleMatchesWhenTheSearchFails(t *testing.T) {
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	served.suggestionTimeout = time.Second
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
 	createSuggestionProject(t, handler, "FORCE")
 	const title = "Archive search drops rows past offset fifty"
 	existing := createSuggestionIssue(t, handler, map[string]any{"project": "FORCE", "title": title})
 
-	lockTx, err := database.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin lock tx: %v", err)
-	}
-	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
-	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
-		t.Fatalf("lock asks: %v", err)
-	}
+	served.suggestionTimeout = time.Millisecond
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 		"project": "FORCE", "title": title, "force": true,
 	}, "alice")
-	if err := lockTx.Rollback(context.Background()); err != nil {
-		t.Fatalf("release the lock: %v", err)
-	}
 	if response.Code != http.StatusCreated {
 		t.Fatalf("forced create: status=%d body=%s", response.Code, response.Body.String())
 	}

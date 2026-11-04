@@ -308,6 +308,12 @@ type relatedInput struct {
 	// terms' document frequencies, as an issue source's own issue is (the no-write route's
 	// exclude_issue).
 	excludeIssue string
+	// excludeIssues leaves each of those issues and everything it owns out of the results, and
+	// out of the results alone: the single exclude_issue exists to stop a text inflating the
+	// rarity of its own words, and an ancestor or a descendant of the query is not the query's
+	// own text, so the list's issues keep their place in the word statistics (the no-write
+	// route's exclude_issues).
+	excludeIssues []string
 	// keywordsOnly skips the meaning search.
 	keywordsOnly bool
 	// record writes the check's records: write_suggestions rows for an issue or ask source and one
@@ -315,10 +321,21 @@ type relatedInput struct {
 	record bool
 }
 
-// excludes reports whether result is left out of the check's items: the source's own, or the
-// excluded issue's.
+// excludes reports whether result is left out of the check's items: the source's own, the
+// excluded issue's, or any issue's on the exclusion list.
 func (input relatedInput) excludes(result model.SearchResult) bool {
-	return input.source.owns(result) || (input.excludeIssue != "" && ownedByIssue(result, input.excludeIssue))
+	if input.source.owns(result) {
+		return true
+	}
+	if input.excludeIssue != "" && ownedByIssue(result, input.excludeIssue) {
+		return true
+	}
+	for _, key := range input.excludeIssues {
+		if ownedByIssue(result, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // relatedRecord is what the related_checks row of one check holds besides its source and what
@@ -680,8 +697,8 @@ func milliseconds(d time.Duration) *int {
 // those states leaves every item's nil, and so no Decision, rather than failing the check or
 // keeping the states read before it. Each owner (an issue, or a project document)
 // keeps only its best-ranked item, so an issue matched through its title, its spec and a comment
-// fills one place, not three. Related then takes the best suggestionRelatedCount with every item
-// on an open owner ahead of every item on a done issue, keeping the search's order within each;
+// fills one place, not three. Related then takes the best suggestionRelatedCount in
+// relatedItemRank's order, keeping the search's order within each rank;
 // Decision is the first answered ask in the search's own order, deliberately not reordered by
 // owner status: an answered question stays the best match for the question asked whether or not
 // its issue has since closed.
@@ -713,7 +730,7 @@ func (s *server) fillRelatedItems(
 		}
 	}
 	slices.SortStableFunc(related, func(a, b model.SearchResult) int {
-		return cmp.Compare(boolRank(closedOwner(a)), boolRank(closedOwner(b)))
+		return cmp.Compare(relatedItemRank(a), relatedItemRank(b))
 	})
 	for _, result := range related[:min(len(related), suggestionRelatedCount)] {
 		suggestions.Related = append(suggestions.Related, suggestionFromResult(result))
@@ -744,19 +761,29 @@ func (s *server) resolveSuggestionProject(ctx context.Context, source suggestion
 	return project, err
 }
 
-// closedOwner reports whether result belongs to an issue that is done. Keyword search ranks an
-// issue already closed as a duplicate above the open issue it was closed into whenever its words
-// are closer to the new filing's, which they often are (a duplicate restates the bug the way the
-// next duplicate will); the open issue is the one an agent can act on.
-func closedOwner(result model.SearchResult) bool {
-	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
-}
-
-func boolRank(b bool) int {
-	if b {
+// relatedItemRank orders the check's related items: up to three open issues come before any item
+// of another kind, and everything a done issue owns comes last.
+//
+// An issue is what a filer can act on - fold into it, comment on it, file under it - where an
+// answered ask with a long answer or a project document can only be read, and the check has three
+// places to give. Keyword search ranks an issue already closed as a duplicate above the open
+// issue it was closed into whenever its words are closer to the new filing's, which they often
+// are (a duplicate restates the bug the way the next duplicate will); the open issue is the one
+// an agent can act on, so done comes last whatever its kind.
+func relatedItemRank(result model.SearchResult) int {
+	switch {
+	case closedOwner(result):
+		return 2
+	case result.Kind == "issue":
+		return 0
+	default:
 		return 1
 	}
-	return 0
+}
+
+// closedOwner reports whether result belongs to an issue that is done.
+func closedOwner(result model.SearchResult) bool {
+	return result.Owner.Kind == "issue" && result.Owner.Status == "done"
 }
 
 func suggestionFromResult(result model.SearchResult) model.WriteSuggestion {

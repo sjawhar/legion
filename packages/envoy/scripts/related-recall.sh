@@ -236,7 +236,7 @@ while read -r key; do
     title_versions="$(titles "$key")"
   fi
   jq -c --rawfile spec "$workdir/spec" --slurpfile versions "$workdir/versions" --argjson titles "$title_versions" '
-    {record: "issue", key, title, created_at, updated_at, status, spec: $spec}
+    {record: "issue", key, title, created_at, updated_at, status, closed_at, spec: $spec}
     + (if ($versions | length) > 0 then {spec_versions: $versions} else {} end)
     + (if ($titles | length) > 1 then {title_versions: $titles} else {} end)' "$row" >>"$workdir/output.jsonl"
 done <"$workdir/keys"
