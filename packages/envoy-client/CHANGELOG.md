@@ -1,5 +1,11 @@
 # Changelog
 
+## [main@43a994db0ea1] - 2026-11-04
+
+### Added
+
+- `dispatch inbox` lists what the person's Dispatch Inbox page shows, read with the caller's own credential: Needs you, Waiting on agents, Later and Credential requests, each with its count and then its rows, banded by the page's own rule. A credential-request read that fails prints a warning line and counts none; a credential without the `person` scope is refused, and the refusal prints its code and the scope it names. Every reader of an act - `dispatch read`, `dispatch answers`, `dispatch search` and the digest of what people wrote - now names the agent beside the person as `<person>, acting through session <id>` or `... through token <name>`.
+
 ## [main@fd9666ee5cc3] - 2026-11-04
 
 ### Added

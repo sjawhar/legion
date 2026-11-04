@@ -1,5 +1,5 @@
 ---
-title: "A sjawhar/legion pull request opens with a conventional commit title"
+title: "A cybermonklabs/legion pull request opens with a conventional commit title"
 category: github
 tags:
   - pr-title
@@ -13,7 +13,7 @@ related_issues:
   - "sjawhar/legion#2307"
 ---
 
-# A sjawhar/legion pull request opens with a conventional commit title
+# A cybermonklabs/legion pull request opens with a conventional commit title
 
 - **Give `gh pr create --title` a subject of the form `type(scope): summary`.** The pattern is
   `^[a-z]+(\([^)]+\))?!?: .+` (`.github/workflows/pr-title.yaml:71`). For example:

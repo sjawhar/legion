@@ -48,7 +48,7 @@ NATS=sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
 BUN=sha256:1b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f607182
 GOLANG=sha256:3d4e5f60718293a43d4e5f60718293a43d4e5f60718293a43d4e5f60718293a4
 OTHER=sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021
-REGISTRY=ghcr.io/sjawhar/legion/ci
+REGISTRY=ghcr.io/cybermonklabs/legion/ci
 
 # The stand-in crane: `digest` prints what the registry's tag points at, and exits 1 where it
 # points at nothing, as crane does for a tag the registry does not hold. `copy` reads the

@@ -33,5 +33,5 @@ Extends docs/solutions/legion/a-pod-name-copied-from-dispatch-into-a-pull-reques
 On sjawhar/legion#2209 the first version-skew proof comment carried
 `https://dispatch.<tailnet>.ts.net/projects/…` lines from `dispatch project` and `dispatch issue`.
 It was deleted within a minute and reposted with the host replaced
-(https://github.com/sjawhar/legion/pull/2209#issuecomment-6405051940). Every later proof comment
+(https://github.com/cybermonklabs/legion/pull/2209#issuecomment-6405051940). Every later proof comment
 ran the check first and passed.

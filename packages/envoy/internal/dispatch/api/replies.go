@@ -118,7 +118,7 @@ func parseMyRepliesOwner(r *http.Request) (issue string, artifact *string, err e
 // listMyReplies answers GET /api/v1/me/replies: one page of the caller's unread threads and how
 // many there are in all.
 func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.requireHuman(w, r)
+	caller, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -200,7 +200,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 // update`, and two marks never wait on each other. It takes the owner's lock first, then the
 // project's, which the event's append takes.
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
