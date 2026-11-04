@@ -3262,34 +3262,12 @@ func TestListenerDeliveryHandler_NoHolderKeepsARoleAndExceptsAnAgent(t *testing.
 	}
 }
 
-// A copy of a message a session has already taken is not resolved a second time: the dedupe key
-// the first delivery recorded is what the next copy is judged against. The core handler is what
-// drives it, as it drives every delivery to a session that takes its messages off its own
-// subscription: the durable acknowledges such a stored message before it decodes it
-// (durableNeedsDelivery, takesStoredMessagesItself).
-func TestListenerDeliveryHandler_DedupesSuccessfulDelivery(t *testing.T) {
-	harness := newListenerDeliveryHarness(t)
-	item := listenerTestEnvelope(contracts.AgentSubject("ses_success"), "dedupe-success")
-	harness.registerTarget(t, "ses_success", item.Topic)
-	data := marshalListenerEnvelope(t, item)
-
-	harness.coreHandler(&natsgo.Msg{Data: data})
-	harness.coreHandler(&natsgo.Msg{Data: data})
-
-	body := metricsBody(t, harness)
-	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {
-		t.Fatalf("%s = %d, want 1 - the first copy reaches the session on its own subscription:\n%s", deliveredSeries("skipped"), got, body)
-	}
-	if got := counterValue(t, body, deliveredSeries("dedupe")); got != 1 {
-		t.Fatalf("%s = %d, want 1 - the second copy is judged against the key the first recorded:\n%s", deliveredSeries("dedupe"), got, body)
-	}
-}
-
 // TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode proves one
 // incapable subscriber cannot be given a tagged delivery or keep a capable
-// subscriber on the same topic from taking it. Both subscribers take their messages off their
-// own subscriptions, so the core handler is what drives the fan-out for them
-// (durableNeedsDelivery, takesStoredMessagesItself).
+// subscriber on the same topic from taking it. Both subscribers are on consumer delivery, as
+// every live session is, so the message the capable one is given is its own consumer's to relay:
+// the fan-out counts that recipient skipped and reports nothing of it, and the one exception it
+// publishes is the incapable subscriber's refusal (session.SessionEntry.ConsumerRelaysStored).
 func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	const (
@@ -3297,8 +3275,8 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 		capable   = "ses_capable"
 		incapable = "ses_incapable"
 	)
-	harness.registerFanoutTarget(t, capable, topic, []string{"btw"})
-	harness.registerFanoutTarget(t, incapable, topic, nil)
+	harness.registerConsumerTarget(t, capable, topic, []string{"btw"})
+	harness.registerConsumerTarget(t, incapable, topic, nil)
 	item := listenerTestEnvelope(topic, "fanout-refuse-unadvertised-mode")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -3321,13 +3299,13 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 		t.Fatalf("flush delivery exception: %v", err)
 	}
 
-	// The dedupe key is written for a recipient the message was delivered to and for no other,
-	// so it says which of the two took it (applyDeliveryOutcome's recordDedupe).
-	if !harness.config.dedupeCache.Seen(item.DedupeKey, capable) {
-		t.Fatalf("the capable subscriber %s was not given the message", capable)
-	}
-	if harness.config.dedupeCache.Seen(item.DedupeKey, incapable) {
-		t.Fatalf("the incapable subscriber %s was given a mode it does not advertise", incapable)
+	// Nothing the fan-out hands to nobody is recorded: the capable subscriber's copy is its own
+	// consumer's to relay and the incapable one's is refused, so neither leaves a dedupe key
+	// behind (fanoutDelivery).
+	for _, target := range []string{capable, incapable} {
+		if harness.config.dedupeCache.Seen(item.DedupeKey, target) || harness.config.attemptCache.Seen(item.DedupeKey, target) {
+			t.Fatalf("the fan-out recorded %s, which it handed the message to nobody for", target)
+		}
 	}
 	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != incapable {
 		t.Fatalf("exception recipient = %q, want %q", recipient, incapable)
@@ -3339,7 +3317,7 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 		t.Fatalf("expected per-recipient failure metric, got %s", body)
 	}
 	if !strings.Contains(body, `test_messages_delivered{delivery_status="skipped"} 1`) {
-		t.Fatalf("expected the capable subscriber's delivery to its own subscription, got %s", body)
+		t.Fatalf("expected the capable subscriber's message to be its own consumer's to relay, got %s", body)
 	}
 	if strings.Contains(body, `test_messages_naked 1`) {
 		t.Fatalf("terminal refusal must not NAK the fanout envelope, got %s", body)
@@ -3434,7 +3412,8 @@ func TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery(t *t
 
 // TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload proves ordinary
 // notifications remain available to every matching subscriber regardless of
-// its delivery capabilities.
+// its delivery capabilities: each is given the message by its own consumer's relay, which the
+// fan-out counts skipped and refuses for nobody (session.SessionEntry.ConsumerRelaysStored).
 func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	const (
@@ -3442,16 +3421,28 @@ func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
 		firstTarget = "ses_first"
 		nextTarget  = "ses_next"
 	)
-	harness.registerFanoutTarget(t, firstTarget, topic, nil)
-	harness.registerFanoutTarget(t, nextTarget, topic, nil)
+	harness.registerConsumerTarget(t, firstTarget, topic, nil)
+	harness.registerConsumerTarget(t, nextTarget, topic, nil)
 	item := listenerTestEnvelope(topic, "fanout-untagged")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"}}`
+	probe := exceptionProbe(t, harness.client)
 
 	harness.coreHandler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush what the fan-out published: %v", err)
+	}
 
+	body := metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("skipped")); got != 2 {
+		t.Fatalf("%s = %d, want 2 - the untagged message is both subscribers' own consumers' to relay:\n%s", deliveredSeries("skipped"), got, body)
+	}
+	if got := counterValue(t, body, deliveredSeries("failed")); got != -1 {
+		t.Fatalf("%s = %d, want no series at all - an untagged message is refused for nobody:\n%s", deliveredSeries("failed"), got, body)
+	}
+	noException(t, probe)
 	for _, target := range []string{firstTarget, nextTarget} {
-		if !harness.config.dedupeCache.Seen(item.DedupeKey, target) {
-			t.Fatalf("the untagged message was not given to %s", target)
+		if harness.config.dedupeCache.Seen(item.DedupeKey, target) || harness.config.attemptCache.Seen(item.DedupeKey, target) {
+			t.Fatalf("the fan-out recorded %s, which it handed the message to nobody for", target)
 		}
 	}
 }
@@ -3722,23 +3713,11 @@ func (f *roleForwarder) settled(t *testing.T) {
 	}
 }
 
-// registerTarget records sessionID as a session of this machine that takes its messages off its
-// own NATS subscription, following topic. A delivery to it resolves and is counted skipped: the
-// listener hands it to nobody (session.Resolve).
-func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic string) {
-	t.Helper()
-	if _, err := h.registry.Upsert(store.Interest{
-		SessionID: sessionID,
-		MachineID: "test-machine",
-	}, []string{topic}); err != nil {
-		t.Fatalf("register interest: %v", err)
-	}
-	if err := h.sessions.Put(sessionID, session.SessionEntry{SelfSubscribed: true, MachineID: "test-machine"}); err != nil {
-		t.Fatalf("register session: %v", err)
-	}
-}
-
-// registerFanoutTarget is registerTarget with the delivery modes the session advertises.
+// registerFanoutTarget records sessionID as a session of this machine following topic and
+// advertising capabilities, whose entry records no consumer of its own: the record a build
+// before dispatch://INFRA-771 left behind, which nothing reaches (session.ErrNoSessionRecord).
+// It is the recipient the fan-out alone reports, so a refusal of it records its attempt before
+// the exception (fanoutDelivery).
 func (h listenerDeliveryHarness) registerFanoutTarget(t *testing.T, sessionID, topic string, capabilities []string) {
 	t.Helper()
 	if _, err := h.registry.Upsert(store.Interest{
@@ -3751,6 +3730,29 @@ func (h listenerDeliveryHarness) registerFanoutTarget(t *testing.T, sessionID, t
 		SelfSubscribed: true,
 		MachineID:      "test-machine",
 		Capabilities:   capabilities,
+	}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+}
+
+// registerConsumerTarget is registerFanoutTarget for a session on consumer delivery, the shape
+// every live registration has (consumerRegistration): its messages are held by its own consumer
+// and sent by that consumer's relay, so a delivery to it resolves as relayed and is counted
+// skipped, with nothing recorded (session.SessionEntry.ConsumerRelaysStored).
+func (h listenerDeliveryHarness) registerConsumerTarget(t *testing.T, sessionID, topic string, capabilities []string) {
+	t.Helper()
+	if _, err := h.registry.Upsert(store.Interest{
+		SessionID: sessionID,
+		MachineID: "test-machine",
+	}, []string{topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := h.sessions.Put(sessionID, session.SessionEntry{
+		SelfSubscribed: true,
+		MachineID:      "test-machine",
+		Capabilities:   capabilities,
+		Delivery:       session.DeliveryConsumer,
+		Epoch:          "e",
 	}); err != nil {
 		t.Fatalf("register session: %v", err)
 	}

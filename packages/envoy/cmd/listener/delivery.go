@@ -654,10 +654,11 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 const deliverySessionReadTimeout = 2 * time.Second
 
 // agentSubjectDelivery delivers to the session named by the topic
-// (notifications.agent.<session>), which takes the message from its own consumer or off its own
-// subscription as session.HandleAgentMessage decides. A session another listener owns is that
-// listener's to deliver, so this one acknowledges the message silently; a session that records no
-// way of receiving at all is held and retried, then given up (unplaceableAgentDelivery).
+// (notifications.agent.<session>), which takes the message from its own consumer, relayed by the
+// listener that owns the session, as session.HandleAgentMessage decides. A session another
+// listener owns is that listener's to deliver, so this one acknowledges the message silently; a
+// session that records no way of receiving at all is held and retried, then given up
+// (unplaceableAgentDelivery).
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata the durable's handler read carries everything unplaceableAgentDelivery
@@ -760,26 +761,12 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			origin:          exceptionOrigin(message),
 			clearAttempt:    result.ShouldNAK,
 		})
-	}
-	if result.Delivered {
-		deliveryStatus := "delivered"
-		deliveryLog := "listener agent delivered"
-		if result.Skipped {
-			// The session holds its own NATS subscription and the message reaches it there
-			// (session.Resolve): this listener handed it to nobody.
-			deliveryStatus = "skipped"
-			deliveryLog = "listener agent session takes the message off its own subscription"
-		}
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			sessionID:    sessionID,
-			metricStatus: deliveryStatus,
-			duration:     &deliveryTimer,
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelInfo, deliveryLog, sessionID, item.Topic, item.EventID, deliveryStatus)
-			},
-			recordDedupe: true,
-		})
-	} else if result.Err == nil {
+	} else {
+		// The resolution found no way the session receives this message and reported no error of
+		// its own, so there is nothing to deliver and nothing to report: the message is held and
+		// retried for the whole window before it is given up. A delivery of its own is no longer
+		// an outcome here - a session's own consumer is the one way a message reaches it, and
+		// the relay of that consumer carries it, which the Relayed branch above answers.
 		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata)
 		return
 	}
@@ -993,42 +980,27 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		if err != nil {
-			retryable := shouldNAKFanoutDelivery(target != nil, err)
-			if !retryable {
-				deadDeliveries++
-			}
-			if applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    interest.SessionID,
-				metricStatus: "failed",
-				duration:     &deliveryTimer,
-				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-				},
-				// A resolution that failed records no attempt -- only the success arm below
-				// does -- so there is none to clear for the session whose entry is still to
-				// come; the field stands for the retry this outcome asks for.
-				clearAttempt: retryable,
-				retry:        retryable,
-			}) {
-				failed = true
-			}
-		} else {
-			// The attempt is recorded before the outcome is applied, so another copy of the same
-			// event read while this one is in flight is a dedupe skip rather than a second
-			// delivery. A resolution that failed records none: it names a delivery that was
-			// never made.
-			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-			deliveryStatus := "delivered"
-			if delivery.Skipped {
-				deliveryStatus = "skipped"
-			}
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    interest.SessionID,
-				metricStatus: deliveryStatus,
-				duration:     &deliveryTimer,
-				recordDedupe: true,
-			})
+		// Every resolution that did not relay failed: a session receives what its own consumer
+		// delivers and nothing else, so session.Resolve answers either that relay or an error
+		// (session.ErrNoSessionRecord), and this path has no third outcome to deliver.
+		retryable := shouldNAKFanoutDelivery(target != nil, err)
+		if !retryable {
+			deadDeliveries++
+		}
+		if applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    interest.SessionID,
+			metricStatus: "failed",
+			duration:     &deliveryTimer,
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
+			},
+			// A resolution that failed records no attempt, so there is none to clear for the
+			// session whose entry is still to come; the field stands for the retry this outcome
+			// asks for.
+			clearAttempt: retryable,
+			retry:        retryable,
+		}) {
+			failed = true
 		}
 	}
 	if deadDeliveries > 0 {

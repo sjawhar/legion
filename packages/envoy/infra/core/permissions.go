@@ -263,10 +263,14 @@ func DaemonPermissions() Permissions {
 // calls beside the same notifications.> subscribe.
 //
 // That subscribe is this set's own, not one it takes from the session's: SessionPermissions holds
-// it no longer, and a listener run with ENVOY_SUBSCRIBE_ALL_TOPICS=1, which a host user may be,
-// is refused the subscription without it and ends its start. Naming it here also leaves the
-// sessions sharing a host user the reach they have today, which the per-session credentials of
-// dispatch://INFRA-840 take away.
+// it no longer. It is the reach the sessions sharing a host user already have - one user is one
+// grant, so each of them may subscribe to every notification topic - and naming it here keeps
+// them at that reach until the per-session credentials of dispatch://INFRA-840 take it away. No
+// Envoy program reads it: the listener holds no core subscription on notifications.> any more,
+// and a start that still sets ENVOY_SUBSCRIBE_ALL_TOPICS is warned about by name and otherwise
+// ignored (cmd/listener/main.go's warnIgnoredEnv). Dropping it would rewrite every deployed host
+// user, and a hub's users are rendered into the VM's cloud-config, which changes only by
+// replacing the VM, so it stays until INFRA-840 replaces it.
 func HostPermissions(machineID string) Permissions {
 	listener, agent := listenerGrant(machineID), SessionPermissions()
 	// notifications.> admits every notification subject the session's set names, its relay subject

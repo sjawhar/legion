@@ -7,11 +7,14 @@ import (
 
 // HandleAgentResult captures the outcome of agent message handling.
 type HandleAgentResult struct {
+	// Delivered reports a resolution that succeeded (Resolve), which is now the one outcome
+	// besides an error: the session's own consumer holds the message. It is therefore set with
+	// Relayed and never without it, and it is false for every other outcome - a resolution that
+	// failed, with an error of its own or without one, and a session another listener owns.
 	Delivered bool
-	Skipped   bool
-	// Relayed is set with Delivered and Skipped for a message the session's own consumer holds,
-	// which the relay of that consumer delivers (DeliveryResult.Relayed): the caller records
-	// nothing about it, neither an attempt nor a dedupe key.
+	// Relayed is set with Delivered for a message the session's own consumer holds, which the
+	// relay of that consumer delivers (DeliveryResult.Relayed): the caller records nothing
+	// about it, neither an attempt nor a dedupe key.
 	Relayed bool
 	// OwnedElsewhere reports a session whose stored subscription names another listener. That
 	// listener reads the same inbox message from its own durable and delivers it, so this one
@@ -73,7 +76,8 @@ func HandleAgentMessage(
 	return delivered(delivery)
 }
 
-// delivered is the result of a delivery that succeeded.
+// delivered is the result of a resolution that succeeded: the session's own consumer holds the
+// message, and the relay of that consumer is what delivers it.
 func delivered(delivery DeliveryResult) HandleAgentResult {
-	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped, Relayed: delivery.Relayed}
+	return HandleAgentResult{Delivered: true, Relayed: delivery.Relayed}
 }

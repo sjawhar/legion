@@ -113,8 +113,9 @@ func deliveredSeries(status string) string {
 // listener's cache has not seen it, exactly as the send route does
 // (TestSendReadsTheSessionStoreWhileTheCacheIsCold, send_route_acceptance_test.go): the cache
 // follows the bucket through a watcher and so trails it, and a delivery that takes the cache's miss
-// for an answer loses the message - it is counted skipped and ACKed away, with nothing left to
-// redeliver. This drives the listener's own delivery handler with a session another listener
+// for an answer holds the message it could have resolved and gives it up (unplaceableAgentDelivery),
+// though the session's own consumer was holding it all along. This drives the listener's own
+// delivery handler with a session another listener
 // registered a moment ago, through a listener whose cache was warm before that write and has
 // followed nothing since, which is the same miss a cache still refilling after a reconnect has.
 //
@@ -140,6 +141,7 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	}
 	if err := registrar.Put(target, session.SessionEntry{
 		SelfSubscribed: true, MachineID: "test-machine", Dir: "/test/" + target, Title: "cold target",
+		Delivery: session.DeliveryConsumer, Epoch: "e",
 	}); err != nil {
 		t.Fatalf("register %s through the other listener: %v", target, err)
 	}
@@ -153,12 +155,13 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	item := listenerTestEnvelope(contracts.AgentSubject(target), "cold-cache-agent-delivery")
 	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
-	// The record only the bucket holds says the session takes its messages off its own
-	// subscription, which is a delivered outcome counted skipped. A delivery that took the
-	// cache's miss for an answer would have found no record at all and given the message up.
-	records := deliveryRecords(t, harness.logs.String(), "listener agent session takes the message off its own subscription")
-	if len(records) != 1 || records[0].SessionID != target {
-		t.Fatalf("%d lines say the session read the message off its own subscription, want one naming %s:\n%s", len(records), target, harness.logs.String())
+	// The record only the bucket holds puts the session on consumer delivery, so the message is
+	// its own consumer's to relay: an outcome counted skipped and recorded nowhere
+	// (session.SessionEntry.ConsumerRelaysStored). A delivery that took the cache's miss for an
+	// answer would have found no record at all and held the message for its retry window, and
+	// one that read a record it could reach the session through no way would have failed it.
+	if failures := deliveryRecords(t, harness.logs.String(), "listener agent delivery failed"); len(failures) != 0 {
+		t.Fatalf("%d lines fail the delivery, want none - the bucket's record puts %s on consumer delivery:\n%s", len(failures), target, harness.logs.String())
 	}
 	body := metricsBody(t, harness)
 	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {

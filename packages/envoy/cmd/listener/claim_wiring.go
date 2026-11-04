@@ -15,7 +15,7 @@ type subscribeBody struct {
 	// Port is the session's own HTTP serving port, parsed so that a registration carrying one
 	// above 0 can be refused by name (subscribeHandler): this listener delivers nothing to a
 	// port, and storing such a registration would leave its session waiting for messages
-	// nothing sends. A session receives from its own consumer, or on its own NATS subscription.
+	// nothing sends. A session receives from its own consumer and nothing else.
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
 	Capabilities   []string `json:"capabilities"`
@@ -27,8 +27,8 @@ type subscribeBody struct {
 	// stored subscription names (the one store.Registry.Match delivers on), which this
 	// registration moves to the listener answering it (store's mergeForUpsert), and any other
 	// listener leaves such a message to it silently - and it reaches the session from its own
-	// consumer, relayed by that listener, or on the session's own NATS subscription, wherever
-	// its process runs. Empty for a session whose plugin predates this field.
+	// consumer, relayed by that listener, wherever its process runs. Empty for a session whose
+	// plugin predates this field.
 	Host string `json:"host"`
 	// Plugin and PluginVersion name the plugin the session registers through (its npm package
 	// name) and that plugin's build, so the session list shows which build each session runs.

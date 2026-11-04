@@ -741,10 +741,9 @@ func bindTestDurable(t *testing.T, rig *relayRig, name, subject string) {
 }
 
 // keepTheDurableReading gives topic a second recipient whose interest outlives its session entry,
-// and returns its session id. A session whose own consumer holds a stored message takes it from
-// there, and one that is self-subscribed takes it off its own subscription, so the durable path
-// acknowledges such a message before it decodes it (durableNeedsDelivery,
-// takesStoredMessagesItself) and the fan-out never judges it. An interest the fan-out can match
+// and returns its session id. A stored message held by the own consumer of every session whose
+// interest matches its topic is acknowledged by the durable path before it is decoded
+// (durableNeedsDelivery), so the fan-out never judges it. An interest the fan-out can match
 // whose entry it cannot read is the ordinary state of a session whose entry has lapsed -- an
 // entry lives about five minutes (session.registry) and an interest about fifteen -- and it is
 // what keeps the durable path reading a topic for a test whose subject is what the fan-out does

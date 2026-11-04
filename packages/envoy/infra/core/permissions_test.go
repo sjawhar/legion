@@ -218,10 +218,9 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 }
 
 // Narrowing the session's set to its relay subject does not take notifications.> from the host's
-// or the listener-host's: both name it themselves. A host listener opted into the live lane with
-// ENVOY_SUBSCRIBE_ALL_TOPICS=1 is refused that subscription without it and ends its start, and
-// the sessions sharing a host user keep the reach they have today until dispatch://INFRA-840
-// gives each session a credential of its own.
+// or the listener-host's: both name it themselves. It is the reach the sessions sharing a host
+// user keep until dispatch://INFRA-840 gives each session a credential of its own, and the host
+// listener's own reach over the topics it serves.
 func TestHostPermissionsKeepTheSubscribeToEveryTopicTheSessionsLost(t *testing.T) {
 	require.NotContains(t, core.SessionPermissions().Subscribe.Allow, "notifications.>")
 	require.Contains(t, core.HostPermissions("example-host-a").Subscribe.Allow, "notifications.>")

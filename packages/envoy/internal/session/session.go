@@ -19,8 +19,12 @@ import (
 // (cmd/listener/unplaceable_delivery.go).
 var ErrNoSessionRecord = errors.New("no session record")
 
-// DeliveryResult describes a completed delivery attempt.
+// DeliveryResult describes a completed delivery attempt. Resolve has one outcome that is not an
+// error - the session's own consumer relays the message - so it either sets both fields below or
+// returns the error: a result beside a nil error never has them unset.
 type DeliveryResult struct {
+	// Skipped says this delivery needs nothing of its caller, because the session receives the
+	// message another way: the relay of its own consumer, which is the only other way left.
 	Skipped bool
 	// Relayed is set with Skipped by Resolve for a message the session's own consumer holds, so
 	// the relay of that consumer is what delivers it (ConsumerRelaysStored): the caller records
@@ -35,17 +39,19 @@ type DeliveryResult struct {
 // message this listener handed to nobody would have the next copy of the same event skipped as
 // one the session already has, and an attempt record would have a redelivery of it skipped as one
 // already on its way. A topic the stream does not capture is in no consumer whatever the
-// session's delivery is, so the session takes such a message off its own subscription.
+// session's delivery is, and no path of the session's own carries such a message either, so
+// Resolve answers it with ErrNoSessionRecord.
 func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool {
 	return e.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(topic)
 }
 
-// Resolve decides what a delivery of item to sessionID's session at entry comes to: the session's
-// own consumer relays the message, the session takes it off its own NATS subscription, or the
-// entry records no way of receiving at all. A result with Skipped set needs nothing of this
-// delivery, because the session receives the message another way, and an error is the delivery's
-// failure. A nil entry produces ErrNoSessionRecord, the same result a failed lookup produces, so
-// a caller can avoid a second registry read.
+// Resolve decides what a delivery of item to sessionID's session at entry comes to, and there are
+// two answers left: the session's own consumer relays the message, or the entry records no way of
+// receiving at all. No session takes a message off a NATS subscription of its own any more
+// (dispatch://INFRA-771), so a result beside a nil error always has Skipped set, and needs
+// nothing of this delivery because the relay of that consumer is what delivers the message; an
+// error is the delivery's failure. A nil entry produces ErrNoSessionRecord, the same result a
+// failed lookup produces, so a caller can avoid a second registry read.
 //
 // It is a package function because the decision holds no state at all: every caller resolves the
 // entry it decides on and hands it over, so the record the decision acts on is the one that
@@ -54,9 +60,10 @@ func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool 
 // storedSeq is the stream sequence of the durable path's copy of a stored message, 0 for any
 // other delivery. A message is stored on the subject its envelope names as its topic, so that
 // topic and the sequence together decide whether a session on consumer delivery is already held
-// this message by its own consumer (SessionEntry.ConsumerRelaysStored). A core path's message is
-// not the durable's copy of a stored one, so its caller passes a sequence of 0, which leaves a
-// session on consumer delivery its consumer's copy whatever that copy's sequence is.
+// this message by its own consumer (SessionEntry.ConsumerRelaysStored). A delivery that is not
+// the durable's copy of a stored message - the listener's core lane carries one - passes a
+// sequence of 0, which leaves a session on consumer delivery its consumer's copy whatever that
+// copy's sequence is.
 func Resolve(item contracts.Envelope, sessionID string, entry *SessionEntry, storedSeq uint64) (DeliveryResult, error) {
 	if entry == nil {
 		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, sessionID)
