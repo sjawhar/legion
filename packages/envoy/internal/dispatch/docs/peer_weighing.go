@@ -61,12 +61,6 @@ type peerWeighing struct {
 	// the delete ranges the room is not known to hold deleted can add to the room's whole-state
 	// frame (frameBytes, deleteFrameBytes), what it adds to the room's frame total.
 	unrendered, frame uint64
-	// born is whether any struct past the room's state integrates deleted (bornDeleted), whose
-	// clocks the room's delete set holds from then on. It is read by the charge of a write of the
-	// server's own, which lists those clocks from the update ygo encoded of the transaction
-	// (deletedRuns.integrated); a browser's are listed from that update too, where the room's
-	// update observer drains it (roomCharge.applied).
-	born bool
 	// retired is the clients the room's history lists as retired by a rebuild, each with the clock
 	// it had reached (roomTotals.retired), nil for a room never rebuilt or no load listed, and
 	// entries where that list's own entries sit (roomTotals.entries). former is whether the update
@@ -138,9 +132,9 @@ func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 	if end <= known && (walked.length != 0 || walked.clock < known) {
 		return
 	}
-	// Clocks born deleted - a GC run's and a deleted item's (bornDeleted) - are not counted here:
-	// nothing the room renders ever comes of them, and a rendering that can grow is what both
-	// readers of this count weigh (the at-the-bound rule in weighPeerUpdate, and
+	// Clocks that render nothing - a GC run's and a deleted item's (bornDeleted) - are not
+	// counted here: nothing the room renders ever comes of them, and a rendering that can grow is
+	// what both readers of this count weigh (the at-the-bound rule in weighPeerUpdate, and
 	// refusedUnderPressure). Their length is also a varint where every other kind's is its
 	// content's own bytes, so one struct of about fifteen bytes declares 2^53 clocks: counted,
 	// 1,024 such groups took this sum past 2^63 and wrapped it negative, which read as an update
@@ -159,10 +153,16 @@ func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 	w.content += unrenderedContentHeap(walked)
 	w.unrendered += unrenderedBytes(walked)
 	w.frame += frameBytes(walked)
-	w.born = w.born || bornDeleted(walked)
 	w.forged = w.forged || walked.parent == parentRetired ||
 		(walked.hasOrigin && w.entries.overlap(walked.origin.client, walked.origin.clock, 1)) ||
 		(walked.hasRightOrigin && w.entries.overlap(walked.rightOrigin.client, walked.rightOrigin.clock, 1))
+}
+
+// bornDeleted is whether walked renders nothing of its own: a GC run, or a deleted item. It is
+// not whether the room holds those clocks deleted - ygo deletes none of a GC run's clocks the
+// room holds live, and holds a deleted item live (deletedRuns) - and nothing reads it for that.
+func bornDeleted(walked updateStruct) bool {
+	return walked.kind == structGC || walked.kind == structDeleted
 }
 
 func (w *peerWeighing) walkedDelete(client, clock, length uint64) {

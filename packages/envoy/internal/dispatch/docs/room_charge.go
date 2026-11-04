@@ -106,49 +106,49 @@ func (c *roomCharge) adds(content int64) {
 // applied charges the room what update added, one transaction's update the peer hook's own apply
 // committed, which the room's update observer hands over (renderedReplica.chargeAdded): its
 // content a rendering can show to the uncounted part, as contentAdded counts it, its structure
-// having been charged by the hook that admitted it (grew). From the same walk it lists the clocks
-// the transaction integrated deleted - a GC run's, a deleted item's (bornDeleted) - which is the
-// room's own answer for what the browser's bytes only claimed: ygo encodes this update from the
-// state before the transaction (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3,
-// crdt/doc.go:604-620 and crdt/update.go:366-406), so every struct in it is one the room
-// integrated, where a browser's GC run over clocks the room holds live integrates none of them
-// (deletedRuns). Its delete set is not listed here: ygo writes the room's whole delete set into
-// every transaction's update, which the hook has listed the browser's own ranges of already
-// (deletedRuns.record), and walking it into the list on every keystroke would cost the room its
-// every run again.
+// having been charged by the hook that admitted it (grew). From the same walk it lists the
+// update's delete set as the room's (deletedRuns.list): ygo writes the room's whole delete set
+// into the update of every transaction (buildDeleteSet and encodeV1Locked, sjawhar/ygo
+// v1.54.1-sami.3, crdt/update.go:665-678 and :387), so what the apply of the browser's update
+// actually deleted is in it, which is the room's own answer for what the browser's bytes only
+// claimed: a browser's GC run over clocks the room holds live deletes none of them, and a deleted
+// item of its own ygo holds live (deletedRuns). The structs of the update are not read into the
+// list at all, since a struct the walk reads as born deleted is not always one ygo holds deleted
+// (deletedRuns). A range the list holds already costs a read of it and no more, so a keystroke
+// into a room of thousands of deleted runs, whose update carries every one of them, pays the walk
+// the charge already makes and nothing besides.
 //
 // A delete range weighed between the apply and this drain finds those clocks unlisted and is
 // charged for them, which over-charges and never under-charges. An update the walk cannot read is
-// charged its bytes as content, as contentAdded charges it, and lists nothing. Nil, a replica no
-// room's load charged (a test's), charges nothing and walks nothing.
+// charged its bytes as content, as contentAdded charges it, and lists what the walk read before
+// it refused. Nil, a replica no room's load charged (a test's), charges nothing and walks nothing.
 func (c *roomCharge) applied(update []byte) {
 	if c == nil {
 		return
 	}
-	var walked appliedWalk
+	walked := appliedWalk{deleted: c.deletes()}
 	if _, err := walkUpdate(update, fromRoom, &walked); err != nil {
 		c.adds(int64(len(update)))
 		return
 	}
 	c.adds(walked.content.bytes)
-	c.deleted.listed(walked.born)
 }
 
 // appliedWalk is applied's visitor: the content a rendering can show (contentAdded's
-// renderedContent) and the clocks born deleted of one walk of a transaction's update.
+// renderedContent) of one walk of a transaction's update, and the room's list of delete ranges,
+// which that walk lists the update's delete set into.
 type appliedWalk struct {
 	content renderedContent
-	born    []deletedRun
+	deleted *deletedRuns
 }
 
 func (w *appliedWalk) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
-	if bornDeleted(walked) && walked.length > 0 {
-		w.born = append(w.born, deletedRun{client: walked.client, clock: walked.clock, length: walked.length})
-	}
 }
 
-func (*appliedWalk) walkedDelete(_, _, _ uint64) {}
+func (w *appliedWalk) walkedDelete(client, clock, length uint64) {
+	w.deleted.list(client, clock, length)
+}
 
 // grew charges the room structure more in its structure part, which no count clears: what an
 // update the peer hook admitted adds that the rendering does not price (peerWeighing.
@@ -166,53 +166,54 @@ func (c *roomCharge) grew(structure int64) {
 // buildPhase2, crdt/doc.go:616-620), so each is charged with the splits its integration can cause,
 // with the splits each delete range can leave at its ends (deletedRuns.splitEnds) and
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
-// raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner. The
-// update's delete ranges, and the structs it integrated deleted, are listed as the room's
-// (deletedRuns.integrated, which reads a server write's structs because the room itself encoded
-// them, where a browser's bytes are never read that way), once the charge has given the budget's
-// lock back. One walk reads the content and the structure both. An update the walk cannot read is
-// charged its bytes as content, as contentAdded charges it, and the structure the walk read before
-// it refused. Nil, a replica no room's load charged (a test's), charges nothing and walks nothing.
+// raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner.
+//
+// The same walk lists the update's delete set as the room's (deletedRuns.list), which is the room's
+// whole delete set at that commit, every range of it weighed before it is listed: ygo sorts and
+// merges each client's ranges as it decodes them (crdt/update.go:1474), so no two ranges of one
+// update touch, and listing one leaves what the rest are charged as it was. The structs of the
+// update are not read into the list, here as in applied. One walk reads the content, the structure
+// and the delete set. An update the walk cannot read is charged its bytes as content, as
+// contentAdded charges it, and the structure the walk read before it refused. Nil, a replica no
+// room's load charged (a test's), charges nothing and walks nothing.
 func (c *roomCharge) wrote(update []byte) {
 	if c == nil {
 		return
 	}
-	weighed := writtenWeighing{structure: peerWeighing{known: c.deletes()}}
-	tally, err := walkUpdate(update, fromRoom, &weighed)
+	weighed := writtenWeighing{structure: peerWeighing{known: c.deletes()}, deleted: c.deletes()}
+	_, err := walkUpdate(update, fromRoom, &weighed)
 	content := weighed.content.bytes
 	if err != nil {
 		content = int64(len(update))
 	}
 	c.charged(content, weighed.structure.structureHeap())
-	if err == nil {
-		if weighed.structure.born {
-			c.deleted.integrated(update)
-		} else {
-			c.deleted.record(update, tally.deletesAt)
-		}
-	}
 }
 
 // writtenWeighing is wrote's visitor: the content a rendering can show (contentAdded's
-// renderedContent) and the structure (peerWeighing) of one walk of a server write's update. Its
+// renderedContent) and the structure (peerWeighing) of one walk of a server write's update, and
+// the room's list of delete ranges, which that walk lists the update's delete set into. Its
 // peerWeighing holds no state vector, so every struct counts as past the room's state, as every
 // struct of a transaction's update is.
 type writtenWeighing struct {
 	content   renderedContent
 	structure peerWeighing
+	deleted   *deletedRuns
 }
 
 // walkedStruct weighs walked as the peer hook's weighing does, but for the apply-heap estimate
-// (structApplyHeap), which wrote never reads: it reads the structure (structureHeap) and whether
-// a struct integrated deleted (born) alone, so a server write pays not even the estimate's
-// arithmetic over what the walk counted in each struct's content (contentShape).
+// (structApplyHeap), which wrote never reads: it reads the structure (structureHeap) alone, so a
+// server write pays not even the estimate's arithmetic over what the walk counted in each struct's
+// content (contentShape).
 func (w *writtenWeighing) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
 	w.structure.weighStruct(walked, applyCost{})
 }
 
+// walkedDelete weighs the range against the room's list and only then lists it, so the splits it
+// can leave are charged against the list as it stood before this update's own delete set.
 func (w *writtenWeighing) walkedDelete(client, clock, length uint64) {
 	w.structure.walkedDelete(client, clock, length)
+	w.deleted.list(client, clock, length)
 }
 
 // gaveBack takes structure back out of the room's structure part: what growWithin charged before

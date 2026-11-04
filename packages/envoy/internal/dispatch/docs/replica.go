@@ -818,8 +818,8 @@ func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 // chargeAdded charges the room's charge in the room budget what each of updates added: the content
 // a transaction added (contentAdded), whoever wrote it - a browser's update the peer hook
 // admitted, or the server's own write, a repair's included - never the update's bytes, which carry
-// the room's whole delete set on every transaction, with the clocks the transaction integrated
-// deleted listed as the room's from that same walk (roomCharge.applied, deletedRuns); and, for a
+// the room's whole delete set on every transaction, that delete set listed as the clocks the room
+// holds deleted from the same walk (roomCharge.applied, deletedRuns); and, for a
 // transaction the hook did not apply (roomTotals.hookApplies) - an API write's publish, an
 // injected update, settlement's repair, any other write of the server's own - its structure too,
 // as the hook charges a browser's (roomCharge.wrote), which refuses none of them. Each committed

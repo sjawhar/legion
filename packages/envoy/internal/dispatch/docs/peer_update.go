@@ -248,7 +248,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	charge := weighing.roomCharge()
 	structs, scans := weighing.totals()
 	weighed := peerWeighing{held: info.Doc.StateVector(), known: charge.deletes(), retired: structs.retiredClients(), entries: structs.retiredEntries()}
-	tally, err := walkUpdate(info.Update, fromPeer, &weighed)
+	_, err := walkUpdate(info.Update, fromPeer, &weighed)
 	if s.refusesNextPeerUpdateForTest(info.Room) && err == nil && !weighed.former {
 		err = &updateRefusal{rule: errUpdateNotFromEditor, reason: "the test hook armed this document's next browser update to be refused"}
 	}
@@ -344,17 +344,19 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	}
 	// Moved to what the hook admitted only after the apply returns, so a recount that read the
 	// total's admissions before its encode cannot miss what this apply integrated
-	// (roomTotals.recount). Its delete ranges are listed as the room's, so a later update
-	// carrying them again is charged nothing for them (deletedRuns). Its structs are not listed
-	// here at all: a browser's GC run or deleted item names clocks the room can hold live, which
-	// ygo leaves live, so the clocks an apply of one did integrate deleted are listed from the
-	// update ygo encoded of its transaction, where the room's update observer drains it
-	// (roomCharge.applied).
+	// (roomTotals.recount). Nothing of the update is listed as the room's deleted here, neither
+	// its structs nor its delete ranges: a browser's bytes say which clocks the browser holds
+	// deleted, not which the room does - its GC run over clocks the room holds live deletes none
+	// of them, ygo holds a deleted item of its own live, and the part of a delete range past the
+	// clocks the room holds parks and deletes nothing yet. What this apply did delete is listed
+	// from the delete set ygo writes into the update of its own transaction, which is the room's
+	// whole delete set, where the room's update observer drains it (roomCharge.applied,
+	// deletedRuns). A range weighed again between this apply and that drain is charged again,
+	// which over-charges and never under-charges.
 	structs.landed(added)
 	if !charged {
 		charge.grew(weighed.structureHeap())
 	}
-	charge.deletes().record(info.Update, tally.deletesAt)
 	return nil
 }
 

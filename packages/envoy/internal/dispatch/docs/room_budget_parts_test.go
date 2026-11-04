@@ -47,9 +47,11 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 // part as it was.
 //
 // The room drains its own commits, as every loaded room does (keepReplica, websocket.go's update
-// observer): the clocks an admitted update integrated deleted are listed as the room's from the
-// update ygo encoded of that commit (roomCharge.applied), so the handoff that carries them back
-// is charged nothing for them.
+// observer): what a commit of the room deleted is listed as the room's from the delete set ygo
+// writes into the update of that commit (roomCharge.applied, deletedRuns.list), so the handoff
+// that carries those ranges back is charged nothing for them. A delete range the room parks is
+// in no delete set ygo builds, so the room lists none of it and every update carrying it again is
+// charged for it again, which over-charges and never under-charges.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
 	service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
 	service.measurer.interval = noInterval
@@ -90,14 +92,19 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	}
 	// Five ranges of a client the room holds nothing of, none touching the next: each can split at
 	// both ends, but for the first's start, the client's first clock, where its first item starts.
-	if grew, want := admit("delete ranges", deleteRangesFrom(78, 5)), int64((5*splitsAStructCanCause-1)*bytesOfHeapASplit*roomCopies); grew != want {
-		t.Fatalf("five delete ranges grew the structure part by %d bytes, want %d", grew, want)
+	// ygo parks them whole, since the room holds no clock of that client, so they delete nothing
+	// and no delete set ygo builds holds them: the same ranges sent again, and the room's own
+	// whole state, which carries parked ranges back (withParked, sjawhar/ygo v1.54.1-sami.3,
+	// crdt/update.go:230-258), are charged for them again.
+	parked := int64((5*splitsAStructCanCause - 1) * bytesOfHeapASplit * roomCopies)
+	if grew := admit("delete ranges", deleteRangesFrom(78, 5)); grew != parked {
+		t.Fatalf("five delete ranges grew the structure part by %d bytes, want %d", grew, parked)
 	}
-	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != 0 {
-		t.Fatalf("delete ranges the room already holds grew the structure part by %d bytes, want nothing", grew)
+	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != parked {
+		t.Fatalf("five parked delete ranges grew the structure part by %d bytes on their second apply, want the %d of their first", grew, parked)
 	}
-	if grew := admit("the whole state the room holds, its delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != 0 {
-		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want nothing", grew)
+	if grew := admit("the whole state the room holds, its parked delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != parked {
+		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want the %d its parked ranges are charged again", grew, parked)
 	}
 	structure, _, _, _ := chargeParts(charge)
 	otherRoot := newV1Frame(1).group(1, 79, 0).rooted(byte(structString), "other", "").str("x").noDeletes()
@@ -123,25 +130,24 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 }
 
 // The structure part charges a delete range's splits once, for a range the room did not already
-// hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is every
-// range of every update the hook admits. So a browser's whole-state handoff of a document edited
-// into 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
+// hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is the
+// delete set of every commit the room's drain hands over, which is the room's whole delete set at
+// that commit (deletedRuns.list). So a browser's whole-state handoff of a document edited into
+// 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
 // each transaction as ygo does (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3,
 // crdt/doc.go:616, crdt/update.go:388), are charged nothing for the runs: the keystroke is charged
 // its one struct alone. A new deletion in the middle of a run of text is charged its range's two
-// splits, and the same update sent again nothing; a new deletion of one
-// character between two the room holds deleted is charged nothing, since both its ends are clean
-// already (deletedRuns.splitEnds).
+// splits, and the same update sent again nothing, its clocks having been listed from the commit
+// the hook's own apply made; a new deletion of one character between two the room holds deleted is
+// charged nothing, since both its ends are clean already (deletedRuns.splitEnds).
 func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
-	service, room, replica := peerUpdateRoom(t, strings.Repeat("word ", 1_000)+"\n", 0)
-	service.budget.limit = roomBudgetBytes
+	service, room, replica, charge := drainedPeerUpdateRoom(t, strings.Repeat("word ", 1_000)+"\n")
 	text := firstText(room.GetXmlFragment(fragmentName))
 	room.Transact(func(txn *crdt.Transaction) {
 		for i := range 2_000 {
 			text.Delete(txn, i, 1)
 		}
 	})
-	charge := service.chargeLoadedRoom("room", room, replica)
 	admit := func(what string, update []byte) int64 {
 		t.Helper()
 		before, _, _, _ := chargeParts(charge)
@@ -964,8 +970,10 @@ func browserTreeEdit(t *testing.T, room, browser *crdt.Doc, change func(tree *pm
 // can leave the charges past the limit by the round's whole structure and count before the sweep
 // raises full, and by as many rounds as are admitted before it does; then a hundred shrinking
 // updates, one browser's four cuts of fifty bytes sent to twenty-five rooms, each carrying the
-// copy's delete set with the cuts before it, must fit in what is left. Three such crossing rounds
-// and the hundred shrinks fit inside pressureReserveBytes.
+// copy's delete set with the cuts before it, must fit in what is left: the room that takes the
+// cuts drains its own commits, as a loaded room does, so the range each cut carries again is one
+// the room has listed from the commit the cut before it made (deletedRuns.list). Three such
+// crossing rounds and the hundred shrinks fit inside pressureReserveBytes.
 func TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Growth\n\nA small document its browser grows.\n", 0)
 	service.budget.limit = roomBudgetBytes
@@ -998,9 +1006,7 @@ func TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake(t *testi
 	runtime.KeepAlive(replica)
 
 	const shrunk, cuts, cutBytes = 25, 4, 50
-	service, room, replica = peerUpdateRoom(t, proseAtLeast(16<<10), 0)
-	service.budget.limit = roomBudgetBytes
-	charge = service.chargeLoadedRoom("room", room, replica)
+	service, room, replica, charge = drainedPeerUpdateRoom(t, proseAtLeast(16<<10))
 	var shrinker *crdt.Doc
 	for cut := range cuts {
 		var shrink []byte

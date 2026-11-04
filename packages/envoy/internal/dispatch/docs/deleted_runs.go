@@ -13,48 +13,60 @@ import (
 // holds deleted already, which is most of a reconnecting browser's whole-state handoff.
 
 // deletedRuns is the delete ranges a room is known to hold deleted, each client's sorted and
-// merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), the ranges of
-// every update the room has been charged the structure of since - a browser's update the peer
-// hook admitted, a transaction of the server's own (roomCharge.wrote) - (record), and the clocks
-// every transaction of the room integrated deleted, a GC run's and a deleted item's, read from
-// the update ygo encoded of that transaction: a server write's as its charge walks it
-// (integrated), a browser's as the room's update observer hands its commit over (listed,
-// roomCharge.applied). A clock it lists that the room holds is deleted; one the room does not hold
-// yet is in a range the room keeps parked, since ygo parks the part of a range past the clocks it
-// holds (sjawhar/ygo v1.54.1-sami.3, crdt/delete_set.go:385-397, crdt/update.go:783-786) and an
-// update is listed only once its apply has returned. A delete range it covers whole adds no
-// struct, and one that overlaps what it lists none at an end inside it (splitEnds), so neither the
-// structure part nor the struct total charges a browser's whole-state handoff for the delete set it
-// carries. Without it the structure part, which no count clears, would charge the room's whole
-// delete set again on every browser's sync, whose whole-state handoff carries it, and on every
-// transaction, whose update ygo encodes with the room's whole delete set (crdt/doc.go:597-612): an
-// edited room held open across reconnects would grow its charge with nothing added to its heap.
-// And the struct total would count two structs for every range of it on every connect, which
-// refused every browser reconnecting to a room at the decode cap before it had edited anything.
+// merged. It has one source, the delete set ygo itself committed for the room: the room's whole
+// delete set at its load (seed, crdt.DeleteSetFromDoc), and the delete set of every update the
+// room's update observer drains, listed by the walk the room's charge already makes of that
+// update (list, from roomCharge.applied and roomCharge.wrote). ygo writes
+// buildDeleteSet(doc.store) - the ranges of every item of the room's store it holds deleted, and
+// nothing else - into the update of every transaction (sjawhar/ygo v1.54.1-sami.3, encodeV1Locked,
+// crdt/update.go:387 and :402, which buildPhase2 calls under the document's lock,
+// crdt/doc.go:604-620; buildDeleteSet, crdt/update.go:665-678), so each drained update carries
+// the room's whole delete set as it stood at that commit, and the list is their union: what ygo
+// holds deleted as of the room's last drain, and nothing besides.
 //
-// A range of an update whose apply failed is neither listed nor charged, since the room's bounded
-// document took that update back out whole (newRoomScans). Two updates weighed at once - two
-// browsers', or a browser's whose ranges the hook lists only once its apply returns and a server
-// write committed meanwhile - can each find the same new range unlisted, and both are charged it,
-// which over-charges and never under-charges. The list holds sixteen bytes for each run of the
-// room's delete set, beside the tombstone of at least one struct, 129 bytes or more
-// (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
+// A delete range it covers whole adds no struct, and one that overlaps what it lists none at an
+// end inside it (splitEnds), so neither the structure part nor the struct total charges a
+// browser's whole-state handoff for the delete set it carries. Without it the structure part,
+// which no count clears, would charge the room's whole delete set again on every browser's sync,
+// whose whole-state handoff carries it, and on every transaction, whose update ygo encodes with
+// the room's whole delete set (crdt/doc.go:597-612): an edited room held open across reconnects
+// would grow its charge with nothing added to its heap. And the struct total would count two
+// structs for every range of it on every connect, which refused every browser reconnecting to a
+// room at the decode cap before it had edited anything.
 //
-// It lists no clock a browser's bytes claim. A GC run or a deleted item a browser sends says
-// which clocks it holds deleted, not which the room does: ygo integrates a struct from the first
-// clock the room does not hold (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:82-90), so a GC run over
-// clocks the room holds live deletes none of them, and one whose predecessor is missing parks and
-// deletes nothing yet. Listing such a run was a forgery one 22-byte frame could send: with the
-// room's live text listed deleted, a later delete range over it was covered (covers) and left no
-// end split (splitEnds), so the struct total, the structure part and the frame total each charged
-// it nothing until the measurer's next count. Clipping the run to the clocks past the state vector
-// the hook's weighing read is not enough either, since no lock is held from that read to the apply
-// (weighPeerUpdate) and another browser's update or a server write can fill those clocks live in
-// between. Reading the room's whole delete set after such an apply is not the answer either: a
-// crafted browser sends a frame of a few bytes, one GC run of a client id of its own, as often as
-// the decode cap lets it, and each of them would walk the room's whole store. So the room lists
-// what its own transaction integrated instead, from the update ygo encoded of it, which no
-// browser writes and no apply racing it can forge.
+// Nothing else lists a clock. Not a browser's delete ranges, which the hook once listed as it
+// admitted an update: they say which clocks the browser holds deleted, not which the room does.
+// ygo integrates a struct from the first clock the room does not hold (crdt/item.go:82-90), so a
+// GC run over clocks the room holds live deletes none of them, and it parks the part of a delete
+// range past the clocks the room holds (crdt/delete_set.go:238-244, crdt/update.go:783-786),
+// which deletes nothing until those clocks arrive and which no delete set ygo builds holds. And
+// not the structs of an update, which the room once read from its own encode of a transaction it
+// had committed: a struct that renders nothing is not always one ygo holds deleted. A GC struct
+// is, since ygo decodes one as an item marked deleted (crdt/update.go:447-456), which
+// buildDeleteSet lists. A deleted item - content reference 1, what a browser sends for a
+// tombstone of its own - is not: ygo decodes one as an item carrying ContentDeleted whose Deleted
+// stays false (crdt/update.go:1183-1191, decodeContent :1222-1229), and Item.integrate never
+// marks it deleted (crdt/item.go:81-420), where Yjs marks it as it integrates its content (yjs
+// 13.6.32, src/structs/ContentDeleted.js:65-68). buildDeleteSet lists item.Deleted alone
+// (crdt/update.go:665-672), so the room's delete set holds no range of such an item - though
+// encodeItem writes it back under the deleted reference (crdt/update.go:488-491), so a walk of
+// the room's own encode reads it as a struct born deleted all the same. Listed from that walk, as
+// the room once listed it, one 26-byte frame - a browser's rooted deleted item of length 1,000,
+// whose length is a varuint that can claim up to 2^53 clocks - took 1,000 clocks of a client of
+// its own off the books: covers answered true over them where crdt.DeleteSetFromDoc held no range
+// of that client, and a delete of every other one of them was then charged nothing at all, where
+// against the room's own delete set it is charged 999 structs, 999 splits and 81,360 frame bytes
+// (TestADeletedItemTheRoomHoldsLiveLeavesLaterDeletesCharged).
+//
+// A range is listed only from a transaction that committed: a failed apply logs no update, and
+// the room's bounded document took what it integrated back out whole (newRoomScans). Two updates
+// weighed at once - two browsers', or a browser's and a server write committed meanwhile - can
+// each find the same range unlisted and both be charged it, and so can an update weighed between
+// the apply of a delete and the drain that lists it. Each of those over-charges and none
+// under-charges: the list is a subset of what ygo holds deleted at every moment, and a range
+// weighed against a subset is charged no less than against the whole. The list holds sixteen
+// bytes for each run of the room's delete set, beside the tombstone of at least one struct, 129
+// bytes or more (bytesOfHeapAStruct), that each run deletes, and it goes with the room.
 type deletedRuns struct {
 	mu      sync.RWMutex
 	clients map[uint64][]clockRun
@@ -62,10 +74,6 @@ type deletedRuns struct {
 
 // clockRun is the clocks [start, end) of one client.
 type clockRun struct{ start, end uint64 }
-
-// deletedRun is the clocks [clock, clock+length) of one client that one struct of an update
-// integrated deleted, as a walk of that update read them (roomCharge.applied).
-type deletedRun struct{ client, clock, length uint64 }
 
 // seed lists every range of set, the room's delete set at its load.
 func (d *deletedRuns) seed(set *crdt.IDSet) {
@@ -120,19 +128,16 @@ func (d *deletedRuns) covers(client, clock, length uint64) bool {
 // passes the right half, whose origin is the left half's last clock), which its own integrate
 // cleans at x, a split its own count holds (splitsAStructCanCause).
 //
-// Where x is not held, no item holds it: a room holds each client's clocks from 0 up, and
-// integrates a struct reaching past them from the first clock it does not hold
-// (crdt/item.go:82-90), so where x-1 is held the item that brings x starts at x. Where x-1 is not
-// held either, one item the same transaction integrates can hold both; what the list holds of them
-// is then in ranges the room keeps parked, which ygo deletes in that transaction once their clocks
-// arrive (drainParked, crdt/update.go:803). Where x-1 and x both end deleted, the halves at x
-// merge back as above; where only one does, x is where a parked run starts or ends, a split
-// charged to the range that first listed a clock beside x, which had its own end at x with neither
-// clock listed - and the room's count holds splitsAStructCanCause structs for each parked range
-// besides (structTotalOf). So each place a listed run starts or ends is split once at most, by a
-// range charged for it; and the list only grows, so a range weighed against the list before its
-// apply is charged no less than against the list its apply meets. Nil, a room no load charged,
-// lists nothing.
+// Where x is not held, the list holds neither x-1 nor x, so the end is charged a split: a room
+// holds each client's clocks from 0 up, and integrates a struct reaching past them from the first
+// clock it does not hold (crdt/item.go:82-90), and the list holds only clocks of items the room's
+// store holds deleted (deletedRuns), which are clocks the room holds. Where x-1 and x are both
+// held and both deleted, the halves at x merge back as above; the list holds no clock that is not
+// deleted, so the two paragraphs above cover every end it answers for, and each place a listed
+// run starts or ends is split once at most, by a range charged for it. The list only grows and
+// never holds a clock ygo holds live, so a range weighed against it is charged no less than
+// against the room's own delete set as its apply meets it. Nil, a room no load charged, lists
+// nothing.
 func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) {
 	if length == 0 {
 		return false, false
@@ -152,72 +157,22 @@ func (d *deletedRuns) splitEnds(client, clock, length uint64) (start, end bool) 
 	return clock > 0 && !beside(clock), !beside(clock + length)
 }
 
-// record lists every range of the delete set of update, which a walk found at deletesAt
-// (updateTally.deletesAt), once the room has been charged its structure - a browser's update the
-// peer hook admitted, or a transaction of the server's own (roomCharge.wrote). It walks as a
-// room's own state is walked (fromRoom), which refuses only what ygo cannot decode: the server's
-// writes can carry what no browser sends, and an update the hook admitted passed the stricter
-// walk already. The structs of the update are not read here: a browser's say which clocks the
-// browser holds deleted, not which the room does, and a transaction's own are listed from the
-// update the room encoded of it (integrated, listed). Nil records nothing.
-func (d *deletedRuns) record(update []byte, deletesAt int) {
-	if d == nil {
+// list lists the clocks [clock, clock+length) of client of one range of the delete set of an
+// update the room's update observer drained, as the walk the room's charge makes of that update
+// reads it (roomCharge.applied, roomCharge.wrote): the one place a run is listed from an update,
+// beside the room's delete set at its load (seed). The room's delete set only grows, so a range
+// the list covers already adds nothing, and costs the read lock and a binary search alone -
+// neither the write lock nor an allocation. That is what a keystroke into a room of thousands of
+// deleted runs costs here: ygo writes the room's whole delete set into every transaction's
+// update, and the list holds every range of it already. Nil, a room no load charged, lists
+// nothing.
+func (d *deletedRuns) list(client, clock, length uint64) {
+	if d == nil || length == 0 || d.covers(client, clock, length) {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_ = walkDeleteSet(update, deletesAt, fromRoom, (*deletedRunsRecorder)(d))
-}
-
-// integrated lists the ranges of the delete set of update and the clocks of every struct of it
-// that integrates deleted - a GC run, a deleted item (bornDeleted), which the delete set of every
-// encode of the room's state lists from then on (buildDeleteSet, sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:665-678) though no delete range named them - from one walk of the whole update
-// rather than of its delete set alone. Its update is ygo's own encode of a transaction the room
-// committed, which the room's update observer hands over (roomCharge.wrote): ygo writes it from
-// the state before the transaction (buildPhase2 and encodeV1Locked, crdt/doc.go:604-620 and
-// crdt/update.go:366-406), so every struct in it is a struct the room's store holds, and one born
-// deleted is one the room holds deleted. A browser's bytes are never read this way
-// (deletedRuns). Nil lists nothing.
-func (d *deletedRuns) integrated(update []byte) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	_, _ = walkUpdate(update, fromRoom, (*deletedRunsRecorder)(d))
-}
-
-// listed lists runs, the clocks the structs of one transaction of the room integrated deleted: a
-// walk of the update ygo encoded of that transaction read them, and its caller holds no lock of
-// this list (roomCharge.applied). Nil, a room no load charged, lists nothing.
-func (d *deletedRuns) listed(runs []deletedRun) {
-	if d == nil || len(runs) == 0 {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, run := range runs {
-		d.addLocked(run.client, run.clock, run.length)
-	}
-}
-
-// deletedRunsRecorder is record's and integrated's visitor, which its caller holds the lock for.
-type deletedRunsRecorder deletedRuns
-
-func (r *deletedRunsRecorder) walkedStruct(walked updateStruct) {
-	if bornDeleted(walked) {
-		(*deletedRuns)(r).addLocked(walked.client, walked.clock, walked.length)
-	}
-}
-
-func (r *deletedRunsRecorder) walkedDelete(client, clock, length uint64) {
-	(*deletedRuns)(r).addLocked(client, clock, length)
-}
-
-// bornDeleted is whether walked integrates as a deleted struct: a GC run or a deleted item.
-func bornDeleted(walked updateStruct) bool {
-	return walked.kind == structGC || walked.kind == structDeleted
+	d.addLocked(client, clock, length)
 }
 
 // addLocked lists clocks [clock, clock+length) of client, merged into the runs it overlaps or

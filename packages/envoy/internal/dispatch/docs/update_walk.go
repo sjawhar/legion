@@ -194,20 +194,6 @@ func walkUpdate(update []byte, source updateWriter, visit updateVisitor) (update
 	return tally, nil
 }
 
-// walkDeleteSet reads the delete set of update alone, from at, where a walk of the whole update
-// found it (updateTally.deletesAt), handing visit each range as walkUpdate does, and refuses what
-// that walk would. It is for a second look at the delete set of an update already walked, which
-// need not read its structs again.
-func walkDeleteSet(update []byte, at int, source updateWriter, visit updateVisitor) error {
-	w := updateWalker{buf: update, pos: at, source: source}
-	var tally updateTally
-	w.deleteSet(&tally, visit)
-	if w.refusal != nil {
-		return w.refusal
-	}
-	return nil
-}
-
 // deleteSet reads a delete set from the walker's position, counting it into tally and handing
 // visit each range.
 func (w *updateWalker) deleteSet(tally *updateTally, visit updateVisitor) {
@@ -287,8 +273,9 @@ type updateTally struct {
 	// each client's ranges when it decodes them (sjawhar/ygo v1.54.1-sami.3,
 	// crdt/update.go:1474-1476), so a decoded delete set can hold fewer.
 	deleteRanges uint64
-	// deletesAt is where in the update its delete set starts, for a second look at the delete set
-	// alone (walkDeleteSet).
+	// deletesAt is where in the update its delete set starts: every byte between the update's
+	// count of clients and it is a struct's, which is how the size the walk counts for each
+	// struct is held to the bytes it read (TestTheUpdateWalkNamesParentsAndContent).
 	deletesAt int
 }
 
