@@ -105,12 +105,19 @@ type Ledger struct {
 	// anchors holds, per document, the anchored ask and comment rows this transaction writes, as
 	// they will stand (RegisterPendingAnchor), in the order they were first registered.
 	anchors map[string][]*PendingAnchor
-	// approvals holds, per document, its open approval request as this transaction's queued
-	// writes leave it (recordPendingApproval): the row as moved to the transaction's version
-	// (MoveApprovalAsk), edited_at included.
+	// approvals holds, per document, its open approval request as the move of this transaction's
+	// version left it (recordPendingApproval): the row moved to that version (MoveApprovalAsk),
+	// edited_at included, and open, since no answer queued after it is recorded here. The carry
+	// that reads it next is not reading it stale: the carry's own answer is the one write that
+	// closes the request, and refuseSecondCarry fails every later version write of that document
+	// in the same transaction, so no reader that goes on to commit sees the entry afterwards.
 	approvals map[string]*model.Ask
-	// reviews holds, per document, the newest review this transaction has queued (QueueReview),
-	// which the table answers only once the write phase has run (PendingReview).
+	// reviews holds, per document, the newest review this transaction has queued, which the
+	// table answers only once the write phase has run (PendingReview). The carry's own review is
+	// the only one recorded here (writeCarriedReview, through recordPendingReview), and
+	// refuseSecondCarry reads an entry's presence as proof that this transaction has carried an
+	// approval of that document already: a write path that starts recording a review here would
+	// refuse the carry of any later version of the same document in the same transaction.
 	reviews map[string]model.ArtifactReview
 	// referenced is, per source, the targets its references cite once this transaction's queued
 	// reconciliation of them is written, and blockIndexes, per document, what its block index holds
@@ -552,8 +559,9 @@ func recordPendingApproval(ctx context.Context, tx pgx.Tx, artifactID string, as
 }
 
 // recordPendingReview records review as the newest review of artifactID on the ledger ctx queues
-// tx's writes on: the caller has queued the insert that writes it (QueueReview), and a read of
-// artifact_reviews before the write phase still answers the review before this one.
+// tx's writes on: writeCarriedReview, its one caller, has queued the insert that writes it
+// (QueueReview), and a read of artifact_reviews before the write phase still answers the review
+// before this one. What a later carry makes of the entry's presence is on the field (reviews).
 func recordPendingReview(ctx context.Context, tx pgx.Tx, artifactID string, review model.ArtifactReview) {
 	ledger := queueFor(ctx, tx)
 	if ledger == nil {

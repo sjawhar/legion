@@ -709,15 +709,13 @@ func TestAVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 	}
 }
 
-// A transaction carries one document's approval at most once. The carry reads the document's
-// newest review and the approved version's text from the tables, so a carry that ran earlier in
-// the same transaction - whose review and whose version are queued and in neither table yet -
-// leaves those reads stale, and a second carry would record an approval in a person's name from
-// a review the transaction has already moved past. Here the agent names a version whose text is
-// the approved text, which carries alice's approval, and names a second version of the same
-// document in the same transaction: the second one is refused (errApprovalCarriedTwice) and the
-// transaction writes nothing. SnapshotVersion would not reach the carry for the first version,
-// returning the latest version where the live text has not moved, so both versions are named.
+// A transaction carries one document's approval at most once (errApprovalCarriedTwice, whose doc
+// carries the reason). Here the agent names a version whose text is the approved text, which
+// carries alice's approval, and both routes into the carry are then refused in that same
+// transaction: a second named version of the document (carryApproval's guard) and the restore
+// the upload route runs on its own (CarryRestoredApproval's). SnapshotVersion would not reach
+// the carry for the first version, returning the latest version where the live text has not
+// moved, so the versions are named.
 func TestATransactionCannotCarryOneDocumentsApprovalTwice(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -741,7 +739,8 @@ func TestATransactionCannotCarryOneDocumentsApprovalTwice(t *testing.T) {
 	defer tx.Rollback(ctx)
 	joinedCtx, ledger := service.Join(ctx, tx)
 	defer ledger.Discard()
-	if _, err := service.NamedVersion(joinedCtx, artifactID, "Restores the approved text", agent); err != nil {
+	restored, err := service.NamedVersion(joinedCtx, artifactID, "Restores the approved text", agent)
+	if err != nil {
 		t.Fatalf("the version restoring the approved text: %v", err)
 	}
 	if _, carried := ledger.PendingReview(artifactID); !carried {
@@ -749,5 +748,11 @@ func TestATransactionCannotCarryOneDocumentsApprovalTwice(t *testing.T) {
 	}
 	if _, err := service.NamedVersion(joinedCtx, artifactID, "A second version of the same document", agent); !errors.Is(err, errApprovalCarriedTwice) {
 		t.Fatalf("the second version of the document in the same transaction = %v, want %v", err, errApprovalCarriedTwice)
+	}
+	// The upload route writes its version itself and carries the restore alone (the api
+	// package's storeArtifact calls CarryRestoredApproval), so that route's own guard call is
+	// what refuses it here.
+	if err := CarryRestoredApproval(joinedCtx, tx, service.events, artifactID, restored.Version.Number, "Context\n", nil, service.serverURL); !errors.Is(err, errApprovalCarriedTwice) {
+		t.Fatalf("the upload route's restore over the same document in the same transaction = %v, want %v", err, errApprovalCarriedTwice)
 	}
 }

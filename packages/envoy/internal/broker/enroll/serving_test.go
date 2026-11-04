@@ -456,7 +456,10 @@ func TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff(t *testing
 	for _, clock := range []*ServingClock{stuck, serving} {
 		wg.Go(func() { clock.Run(runs) })
 	}
-	time.Sleep(threshold + 3*interval)
+	// The event the assertions below read: the serving broker has beaten past start+threshold, by
+	// which time the lease r.setLease shortened above has run out. No fixed sleep bounds that on a
+	// loaded machine.
+	r.beatsPast(t, serving, start.Add(threshold))
 	live := r.live(t, id)
 	ended := r.endLapsed(t)
 	cancel()
@@ -474,14 +477,43 @@ func TestAHeldServingLockFailsTheBeatAndAnotherBrokerKeepsTheGuardOff(t *testing
 	if last, _ := r.servingOf(t, stuck); !last.Equal(stuckLast) {
 		t.Fatalf("the stuck broker's last_serving_at = %s, want it left at %s while its row is held", last, stuckLast)
 	}
+	// Only the stuck clock's warning is this test's subject. The serving clock's own beats are
+	// bounded by Interval too, so one of them can time out under load and warn as well.
 	warnings := []string{}
 	for line := range strings.Lines(logged.String()) {
-		if strings.Contains(line, "level=WARN") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "process="+stuck.processID()) {
 			warnings = append(warnings, line)
 		}
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "the serving clock could not beat") || !strings.Contains(warnings[0], "timed_out=true") {
-		t.Fatalf("Run logged warnings %q, want one that the serving clock could not beat, with timed_out=true", warnings)
+		t.Fatalf("Run logged warnings %q for the stuck broker, want one that the serving clock could not beat, with timed_out=true", warnings)
+	}
+}
+
+// beatsPastCap and beatsPastMargin bound the wait below: the clock under test needs more than its
+// threshold of real time to get past want, and a run whose binary deadline leaves less than the
+// margin fails by name rather than letting go test's own timeout fire with no test named.
+const beatsPastCap = 30 * time.Second
+const beatsPastMargin = 10 * time.Second
+
+// beatsPast waits for clock's broker_serving row to pass want.
+func (r servingRig) beatsPast(t *testing.T, clock *ServingClock, want time.Time) {
+	t.Helper()
+	wait := beatsPastCap
+	if deadline, bounded := t.Deadline(); bounded {
+		left := time.Until(deadline)
+		if left <= beatsPastMargin {
+			t.Fatalf("the test binary's deadline leaves %s, not more than %s: this looks like a misconfigured run; raise -timeout", left.Round(time.Millisecond), beatsPastMargin)
+		}
+		wait = min(wait, left-beatsPastMargin)
+	}
+	for deadline := time.Now().Add(wait); ; time.Sleep(10 * time.Millisecond) {
+		if last, _ := r.servingOf(t, clock); last.After(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the serving broker's last_serving_at did not pass %s within %s", want, wait)
+		}
 	}
 }
 

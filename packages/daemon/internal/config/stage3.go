@@ -33,6 +33,15 @@ func (gate DesignGate) Valid() bool {
 	return gate == DesignGateRootIssues || gate == DesignGateOff
 }
 
+// OrDefault is gate, or root-issues when gate is unset: the policy a workflow applies when its
+// configuration names none, which the engine and the outbox's hand-over read alike.
+func (gate DesignGate) OrDefault() DesignGate {
+	if gate == "" {
+		return DesignGateRootIssues
+	}
+	return gate
+}
+
 // Gates contains the workflow gates the daemon enforces.
 type Gates struct {
 	Design DesignGate

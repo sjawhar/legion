@@ -117,8 +117,8 @@ type approvedVersion struct {
 // A route that trips it is a programming error, not a user's: no caller can provoke it, and the
 // refusal fails the write rather than reporting anything to a person. A route that must write
 // two versions of one document in one transaction has to give the carry a read of that
-// transaction's queued review (Ledger.PendingReview) and of its queued version text
-// (Ledger.QueueVersion) in place of the two stored reads before it can carry twice.
+// transaction's queued review (Ledger.PendingReview) and of its queued version's text
+// (latestVersion) in place of the two stored reads before it can carry twice.
 var errApprovalCarriedTwice = errors.New("a transaction carries one document's approval at most once")
 
 // refuseSecondCarry refuses the carry when the ledger queueing tx's writes already holds a

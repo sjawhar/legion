@@ -37,8 +37,12 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 	return nil, fmt.Errorf("read open approval ask: %w", err)
 }
 
-// openApprovalAsk is OpenApprovalAsk as the transaction's queued writes leave the request: the
-// request a version write of this transaction moved (MoveApprovalAsk), else the stored one.
+// openApprovalAsk is OpenApprovalAsk as this transaction's own move of the request left it: the
+// row a version write of this transaction moved to its version (MoveApprovalAsk), edited_at
+// included, else the stored one. The move is all the ledger holds of the request, so the row
+// reads open even once the carry has queued its answer; nothing that commits reads it so, since
+// the carry's answer (answerApprovalAsk) is the only write that closes the request, and
+// refuseSecondCarry fails every later version write of that document in the same transaction.
 func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	if ledger := queueFor(ctx, tx); ledger != nil {
 		if ask := ledger.approvals[artifactID]; ask != nil {
