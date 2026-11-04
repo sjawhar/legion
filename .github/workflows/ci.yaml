@@ -2831,7 +2831,8 @@ jobs:
   #
   # The lane is four jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener, the
   # registry store, the session cache and kvwatch), envoy-go-race-pmdoc, envoy-go-race-api and
-  # envoy-go-race-docs, whose own comment below says why the document service runs alone.
+  # envoy-go-race-docs, whose own comment below says why the document service runs in eight shards
+  # of its own.
   #
   # pmdoc and api sit apart because isolation is what made them fast: sharing a runner, the race
   # binaries contended for the four vCPUs, and alone pmdoc fell from 1563.552 s to 1023.519 s and
@@ -2973,24 +2974,68 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # The document service alone, under the race detector, with a deadline of its own. It is by far
-  # the slowest package of the race lane - 1773 s of the 1842 s the first step of envoy-go-race
-  # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
-  # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
-  # Its own filter is the closure of this one package, not packages/envoy/**, so a change
-  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
-  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
-  # without its lock races the room's peers, which no ordinary run shows
+  # The document service alone, under the race detector, with a deadline of its own, in six
+  # shards. It is by far the slowest package of the race lane - 1773 s of the 1842 s the first
+  # step of envoy-go-race spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute
+  # step with the other five groups left it no headroom: that step died on go test's own deadline
+  # at job 123503246603. Its own filter is the closure of this one package, not packages/envoy/**,
+  # so a change elsewhere in the module does not start this job. No Bun: no test file here runs
+  # it, and envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live
+  # document without its lock races the room's peers, which no ordinary run shows
   # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
   # LEGION-499).
+  #
+  # The package is sharded because one runner no longer holds it (INFRA-179). The race detector's
+  # shadow memory ratchets with each test's heap peak and never shrinks, so one process running
+  # every test of the package ends up holding the high-water mark of all of them: the whole
+  # package under -race measured 14.65 GB resident and still climbing at the 60-minute mark on
+  # the development pod at d88e2988, against the 16 GB of a standard ubuntu-24.04 runner. No test
+  # failed - the runner killed the job: four of them on this branch ended `runner received a
+  # shutdown signal` (exit 143) at 25-32 minutes, the last on a re-run. Three shards are not
+  # enough: dealt round-robin over three, the same tests peaked at 15.6 GB (killed), 8.5 GB and
+  # 10.2 GB on that pod, and over six at 11.8, 5.4, 8.0, 7.0, 3.6 and 5.9 GB. This job runs eight.
+  # Measured on the pod at fcbecb93 on 2026-11-04, after this branch's tests at the decode cap
+  # stopped running under -race (skipAtTheBoundsUnderRace, each naming its concurrent
+  # counterpart), the eight peaked at 5.4, 6.3, 6.4, 2.8, 5.8, 4.8, 6.7 and 4.5 GB, the worst
+  # 9.3 GB short of a runner's 16 GB, and took 207 to 799 s each on its two processors. No test is
+  # dropped and none is weakened: every shard runs under -race, and together they run every name
+  # the package lists.
+  #
+  # A shard takes its tests from the package's own list, as dispatch-memory's do (its comment
+  # below says why that one is sharded): the n-th name the test binary's `-test.list '.*'` prints,
+  # counted from one, belongs to shard ((n - 1) mod shards) + 1, and the shard runs exactly those
+  # names under `-test.run '^(…)$'`. Every test therefore lands in exactly one shard, a new one
+  # with no edit here, and dealing the list round-robin spreads the heaviest tests, which sit
+  # next to each other in their files, across the shards rather than piling them into one. A
+  # shard that lists no test fails instead of passing on an empty run, which is what a package
+  # that stopped building, or a shard number past the end of the matrix, would otherwise look
+  # like.
+  #
+  # The step compiles the race binary once (`go test -race -c`) and runs that one binary for both
+  # the list and the tests, in the package's own directory so the testdata paths its tests open
+  # resolve. `go test -list` would compile the same race binary a second time, up to five minutes
+  # of a shard's budget, and a binary run directly answers from no test cache, so it needs no
+  # -count=1.
+  #
+  # The shards are one job to ci-ok, which is what condenses them: a matrix job's `result` in its
+  # needs context is `success` only when every shard succeeded, so a failed, cancelled or skipped
+  # shard takes envoy-go-race-docs red there (.github/scripts/ci-ok.sh).
   envoy-go-race-docs:
+    name: envoy-go-race-docs (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'
     runs-on: ubuntu-24.04
-    # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
-    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
-    # then the step's own 60 minutes, which is 66 under this limit of 70.
+    # The run's -test.timeout 60m must fire before the runner cancels the shard, so a hung test
+    # prints the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binary (once: the list runs that same binary), then the run's own 60 minutes, which is 66
+    # under this limit of 70.
     timeout-minutes: 70
+    strategy:
+      # Every shard's verdict is wanted at once: a red shard must not cancel its siblings, since
+      # which tests fail is the finding.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3031,8 +3076,19 @@ jobs:
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - name: Race-test the document service
-        run: go test -race -timeout 60m ./internal/dispatch/docs/
-        working-directory: packages/envoy
+        env:
+          RACE_DOCS_SHARD: ${{ matrix.shard }}
+          RACE_DOCS_SHARDS: ${{ strategy.job-total }}
+        run: |
+          go test -race -c -o "$RUNNER_TEMP/docs.test" .
+          "$RUNNER_TEMP/docs.test" -test.list '.*' > "$RUNNER_TEMP/docs-tests.txt"
+          all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/docs-tests.txt")
+          mine=$(printf '%s\n' "$all" | awk -v shard="$RACE_DOCS_SHARD" -v shards="$RACE_DOCS_SHARDS" '(NR - 1) % shards + 1 == shard')
+          [ -n "$mine" ] || { echo "::error::shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS takes none of the $(printf '%s\n' "$all" | grep -c . ) tests ./internal/dispatch/docs/ lists"; exit 1; }
+          echo "shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS runs $(printf '%s\n' "$mine" | wc -l) of $(printf '%s\n' "$all" | wc -l) tests:"
+          printf '%s\n' "$mine"
+          "$RUNNER_TEMP/docs.test" -test.timeout 60m -test.v -test.run "^($(printf '%s\n' "$mine" | paste -sd'|' -))$"
+        working-directory: packages/envoy/internal/dispatch/docs
 
       - name: Report ci-ok when this is the run's last job
         if: always()

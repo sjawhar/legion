@@ -481,6 +481,11 @@ ENV_ALLOWED = frozenset({
     # shards there are: the `-run` the shard builds from them selects test names and compiles the
     # same package whatever it selects (ci.yaml's dispatch-memory).
     "MEMORY_SHARD", "MEMORY_SHARDS",
+    # Which sixth of the document service's tests one shard of envoy-go-race-docs runs, and how
+    # many shards there are: the `-test.run` the shard builds from them selects test names in a
+    # race binary already compiled, so they move nothing the step compiles (ci.yaml's
+    # envoy-go-race-docs).
+    "RACE_DOCS_SHARD", "RACE_DOCS_SHARDS",
     "TESTCONTAINERS_RYUK_DISABLED",
 })
 

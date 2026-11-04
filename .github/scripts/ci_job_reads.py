@@ -41,6 +41,7 @@ from pathlib import Path
 from ci_filter_coverage import Read, at, exact, gate, run
 
 ENVOY = "packages/envoy"
+DOCS = "packages/envoy/internal/dispatch/docs"
 DAEMON = "packages/daemon"
 INFRA = "packages/envoy/infra"
 FIX = "packages/contracts/fixtures"
@@ -372,6 +373,20 @@ mine=$(printf '%s\\n' "$all" | awk -v shard="$MEMORY_SHARD" -v shards="$MEMORY_S
 echo "shard $MEMORY_SHARD of $MEMORY_SHARDS runs $(printf '%s\\n' "$mine" | wc -l) of $(printf '%s\\n' "$all" | wc -l) tests:"
 printf '%s\\n' "$mine"
 go test -tags memory -count=1 -timeout 40m -v -run "^($(printf '%s\\n' "$mine" | paste -sd'|' -))$" ./cmd/dispatch"""
+# The document service's race shards deal the same way, and the step builds the race binary once
+# rather than letting the list compile it a second time: its one go command is `go test -race -c`
+# in the package's own directory, and the binary it writes answers both the list and the shard's
+# run (ci.yaml's envoy-go-race-docs).
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = """\
+go test -race -c -o "$RUNNER_TEMP/docs.test" .
+"$RUNNER_TEMP/docs.test" -test.list '.*' > "$RUNNER_TEMP/docs-tests.txt"
+all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/docs-tests.txt")
+mine=$(printf '%s\\n' "$all" | awk -v shard="$RACE_DOCS_SHARD" -v shards="$RACE_DOCS_SHARDS" '(NR - 1) % shards + 1 == shard')
+[ -n "$mine" ] || { echo "::error::shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS takes none of the $(printf '%s\\n' "$all" | grep -c . ) tests ./internal/dispatch/docs/ lists"; exit 1; }
+echo "shard $RACE_DOCS_SHARD of $RACE_DOCS_SHARDS runs $(printf '%s\\n' "$mine" | wc -l) of $(printf '%s\\n' "$all" | wc -l) tests:"
+printf '%s\\n' "$mine"
+"$RUNNER_TEMP/docs.test" -test.timeout 60m -test.v -test.run "^($(printf '%s\\n' "$mine" | paste -sd'|' -))$\""""
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -706,10 +721,10 @@ GATES = [
                  ENVOY, ["./internal/dispatch/api/"], race=True),
     ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
-        step_run("envoy-go-race-docs", "Race-test the document service",
-                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
-                 ["./internal/dispatch/docs/"], race=True),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, DOCS, RACE_DOCS_SCRIPT, [
+            (DOCS, ["."], "go test -race -c .", {"race": True}),
+        ]),
     ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", exact=[
