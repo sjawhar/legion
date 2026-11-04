@@ -388,45 +388,68 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 	return nil
 }
 
-// suggestionOutcomePass is one pass of the loop: it reads the safe horizon of the event log once
-// (events.Horizon.Safe, one observation; Await on a process's first pass, below), judges page
-// after page up to it (sweepSuggestionOutcomePages), and answers when the loop should run again.
+// suggestionOutcomeFloor reads the id a pass caps its page at. It keeps the marks of the event
+// log the sweep has taken (eventMarks), as the server keeps the relay's.
+type suggestionOutcomeFloor struct {
+	horizon *events.Horizon
+	marks   eventMarks
+}
+
+// read answers the highest id at or below which no event can still be open, and whether the log
+// holds ids above it that this pass therefore leaves to a later one.
 //
-// A safe of 0 is a horizon that has proven nothing yet: one snapshot never proves its own A
-// (events.Horizon), so the first pass after a process starts reads 0 however much the log holds.
-// That pass takes a horizon with Await instead, which is at or above every id committed before
-// the call, rather than start a null cursor at the highest id at or below 0 (startSuggestionCursor)
-// and leave every later pass paging the log from its start.
+// It reads a writer floor (eventWriterFloor), not the safe horizon. Both are an id every event at
+// or below which is final, and the sweep needs no more than that (judgeSuggestionPage); they
+// differ in what they wait on. The safe horizon is proven from pg_snapshot_xmin, the oldest
+// transaction id running anywhere on the Postgres instance (events.Horizon, "Costs"), so any
+// transaction open in any database on that instance - another service's write, an operator's
+// psql session, a `create database … template` - holds it back, and with it every judgement this
+// sweep owes. The floor counts only the transactions that hold a write lock on this database's
+// events table (events.Horizon.WriterFloor, oldestEventWriterSQL filters by
+// `datname = current_database()`), which are the only ones that can hold an event id of this log
+// open. It waits on no transaction at all: it is two statements that answer at once.
 //
-// A pass that leaves an id standing above the horizon it read has read less than the log holds:
-// an event that committed while a lower id was still open, which this pass could not judge by. It
-// asks for a pass schedule.minGap away rather than for the soonest thing it held back, because
-// nothing announces the moment those open writes end and the horizon moves, so a horizon held
-// back costs one pass per gap instead of a loop re-reading as fast as it can. The wait loses
-// nothing: each pass works out afresh what it held back for being younger than settle, and the
-// late commit's own notification on dispatch_events wakes the loop as any other commit does.
-//
-// Two answers say an id stands above what this pass read, and a pass needs both: Pending, this
-// pass's own observation having seen an id above H, and a horizon now proven past the safe this
-// pass read, which is what Pending reads as settled once another reader of the one Horizon - the
-// relay, the delivery hub - proves that observation while this pass's pages run. Neither alone
-// covers the other: without the second, a pass whose gap closed under it would ask for nothing
-// and leave those events to the next commit's wake.
-func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *events.Horizon, schedule suggestionSchedule) (time.Time, error) {
-	safe, err := horizon.Safe(ctx)
+// A floor of 0 with events in the log is the one case the floor cannot bound: no mark counts, so
+// an event write of this database has been open since before every mark the sweep has taken, and
+// nothing is proven or persisted either - a process's first pass under such a write. The horizon
+// is the only bound there is then, and the pass awaits it (events.Horizon.Await), rather than
+// start a null cursor at the highest id at or below 0 (startSuggestionCursor) and leave every
+// later pass paging the log from its start. An empty log needs no bound: every id at or below 0
+// is final because there is none.
+func (f *suggestionOutcomeFloor) read(ctx context.Context) (safe int64, held bool, err error) {
+	floor, _, newest, err := eventWriterFloor(ctx, f.horizon, &f.marks)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("read the event log's safe horizon: %w", err)
+		return 0, false, fmt.Errorf("read the event log's writer floor: %w", err)
 	}
-	if safe == 0 {
-		if safe, err = horizon.Await(ctx); err != nil {
-			return time.Time{}, fmt.Errorf("await the event log's safe horizon: %w", err)
+	if floor == 0 && newest > 0 {
+		if floor, err = f.horizon.Await(ctx); err != nil {
+			return 0, false, fmt.Errorf("await the event log's safe horizon: %w", err)
 		}
+	}
+	return floor, floor < newest, nil
+}
+
+// suggestionOutcomePass is one pass of the loop: it reads the id the log is final up to
+// (suggestionOutcomeFloor.read), judges page after page up to it (sweepSuggestionOutcomePages),
+// and answers when the loop should run again.
+//
+// A pass that leaves an id standing above the floor it read has read less than the log holds: an
+// event that committed while a lower id was still open, which this pass could not judge by. It
+// asks for a pass schedule.minGap away rather than for the soonest thing it held back, because
+// nothing announces the moment those open writes end and the floor moves, so a floor held back
+// costs one pass per gap instead of a loop re-reading as fast as it can. The wait loses nothing:
+// each pass works out afresh what it held back for being younger than settle, and the late
+// commit's own notification on dispatch_events wakes the loop as any other commit does.
+func suggestionOutcomePass(ctx context.Context, pool *store.Pool, floor *suggestionOutcomeFloor, schedule suggestionSchedule) (time.Time, error) {
+	safe, held, err := floor.read(ctx)
+	if err != nil {
+		return time.Time{}, err
 	}
 	next, err := sweepSuggestionOutcomePages(ctx, pool, safe, schedule.page, schedule.settle)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if horizon.Pending() || horizon.Proven() > safe {
+	if held {
 		return time.Now().Add(schedule.minGap), nil
 	}
 	return next, nil
@@ -440,17 +463,20 @@ func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *event
 // the server, the pglisten.Hub wake on EventsChannel, which every event commit announces
 // whichever process made it, and which the hub also signals after each successful LISTEN, so what
 // was written while the listener had no connection is caught up then - and when a pass asks for
-// one: once what it held back for being under a minute old is a minute old
-// (judgeSuggestionPage), once the gap the safe horizon left open may have closed
+// (judgeSuggestionPage), once the gap an open event write left may have closed
 // (suggestionOutcomePass), and a minute after a pass that failed. Passes start at least a minute
 // apart, and each reads page after page until it has caught up (sweepSuggestionOutcomePages). A
 // nil wake leaves the loop with its start pass and the passes those ask for. With nothing
-// written, nothing due and the horizon current it holds no timer and makes no statement.
+// written, nothing due and the floor at the log's head it holds no timer and makes no statement
+// on pool.
 //
-// It reads the event log only up to the safe horizon of horizon, the server's one events.Horizon
+// It reads the event log only up to a writer floor of horizon, the server's one events.Horizon
 // (api.Background's EventHorizon, the Horizon the live event feed reads through too): event ids
 // are not commit order, so a cursor moved by an uncapped `id > cursor` read could pass an event
-// that was still committing and never judge by it (judgeSuggestionPage).
+// that was still committing and never judge by it (judgeSuggestionPage). The floor is read from
+// marks of the log this loop keeps for itself (suggestionOutcomeFloor), so a transaction open in
+// another database on the same Postgres instance, which holds the safe horizon back, holds this
+// sweep back not at all.
 //
 // It takes no lease (duty.WokenLoop.Lease empty), as the embedding queue takes none: every page
 // runs in a transaction holding the suggestion_outcome_cursor row `for update`
@@ -474,11 +500,12 @@ func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, horizon *e
 
 func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, horizon *events.Horizon, wake <-chan struct{}, schedule suggestionSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
+	floor := &suggestionOutcomeFloor{horizon: horizon}
 	duty.RunWoken(ctx, duty.WokenLoop{
 		Wake:   wake,
 		MinGap: schedule.minGap,
 		Pass: func(ctx context.Context) time.Time {
-			next, err := suggestionOutcomePass(ctx, pool, horizon, schedule)
+			next, err := suggestionOutcomePass(ctx, pool, floor, schedule)
 			if err != nil && ctx.Err() == nil {
 				slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 				next = time.Now().Add(schedule.minGap)

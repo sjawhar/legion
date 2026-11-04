@@ -80,13 +80,22 @@ func (m *eventMarks) candidates() []events.Mark {
 // this process proved and the one persisted (events.Horizon.Persisted). It waits on no
 // transaction.
 func (s *server) writerFloor(ctx context.Context) (floor int64, ok bool, newest int64, err error) {
-	horizon := s.horizon()
+	return eventWriterFloor(ctx, s.horizon(), &s.eventMarks)
+}
+
+// eventWriterFloor is writerFloor over any marks list: the server's own, or the one a reader of
+// the event log that holds no server keeps for itself (the suggestion outcome sweep's
+// suggestionOutcomeFloor). It waits on no transaction, which is what separates it from the safe
+// horizon: the floor counts only the transactions that hold a write lock on this database's
+// events (events.Horizon.WriterFloor), where the horizon waits on every transaction id running
+// anywhere on the Postgres instance.
+func eventWriterFloor(ctx context.Context, horizon *events.Horizon, marks *eventMarks) (floor int64, ok bool, newest int64, err error) {
 	mark, err := horizon.Mark(ctx)
 	if err != nil {
 		return 0, false, 0, err
 	}
-	s.eventMarks.add(mark)
-	floor, ok, err = horizon.WriterFloor(ctx, s.eventMarks.candidates()...)
+	marks.add(mark)
+	floor, ok, err = horizon.WriterFloor(ctx, marks.candidates()...)
 	if err != nil || ok {
 		return floor, ok, mark.Newest, err
 	}

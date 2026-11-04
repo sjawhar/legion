@@ -165,6 +165,9 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 // With no event written, the sweep makes no statement at all - no pass on a timer, no lease
 // attempt - over a window fifteen times its gap between passes, though a suggestion is pending.
 func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
+	// No t.Parallel: this test measures a window of wall-clock time, fifteen gaps of the sweep
+	// it runs, and asserts nothing was done in it; a parallel test's CPU is what would stretch
+	// that window past a pass the sweep then makes inside it.
 	sweep := startIdleSweep(t, "OIDLE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
 
@@ -181,8 +184,9 @@ func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
 // An event the suggestion's actor writes on the suggested issue wakes the idle sweep through its
 // notification on a real pglisten.Hub, and the suggestion is marked acted_on within seconds.
 func TestAnEventByTheActorOnTheSuggestedIssueWakesTheSweepAndMarksActedOn(t *testing.T) {
-	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
-	// on is instance-wide — any open transaction anywhere on the Postgres server holds it back.
+	// No t.Parallel: startIdleSweep measures a quiet window of the sweep it runs
+	// (storetest.AwaitQuiet) before the test's own write, and a parallel test's CPU is what
+	// would stretch that window.
 	sweep := startIdleSweep(t, "OWAKE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
 
@@ -579,9 +583,11 @@ func suggestionOutcomeAt(t *testing.T, srv *server, sourceIssueKey, suggestedID 
 // An event that can still commit is never passed over. Transaction A appends an event on the
 // suggested issue, the one that resolves the suggestion, and stays open while transaction B
 // appends a later id and commits, so the highest committed id stands above an id that can still
-// commit. A pass run then reads only up to the safe horizon (events.Horizon), which stays below
-// A's id while A is open: it judges nothing, leaves the cursor below that id, and asks for a pass
-// of its own no sooner than the loop's gap rather than spinning on the gap above the horizon.
+// commit. A pass run then reads only up to the id the log is final through
+// (suggestionOutcomeFloor): A holds a write lock on this database's events, so no mark the pass
+// takes counts and the floor falls back to the horizon already proven, which stands below A's
+// id while A is open. It judges nothing, leaves the cursor below that id, and asks for a pass of
+// its own no sooner than the loop's gap rather than spinning on the gap above the floor.
 // Once A commits, the next pass reads its event and judges the suggestion by it, once. A pass
 // reading `id > cursor` uncapped moves the cursor past A's event on the first pass, and the
 // suggestion is then never judged.
@@ -612,9 +618,12 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	}
 
 	schedule := suggestionSchedule{minGap: time.Second, page: suggestionOutcomePage}
+	// One floor across the three passes below, as the loop keeps one across its own
+	// (runSuggestionOutcomeSweep): the marks it takes are what a later pass reads the log up to.
+	floor := &suggestionOutcomeFloor{horizon: srv.horizon()}
 	low, _, commitLow := appendOutOfOrder(t, database, deps.Events, target, other)
 	started := time.Now()
-	next, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule)
+	next, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule)
 	if err != nil {
 		t.Fatalf("the pass run while the lower id is still open: %v", err)
 	}
@@ -636,7 +645,7 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 	if safe := safeHorizon(t, srv); safe < low {
 		t.Fatalf("the safe horizon is %d once event %d has committed; want it at or above that id", safe, low)
 	}
-	if _, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule); err != nil {
 		t.Fatalf("the pass run once the lower id has committed: %v", err)
 	}
 	if row := readSuggestionOutcome(t, srv, source, target); row.Outcome != "acted_on" || row.Detail != "the suggested issue was updated directly" {
@@ -649,7 +658,7 @@ func TestTheSuggestionSweepTrailsTheSafeHorizon(t *testing.T) {
 		t.Fatalf("cursor = %d after the pass that read event %d; want it at or above that id", *cursor, low)
 	}
 	judged := suggestionOutcomeAt(t, srv, source, target)
-	if _, err := suggestionOutcomePass(ctx, database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(ctx, database.Pool, floor, schedule); err != nil {
 		t.Fatalf("the pass after the suggestion was judged: %v", err)
 	}
 	if again := suggestionOutcomeAt(t, srv, source, target); judged == nil || again == nil || !again.Equal(*judged) {
@@ -677,7 +686,7 @@ func TestTheFirstPassOfAJustStartedProcessStartsAtTheNewestEvent(t *testing.T) {
 
 	newest := lastEventID(t, database)
 	schedule := suggestionSchedule{minGap: time.Second, settle: time.Minute, page: suggestionOutcomePage}
-	if _, err := suggestionOutcomePass(t.Context(), database.Pool, srv.horizon(), schedule); err != nil {
+	if _, err := suggestionOutcomePass(t.Context(), database.Pool, &suggestionOutcomeFloor{horizon: srv.horizon()}, schedule); err != nil {
 		t.Fatalf("the first pass of a just-started process: %v", err)
 	}
 	switch cursor := outcomeCursor(t, database); {

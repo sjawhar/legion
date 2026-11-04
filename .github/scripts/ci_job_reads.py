@@ -338,12 +338,22 @@ def go_notices_runs():
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
-s=0
-go list ./... | grep -v '/integration' | xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" || s=$?
+go list ./... | grep -Ev '/integration|/internal/dispatch/routes$' |
+  xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" &
+rest=$!
+DISPATCH_TEST_DATABASE_URL="$HORIZON_TEST_DATABASE_URL" \\
+  go test -json -count=1 -timeout 20m ./internal/dispatch/routes > "$RUNNER_TEMP/go-test-json/unit-routes.json" &
+routes=$!
+rest_status=0
+routes_status=0
+wait "$rest" || rest_status=$?
+wait "$routes" || routes_status=$?
+s=$rest_status
+if [ "$s" -eq 0 ]; then s=$routes_status; fi
 if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
 else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json" "$RUNNER_TEMP/go-test-json/unit-routes.json"
 fi
 exit $s"""
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
@@ -368,6 +378,22 @@ else
   jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/integration.json"
 fi
 exit $s"""
+# envoy-go-race-docs's one test step. It is pinned rather than read as a plain command because the
+# memory sampler runs beside the go call: that job is the one the runner has killed for memory,
+# and go test prints nothing until the package ends, so the sampler is what says where the memory
+# went (dispatch://INFRA-1075).
+RACE_DOCS_STEP = "Race-test the document service"
+RACE_DOCS_SCRIPT = """\
+peak=0
+while :; do
+  used=$(free -m | awk '/^Mem:/{print $3}')
+  if [ "$used" -gt "$peak" ]; then peak=$used; fi
+  echo "memory $(date -u +%T) used ${used} MiB, peak ${peak} MiB, biggest $(ps -eo rss=,comm= --sort=-rss | head -1)"
+  sleep 20
+done &
+sampler=$!
+trap 'kill "$sampler" 2>/dev/null || true' EXIT
+go test -race -timeout 60m -p 2 -parallel 2 ./internal/dispatch/docs/"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -667,10 +693,12 @@ GATES = [
         # to the log, so none of them is in the simple form: -json is not a flag the check
         # reduces and a redirect is not in that form either (dispatch://INFRA-1075).
         #
-        # One call over every package but internal/integration, which the integration step tests:
-        # counted as all of ./....
+        # Two calls at once, which between them name every package but internal/integration, the
+        # integration step's: all of ./... but internal/dispatch/routes, and that package against
+        # the job's second Postgres. The superset ./... covers both.
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+            (ENVOY, ["./internal/dispatch/routes"], "go test -count=1 -timeout 20m ./internal/dispatch/routes", {}),
         ]),
         pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
             (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
@@ -738,10 +766,10 @@ GATES = [
                  ENVOY, ["./internal/dispatch/api/"], race=True),
     ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
-        step_run("envoy-go-race-docs", "Race-test the document service",
-                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
-                 ["./internal/dispatch/docs/"], race=True),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", exact=[
+        pinned_step("envoy-go-race-docs", RACE_DOCS_STEP, ENVOY, RACE_DOCS_SCRIPT, [
+            (ENVOY, ["./internal/dispatch/docs/"], "go test -race ./internal/dispatch/docs/", {"race": True}),
+        ]),
     ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
