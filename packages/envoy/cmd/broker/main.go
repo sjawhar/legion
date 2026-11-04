@@ -2,7 +2,7 @@
 // requests by policy or, for a request that needs a person, on its own approval page, where the
 // approver signs in to the broker itself (BROKER_SIGNIN_*), over a signed credential-request
 // record, and releases granted values. Its HTTP API is documented at
-// https://sjawhar.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential
+// https://cybermonklabs.github.io/legion/broker/reference/api/. The broker holds no Dispatch credential
 // and never opens a Dispatch ask: Dispatch's server lists pending requests and links each to the
 // broker's page, and relays a machine login's decision with its typed code.
 package main
@@ -636,7 +636,7 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		VMServicesByAccount: cfg.VMServicesByAccount,
 		VMProjects:          cfg.VMProjects,
 		VMInstancePatterns:  cfg.VMInstancePatterns,
-		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}, secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -697,14 +697,13 @@ func issuerKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
 	return oidc.NewKeys(discovery, issuer)
 }
 
-// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
-// and the Google login minter for google-login ones. Its arguments are the production minters in
-// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
-// minter fails it.
-func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+// kindMinters is the broker's minter for each kind. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints and projected token file.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin, azureLogin secrets.AzureLogin) map[string]requests.Minter {
 	return map[string]requests.Minter{
 		policy.KindGitHubApp:   githubApp.Mint,
 		policy.KindGoogleLogin: googleLogin.Mint,
+		policy.KindAzureLogin:  azureLogin.Mint,
 	}
 }
 

@@ -696,7 +696,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 
 // nextImage is another release's pinned image: what a daemon restarted onto a new release is
 // configured with over pods the previous release launched.
-const nextImage = "ghcr.io/sjawhar/legion-worker@sha256:2e2e2e2e0000000000000000000000000000000000000000000000000000cafe"
+const nextImage = "ghcr.io/cybermonklabs/legion-worker@sha256:2e2e2e2e0000000000000000000000000000000000000000000000000000cafe"
 
 // A pod launched from another release's image — every container of it, or an init container alone,
 // since a pod is built whole from one image — runs agents that call this daemon as that release,

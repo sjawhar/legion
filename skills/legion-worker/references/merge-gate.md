@@ -2,7 +2,7 @@
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
 approval, the implementer on a look of its closed issue's production check, or the merger merging
-the pull request. Every path it cites is in sjawhar/legion.
+the pull request. Every path it cites is in cybermonklabs/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head → the
 architect's acceptance, in `accepting` → retro → the merger's merge of the head it read, which
@@ -256,7 +256,7 @@ it there until that answer comes clean.
   `issue.deployed` event for the pull request; when the project's `legion.yaml` names the
   repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
   on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
-  job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
+  job; or, for `cybermonklabs/legion`, on a Legion daemon's boot on a build containing the merge, on
   Dispatch's `server.started` announcing that every server process serves such a build, or on the
   build the daemon read from Dispatch at its boot. The woken look's task names the event
   (`Dispatch's issue.deployed: run <id> completed <t>`,

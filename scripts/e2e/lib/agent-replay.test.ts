@@ -102,8 +102,9 @@ test("a refused agent view ends at once, naming Dispatch's refusal", async () =>
   const dispatch = fakeDispatch((socket) =>
     socket.send(
       JSON.stringify({
-        code: "HUMAN_ONLY",
-        message: "only users may watch an agent's conversation",
+        code: "OAUTH_SCOPE_REQUIRED",
+        message:
+          "this socket's credential does not hold the person scope, which watching an agent's conversation requires",
         sub: SUB,
         type: "error",
       })
@@ -111,7 +112,7 @@ test("a refused agent view ends at once, naming Dispatch's refusal", async () =>
   );
   const result = await timed(read(dispatch.url));
   expect(result.error).toBe(
-    "Dispatch refused the agent view: HUMAN_ONLY: only users may watch an agent's conversation"
+    "Dispatch refused the agent view: OAUTH_SCOPE_REQUIRED: this socket's credential does not hold the person scope, which watching an agent's conversation requires"
   );
   expect(result.ms).toBeLessThan(5_000);
 });

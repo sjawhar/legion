@@ -262,7 +262,7 @@ package api
 // declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
 // without these shapes, so this branch takes the number above it, as the collision note says.)
 //
-// 34: sjawhar/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
+// 34: cybermonklabs/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
 // `/legion/scratch` (scratchRoot), and the values `mainEnvironment` sets name its directories:
 // every role container of a pod, a workflow role's and the controller's, is told the same
 // `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR` —
@@ -298,7 +298,7 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// 36: INFRA-229 (cybermonklabs/legion) -- `api.PullRequestView` gains `state`, the pull request's
 // `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
 // issue beneath it is still in the workflow and a merged root's close waits for the rest of its
 // tree, so a root stands in the phase that waits for its merge for days and an operator must see
@@ -306,7 +306,7 @@ package api
 // state whose pull request views carry the field, so the boot gate and `legion probe-image`
 // refuse the mixed pair.
 //
-// 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
+// 37: cybermonklabs/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
 // generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates
 // with the pod and deletes with it, so an issue's Sandbox owns no volume claim template and a
 // stopped issue's Sandbox is always deleted. Nothing carries a disk from one pod to the next, so
@@ -330,7 +330,7 @@ package api
 // released pi-legion declaring it, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 38: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// 38: cybermonklabs/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
 // issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
 // and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
 // keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no

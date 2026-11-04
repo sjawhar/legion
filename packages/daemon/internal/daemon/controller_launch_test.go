@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,6 +212,52 @@ func TestForgetSessionLetsTheControllerKeeperSpawnFresh(t *testing.T) {
 	}
 }
 
+// keeperStoppedLine is what the controller keeper logs (controller.go, keep) the first time it
+// finds the controller's claim failed or retired, before it sends any retry.
+const keeperStoppedLine = "controller: the daemon's controller stopped; retrying it with fresh budgets"
+
+// keeperSawFailure is a log handler that records, once, how many times the runtime had spawned the
+// controller when the keeper logged its claim failed. The keeper logs that line on the sweep that
+// first finds the claim failed and sends its retry only on a later sweep, so the count is the one
+// the failure left, fixed for good however late the test reads it, where the claim's state and
+// the spawn count both move on at the retry.
+type keeperSawFailure struct {
+	slog.Handler
+	token  claim.Token
+	spawns func() int
+	// failedAt is that count, -1 until the line is logged.
+	failedAt *atomic.Int64
+}
+
+func (h keeperSawFailure) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == keeperStoppedLine {
+		var token, state string
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "claim":
+				token = a.Value.String()
+			case "state":
+				state = a.Value.String()
+			}
+			return true
+		})
+		if token == string(h.token) && state == string(supervise.StateFailed) {
+			h.failedAt.CompareAndSwap(-1, int64(h.spawns()))
+		}
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h keeperSawFailure) WithAttrs(attrs []slog.Attr) slog.Handler {
+	h.Handler = h.Handler.WithAttrs(attrs)
+	return h
+}
+
+func (h keeperSawFailure) WithGroup(name string) slog.Handler {
+	h.Handler = h.Handler.WithGroup(name)
+	return h
+}
+
 // A controller whose launches run out of their budget fails, as any claim does, and nothing in the
 // machine relaunches a failed claim. The keeper does: after its wait it retries the claim with fresh
 // budgets, so the project is never left without a controller for good.
@@ -220,21 +268,25 @@ func TestTheKeeperRetriesAControllerWhoseLaunchesRanOut(t *testing.T) {
 	refused := errors.New("the cluster refused the Sandbox")
 	rt.ScriptSpawn(fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused}, fake.SpawnResult{Err: refused})
 	o := fakeRuntime(rt, &built{})
-	// The three refused launches run back to back, so the claim's failed state lasts only until
-	// the keeper's retry. A retry as short as the sweep would let the whole sequence fall between
-	// two polls of the wait below, which reads spawns 0 and then 4 and never the failure it is
-	// there to prove; two seconds is long enough that the failed claim is seen and short enough
-	// that the test still runs in seconds.
-	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 2*time.Second
-	d := startDaemon(t, cfg, o)
+	o.orphanSweep, o.controllerRetry = 50*time.Millisecond, 200*time.Millisecond
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := claim.ControllerToken(project)
+	// The claim is failed only from the third refusal until the keeper's retry a controllerRetry
+	// later, a window a loaded machine's polls can miss; the keeper's own line marks it for good.
+	failedAt := &atomic.Int64{}
+	failedAt.Store(-1)
+	log := slog.New(keeperSawFailure{Handler: quietLogger().Handler(), token: token,
+		spawns: func() int { return controllerSpawns(rt, token) }, failedAt: failedAt})
+	d := startDaemonLogging(t, cfg, o, log)
 	testwait.Eventually(t, "the controller's refused launches to fail its claim", func() bool {
-		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit && d.claim(token).State == string(supervise.StateFailed)
+		return failedAt.Load() >= 0
 	})
+	if spawns := failedAt.Load(); spawns != int64(cfg.LaunchFailureLimit) {
+		t.Fatalf("the controller's claim failed after %d launches, want %d refused", spawns, cfg.LaunchFailureLimit)
+	}
 	testwait.Eventually(t, "the keeper to retry the failed controller on fresh budgets", func() bool {
 		c := d.claim(token)
 		return controllerSpawns(rt, token) == cfg.LaunchFailureLimit+1 && c.State == string(supervise.StateLaunching) &&
