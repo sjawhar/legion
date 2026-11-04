@@ -10,7 +10,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // twoRequirements is a spec marking two requirements, r1 and r2.
@@ -231,59 +230,66 @@ func TestApprovalRequestSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
 	}
 }
 
-// unreadableSpecStore fails the next read of one document's stored state, whichever way the
-// document service reads it: its stamp, its history or its rendering.
-type unreadableSpecStore struct {
-	docs.VersionedStore
-	mu     sync.Mutex
-	broken map[string]bool
+// unreadableSpecDocs is the document service with one document's rendering unreadable while it
+// is armed: every Text of that document fails, and counts as a read it failed. The fault sits on
+// the read the coverage folds (typedBlocksIn), not below the document service: once the room is
+// resident, a few milliseconds after the creating write, Text serves the document from memory
+// (heldTree) and never reaches the stored state, so a fault on the store raced that and was
+// left unconsumed in the runs the room won.
+type unreadableSpecDocs struct {
+	docs.API
+	mu sync.Mutex
+	// broken is the artifact whose rendering fails; "" while disarmed.
+	broken string
+	failed int
 }
 
-// failNextRead arms the next read of room to fail, once.
-func (s *unreadableSpecStore) failNextRead(room string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.broken[room] = true
+// failReads arms every read of artifactID's rendering to fail until restoreReads.
+func (d *unreadableSpecDocs) failReads(artifactID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.broken = artifactID
 }
 
-func (s *unreadableSpecStore) take(room string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	broken := s.broken[room]
-	delete(s.broken, room)
-	return broken
+// restoreReads disarms the fault and answers how many reads it failed while armed.
+func (d *unreadableSpecDocs) restoreReads() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.broken = ""
+	return d.failed
 }
 
-func (s *unreadableSpecStore) DocumentStamp(ctx context.Context, room string) (docs.DocumentStamp, error) {
-	if s.take(room) {
-		return docs.DocumentStamp{}, errors.New("the document store this test stands on is unavailable")
+func (d *unreadableSpecDocs) Text(ctx context.Context, artifactID string) (string, error) {
+	d.mu.Lock()
+	broken := d.broken != "" && artifactID == d.broken
+	if broken {
+		d.failed++
 	}
-	return s.VersionedStore.DocumentStamp(ctx, room)
-}
-
-func (s *unreadableSpecStore) LoadDocument(ctx context.Context, room string) (docs.LoadedDocument, error) {
-	if s.take(room) {
-		return docs.LoadedDocument{}, errors.New("the document store this test stands on is unavailable")
+	d.mu.Unlock()
+	if broken {
+		return "", errors.New("the document this test stands on is unreadable")
 	}
-	return s.VersionedStore.LoadDocument(ctx, room)
+	return d.API.Text(ctx, artifactID)
 }
 
 // A coverage read that fails refuses nothing: the request is recorded as it always was — it
 // never read the live spec before the answer carried coverage — and the answer says the
 // coverage was not read rather than naming gaps it could not count.
 func TestApprovalRequestGoesThroughWhenTheCoverageReadFails(t *testing.T) {
-	var broken *unreadableSpecStore
-	handler, _, _ := newTestServer(t, testServerOptions{
-		persistence: func(database *store.Store) docs.VersionedStore {
-			broken = &unreadableSpecStore{VersionedStore: docs.NewPgVersioned(database), broken: map[string]bool{}}
-			return broken
-		},
-	})
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	// Swapped in before the first request, so every handler reads the wrapper.
+	broken := &unreadableSpecDocs{API: served.deps.Docs}
+	served.deps.Docs = broken
 	issue := createInteractionIssue(t, handler, "COVF", "Unread coverage", twoRequirements)
 
-	// The next read of the spec's stored state fails, which is the read the coverage folds.
-	broken.failNextRead(issue.PrimaryArtifactID)
+	// Every read of the spec's rendering fails until the request has answered, whether the
+	// document service would have served it from the resident room or from the stored state.
+	broken.failReads(issue.PrimaryArtifactID)
 	answer := requestSpecApproval(t, handler, issue.PrimaryArtifactID)
+	// A fault the request never met proves nothing about a failed read.
+	if failed := broken.restoreReads(); failed == 0 {
+		t.Fatalf("the request never read the spec's rendering, so no coverage read failed: %+v", answer)
+	}
 	if answer.Ask == nil {
 		t.Fatalf("the request opened no ask when the coverage read failed: %+v", answer)
 	}
