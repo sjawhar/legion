@@ -102,7 +102,17 @@
     "BlockAttributeKind": {
       "description": "BlockAttributeKind is the kind of value a typed block attribute holds. A `block[]` attribute points at blocks: canonical block references (parseBlockPointerValue in @legion/contracts' dispatch-block-ref.ts), each making an edge of the attribute's name.",
       "type": "string",
-      "enum": ["string", "bool", "enum", "string[]", "block[]", "ask", "person", "actor", "timestamp"],
+      "enum": [
+        "string",
+        "bool",
+        "enum",
+        "string[]",
+        "block[]",
+        "ask",
+        "person",
+        "actor",
+        "timestamp"
+      ],
       "x-go-constants": {
         "string": "BlockAttributeString",
         "bool": "BlockAttributeBool",

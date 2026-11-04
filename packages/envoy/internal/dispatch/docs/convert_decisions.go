@@ -148,7 +148,7 @@ func (s *Service) convertDecisionIssue(ctx context.Context, sources []legacyDeci
 	defer tx.Rollback(ctx)
 	if apply {
 		var key string
-		if err := tx.QueryRow(ctx, `select key from issues where key=$1 for update`, sources[0].key).Scan(&key); err != nil {
+		if err := tx.QueryRow(ctx, `select key from issues where key=$1 for no key update`, sources[0].key).Scan(&key); err != nil {
 			return report, err
 		}
 	}

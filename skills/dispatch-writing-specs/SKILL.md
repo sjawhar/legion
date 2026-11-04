@@ -30,7 +30,7 @@ Part | Content
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- Write about the current design. Keep a person's answered ask in its spec, with the answer unchanged; do not restate or rewrite their words as an agent decision.
+- Write about the current design, never how people reached it. Never restate a person's answer as your own.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
@@ -55,18 +55,17 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-An answered ask is the decision node itself. Keep it in the spec, in its section, with the person's selected options and answer unchanged. Never remove or move a person's answered decision out of a spec.
+A person's answered ask is the decision: keep it in its spec section, its answer unchanged. Never move or remove it.
 
-For a choice you made yourself, write a `:::decision` block in the spec with `title` naming the choice. Its body gives your reason and the options you weighed. The Decisions tab labels it as the agent's choice.
+For a choice you made alone, write a `:::decision{title="..."}` block in the spec: your reason and the options you weighed.
 
-- Set `shaped="dispatch://KEY/spec#b-<id> ..."` on the decision or ask node for each spec block it shaped (`doc-read --blocks` lists the ids; write ids percent-encoded).
-- A choice derived from an ask may set `from_ask="dispatch://KEY/ask/<id>"` for provenance. That does not turn the agent's choice into the person's answer.
-- `decided_by` is a canonical person login, when the decision genuinely belongs to that person. It is not a place for an agent's interpretation.
-- Add an `Unsure:` paragraph for what would change your mind. Set `replaced="true"` when the agent's choice no longer applies; retain the node and its identity.
+- `shaped="dispatch://KEY/spec#b-<id> ..."` names each spec block it shaped (`doc-read --blocks` lists the ids).
+- `from_ask` names an ask it follows; the choice stays yours.
+- An `Unsure:` paragraph says what would change your mind; `replaced="true"` marks a choice that no longer applies.
 
 ## Old specs
 
-At your next edit, rewrite prose outside the outline in one version. Retain every answered ask in its section with its identity and the person's answer unchanged. Move only open asks with `doc-edit`'s `move`; do not turn a person's answered decision into an agent's summary.
+At your next edit, rewrite prose outside the outline in one version. Keep each answered ask in place; move open asks with `doc-edit`'s `move`.
 
 ## Approval
 

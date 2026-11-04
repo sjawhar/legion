@@ -126,7 +126,18 @@ export function setDecisionNotes(
   historical = false
 ): void {
   const notes = { artifactId, decisions, historical };
-  if (key.getState(view.state) === undefined) {
+  const installed = key.getState(view.state);
+  // With nothing to draw, or the same notes drawn already, the editor state is left as it is.
+  const drawn = installed?.notes;
+  if (
+    drawn === undefined
+      ? decisions.length === 0
+      : drawn.artifactId === artifactId &&
+        drawn.decisions === decisions &&
+        drawn.historical === historical
+  )
+    return;
+  if (installed === undefined) {
     const plugin = new Plugin({
       key,
       state: {
