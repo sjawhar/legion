@@ -302,6 +302,16 @@ function visits(seed: Seeded): readonly Visit[] {
   return [
     { route: "/", shows: (page) => [heading(page, "Inbox")], url: "/" },
     {
+      route: "/inbox/unified",
+      shows: (page) => [heading(page, "Unified inbox · preview")],
+      url: "/inbox/unified",
+    },
+    {
+      route: "/inbox/shadow",
+      shows: (page) => [heading(page, "Does the new inbox miss anything?")],
+      url: "/inbox/shadow",
+    },
+    {
       route: "/answers",
       shows: (page) => [
         heading(page, "Answered by you"),

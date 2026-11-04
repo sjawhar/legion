@@ -40,6 +40,12 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
     console.log(`Inbox comparison first screen: ${JSON.stringify(geometry)}`);
     expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.width);
     expect(geometry.pageHeight).toBeLessThanOrEqual(geometry.height);
+    if (testInfo.project.name === "iphone") {
+      await page.setViewportSize({ width: 390, height: 844 });
+      const tallHeight = await page.evaluate(() => document.body.scrollHeight);
+      console.log(`Inbox comparison 390x844 page height: ${tallHeight}`);
+      expect(tallHeight).toBeLessThanOrEqual(844);
+    }
     await page.screenshot({ path: testInfo.outputPath("inbox-shadow.png"), fullPage: true });
     await page.getByRole("link", { name: "Try unified inbox" }).click();
     await expect(page.getByRole("heading", { name: "Unified inbox · preview" })).toBeVisible();
@@ -54,7 +60,7 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
     );
     await page.screenshot({ path: testInfo.outputPath("unified-inbox.png"), fullPage: true });
     await page.getByRole("link", { name: "Return to current inbox" }).click();
-    await expect(page).toHaveURL("/");
+    await expect(page).toHaveURL((url) => url.pathname === "/");
     await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
   } finally {
     await alice.close();

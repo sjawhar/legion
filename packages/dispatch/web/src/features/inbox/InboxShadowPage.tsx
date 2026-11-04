@@ -38,7 +38,7 @@ export function InboxShadowPage(): ReactNode {
     );
   return (
     <section aria-label="Inbox comparison">
-      <h1 className="text-[22px] font-semibold tracking-tight">
+      <h1 className="text-xl font-semibold leading-tight tracking-tight">
         Does the new inbox miss anything?
       </h1>
       {shadow.isPending ? <LoadingSkeleton label="Comparing inboxes" /> : null}
@@ -50,7 +50,7 @@ export function InboxShadowPage(): ReactNode {
       {shadow.data && !shadow.isError ? (
         <>
           <p
-            className={`mt-3 text-3xl font-semibold ${shadow.data.mismatched || shadow.data.errors || shadow.data.uncovered_users ? dangerText : ""}`}
+            className={`mt-2 text-3xl font-semibold ${shadow.data.mismatched || shadow.data.errors || shadow.data.uncovered_users ? dangerText : ""}`}
             data-testid="inbox-shadow-mismatches"
           >
             {shadow.data.mismatched} differences
@@ -60,7 +60,7 @@ export function InboxShadowPage(): ReactNode {
               ? "All active people checked"
               : `${shadow.data.uncovered_users} people not checked recently`}
           </p>
-          <dl className="mt-5 space-y-3 text-sm">
+          <dl className="mt-3 space-y-1 text-sm">
             {causes.map(([cause, label]) => (
               <div className="flex flex-wrap justify-between gap-2" key={cause}>
                 <dt>{label}</dt>
@@ -79,7 +79,7 @@ export function InboxShadowPage(): ReactNode {
               <dd>{shadow.data.expansions.mention ?? 0}</dd>
             </div>
           </dl>
-          <div className={`mt-5 border-t pt-4 text-sm ${borderDefault}`}>
+          <div className={`mt-3 border-t pt-3 text-sm ${borderDefault}`}>
             <p className="font-medium">
               {shadow.data.ready
                 ? "Comparison gate met; cutover still requires review"
@@ -90,7 +90,7 @@ export function InboxShadowPage(): ReactNode {
               {shadow.data.daily_mismatched} differences recorded today.
             </p>
           </div>
-          <p className={`mt-3 text-xs ${textMutedOnCanvas}`}>
+          <p className={`mt-2 text-xs ${textMutedOnCanvas}`}>
             Last compared:{" "}
             {shadow.data.checked_at ? (
               <Timestamp at={shadow.data.checked_at} />
@@ -98,7 +98,7 @@ export function InboxShadowPage(): ReactNode {
               "No completed comparison"
             )}
           </p>
-          <details className="mt-4 text-sm">
+          <details className="mt-1 text-sm">
             <summary className="min-h-11 cursor-pointer py-2">People and coverage</summary>
             <p className={`mb-2 ${textMutedOnCanvas}`}>
               Every person who has signed in is checked, including inactive people. Counts contain
@@ -147,7 +147,7 @@ export function InboxShadowPage(): ReactNode {
         </>
       ) : null}
       <nav
-        className={`mt-4 flex flex-wrap gap-x-4 gap-y-2 text-sm ${linkText} ${linkHoverText}`}
+        className={`mt-2 flex flex-wrap gap-x-4 gap-y-2 text-sm ${linkText} ${linkHoverText}`}
         aria-label="Inbox preview"
       >
         <Link className="min-h-11 py-2" to="/inbox/unified">

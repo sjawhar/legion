@@ -42,6 +42,10 @@ func TestUnifiedInboxPlansAndP99OnRealisticVolume(t *testing.T) {
  `); err != nil {
 		t.Fatal(err)
 	}
+	var comments, messages, eventCount int
+	if err := database.Pool.QueryRow(ctx, `select (select count(*) from comments),(select count(*) from messages),(select count(*) from events)`).Scan(&comments, &messages, &eventCount); err != nil {
+		t.Fatal(err)
+	}
 	var raw []byte
 	args := append(unreadDirectRepliesArgs("alice", nil), 50, 0)
 	if err := database.Pool.QueryRow(ctx, `explain(analyze,buffers,format json) `+unifiedInboxQuery, args...).Scan(&raw); err != nil {
@@ -72,7 +76,7 @@ func TestUnifiedInboxPlansAndP99OnRealisticVolume(t *testing.T) {
 		}
 	}
 	walk(plans[0].Plan)
-	t.Logf("EXPLAIN 20020 comments / 22002 messages / 100000 events: planning %.3f ms execution %.3f ms", plans[0].PlanningTime, plans[0].ExecutionTime)
+	t.Logf("EXPLAIN %d comments / %d messages / %d events: planning %.3f ms execution %.3f ms", comments, messages, eventCount, plans[0].PlanningTime, plans[0].ExecutionTime)
 	// Exercise the actual authenticated HTTP reads, not only planner cost. Alternate
 	// which implementation runs first so the new path gets no warm-cache advantage.
 	legacy := func() {

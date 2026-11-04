@@ -1,8 +1,9 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import type { UnifiedInboxPage as InboxPage } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { compareTimestamps } from "../../lib/timestamps";
@@ -29,8 +30,10 @@ const labels = {
 export function UnifiedInboxPage(): ReactNode {
   useDocumentTitle("Unified inbox preview · Dispatch");
   const [mentions, setMentions] = useState(false);
+  const login = useQuery(whoAmIQuery()).data?.login;
   const inbox = useInfiniteQuery({
-    queryKey: ["unified-inbox", mentions],
+    queryKey: ["unified-inbox", login, mentions],
+    enabled: login !== undefined,
     initialPageParam: 0,
     queryFn: ({ pageParam }) => api.listUnifiedInbox({ limit: 50, offset: pageParam, mentions }),
     getNextPageParam: (last: InboxPage) =>

@@ -807,7 +807,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </aside>
         )}
         <main
-          className={`min-w-0 flex-1 p-6 outline-none xl:order-2 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
+          className={`min-w-0 flex-1 p-6 outline-none xl:order-2 ${fillsViewport ? "flex min-h-0 flex-col" : location.pathname === "/inbox/shadow" ? "pb-6" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
           data-shell-layout={fullWidth ? "full-width" : "standard"}
           data-testid="main-content"
           id="main-content"
