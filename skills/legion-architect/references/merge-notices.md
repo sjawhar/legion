@@ -74,9 +74,11 @@ carries them — `close_root` answers `CLOSE_REASON_TOO_LONG` and `handoff_compl
 `READY_PACKET_TOO_LONG`, each naming the bound and how far over the text is — so this notice is a
 refusal those checks did not predict.
 
-On a status write the daemon set the status all the same, and only the reason beside it is on no
-issue: the issue's lifecycle stands and nothing waits on you. On a message the message is on no
-issue and nothing else about the issue changed: no phase moved, and no worker was told.
+On a status write the daemon writes the status all the same, retrying it on the row's backoff
+until Dispatch takes it, so the status is set unless Dispatch refused the status itself — the
+reason says which — and only the reason beside it is on no issue: the issue's lifecycle stands
+and nothing waits on you. On a message the message is on no issue and nothing else about the
+issue changed: no phase moved, and no worker was told.
 
 Either way, what a person still needs is yours to post on the issue with `dispatch comment`. A
 refused READY packet is nobody's to send again: the issue is in `awaiting_merge`, where no worker

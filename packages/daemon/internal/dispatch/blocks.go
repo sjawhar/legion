@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 	"unicode/utf16"
 )
@@ -28,20 +29,33 @@ import (
 //   - a blank line inside a typed block, the container directive the parser reads as one block
 //     from its opener (:::ask{...}) through the line of colons that closes it;
 //   - a blank line inside the frontmatter a body opens with, which the parser reads as one block
-//     from the line of dashes that opens it through the line of dashes that closes it;
+//     from the line of dashes that opens it through the line that closes it;
 //   - a blank line before a line that is indented at all, which in the server's parser continues
 //     a list item or an indented code block (and which joins a paragraph to an indented code
 //     block below it, where the parser reads two blocks);
 //   - a blank line between two list items, which the server reads as one loose list, and one
 //     between two quoted lines, which the server reads as two quotes and this reader as one.
 //
+// Three of those openers and closers follow the server's own rule rather than a looser one, since
+// a block this reader ends before the server's ends is a block it measures short:
+//
+//   - a fence or a typed block opens only on a line indented three spaces or less (opensFence),
+//     as CommonMark and the directive parser open one; a deeper line is indented code, or a line
+//     of a block its container holds, and continues() joins it to the block above it anyway;
+//   - a fence closes only on a line indented three spaces or less (closesFence), since CommonMark
+//     reads a deeper line as code the block holds and the server's block goes on;
+//   - frontmatter closes only on `---`, with the spaces and tabs that end the line taken off
+//     (frontmatter), the rule pmdoc's parseFrontmatterBlock follows; a longer line of dashes is
+//     content there.
+//
 // Everything else splits where the server's fallback splits, at a blank line, so the two agree on
 // paragraphs, headings, tables, thematic breaks, and lists and quotes written without blank lines.
 // Joining only ever makes a block longer, but the shapes it joins are a list, not a proof: a shape
 // the parser holds in one block and this list misses reads as shorter blocks here. So the two
-// readings are compared document by document over the parser's own corpus (corpus_test.go, over
-// the table packages/envoy/internal/dispatch/itemblocks writes from its splitter), and no document
-// of that corpus holds a block longer than the block this reader holds it in.
+// readings are compared document by document over the parser's own corpus and over the shapes
+// this reader claims (corpus_test.go, over the tables packages/envoy/internal/dispatch/itemblocks
+// writes from its splitter), and no document of either holds a block longer than the block this
+// reader holds it in.
 //
 // The block count reads the text as the most blocks it could hold (MostBlocks): its lines that are
 // not blank. Every block of the server's holds at least one line with text in it and no two of its
@@ -50,6 +64,22 @@ import (
 // fence opener, a list item, a thematic break after a paragraph), which a reader that splits at
 // blank lines alone can never see. Counting the joined runs instead would take a body of more
 // blocks than Dispatch holds a body to and lose the post that carried it.
+
+// lines iterates text's lines: where each line begins in text, and the line itself without its
+// line feed. A line's end is that offset plus its length, the offset of its line feed or of the
+// text's end. Every walk of a body here takes its lines from this one, so the two measures and
+// the frontmatter rule step through a text the same way.
+func lines(text string) iter.Seq2[int, string] {
+	return func(yield func(int, string) bool) {
+		offset := 0
+		for raw := range strings.Lines(text) {
+			if !yield(offset, strings.TrimSuffix(raw, "\n")) {
+				return
+			}
+			offset += len(raw)
+		}
+	}
+}
 
 // Blocks is text's blocks, in order, each as its author wrote it: from the start of the line the
 // block begins on through its last line that is not blank, without the blank lines that end it. A
@@ -60,21 +90,16 @@ func Blocks(text string) []string {
 	opener := ""        // that block's first line, which says whether a later line continues it
 	gap := false        // a blank line stands between that block's last line and the next one
 	fence := ""         // the run of backticks, tildes or colons an open block was opened with
-	offset := 0
+	head := 0
 	// Frontmatter stands at the start of a body and nowhere else, so it is read here rather than
 	// by opensFence, and as one block, blank lines and all, as the parser reads it.
 	if closed := frontmatter(text); closed > 0 {
 		blocks = append(blocks, strings.TrimSuffix(text[:closed], "\r"))
-		offset = closed
+		head = closed
 	}
-	for offset < len(text) {
-		lineEnd := strings.IndexByte(text[offset:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += offset
-		}
-		line := text[offset:lineEnd]
+	for at, line := range lines(text[head:]) {
+		lineStart := head + at
+		lineEnd := lineStart + len(line)
 		switch {
 		case fence != "":
 			// Every line of an open fence belongs to its block, blank ones included; a blank line
@@ -93,12 +118,11 @@ func Blocks(text string) []string {
 				start = -1
 			}
 			if start < 0 {
-				start, opener = offset, line
+				start, opener = lineStart, line
 			}
 			end, gap = lineEnd, false
 			fence = opensFence(line)
 		}
-		offset = lineEnd + 1
 	}
 	if start >= 0 {
 		blocks = append(blocks, strings.TrimSuffix(text[start:end], "\r"))
@@ -113,17 +137,10 @@ func Blocks(text string) []string {
 // and it is what CheckBody holds the block count to.
 func MostBlocks(text string) int {
 	count := 0
-	for offset := 0; offset < len(text); {
-		lineEnd := strings.IndexByte(text[offset:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += offset
-		}
-		if strings.Trim(text[offset:lineEnd], " \t\r") != "" {
+	for _, line := range lines(text) {
+		if strings.Trim(line, " \t\r") != "" {
 			count++
 		}
-		offset = lineEnd + 1
 	}
 	return count
 }
@@ -166,11 +183,18 @@ func listMarker(line string) bool {
 // opensFence is the run of backticks, tildes or colons line opens a block that holds its blank
 // lines with, empty when it opens none: a fenced code block (``` or ~~~), or a typed block, the
 // container directive the parser reads as one block from its opener (:::ask{...}) through the
-// line of colons that closes it. Any indentation counts: a fence inside a list item is indented,
-// and a line that only looks like one inside an indented code block joins what follows it into
-// one block, which is the reading that refuses more rather than less.
+// line of colons that closes it. The run opens a block only where the line is indented three
+// spaces or less, as CommonMark opens a fence and as the directive parser opens a typed block: a
+// line indented four columns or more (a tab counts as four) is indented code at the server, or a
+// line of a block its container holds, and opening a fence on it would carry this reader's fence
+// state past where the server's block ends. Such a line needs no fence state here, since
+// continues() already joins an indented line to the block above it, and the lines it holds are
+// indented too.
 func opensFence(line string) string {
-	trimmed := strings.TrimLeft(line, " \t")
+	trimmed, indented := indentation(line)
+	if indented {
+		return ""
+	}
 	for _, mark := range []string{"`", "~", ":"} {
 		run := len(trimmed) - len(strings.TrimLeft(trimmed, mark))
 		if run >= 3 {
@@ -181,43 +205,56 @@ func opensFence(line string) string {
 }
 
 // closesFence says whether line closes a block opened with fence: the same character, at least as
-// many of them, and nothing else on the line. A typed block's colons must stand at the left margin
-// as well, since a typed block written inside another one closes the inner one: reading the outer
-// one on to the line that closes it at the margin keeps the whole of it in one block, which is the
-// reading that refuses more rather than less.
+// many of them, and nothing else on the line, on a line indented three spaces or less. CommonMark
+// closes a fence on no deeper line: a deeper one is code the block holds, and the server's block
+// goes on, so closing on it here would measure a block shorter than the server's. A typed block's
+// colons must stand at the left margin as well, since a typed block written inside another one
+// closes the inner one: reading the outer one on to the line that closes it at the margin keeps
+// the whole of it in one block, which is the reading that refuses more rather than less.
 func closesFence(line, fence string) bool {
-	mark := fence[:1]
-	if mark == ":" && !strings.HasPrefix(line, ":") {
+	trimmed, indented := indentation(line)
+	if indented {
 		return false
 	}
-	trimmed := strings.TrimRight(strings.TrimLeft(line, " \t"), " \t\r")
+	mark := fence[:1]
+	if mark == ":" && len(trimmed) != len(line) {
+		return false
+	}
+	trimmed = strings.TrimRight(trimmed, " \t\r")
 	return len(trimmed) >= len(fence) && strings.Trim(trimmed, mark) == ""
 }
 
-// frontmatter is where the frontmatter text opens with ends: the offset just past the line of
-// dashes that closes it, and 0 when text opens with no line of dashes or no later line closes
-// one. The parser reads frontmatter as one block, blank lines and all. A body that opens with a
-// thematic break and holds a second one is read as one block to that second line here, where the
-// parser reads two breaks and what stands between them, which is the reading that refuses more
-// rather than less.
+// indentation is line without the spaces it opens with, and whether those spaces carry it four
+// columns or more past the margin, where CommonMark reads indented code rather than a fence: four
+// spaces, or a tab, which counts as four columns wherever it stands in the indentation.
+func indentation(line string) (string, bool) {
+	spaces := len(line) - len(strings.TrimLeft(line, " "))
+	return line[spaces:], spaces > 3 || strings.HasPrefix(line[spaces:], "\t")
+}
+
+// frontmatter is where the frontmatter text opens with ends: the offset just past the line that
+// closes it, and 0 when text opens with no line of dashes or no later line closes one. The parser
+// reads frontmatter as one block, blank lines and all. It closes frontmatter on `---` alone, with
+// the spaces and tabs that end the line taken off (pmdoc's parseFrontmatterBlock), so that is the
+// line this closes on too: closing on a longer line of dashes, which the server reads as content,
+// would end the block where the server's goes on. The opener is read more widely than the server
+// reads it — any line of three or more dashes, carriage return and all — since opening
+// frontmatter where the server opens none only joins what follows into one block, which is the
+// reading that refuses more rather than less. A body that opens with a thematic break and holds a
+// second one is read as one block to that second line here, where the parser reads two breaks and
+// what stands between them.
 func frontmatter(text string) int {
-	offset, first := 0, true
-	for offset < len(text) {
-		lineEnd := strings.IndexByte(text[offset:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += offset
+	for at, line := range lines(text) {
+		if at == 0 {
+			opener := strings.TrimRight(line, " \t\r")
+			if len(opener) < 3 || strings.Trim(opener, "-") != "" {
+				return 0
+			}
+			continue
 		}
-		line := strings.TrimRight(text[offset:lineEnd], " \t\r")
-		dashes := len(line) >= 3 && strings.Trim(line, "-") == ""
-		switch {
-		case first && !dashes:
-			return 0
-		case !first && dashes:
-			return lineEnd
+		if strings.TrimRight(line, " \t") == "---" {
+			return at + len(line)
 		}
-		offset, first = lineEnd+1, false
 	}
 	return 0
 }

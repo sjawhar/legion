@@ -13,11 +13,14 @@ func assertBlocks(t *testing.T, text string, want []string) {
 	}
 }
 
-// The shapes this reader and the Dispatch server's (itemblocks.Split) read the same way, each
-// checked against that reader's own answer: paragraphs, headings, tables and thematic breaks
-// split at blank lines; a fenced code block holding blank lines is one block, as are a loose
-// list, an indented code block holding a blank line and a list item's later paragraph; and a body
-// the server's parser refuses falls back to the same blank-line split on both sides.
+// What this reader makes of the shapes it is written for, written out: paragraphs, headings,
+// tables and thematic breaks split at blank lines; a fenced code block holding blank lines is one
+// block, as are a loose list, an indented code block holding a blank line and a list item's later
+// paragraph; and a body the server's parser refuses falls back to the same blank-line split on
+// both sides. These are this reader's own answers, not the server's: a claim about the server's
+// (itemblocks.Split) is held to the splitter itself in corpus_test.go, over the parser's corpus
+// and over the documents under testdata/shapes, which is where a shape this reader's rules are
+// written for belongs.
 func TestBlocksReadsTheShapesTheServerReadsTheSameWay(t *testing.T) {
 	assertBlocks(t, "# Plan\n\nFirst.\n\n- a\n- b\n\n```\ncode\n```",
 		[]string{"# Plan", "First.", "- a\n- b", "```\ncode\n```"})

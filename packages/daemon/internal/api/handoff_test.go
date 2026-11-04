@@ -1128,6 +1128,51 @@ func TestHandoffCompleteRefusesAREADYPacketDispatchWouldRefuseAndAppliesTheShort
 	}
 }
 
+// The packet the route measures is the post the outbox makes of it: the packet with the row's own
+// marker after it (record.MessagePost.Posted). Two packets Dispatch takes on their own make a
+// post it refuses — one of as many lines with text in them as Dispatch holds a body to blocks,
+// where the marker is one block more, and one ending inside an open code fence, where the marker
+// is code inside the last block — and each is refused at the merger's completion with nothing
+// recorded, so the issue stays in merging and the shortened packet is applied.
+func TestHandoffCompleteRefusesAREADYPacketTheOutboxsMarkerCarriesOverTheBounds(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, facts := newHandoffHarness(t, github, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	seedPullRequest(t, h, "LEGION-208", headSHA)
+	seedApproval(t, h, "LEGION-208", approvedSHA)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	for _, tc := range []struct{ name, summary, want string }{
+		{"a packet of as many lines with text in them as Dispatch holds a body to blocks",
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatch.ItemBlocks), "\n\n"),
+			fmt.Sprintf("it is 1 blocks over the %d-block limit", dispatch.ItemBlocks)},
+		{"a packet that ends inside an open code fence",
+			"see log\n\n```\n" + strings.Repeat("y", 31980),
+			fmt.Sprintf("block 2 is 28 characters over the %d-character block limit", dispatch.BlockUnits)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if over := dispatch.CheckBody(record.ReadyPacket(tc.summary, "")); over != nil {
+				t.Fatalf("the packet on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
+			}
+			refusal := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: tc.summary, Ready: true, Commit: headSHA}),
+				http.StatusBadRequest, "READY_PACKET_TOO_LONG")
+			if !strings.Contains(refusal, tc.want) {
+				t.Fatalf("refusal = %q, want it naming %q", refusal, tc.want)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("handoff facts after the refusal = %#v, want none recorded", got)
+			}
+		})
+	}
+
+	// The merger, still in merging, completes again with a packet whose post Dispatch takes, and
+	// that READY is applied: the refusals recorded nothing that would answer it ALREADY_RECORDED.
+	shortened := "see log\n\n```\n" + strings.Repeat("y", 31951)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: headSHA}))
+	if fact := lastCompletion(t, facts); !fact.Ready || fact.Commit != headSHA || fact.Summary != shortened {
+		t.Fatalf("applied fact = %#v, want the shortened READY at %s", fact, headSHA)
+	}
+}
+
 // A completion the workflow refused while the child's tree lingered is recorded as processed under
 // its key. Re-admission starts a new generation of the tree, bumping only the root's generation,
 // and restarts the child's worker in the phase it stood in; the same completion there belongs to

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -1158,6 +1159,46 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	}
 	if got := facts.recorded(); len(got) != 2 || got[1] != (intake.CloseRoot{Issue: "LEGION-208", Reason: long}) {
 		t.Fatalf("close facts = %#v, want the 40,000-character reason applied whole", got)
+	}
+}
+
+// The outbox posts a close reason as the row's message with the row's own marker after it
+// (record.MessagePost.Posted), so the route measures that post and not the reason alone. Two
+// reasons Dispatch takes on their own make a post it refuses: one of exactly as many lines as
+// Dispatch holds a body to blocks, where the marker is one block more, and one ending inside an
+// open code fence, where the marker is code inside the last block and carries it over the unit
+// bound. Each is refused at the call, naming the bound, and records nothing: no fact and no
+// outbox row, so the architect's shortened close is applied.
+func TestAnArchitectsCloseIsRefusedWhereTheOutboxsMarkerPassesTheBound(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, tc := range []struct{ name, reason, want string }{
+		{"a reason of as many lines with text in them as Dispatch holds a body to blocks",
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatch.ItemBlocks), "\n\n"),
+			fmt.Sprintf("it is 1 blocks over the %d-block limit", dispatch.ItemBlocks)},
+		{"a reason that ends inside an open code fence",
+			"see log\n\n```\n" + strings.Repeat("y", 31980),
+			fmt.Sprintf("block 2 is 28 characters over the %d-character block limit", dispatch.BlockUnits)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fact := intake.CloseRoot{Issue: "LEGION-208", Reason: tc.reason}
+			if over := dispatch.CheckBody(fact.Message()); over != nil {
+				t.Fatalf("the reason on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
+			}
+			refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+				"grantId": architect.grant(t), "issue": "LEGION-208", "reason": tc.reason,
+			}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
+			if !strings.Contains(refusal, tc.want) {
+				t.Fatalf("refusal = %q, want it naming %q", refusal, tc.want)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("the refused close applied %#v, want nothing recorded", got)
+			}
+			if rows := outboxRowsOf(t, h, "LEGION-208"); rows != 0 {
+				t.Fatalf("outbox rows after the refused close = %d, want none", rows)
+			}
+		})
 	}
 }
 

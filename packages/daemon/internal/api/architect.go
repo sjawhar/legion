@@ -1174,8 +1174,12 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	// row), and Dispatch refuses a body past the bounds it publishes, so a reason it would refuse
 	// is refused here, before anything is recorded. Refused on the post instead, the reason would
 	// be on no issue, and the daemon's record would read done while the Dispatch issue kept the
-	// status it had.
-	if over := dispatch.CheckBody(fact.Message()); over != nil {
+	// status it had. What is measured is the text the outbox posts, not the reason alone: the
+	// runner appends the row's outbox marker (record.MessagePost.Posted), which is a block of its
+	// own after a reason that ends in a paragraph and code inside one that ends in an open fence,
+	// so a reason that passes these bounds can be a post that does not. record.LongestPost builds
+	// it with the runner's own function, for the longest marker any row could carry.
+	if over := dispatch.CheckBody(record.LongestPost(fact.Message())); over != nil {
 		writeFailure(w, http.StatusBadRequest, "CLOSE_REASON_TOO_LONG",
 			fmt.Sprintf("the reason makes a message Dispatch refuses: %s; shorten it", over))
 		return

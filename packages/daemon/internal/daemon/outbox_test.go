@@ -755,18 +755,83 @@ func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArch
 	}
 }
 
-// The status Dispatch itself refuses is not set by the write that follows the refusal either, and
-// the architect is told that the issue keeps the status it has.
+// The status Dispatch itself refuses is set by nothing, and the architect is told that the issue
+// keeps the status it has.
 func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *testing.T) {
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "INVALID_STATUS", Message: "no such status"}
-	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"}, refusal,
-		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal))
+	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"},
+		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), false)
 	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
-		!strings.Contains(notice.Reason, "The status done was not set either, so the issue keeps the status it has") {
+		!strings.Contains(notice.Reason, "The status done is not set, so the issue keeps the status it has") {
 		t.Fatalf("the notice = %+v, want it saying the status did not land", notice)
 	}
 	if strings.Contains(notice.Reason, "begins") {
 		t.Fatalf("the notice = %+v, want no reason quoted for a write that carried none", notice)
+	}
+}
+
+// The status of a row whose reason Dispatch refused for good is written by the row itself, so
+// Dispatch failing that write at that moment costs nothing: the failure is no refusal, the row
+// goes back to the outbox on its backoff, and its next run posts the reason again (refused
+// again), writes the status, and finishes the row with its architect's notice. Written once
+// inside the finish, a 5xx at that moment would leave the issue at the status it had while the
+// daemon's record read done, with nobody told.
+func TestAStatusWriteRetriesUntilTheStatusLandsAfterItsReasonIsRefused(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	const reason = "Closed by its architect before its first phase: the human decided no change."
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
+		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
+		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
+	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal, statusErr: outage}
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: client,
+		now: func() time.Time { return now },
+	}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done]" {
+		t.Fatalf("statuses written = %v, want the one attempt the first run made", client.statuses)
+	}
+	var kind string
+	var attempts int
+	if err := pool.QueryRow(context.Background(), "select kind, attempts from outbox").Scan(&kind, &attempts); err != nil {
+		t.Fatalf("read the row after the failed status write: %v", err)
+	}
+	if kind != string(record.OutboxKindDispatchStatus) || attempts != 1 {
+		t.Fatalf("the one row is a %s row on attempt %d, want the status row back in the outbox after one attempt", kind, attempts)
+	}
+
+	// Dispatch takes the status on the row's next run, and the row finishes refused with the
+	// architect's notice in its place: the status it set, and the reason that is on no issue.
+	client.statusErr = nil
+	now = now.Add(time.Hour)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the outbox again: %v", err)
+	}
+	if fmt.Sprint(client.statuses) != "[done done]" {
+		t.Fatalf("statuses written = %v, want the retry's write after the first attempt failed", client.statuses)
+	}
+	var payload []byte
+	if err := pool.QueryRow(context.Background(), "select kind, payload from outbox").Scan(&kind, &payload); err != nil {
+		t.Fatalf("read the row left behind: %v", err)
+	}
+	if kind != string(record.OutboxKindNotice) {
+		t.Fatalf("the one row left is a %s row, want the status row finished and its architect's notice in its place", kind)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode the notice: %v", err)
+	}
+	if !strings.Contains(notice.Reason, "The status done was set on the issue all the same") ||
+		!strings.Contains(notice.Reason, refusal.Error()) {
+		t.Fatalf("the notice = %+v, want it naming the status it set and Dispatch's refusal of the reason", notice)
 	}
 }
 

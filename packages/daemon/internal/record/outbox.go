@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -170,6 +171,19 @@ func ParseOutboxKey(key string) (int64, bool) {
 // Posted is the message the runner posts for row id: the body, then the row's marker.
 func (m MessagePost) Posted(id int64) string {
 	return m.Body + messageSeparator + MessageMarker(id)
+}
+
+// LongestPost is the longest text the runner could ever post for body: the post Posted composes,
+// for the largest row id a row can carry (outbox ids are a bigserial, so math.MaxInt64 is the
+// longest marker there is). A caller that must know, before anything is recorded, whether
+// Dispatch would take the post holds this text to Dispatch's bounds rather than the body alone
+// (api's closeRoot and the merger's READY completion): the marker is a block of its own after a
+// body that ends in a paragraph, and it is code inside a body that ends in an open fence, so a
+// body that passes a bound can be a post that does not. It is built by Posted, the function the
+// runner itself posts with, so the text checked and the text posted cannot be composed by two
+// different rules.
+func LongestPost(body string) string {
+	return MessagePost{Body: body}.Posted(math.MaxInt64)
 }
 
 // NoticeKind identifies one persisted notice delivery.
