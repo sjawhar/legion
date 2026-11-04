@@ -1,5 +1,0 @@
-kind: Fixed
-body: A `dispatch comment --reply-to-ask` that hands the turn to the human but lands on an approval request a newer version moved, which stays waiting on the agent, now says why and what to run. The output names the version the request is for and the document's current version, and gives the `dispatch request-approval` call that hands the request back.
-time: 2026-11-02T12:00:00Z
-custom:
-    Issue: pr2680

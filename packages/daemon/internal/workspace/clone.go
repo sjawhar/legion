@@ -262,11 +262,11 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
-// contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.feed) it is a local git
-// clone followed by Jujutsu's import of every commit. The size-following steps share one
-// CloneTimeout, counted on clock from the first's start, each given what remains of it
-// (cloneSteps), not the runner's slow-command budget.
+// contains .jj, record what it holds (RecordHeld), then rename it into place. A killed clone can
+// therefore never appear to be a final clone. From GitHub the clone is `jj git clone`; from a pod's
+// feed (source.feed) it is a local git clone followed by Jujutsu's import of every commit. The
+// size-following steps share one CloneTimeout, counted on clock from the first's start, each given
+// what remains of it (cloneSteps), not the runner's slow-command budget.
 func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -310,6 +310,11 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 	}
 	if !complete {
 		return fmt.Errorf("incomplete Jujutsu clone at %s: missing .jj", temporary)
+	}
+	// Before the rename, so a clone in place always carries its record of what it held when it was
+	// made, and a clone with none is one an earlier release made.
+	if err := RecordHeld(ctx, run, temporary); err != nil {
+		return err
 	}
 	if err := os.Rename(temporary, cloneDir); err != nil {
 		if cloneCollision(err) {

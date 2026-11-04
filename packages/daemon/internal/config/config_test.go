@@ -664,12 +664,12 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		{
 			name: "github app has no private key source",
 			body: minimalFile + "github_apps: {implement: {app_id: \"1\"}, review: {app_id: \"2\", private_key: key}}\n",
-			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, private_key_secret, or token_command",
 		},
 		{
 			name: "github app has two private key sources",
 			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key: key, private_key_command: \"printf key\"}, review: {app_id: \"2\", private_key: key}}\n",
-			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, private_key_secret, or token_command",
 		},
 		{
 			name: "github app secret is not a single key name",
