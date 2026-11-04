@@ -1,6 +1,7 @@
 import {
   type AskAnswer,
   type AskResolution,
+  actorActText,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
   SEARCH_KIND_DEPTH,
   type SearchAsk,
@@ -8,7 +9,7 @@ import {
   type SearchResult,
   snippetText,
 } from "@legion/contracts";
-import { actorActText, actorText } from "./actor-text";
+import { actorText } from "./actor-text";
 import { dispatchDocumentRef } from "./dispatch-owner";
 
 /** The "showing a-b of N" phrasing a paged tool result builds from its offset, row count, and total. */

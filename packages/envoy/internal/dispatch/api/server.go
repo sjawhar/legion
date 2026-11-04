@@ -1111,7 +1111,9 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 			return model.Actor{}, errorf(http.StatusForbidden, "ACTOR_SESSION_MISMATCH",
 				"this request's credential acts for session %s; its actor names another writer", authenticated.ID)
 		}
-		actor := authenticated
+		// Recorded: the actor a handler writes and compares carries no credential, as a stored
+		// actor decoded from JSON carries none (model.Actor.Recorded).
+		actor := authenticated.Recorded()
 		if supplied != nil {
 			actor.Origin = supplied.Origin
 		}

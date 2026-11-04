@@ -1,27 +1,7 @@
 import { expect, test } from "bun:test";
 
-import type { ActorAct, AskResolution } from "../../api/types";
-import { actorActText, askResolutionBadge, askResolutionReason } from "./actor";
-
-test("a person who acted themselves is the person alone", () => {
-  expect(actorActText("alice", undefined)).toBe("alice");
-  // An act that names no agent - neither the session a broker token proved nor the personal
-  // token - has no agent to show beside the person.
-  expect(actorActText("alice", { scopes: ["person"] })).toBe("alice");
-});
-
-test("an act names the session it was made through, else the token", () => {
-  const act: ActorAct = {
-    session: "0123456789abcdef",
-    token_id: "token-1",
-    token_name: "architect",
-    scopes: ["person", "approve"],
-  };
-  expect(actorActText("alice", act)).toBe("alice, acting through session 0123456789abcdef");
-  expect(actorActText("alice", { token_id: "token-1", token_name: "architect" })).toBe(
-    "alice, acting through token architect"
-  );
-});
+import type { AskResolution } from "../../api/types";
+import { askResolutionBadge, askResolutionReason } from "./actor";
 
 test("a withdrawal drops the server's reason, which only repeats the actor sentence", () => {
   const retracted: AskResolution = {

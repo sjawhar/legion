@@ -1,11 +1,12 @@
+import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
-
 import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
 import { AgentParts, AskResolutionLine } from "../refs/AgentName";
-import { actorActText, askResolutionReason } from "../refs/actor";
+
+import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 

@@ -1,5 +1,5 @@
+import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
-
 import type { SearchAsk } from "../../api/types";
 import {
   badgeLow,
@@ -8,7 +8,6 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AskResolutionLine } from "../refs/AgentName";
-import { actorActText } from "../refs/actor";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { markdownHead } from "../refs/markdown-fragment";
 import { Timestamp } from "../refs/Timestamp";

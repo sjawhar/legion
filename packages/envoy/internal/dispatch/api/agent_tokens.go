@@ -190,10 +190,10 @@ func tokenScopes(w http.ResponseWriter, actor model.Actor, requested *[]string) 
 	// refused and a repeat is folded, so a long array buys no room.
 	scopes := make([]string, 0, len(model.Scopes))
 	for _, scope := range *requested {
-		if scope != model.ScopePerson && scope != model.ScopeApprove {
+		if !slices.Contains(model.Scopes, scope) {
 			writeError(w, codeTokenScopesInput, http.StatusBadRequest, fmt.Sprintf(
-				"%q is no scope this deployment knows; the scopes are %s and %s",
-				scope, model.ScopePerson, model.ScopeApprove))
+				"%q is no scope this deployment knows; the scopes are %s",
+				scope, strings.Join(model.Scopes, " and ")))
 			return nil, false
 		}
 		// Act is nil for a browser, whose person holds every scope, which is what Holds answers

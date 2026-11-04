@@ -1,8 +1,4 @@
-import { actorActText } from "@legion/contracts";
-
 import type { Actor, AskResolution } from "../../api/types";
-
-export { actorActText };
 
 /** Whether an actor is the signed-in viewer: a human whose login is theirs, in any casing, as
  *  the server matches it. */

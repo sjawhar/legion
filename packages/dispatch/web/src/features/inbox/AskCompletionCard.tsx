@@ -1,6 +1,6 @@
+import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-
 import type { Ask, AskAnswer, AskEdit, AskResolution } from "../../api/types";
 import {
   badgeLow,
@@ -17,7 +17,8 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AgentName, AskResolutionLine } from "../refs/AgentName";
-import { actorActText, askResolutionBadge, askResolutionReason } from "../refs/actor";
+
+import { askResolutionBadge, askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";

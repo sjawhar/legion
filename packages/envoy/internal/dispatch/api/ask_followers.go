@@ -93,6 +93,10 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 		s.writeAuthenticationError(w, err)
 		return
 	}
+	// A person at a browser writes as themselves: the credential optionalActor resolved is the
+	// request's, not the record's, and the bearer paths below take their actor from
+	// bearerSessionActor and actingPerson, which record none either.
+	actor = actor.Recorded()
 	if !human {
 		var input struct {
 			Actor *model.Actor `json:"actor"`
@@ -110,23 +114,15 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 			s.writeHandlerError(w, err)
 			return
 		}
-		// The session this credential acts as, where it acts as one: the session a
-		// broker-issued token proved, else the one the body names. A credential that acts as
+		// The session this credential acts as, where it acts as one, is bearerSessionActor's
+		// own answer and nothing read a second way: the session a broker-issued token proved,
+		// else the one the body names, as that call would record it. A credential that acts as
 		// the addressed session follows it as it always did, recorded as that session, since
 		// that is its own act and no person's; nothing of what a session reads back changes.
-		own := ""
-		if actor.Credential != nil {
-			own = actor.Credential.Session
-		}
-		if own == "" && input.Actor != nil && input.Actor.Kind == "session" {
-			own = strings.TrimSpace(input.Actor.ID)
-		}
+		acting, actingErr := bearerSessionActor(r, actor, input.Actor)
 		switch {
-		case own != "" && own == sessionID:
-			if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
+		case actingErr == nil && acting.ID == sessionID:
+			actor = acting
 		case person:
 			// Putting another session on an ask is the person's act, so it is recorded as the
 			// person with the agent beside them. actingPerson cannot refuse the scope here,
@@ -142,8 +138,8 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 		default:
 			// The body still has to name a session, so a bearer that names none is told that
 			// first, as it always was (400 ACTOR_KIND).
-			if _, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-				s.writeHandlerError(w, err)
+			if actingErr != nil {
+				s.writeHandlerError(w, actingErr)
 				return
 			}
 			writeError(w, "FOLLOWER_FORBIDDEN", http.StatusForbidden,

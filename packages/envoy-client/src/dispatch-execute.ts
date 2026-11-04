@@ -51,6 +51,7 @@ import type {
 import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
+  actorActText,
   actorLabel,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
@@ -69,7 +70,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
-import { actorActText, actorText } from "./actor-text";
+import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";

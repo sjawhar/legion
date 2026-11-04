@@ -16,5 +16,3 @@ export function actorText(actor: Actor): string {
   }
   return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
-
-export { actorActText };
