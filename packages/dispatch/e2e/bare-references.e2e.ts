@@ -67,21 +67,24 @@ const NO_ISSUE_KEY = "CORE-404";
  *  rendered and preview surfaces like any other.
  *
  *  A row's `refs` is a property of the body string, which a comment, an ask and a message store
- *  as written; a document stores a tree, and the markdown an upload parses into one resolves
- *  both forms of an escaped `#` before anything reads the document. `GET
- *  /api/v1/artifacts/{id}/text` for a document uploaded with `See &#35;q2 here.` answers `See
- *  #q2 here.`, so the line the document holds is one the table itself reads as a citation of q2
- *  (the row `See #q2 for the rollout.`): the two rows below are true where their body is stored
- *  as written and untestable on a document, and their exclusion is no gap in the grammar. */
+ *  verbatim. A document stores a tree, and the parse that makes that tree reads both spellings
+ *  of an escaped `#` as a plain `#` (`pmdoc.Parse`), so the escape is gone before anything
+ *  renders the document or reads it: `GET /api/v1/artifacts/{id}/text` for a document uploaded
+ *  with `See &#35;q2 here.` answers `See #q2 here.`, the line the table itself reads as a
+ *  citation of q2 (the row `See #q2 for the rollout.`). No writer can put the escape back,
+ *  since a text `#q2` the author wrote bare, which cites q2, and one they escaped are the same
+ *  characters by then. The two rows below are true of a body stored as written, untestable on a
+ *  document, and proved on the rendered and preview surfaces; their exclusion is no gap in the
+ *  grammar. */
 const EDITOR_EXCLUDED: Readonly<Record<string, string>> = {
   ':::callout{#d1 affects="dispatch://CORE-1/spec#b-a dispatch://CORE-1/spec#b-b"}':
     "an unclosed directive, which in a document opens a block that swallows the text after it",
   ":::ask{#q2}\nWhich region first?\n:::":
     "written into a document it is the q2 question block's own declaration, not text in it",
   "See &#35;q2 here.":
-    "a document stores no numeric character reference: the text it holds is `See #q2 here.`",
+    "a document stores no numeric character reference: the parse reads it as the text `See #q2 here.`",
   "See \\#q2 and #q3 here.":
-    "a document stores no backslash escape: the text it holds is `See #q2 and #q3 here.`",
+    "a document stores no backslash escape: the parse reads it as the text `See #q2 and #q3 here.`",
 };
 
 /** Whether `row` writes a prefix two of its own items carry: the table proves an ambiguous

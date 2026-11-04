@@ -165,6 +165,10 @@ with a question block's id links to that question of the document the text belon
 their target's title and both join the **Referenced by** list below, as a `dispatch://` reference
 does.
 
+To write a literal `#id` in a document rather than a link to that question, put it in a code
+span: a document keeps no escape of its own, since it stores `\#q2` as `#q2`, and code shows as
+text on every surface.
+
 Every issue, document, and ask has a **Referenced by** list of what links to it. A document page
 shows the list open; an issue shows it in its header.
 

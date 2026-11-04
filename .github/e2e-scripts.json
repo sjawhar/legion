@@ -115,6 +115,10 @@
       "needs": "a throwaway kind cluster with gVisor on an amd64 Linux host, with docker, go, kubectl, curl, zstd, a tar that supports --zstd and kind, and a worker image by digest (LEGION_E2E_IMAGE)"
     },
     {
+      "script": "dispatch-two-builds.sh",
+      "needs": "a commit of this repository's own history to build the base from, which it takes with `git archive` from `--base-commit`: a CI checkout is shallow and carries none but its own head, and which commit is `the build before the change` is a caller's choice no job can make. The property the script proves is covered in CI by the Go tests that write an older build's row by raw SQL and assert the drain re-indexes it (`store/refs_grammar_migrations_test.go`, `docs/refs_grammar_drain_test.go`); the script is the live proof of the same thing through two real `envoy-dispatch` binaries, run by hand from a full checkout with go, bun, curl, psql and a loopback PostgreSQL carrying pgvector (DATABASE_URL)"
+    },
+    {
       "script": "dispatch-session-settings.sh",
       "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
     },

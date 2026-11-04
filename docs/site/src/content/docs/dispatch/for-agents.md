@@ -315,6 +315,11 @@ belongs to — its own text, its questions and replies, and comments anchored to
 but on no document resolves against the issue's spec. Both enter the reference graph, so
 `dispatch read` on the target lists the text that wrote them.
 
+To write a literal `#id` in a document rather than a link to that question, put it in a code
+span: a document keeps no escape of its own, since it stores `\#q2` as `#q2`, and code shows as
+text on every surface. A comment, an ask and an issue message store their body as you wrote it,
+so `\#q2` stays text there.
+
 A comment or message is made of blocks, one per paragraph, list or other top-level block, named
 `b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message
 starts at the block that holds it. A comment block keeps its id when its author moves, rewords or
