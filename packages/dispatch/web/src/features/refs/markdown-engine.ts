@@ -149,6 +149,40 @@ function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): Mark
   };
 }
 
+/**
+ * A body short enough to cost nothing and wide enough to take a parse through the constructs a
+ * document's first screenful is made of: a heading, a paragraph with emphasis, code and a
+ * reference in it, a list, a fenced code block and a table.
+ *
+ * A fresh engine's first parse costs what none after it does: `parseMarkdown` builds the parser
+ * for the pair of policies it is asked for - a `ParserState` over the whole remark processor
+ * (`lib-headless.ts`) - and takes micromark's tokenizer, its constructs and mdast's compiler
+ * through V8's interpreter for the first time. Measured on this pod with a CDP trace, `iphone`
+ * at 4x CPU throttling, the document preview's first screenful - 2,000 characters - cost 469 ms
+ * parsed through a fresh engine, inside the React commit that mounts the issue page, where a
+ * parse with one behind it is a few milliseconds (dispatch://INFRA-341, R11). So an engine is
+ * handed back with that parse behind it, in the task that built it, where nothing is waiting:
+ * the warm-up (`warmMarkdownRenderer`) is what makes that task an early one. It is parsed under
+ * the document's own pair of policies - the one on the path a document's first block waits on -
+ * and most of what it pays for, every construct micromark tokenizes, is the same code whatever
+ * the policies. A body the engine refuses answers `undefined`; this one it does not.
+ */
+const WARM_UP_BODY = `# A heading
+
+A paragraph with *emphasis*, \`code\` and a [reference](dispatch://CORE-1).
+
+- one
+- two
+
+\`\`\`ts
+const a = 1;
+\`\`\`
+
+| a | b |
+| --- | --- |
+| 1 | 2 |
+`;
+
 function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   const cached = engines.get(blockSchema.version);
   if (cached !== undefined) {
@@ -166,6 +200,7 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
     )
     .then((proof) => {
       const engine = buildEngine(proof, blockSchema);
+      engine.parse(WARM_UP_BODY, "space", "refuse");
       readyEngine = engine;
       return engine;
     });
@@ -173,8 +208,10 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   return created;
 }
 
-/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. The
- *  parse worker is not one of them: a page that draws no long body downloads none of it.
+/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render, and
+ *  with them the engine they build, whose parser is built and taken through a parse as it is
+ *  created (`WARM_UP_BODY`), so no surface's first render pays for that. The parse worker is
+ *  not one of them: a page that draws no long body downloads none of it.
  *
  *  The chunk is asked for before the schema read is awaited, not after it: the engine needs
  *  both, neither needs the other, and reading them one after the other put 461 KB of download
@@ -404,9 +441,24 @@ export interface RenderWithEngineOptions {
   readonly theWorkerOrNothing?: boolean;
 }
 
-/** Renders `markdown` with a loaded engine: parsed here for a body up to the threshold; for a
- *  longer one the answer already cached for it, or a pending rendering now and the parsed
- *  document once the worker answers. */
+/** The answer cache's key for one body: the schema version, the two parse policies and the
+ *  source are all a parse reads, so one answer serves every later render of the same four - a
+ *  new decision card, paint or decorate pass repaints the body it already has rather than
+ *  asking for it again. A policy left out of it would serve a body parsed under one of them to
+ *  a caller that asked for the other. */
+function answerKey(
+  engine: MarkdownEngine,
+  markdown: string,
+  softBreaks: SoftBreaks,
+  rawHtml: RawHtml
+): string {
+  return `${engine.blockSchema.version}\u0000${softBreaks}\u0000${rawHtml}\u0000${markdown}`;
+}
+
+/** Renders `markdown` with a loaded engine: the answer already cached for it, whether the parse
+ *  worker left it there or `parseAheadOfTheRender` did; else parsed here for a body up to the
+ *  threshold, and for a longer one a pending rendering now and the parsed document once the
+ *  worker answers. */
 function renderLoaded(
   engine: MarkdownEngine,
   markdown: string,
@@ -415,20 +467,7 @@ function renderLoaded(
   render: (rendering: MarkdownRendering) => void,
   { keepAPostedParse = false, theWorkerOrNothing = false }: RenderWithEngineOptions
 ): () => void {
-  if (!parsesInTheWorker(markdown)) {
-    render({
-      engine,
-      openMermaidFence: undefined,
-      parsed: engine.parse(markdown, softBreaks, rawHtml),
-      pending: false,
-    });
-    return () => undefined;
-  }
-  // The schema version, the two parse policies and the source are all a parse reads, so one
-  // answer serves every later render of the same four: a new decision card, paint or decorate
-  // pass repaints the body it already has rather than asking for it again. A policy left out of
-  // the key would serve a body parsed under one of them to a caller that asked for the other.
-  const key = `${engine.blockSchema.version}\u0000${softBreaks}\u0000${rawHtml}\u0000${markdown}`;
+  const key = answerKey(engine, markdown, softBreaks, rawHtml);
   const cached = answers.get(key);
   if (cached !== undefined) {
     // Reading an answer keeps it: what the cache drops is the body read longest ago, never one
@@ -443,6 +482,15 @@ function renderLoaded(
     });
     return () => undefined;
   }
+  if (!parsesInTheWorker(markdown)) {
+    render({
+      engine,
+      openMermaidFence: undefined,
+      parsed: engine.parse(markdown, softBreaks, rawHtml),
+      pending: false,
+    });
+    return () => undefined;
+  }
   // What the reader has until the answer lands is the body's own text.
   render({ engine, openMermaidFence: undefined, parsed: undefined, pending: true });
   return parseQueue.wait(
@@ -453,6 +501,42 @@ function renderLoaded(
     },
     { keepIfPosted: keepAPostedParse, theWorkerOrNothing }
   );
+}
+
+/**
+ * Parses `markdown` into the answer cache, where the render that needs it reads it instead of
+ * parsing it itself, and resolves once it is there. For a body the worker takes
+ * (`parsesInTheWorker`) there is nothing to do: that body never costs the page a parse.
+ *
+ * It is for a body the page knows it will draw before React draws it. A document's first
+ * screenful is the one: it is under the threshold, so it is parsed on the page's own thread,
+ * and the surface that draws it does so in the layout phase of the commit that mounts the
+ * issue page - the one task that also renders the whole page. Measured on this pod, `iphone`
+ * at 4x CPU throttling, that parse was 294-545 ms of a task already over the 500 ms a reader
+ * feels as a freeze (dispatch://INFRA-341, R11). Parsed here, from the task the document's own
+ * text arrives in (`open-document-early.ts`), it costs that commit nothing and nothing waits
+ * for it: the reader has no page yet.
+ *
+ * A body the engine refuses is remembered as refused, exactly as the render would have found
+ * it, so the fallback it leads to is the same one and the parse is not tried twice.
+ */
+export async function parseAheadOfTheRender(
+  markdown: string,
+  softBreaks: SoftBreaks = "space",
+  rawHtml: RawHtml = "refuse"
+): Promise<void> {
+  if (markdown === "" || parsesInTheWorker(markdown)) {
+    return;
+  }
+  const engine = await loadEngine(await loadBlockSchema());
+  const key = answerKey(engine, markdown, softBreaks, rawHtml);
+  if (answers.has(key)) {
+    return;
+  }
+  rememberUpTo(answers, ANSWER_LIMIT, key, {
+    openMermaidFence: undefined,
+    parsed: engine.parse(markdown, softBreaks, rawHtml),
+  });
 }
 
 /**

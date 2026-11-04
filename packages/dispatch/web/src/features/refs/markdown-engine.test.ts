@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as headlessModule from "@legion/proof-editor/headless";
 
 import serverBlockSchema from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../../api/types";
 import * as schemaModule from "../doc/schema";
 import {
   type MarkdownRendering,
+  parseAheadOfTheRender,
   parsesInTheWorker,
   type RawHtml,
   renderWithEngine,
@@ -159,6 +161,103 @@ describe("the answer cache and the raw-HTML policy", () => {
       expect(asBody.at(-1)?.parsed?.textContent).toBe(words);
     } finally {
       cancelAsBody();
+    }
+  });
+});
+
+// What the warm-up is for, beyond the chunk and the schema: a fresh engine's first parse builds
+// the parser for the pair of policies it is asked for and takes micromark through V8's
+// interpreter for the first time, and on a phone at 4x CPU throttling that first parse was
+// 469 ms of the React commit that mounts a document's page, against 9 ms for a parse with one
+// behind it (dispatch://INFRA-341, R11). The warm-up pays it, in a task of its own; this row is
+// what says the parse is still in it.
+describe("the engine's warm-up", () => {
+  test("takes a parse through the engine it built, so no surface's first render pays for it", async () => {
+    const built = headlessModule.createHeadlessProof;
+    const parsed: string[] = [];
+    const create = spyOn(headlessModule, "createHeadlessProof").mockImplementation(
+      async (options) => {
+        const proof = await built(options);
+        return {
+          ...proof,
+          parseMarkdown(markdown, softBreaks, rawHtml) {
+            parsed.push(markdown);
+            return proof.parseMarkdown(markdown, softBreaks, rawHtml);
+          },
+        };
+      }
+    );
+    // A schema version of its own, so the warm-up builds an engine rather than being answered
+    // with the one an earlier row left behind (`engines`, keyed by the schema's version).
+    const load = spyOn(schemaModule, "loadBlockSchema").mockResolvedValue({
+      ...blockSchema,
+      version: blockSchema.version + 1,
+    });
+    try {
+      await warmMarkdownRenderer();
+
+      expect(parsed).toHaveLength(1);
+      // Wide enough to be worth parsing: a heading, a paragraph, a list, a fence and a table.
+      expect(parsed[0]).toContain("# A heading");
+      expect(parsed[0].split("\n\n").length).toBeGreaterThanOrEqual(5);
+    } finally {
+      create.mockRestore();
+      load.mockRestore();
+    }
+  });
+});
+
+// The screenful a document opens with is under the worker's threshold, so the page parses it
+// itself - in the layout phase of the commit that mounts the issue page, which is the one task
+// that also renders the whole page. On a phone at 4x CPU throttling that parse was 294-545 ms
+// of a task already over the 500 ms a reader feels as a freeze (dispatch://INFRA-341, R11).
+// Parsed ahead, from the task the document's text arrives in, the commit reads the answer
+// instead of making it.
+describe("a body parsed ahead of the render", () => {
+  test("is rendered from the answer the page already has, and is not parsed a second time", async () => {
+    const built = headlessModule.createHeadlessProof;
+    const parsed: string[] = [];
+    const create = spyOn(headlessModule, "createHeadlessProof").mockImplementation(
+      async (options) => {
+        const proof = await built(options);
+        return {
+          ...proof,
+          parseMarkdown(markdown, softBreaks, rawHtml) {
+            parsed.push(markdown);
+            return proof.parseMarkdown(markdown, softBreaks, rawHtml);
+          },
+        };
+      }
+    );
+    // A schema version of its own, so this row builds an engine of its own rather than being
+    // answered with one an earlier row left behind (`engines`, keyed by the schema's version).
+    const load = spyOn(schemaModule, "loadBlockSchema").mockResolvedValue({
+      ...blockSchema,
+      version: blockSchema.version + 2,
+    });
+    const body = "# The lease ledger\n\nThe paragraph a reader meets first.\n";
+    try {
+      await parseAheadOfTheRender(body);
+      // The warm-up body and this one: everything the engine has parsed so far.
+      const before = parsed.length;
+      expect(parsed.at(-1)).toBe(body);
+
+      const renderings: MarkdownRendering[] = [];
+      const cancel = renderWithEngine(body, "space", "refuse", (rendering) =>
+        renderings.push(rendering)
+      );
+      try {
+        // Rendered in this task, from the answer, with no parse of its own.
+        expect(renderings).toHaveLength(1);
+        expect(renderings[0]?.pending).toBe(false);
+        expect(renderings[0]?.parsed?.textContent).toContain("The paragraph a reader meets first.");
+        expect(parsed).toHaveLength(before);
+      } finally {
+        cancel();
+      }
+    } finally {
+      create.mockRestore();
+      load.mockRestore();
     }
   });
 });

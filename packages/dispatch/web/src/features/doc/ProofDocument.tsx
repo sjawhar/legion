@@ -648,12 +648,11 @@ export function ProofDocument({
       editor = undefined;
       document = undefined;
     };
-    // The editor's place in the page - its typed blocks, the margin, search highlights, a block
-    // link - for as long as it is this effect's editor. It returns what undoes it.
+    // The editor's place in the page - the margin, search highlights, a block link - for as
+    // long as it is this effect's editor. It returns what undoes it. Its typed blocks are not
+    // here: they are installed before the build, so no task of the build's end re-creates every
+    // node view of the document (`beforeBuild` below).
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
-      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts, (route, onPicture) =>
-        watchPicturePath(queryClient, route, onPicture)
-      );
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -849,6 +848,15 @@ export function ProofDocument({
               // (`DocumentPreview`).
               setEditorBuilding(true);
               void createEditor(parent, {
+                // The document's typed blocks, over the editor's still-empty document: every
+                // `ask`, every host-rendered block and every picture gets its node view inside
+                // the batch that builds its block, rather than in one `setProps` over the whole
+                // built document afterwards - 1,218 ms of one task for the 406,319-character
+                // document on a phone at 4x CPU throttling (dispatch://INFRA-341, R11).
+                beforeBuild: (view) =>
+                  installTypedBlocks(view, blockSchema, setAskBlockHosts, (route, onPicture) =>
+                    watchPicturePath(queryClient, route, onPicture)
+                  ),
                 // Cursor labels are outside the compact acceptance bar. Even with inline labels,
                 // yCursor's edge widget disrupts the mobile browser's post-update text selection.
                 // A pane publishes no presence at all: the reader is skimming a document from a

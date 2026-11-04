@@ -196,3 +196,77 @@ describe("a document built in batches", () => {
     expect(built.text).toContain(`Paragraph ${BLOCKS - 1} of the ledger.`);
   });
 });
+
+// A host's node views have to be on the view before the build, not after it: `view.setProps`
+// with a new `nodeViews` map re-runs ProseMirror's view update over the whole document, which
+// destroys every node view the batches made and creates the host's in its place. For Dispatch's
+// typed blocks over the 406,319-character document that was one task of 1,218 ms on a phone at
+// 4x CPU throttling, longer than any batch of the build it followed (dispatch://INFRA-341, R11).
+describe("the host's own node views", () => {
+  test("are installed before the first batch, and built a batch at a time with it", async () => {
+    const { parseMarkdown } = await createHeadlessProof({});
+    const ydoc = new Y.Doc();
+    prosemirrorToYXmlFragment(
+      parseMarkdown(paragraphs(BLOCKS)),
+      ydoc.getXmlFragment("prosemirror")
+    );
+    await withDomWindow(async (window) => {
+      const root = window.document.body.appendChild(
+        window.document.createElement("div")
+      ) as unknown as HTMLElement;
+      /** How many blocks the fragment had put in the editor when the host was called. */
+      let whenCalled = -1;
+      let created = 0;
+      // How many of the host's node views existed at each look, one look per task, which is
+      // what says they were created across the batches rather than in one task after them. A
+      // real `setTimeout(0)` chain, as `watchTheBuild` is and for the same reason: what it
+      // watches for is the build's own yield between batches, which a fake clock would drive
+      // rather than observe.
+      const seen: number[] = [];
+      let watching = true;
+      const look = () => {
+        if (!watching) return;
+        seen.push(created);
+        setTimeout(look, 0);
+      };
+      setTimeout(look, 0);
+      const handle = await createProofEditor(root, {
+        beforeBuild: (view) => {
+          whenCalled = blocksBuilt(root);
+          view.setProps({
+            nodeViews: {
+              ...view.props.nodeViews,
+              paragraph: () => {
+                created += 1;
+                const dom = window.document.createElement("p") as unknown as HTMLElement;
+                return { contentDOM: dom, dom };
+              },
+            },
+          });
+        },
+        heatMapMode: "hidden",
+        onMarkClick: () => {},
+        onMarkHover: () => {},
+        user: { color: "#0369a1", name: "alice" },
+        ydoc,
+      });
+      watching = false;
+      const { view } = handle;
+      try {
+        // Called over the empty document Milkdown created, before a block of the fragment was
+        // in it: a node view installed here is the one each batch builds with.
+        expect(whenCalled).toBe(0);
+        expect(view.state.doc.childCount).toBe(BLOCKS);
+        expect(created).toBeGreaterThanOrEqual(BLOCKS);
+        expect(
+          seen.filter((count) => count > 0 && count < BLOCKS).length,
+          "every one of the host's node views was created in one task: a host that installs " +
+            "them after the build pays for the whole document a second time"
+        ).toBeGreaterThan(0);
+      } finally {
+        handle.destroy();
+        while (!view.isDestroyed) await Promise.resolve();
+      }
+    });
+  });
+});

@@ -24,6 +24,11 @@ export interface FakeEditor {
   focused: string[];
   markdown: string | undefined;
   focusedBlocks: string[];
+  /** The node views the host had installed when the fragment was first drawn into the root -
+   *  the real editor's first batch (`@legion/proof-editor`'s `beforeBuild`). A host that
+   *  installs them afterwards leaves this empty, and the real editor then re-creates every
+   *  node view of the built document in one task (dispatch://INFRA-341, R11). */
+  nodeViewsAtBuild: readonly string[];
   options: EditorOptions;
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
@@ -111,6 +116,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       focused: [],
       focusedBlocks: [],
       markdown: undefined,
+      nodeViewsAtBuild: [],
       options,
       readOnly: options.readOnly ?? false,
       remoteMarks: [],
@@ -120,7 +126,6 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       selectedBlock: null,
       viewProps: { nodeViews: {} },
     };
-    root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
@@ -187,6 +192,14 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         },
       },
     } as unknown as EditorHandle;
+    // The real editor calls this over its still-empty document, before the first batch of the
+    // build (`@legion/proof-editor`'s `beforeBuild`), so the fake calls it before it draws the
+    // fragment: what the host installed there is what the build draws with.
+    options.beforeBuild?.(handle.view);
+    editor.nodeViewsAtBuild = Object.keys(
+      (editor.viewProps.nodeViews ?? {}) as Record<string, unknown>
+    );
+    root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     editors.push(editor);
     return handle;
   };

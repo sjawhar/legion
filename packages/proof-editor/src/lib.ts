@@ -179,6 +179,21 @@ export interface CreateProofEditorOptions {
   /** The host's Mermaid renderer, which draws each mermaid code block's diagram. Without one a
    *  document's mermaid blocks show their source. */
   drawMermaid?: MermaidDrawer;
+  /**
+   * The host's own node views and plugins, installed on the view before the document is built.
+   *
+   * A host that installs them afterwards pays for the whole document twice: `view.setProps`
+   * with a new `nodeViews` map re-runs ProseMirror's view update over every node of the
+   * document, which destroys each node view the build made and creates the host's in its
+   * place. For Dispatch's typed blocks over a 406,319-character document, on a phone at 4x CPU
+   * throttling, that one task was 1,218 ms - longer than any batch of the build it followed
+   * (dispatch://INFRA-341, R11). Installed here, the build creates each node view once, inside
+   * the batch that builds its block, where the batches' own budget bounds it.
+   *
+   * The document is empty when this is called, so a node view installed here draws nothing yet
+   * and a plugin added here sees the build as it happens.
+   */
+  beforeBuild?: (view: EditorView) => void;
 }
 
 export interface ProofEditorHandle extends TypedBlockCommands {
@@ -454,6 +469,10 @@ export async function createProofEditor(
     currentReadOnly = readOnly;
     view.setProps({ editable: () => !currentReadOnly });
   };
+
+  // The host's own node views and plugins, over the empty document, so every node view of the
+  // build is created once, in the batch that builds its block (`beforeBuild`).
+  opts.beforeBuild?.(view);
 
   // --- Collab binding -------------------------------------------------
   // Adapted from ProofEditorImpl's initFromShare() collab-activation block.

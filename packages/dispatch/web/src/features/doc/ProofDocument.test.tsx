@@ -45,6 +45,28 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
   }
 });
 
+// The document's typed blocks go on the view before the build, not after the handle arrives: a
+// `setProps` with a new `nodeViews` map over a built document re-runs ProseMirror's view update
+// across every node of it, which for the 406,319-character document was one task of 1,218 ms on
+// a phone at 4x CPU throttling - longer than any batch of the build it followed
+// (dispatch://INFRA-341, R11).
+test("ProofDocument installs the document's typed blocks before the editor's build", async () => {
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+
+    // `callout` is the one host-rendered type of the suites' block schema; `ask` and `image`
+    // every document has.
+    expect(editors[0]?.nodeViewsAtBuild).toEqual(
+      expect.arrayContaining(["ask", "callout", "image"])
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
 // What a reader has while the editor is built for them (`DocumentPreview`): the document, drawn
 // from the markdown `/text` answered, with a `data-block-id` on every block as the editor's
 // draw has. It is named for what it is, `Document text` under a `document` role, never for the

@@ -4,8 +4,10 @@ import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { issueQuery, userStateQuery } from "../../api/queries";
 import type { ArtifactText } from "../../api/types";
-import { warmMarkdownRenderer } from "../refs/markdown-engine";
+import { parseAheadOfTheRender, warmMarkdownRenderer } from "../refs/markdown-engine";
+import { markdownWorkerThreshold } from "../refs/markdown-worker-threshold";
 import { parseIssuePath } from "../refs/routes";
+import { leadingBlocks } from "./document-blocks";
 import { liveTextQueryOptions } from "./live-text";
 
 /**
@@ -149,6 +151,15 @@ function readTheTextEarly(
     staleTime: 0,
   });
   earlyTextRead = { artifactId, read };
+  // The screenful the reader meets, parsed in the task its text arrives in rather than in the
+  // commit that mounts the issue page. `DocumentPreview` draws exactly this source under
+  // exactly these policies, and it is under the worker's threshold, so without this the page
+  // parses it on its own thread inside that commit - 294-545 ms of one task on a phone at 4x
+  // CPU throttling, in a task already over the 500 ms a reader feels as a freeze
+  // (dispatch://INFRA-341, R11). Nothing waits for it here: there is no page yet.
+  void read
+    .then(({ markdown }) => parseAheadOfTheRender(leadingBlocks(markdown, markdownWorkerThreshold)))
+    .catch(() => undefined);
   void read.catch(() => {
     // A failed read is the document's own to report and to retry; what it must not do is wait
     // here for an admission to take.
