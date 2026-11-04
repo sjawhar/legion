@@ -1,0 +1,1214 @@
+{
+  "capture": "The same prompt and model with --thinking-display summarized, which is what the showThinkingSummaries setting turns on: every reasoning part carries the summary text.",
+  "claudeVersion": "2.1.310",
+  "recorded": "2026-11-04",
+  "sessionId": "81654ded-6405-46e0-9c8e-e176dc7ef126",
+  "answers": {
+    "session.model": "claude-opus-5-5",
+    "config.list": [
+      {
+        "key": "autoCompact",
+        "label": "Auto-compact",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "idleCompaction",
+        "label": "Idle compaction",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "autoContinueAtUsageLimit",
+        "label": "Continue automatically at usage limit",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "switchModelsOnFlag",
+        "label": "Switch models when a message is flagged",
+        "kind": "choice",
+        "value": "Switch automatically",
+        "options": [
+          "Switch automatically",
+          "Ask each time"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "tips",
+        "label": "Show tips",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "reduceMotion",
+        "label": "Reduce motion",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "thinking",
+        "label": "Thinking mode",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": true
+      },
+      {
+        "key": "promptSuggestionEnabled",
+        "label": "Prompt suggestions",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "recap",
+        "label": "Session recap",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "checkpoints",
+        "label": "Rewind code (checkpoints)",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "workflows",
+        "label": "Dynamic workflows",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "workflowKeywordTriggerEnabled",
+        "label": "Ultracode keyword trigger",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "workflowSizeGuideline",
+        "label": "Dynamic workflow size",
+        "kind": "choice",
+        "value": "medium",
+        "options": [
+          "unrestricted",
+          "small",
+          "medium",
+          "large"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "verbose",
+        "label": "Verbose output",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "progressBar",
+        "label": "Terminal progress bar",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "turnDuration",
+        "label": "Show turn duration",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "timeFormat",
+        "label": "Time format",
+        "kind": "choice",
+        "value": "auto",
+        "options": [
+          "auto",
+          "12-hour",
+          "24-hour",
+          "24-hour-utc"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "permissionMode",
+        "label": "Default permission mode",
+        "kind": "choice",
+        "value": "bypassPermissions",
+        "options": [
+          "default",
+          "plan",
+          "acceptEdits",
+          "auto",
+          "dontAsk"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "worktreeBaseRef",
+        "label": "Worktree base ref",
+        "kind": "choice",
+        "value": "fresh",
+        "options": [
+          "fresh",
+          "head"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "useAutoModeDuringPlan",
+        "label": "Use auto mode during plan",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "gitignore",
+        "label": "Respect .gitignore in file picker",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "copyFullResponse",
+        "label": "Skip the /copy picker",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "copyOnSelect",
+        "label": "Copy on select",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "autoScroll",
+        "label": "Auto-scroll",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "defaultToAgentsView",
+        "label": "Open agents view by default",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "leftArrowOpensAgents",
+        "label": "← opens agents",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "autoUpdatesChannel",
+        "label": "Auto-update channel",
+        "kind": "text",
+        "value": "latest",
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "theme",
+        "label": "Theme",
+        "kind": "choice",
+        "value": "dark",
+        "options": [
+          "auto",
+          "dark",
+          "light",
+          "light-daltonized",
+          "dark-daltonized",
+          "light-ansi",
+          "dark-ansi"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "notifChannel",
+        "label": "Local notifications",
+        "kind": "choice",
+        "value": "auto",
+        "options": [
+          "auto",
+          "iterm2",
+          "terminal_bell",
+          "iterm2_with_bell",
+          "kitty",
+          "ghostty",
+          "notifications_disabled"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "outputStyle",
+        "label": "Output style",
+        "kind": "choice",
+        "value": "default",
+        "options": [
+          "default",
+          "Proactive",
+          "Concise",
+          "Explanatory",
+          "Learning"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "language",
+        "label": "Language",
+        "kind": "text",
+        "value": "Default (English)",
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "editor",
+        "label": "Editor mode",
+        "kind": "choice",
+        "value": "normal",
+        "options": [
+          "normal",
+          "vim"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "askUserQuestionTimeout",
+        "label": "Question auto-continue timeout",
+        "kind": "choice",
+        "value": "never",
+        "options": [
+          "never",
+          "60s",
+          "5m",
+          "10m"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "externalEditorContext",
+        "label": "Show last response in external editor",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "prStatus",
+        "label": "Show PR status footer",
+        "kind": "boolean",
+        "value": true,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "model",
+        "label": "Model",
+        "kind": "choice",
+        "value": "Default (recommended)",
+        "options": [
+          "default",
+          "sonnet",
+          "opus",
+          "haiku",
+          "fable",
+          "best",
+          "sonnet[1m]",
+          "opus[1m]",
+          "fable[1m]",
+          "opusplan"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "autoConnectIde",
+        "label": "Auto-connect to IDE (external terminal)",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "chrome",
+        "label": "Claude in Chrome enabled by default",
+        "kind": "boolean",
+        "value": false,
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      },
+      {
+        "key": "dialogExpiry",
+        "label": "Dialog expiry",
+        "kind": "choice",
+        "value": "default",
+        "options": [
+          "default",
+          "60s",
+          "5m",
+          "10m",
+          "never"
+        ],
+        "provider": {
+          "plugin": "engine",
+          "tier": "core"
+        },
+        "isLocked": false
+      }
+    ],
+    "command.list": [
+      {
+        "name": "deep-research",
+        "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report.",
+        "source": "builtin"
+      },
+      {
+        "name": "claude-envoy:asd-ste100",
+        "description": "Use when English text must be parsed without a human to resolve ambiguity — tool descriptions, error messages, inter-agent instructions, system prompts, status reports — and misreading has a real cost, or when text reads as dense, hedged, or easy to misparse. Triggers: disambiguate, STE100 rewrite, apply Simplified Technical English, plain-language rewrite, controlled-language rewrite, rewrite so an agent cannot misread this. Not for creative or marketing copy.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:dispatch",
+        "description": "Use before your first dispatch command in a session: a message, comment, ask, artifact, document edit, claim or status change.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:dispatch-first",
+        "description": "Use when a session has the dispatch command, before you plan, file an issue, ask a human, post a finding, or start work. Someone may track that work already or hold a decision on it.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:dispatch-writing-specs",
+        "description": "Use in a session with Dispatch before you write or change a spec, ask, comment or message a person reads. It replaces superpowers' brainstorming there.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:envoy",
+        "description": "Use when you send a message to another agent session, reply to an Envoy delivery, find your own or a peer's session id, subscribe to a topic (a GitHub pull request, CI checks, a Dispatch issue, Slack), publish to a role or team topic, or wait for CI or a merge. Also when you are a subagent that must report to another session, or a subscription stays silent.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:outside-message",
+        "description": "Use before any text reaches a person outside the company: a comment on an issue or pull request of a repository the company does not own, an email, a chat message to another company, a release note, an enrollment reply, a bug report, a disclosure. Use it also before you open an ask that asks the operator to approve such text. Not for a message to the operator, to another agent, or inside the company's own organization.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "claude-envoy:plain-words",
+        "description": "Use before you send or publish any text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. It removes empty verb phrases and replaces each with the literal thing. Use it after you write and before you send.",
+        "source": "plugin",
+        "plugin": "claude-envoy"
+      },
+      {
+        "name": "design",
+        "description": "Grant or revoke Claude agent access to your Design projects",
+        "source": "builtin"
+      },
+      {
+        "name": "design-sync",
+        "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+        "source": "builtin"
+      },
+      {
+        "name": "dataviz",
+        "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+        "source": "builtin"
+      },
+      {
+        "name": "update-config",
+        "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+        "source": "builtin"
+      },
+      {
+        "name": "keybindings-help",
+        "description": "Use when the user wants to customize keyboard shortcuts, rebind keys, add chord bindings, or modify ~/.claude/keybindings.json. Examples: \"rebind ctrl+s\", \"add a chord shortcut\", \"change the submit key\", \"customize keybindings\".",
+        "source": "builtin"
+      },
+      {
+        "name": "verify",
+        "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+        "source": "builtin"
+      },
+      {
+        "name": "debug",
+        "description": "Enable debug logging for this session and help diagnose issues",
+        "source": "builtin"
+      },
+      {
+        "name": "code-review",
+        "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low|medium|high|xhigh|max: from few high-confidence findings up to many, some of them uncertain); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. Pass --max-findings <n> to report up to n findings, or --max-findings all for every finding. The choice stays until you pass --max-findings default.",
+        "source": "builtin"
+      },
+      {
+        "name": "simplify",
+        "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+        "source": "builtin"
+      },
+      {
+        "name": "batch",
+        "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+        "source": "builtin"
+      },
+      {
+        "name": "fewer-permission-prompts",
+        "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+        "source": "builtin"
+      },
+      {
+        "name": "doctor",
+        "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+        "source": "builtin"
+      },
+      {
+        "name": "loop",
+        "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+        "source": "builtin"
+      },
+      {
+        "name": "claude-api",
+        "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+        "source": "builtin"
+      },
+      {
+        "name": "workflow-authoring",
+        "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+        "source": "builtin"
+      },
+      {
+        "name": "run",
+        "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+        "source": "builtin"
+      },
+      {
+        "name": "run-skill-generator",
+        "description": "Author or improve the run-<unit> skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+        "source": "builtin"
+      },
+      {
+        "name": "plugin-authoring",
+        "description": "Make a mod: a change to Claude's own interface or behaviour, such as a panel or pane that stays beside the chat and updates, a band, status line, toast, slash command, or hook on tool calls. Use to make, change or debug a mod or its hooks module.",
+        "source": "builtin"
+      },
+      {
+        "name": "advisor",
+        "description": "Let Claude consult a stronger model at key moments",
+        "source": "builtin"
+      },
+      {
+        "name": "agents",
+        "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+        "source": "builtin"
+      },
+      {
+        "name": "auto-mode-setup",
+        "description": "Teach auto mode about your environment, plus optional rule tweaks",
+        "source": "builtin"
+      },
+      {
+        "name": "autocompact",
+        "description": "Configure the auto-compact window size",
+        "source": "builtin"
+      },
+      {
+        "name": "clear",
+        "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+        "source": "builtin"
+      },
+      {
+        "name": "color",
+        "description": "Set the prompt bar color for this session",
+        "source": "builtin"
+      },
+      {
+        "name": "compact",
+        "description": "Free up context by summarizing the conversation so far",
+        "source": "builtin"
+      },
+      {
+        "name": "config",
+        "description": "Set a setting by key",
+        "source": "builtin"
+      },
+      {
+        "name": "output-style",
+        "description": "List output styles or switch to one",
+        "source": "builtin"
+      },
+      {
+        "name": "context",
+        "description": "Show current context usage",
+        "source": "builtin"
+      },
+      {
+        "name": "effort",
+        "description": "Set effort level for model usage",
+        "source": "builtin"
+      },
+      {
+        "name": "fast",
+        "description": "Toggle fast mode (Opus 5.5)",
+        "source": "builtin"
+      },
+      {
+        "name": "focus",
+        "description": "Toggle focus view: just your prompt, summary, and response",
+        "source": "builtin"
+      },
+      {
+        "name": "heapdump",
+        "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+        "source": "builtin"
+      },
+      {
+        "name": "init",
+        "description": "Initialize a new CLAUDE.md file with codebase documentation",
+        "source": "builtin"
+      },
+      {
+        "name": "mcp",
+        "description": "Manage MCP servers",
+        "source": "builtin"
+      },
+      {
+        "name": "import",
+        "description": "Import config from another AI coding agent",
+        "source": "builtin"
+      },
+      {
+        "name": "model",
+        "description": "Set the AI model for Claude Code",
+        "source": "builtin"
+      },
+      {
+        "name": "__remote-workflow",
+        "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+        "source": "builtin"
+      },
+      {
+        "name": "workflow-launch-exec",
+        "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+        "source": "builtin"
+      },
+      {
+        "name": "reload-plugins",
+        "description": "Activate pending plugin changes in the current session",
+        "source": "builtin"
+      },
+      {
+        "name": "reload-skills",
+        "description": "Pick up skills added or changed on disk during this session",
+        "source": "builtin"
+      },
+      {
+        "name": "rename",
+        "description": "Rename the current conversation",
+        "source": "builtin"
+      },
+      {
+        "name": "security-review",
+        "description": "Complete a security review of the pending changes on the current branch",
+        "source": "builtin"
+      },
+      {
+        "name": "usage",
+        "description": "Show session cost, plan usage, and what's contributing to your limits",
+        "source": "builtin"
+      },
+      {
+        "name": "insights",
+        "description": "Generate a report analyzing your Claude Code sessions",
+        "source": "builtin"
+      },
+      {
+        "name": "recap",
+        "description": "Generate a one-line session recap now",
+        "source": "builtin"
+      },
+      {
+        "name": "skill-doctor",
+        "description": "Show which loaded skills are unused and costing context",
+        "source": "builtin"
+      },
+      {
+        "name": "goal",
+        "description": "Set a goal — keep working until the condition is met",
+        "source": "builtin"
+      },
+      {
+        "name": "design-consent",
+        "description": "Grant Claude agent access to your Design projects",
+        "source": "builtin"
+      },
+      {
+        "name": "design-revoke",
+        "description": "Revoke Claude agent access to your Design projects",
+        "source": "builtin"
+      },
+      {
+        "name": "list-agents",
+        "description": "List subagents, teammates, and other Claude sessions you can message",
+        "source": "builtin"
+      },
+      {
+        "name": "team-onboarding",
+        "description": "Help teammates ramp on Claude Code with a guide from your usage",
+        "source": "builtin"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "hello",
+      "sessionId": "81654ded-6405-46e0-9c8e-e176dc7ef126",
+      "claudeVersion": "2.1.310",
+      "interactive": false
+    },
+    {
+      "kind": "model",
+      "model": "claude-opus-5-5"
+    },
+    {
+      "kind": "append",
+      "uuid": "420061e5-7f5f-42c7-b5a3-b73bee642570",
+      "door": "prompt",
+      "origin": {
+        "kind": "unclassified"
+      },
+      "message": {
+        "type": "user",
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Read ./present.txt with the Read tool, then try to read ./missing.txt with the Read tool (it does not exist; do not create it). Then answer in one short sentence: is 391 prime?"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "turn-start",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab"
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order, so I'll keep that order.\n\nI'll"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "append",
+      "uuid": "0efe68a0-9a75-4614-aa97-621f3516c7ac",
+      "door": "response",
+      "origin": {
+        "kind": "model",
+        "model": "claude-opus-5-5"
+      },
+      "message": {
+        "type": "assistant",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order, so I'll keep that order.\n\nI'll read both files now, present.txt first and then missing.txt, and I'm checking the file contents as data only. I also just confirmed that 391 is 17 × 23, so it isn't prime.\n\n",
+            "signature": "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"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "append",
+      "uuid": "7117fc0b-26b9-4083-988c-a137a3ebe49f",
+      "door": "response",
+      "origin": {
+        "kind": "model",
+        "model": "claude-opus-5-5"
+      },
+      "message": {
+        "type": "assistant",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01FwugpZwCjbRBwdaY1fYo2A",
+            "name": "Read",
+            "input": {
+              "file_path": "/legion/scratch/tmp/infra-1026-capture/work/present.txt"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order, so I'll keep that order.\n\nI'll read both files now, present.txt first and then missing.txt, and I'm checking the file contents as data only. I also just confirmed that 391 is 17 × 23, so it isn't prime.\n\n"
+        },
+        {
+          "type": "tool-call",
+          "id": "toolu_01FwugpZwCjbRBwdaY1fYo2A",
+          "name": "Read",
+          "args": "{\"file_path\": \"/legion/scratch/tmp/infra-1026-capture/work/present.txt\"}"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "append",
+      "uuid": "4cc76854-d95f-448e-b368-de0ece58e51f",
+      "door": "tool-result",
+      "origin": {
+        "kind": "tool",
+        "tool": "Read"
+      },
+      "message": {
+        "type": "user",
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_01FwugpZwCjbRBwdaY1fYo2A",
+            "type": "tool_result",
+            "content": "1\thello from present.txt\n2\t"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "append",
+      "uuid": "9a64dfee-4f0d-47a8-8041-7343cd01190c",
+      "door": "response",
+      "origin": {
+        "kind": "model",
+        "model": "claude-opus-5-5"
+      },
+      "message": {
+        "type": "assistant",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01VuHkzwLXgS4FMRQsMeT1tn",
+            "name": "Read",
+            "input": {
+              "file_path": "/legion/scratch/tmp/infra-1026-capture/work/missing.txt"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order, so I'll keep that order.\n\nI'll read both files now, present.txt first and then missing.txt, and I'm checking the file contents as data only. I also just confirmed that 391 is 17 × 23, so it isn't prime.\n\n"
+        },
+        {
+          "type": "tool-call",
+          "id": "toolu_01FwugpZwCjbRBwdaY1fYo2A",
+          "name": "Read",
+          "args": "{\"file_path\": \"/legion/scratch/tmp/infra-1026-capture/work/present.txt\"}"
+        },
+        {
+          "type": "tool-call",
+          "id": "toolu_01VuHkzwLXgS4FMRQsMeT1tn",
+          "name": "Read",
+          "args": "{\"file_path\": \"/legion/scratch/tmp/infra-1026-capture/work/missing.txt\"}"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "append",
+      "uuid": "6242964d-5bee-4753-bc17-d911dcc75695",
+      "door": "tool-result",
+      "origin": {
+        "kind": "tool",
+        "tool": "Read"
+      },
+      "message": {
+        "type": "user",
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "File does not exist. Note: your current working directory is /legion/scratch/tmp/infra-1026-capture/work.",
+            "is_error": true,
+            "tool_use_id": "toolu_01VuHkzwLXgS4FMRQsMeT1tn"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 0,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I'm going to read ./present.txt first, then try ./missing.txt, and after that I'll check whether 391 is prime. The two reads don't depend on each other, but the user asked for them in order, so I'll keep that order.\n\nI'll read both files now, present.txt first and then missing.txt, and I'm checking the file contents as data only. I also just confirmed that 391 is 17 × 23, so it isn't prime.\n\n"
+        },
+        {
+          "type": "tool-call",
+          "id": "toolu_01FwugpZwCjbRBwdaY1fYo2A",
+          "name": "Read",
+          "args": "{\"file_path\": \"/legion/scratch/tmp/infra-1026-capture/work/present.txt\"}"
+        },
+        {
+          "type": "tool-call",
+          "id": "toolu_01VuHkzwLXgS4FMRQsMeT1tn",
+          "name": "Read",
+          "args": "{\"file_path\": \"/legion/scratch/tmp/infra-1026-capture/work/missing.txt\"}"
+        }
+      ],
+      "done": true,
+      "stopReason": "tool_use"
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 1,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 1,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I confirmed that present.txt hol"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 1,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I confirmed that present.txt holds its greeting and that missing.txt is absent, as expected. Since 391 = 17 × 23, it isn't prime, and I'll answer the"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 1,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I confirmed that present.txt holds its greeting and that missing.txt is absent, as expected. Since 391 = 17 × 23, it isn't prime, and I'll answer the user in one short sentence.\n\nI'm ke"
+        }
+      ],
+      "done": false
+    },
+    {
+      "kind": "append",
+      "uuid": "b5085361-14a5-4d48-9390-b8408e0b4c90",
+      "door": "response",
+      "origin": {
+        "kind": "model",
+        "model": "claude-opus-5-5"
+      },
+      "message": {
+        "type": "assistant",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "I confirmed that present.txt holds its greeting and that missing.txt is absent, as expected. Since 391 = 17 × 23, it isn't prime, and I'll answer the user in one short sentence.\n\nI'm keeping my reply to one short sentence, so I'll answer that 391 isn't prime, since it equals 17 × 23.\n\n",
+            "signature": "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"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "append",
+      "uuid": "a0e4daa8-61f5-4801-8aaa-26e78a2ff1a8",
+      "door": "response",
+      "origin": {
+        "kind": "model",
+        "model": "claude-opus-5-5"
+      },
+      "message": {
+        "type": "assistant",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "No, 391 is not prime because it equals 17 × 23."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "step",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "index": 1,
+      "model": "claude-opus-5-5",
+      "effort": "max",
+      "parts": [
+        {
+          "type": "reasoning",
+          "text": "I confirmed that present.txt holds its greeting and that missing.txt is absent, as expected. Since 391 = 17 × 23, it isn't prime, and I'll answer the user in one short sentence.\n\nI'm keeping my reply to one short sentence, so I'll answer that 391 isn't prime, since it equals 17 × 23.\n\n"
+        },
+        {
+          "type": "text",
+          "text": "No, 391 is not prime because it equals 17 × 23."
+        }
+      ],
+      "done": true,
+      "stopReason": "end_turn"
+    },
+    {
+      "kind": "turn-complete",
+      "turnId": "a5d64e4b-408e-48cd-a811-75b0d12dbeab",
+      "stopReason": "answer"
+    },
+    {
+      "kind": "session-end",
+      "reason": "other"
+    }
+  ]
+}

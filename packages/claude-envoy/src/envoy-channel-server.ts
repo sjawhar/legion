@@ -1,6 +1,11 @@
 import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
+  AGENT_STREAM_WATCH_INTERVAL_MS,
+  type AgentStreamCommand,
+  type AgentStreamControlMessage,
+  agentStreamControlSubject,
+  agentStreamFramesSubject,
   agentSubject,
   type DeliveryCapability,
   ROLE_TOPIC_PREFIX,
@@ -68,6 +73,7 @@ import {
   newClientInstanceID,
   type SubscribeResult,
 } from "@legion/envoy-client/transport"
+import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
@@ -75,9 +81,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { connect } from "nats"
 import { z } from "zod"
+import type { ModConfigRow } from "../hooks/mod-protocol"
 import { name as packageName, version as packageVersion } from "../package.json" with {
   type: "json",
 }
+import { claudeAgentStreamCommands, createClaudeAgentStream } from "./agent-stream-claude"
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
@@ -144,11 +152,20 @@ const CHANNEL_INSTRUCTIONS =
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const encoder = new TextEncoder()
+const decoder = new TextDecoder()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** How often the handoff file is checked for a `/clear`. */
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
 const HANDOFF_FLUSH_TIMEOUT_MS = 10_000
+
+/** How long the live view waits for the mod to answer one of its reads (`$.session.model()`,
+ *  `$.config.list()`, `$.command.list()`). Each is served out of the session's own memory, so a
+ *  wait this long means the mod is gone rather than busy, and the header keeps its last values. */
+const AGENT_STREAM_CALL_TIMEOUT_MS = 5_000
+/** How long the live view waits before taking its control subject again after the subscription's
+ *  iterator ended, which is what a dropped connection looks like from here. */
+const AGENT_STREAM_RESUBSCRIBE_MS = 1_000
 
 /** `promise`, or a rejection naming `what` once `ms` pass. */
 async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -1660,6 +1677,229 @@ function pluginStateDirectory(): string {
   return pluginData
 }
 
+export interface AgentStreamOptions {
+  /** The link to this session's Claude Code mod (`./mod-link`): its events are the conversation,
+   *  and its `$` calls are what the header's two frames are built from. */
+  readonly link: ModLink
+  /** The session's own NATS connection: the frames go out on it, and the control subject is
+   *  taken on it. The session's NATS user may already publish and subscribe to both. */
+  readonly connection: ChannelForwarderConnection
+  /** The session id the Agents page knows this session by, which both subjects name. */
+  readonly sessionID: string
+  /**
+   * Whether the stream follows the session id the mod reports. Claude Code mints a new one on
+   * `/clear` and the channel rebinds to it (`adoptHandoff`), so the two are the same id; under
+   * the `ENVOY_SESSION_ID` override the session registers a fixed id of its own and the Claude
+   * id names nothing Dispatch knows, so the stream stays where it started.
+   */
+  readonly followsSessionId: boolean
+  readonly now?: () => number
+  /** Where a failure that must not stop the session is written; the server's stderr by default. */
+  readonly warn?: (text: string) => void
+}
+
+export interface AgentStreamRunner {
+  /** Stop answering the control subject. The mod's events end with the link itself. */
+  readonly stop: () => void
+}
+
+/**
+ * Publish this session's conversation for the Agents page's live view (INFRA-1026).
+ *
+ * The mod's events become messages on the shared publisher (`./agent-stream-claude`), and this
+ * answers the viewer's control subject the way every Oh My Pi session does (`packages/pi-envoy`,
+ * `pumpAgentStreamControl`): a message that is neither `replay` nor `watch` is ignored, the
+ * replay answer is taken before the message arms anything, so a bare replay from a client that
+ * never attached a viewer gets an empty history, and every message runs inside a guard, since
+ * one throw out of the iterator would leave the session deaf until the resubscribe.
+ *
+ * What differs from an Oh My Pi session is where the header's values come from. That host reads
+ * its model, its levels and its commands out of its own memory; here they are three calls on the
+ * mod, over a socket, which a session with no mod never answers. So a refresh is asked for and
+ * not waited on: a control message is answered from what the mod said last, and a changed answer
+ * reaches the viewer as its own frame a moment later. A session whose mod never connects
+ * publishes no settings and no commands, and its conversation stays empty.
+ */
+export function startAgentStream(options: AgentStreamOptions): AgentStreamRunner {
+  const { connection, link } = options
+  const now = options.now ?? Date.now
+  const warn =
+    options.warn ?? ((text: string): void => void process.stderr.write(`envoy-channel: ${text}\n`))
+  const publisher = new AgentStreamPublisher({
+    now,
+    publish: (subject, payload) => connection.publish(subject, encoder.encode(payload)),
+  })
+  const stream = createClaudeAgentStream({ now, publisher })
+  /** The id both subjects name now; it moves with the mod's own id after a `/clear`. */
+  let session = options.sessionID
+  let subscription: ChannelTopicSubscription | undefined
+  let stopped = false
+  /** What the mod last said of the session's model, its `/config` rows and its commands. They
+   *  survive a session id change: the process and its model do not change with the id. */
+  let model: string | undefined
+  let configRows: readonly ModConfigRow[] | undefined
+  let listedCommands: readonly AgentStreamCommand[] | undefined
+  let readingSettings = false
+  let readingCommands = false
+  /** Whether a viewer has ever armed this session, and when a watch last refreshed the commands:
+   *  both as the Oh My Pi pump keeps them. */
+  let viewerAttached = false
+  let commandsRefreshedOnWatchAt = Number.NEGATIVE_INFINITY
+  /** Whether the mod has said anything at all, which is when its reads are first worth making. */
+  let primed = false
+
+  const framesSubject = (): string => agentStreamFramesSubject(session)
+
+  const publishSettings = (): void => {
+    publisher.setSettings(framesSubject(), stream.settings(model, configRows))
+  }
+
+  const publishCommands = (): void => {
+    if (listedCommands !== undefined) publisher.setCommands(framesSubject(), listedCommands)
+  }
+
+  /** Read the session's model and its `/config` rows, and publish what they say. One read at a
+   *  time: a watch arrives every ten seconds and the answers rarely change. */
+  const refreshSettings = (): void => {
+    if (stopped || readingSettings || !link.connected()) return
+    readingSettings = true
+    void Promise.all([
+      link.request("session.model", undefined, { timeoutMs: AGENT_STREAM_CALL_TIMEOUT_MS }),
+      link.request("config.list", undefined, { timeoutMs: AGENT_STREAM_CALL_TIMEOUT_MS }),
+    ])
+      .then(([answeredModel, rows]) => {
+        model = answeredModel
+        configRows = rows
+        if (!stopped) publishSettings()
+      })
+      .catch((error: unknown) => {
+        warn(`the live view could not read this session's model — ${messageFor(error)}`)
+      })
+      .finally(() => {
+        readingSettings = false
+      })
+  }
+
+  const refreshCommands = (): void => {
+    if (stopped || readingCommands || !link.connected()) return
+    readingCommands = true
+    void link
+      .request("command.list", undefined, { timeoutMs: AGENT_STREAM_CALL_TIMEOUT_MS })
+      .then((commands) => {
+        listedCommands = claudeAgentStreamCommands(commands)
+        if (!stopped) publishCommands()
+      })
+      .catch((error: unknown) => {
+        warn(`the live view could not read this session's commands — ${messageFor(error)}`)
+      })
+      .finally(() => {
+        readingCommands = false
+      })
+  }
+
+  const pump = async (taken: ChannelTopicSubscription, forSession: string): Promise<void> => {
+    try {
+      for await (const message of taken) {
+        // Any client on the bus can publish here. A `null` payload parses cleanly and then
+        // throws on `.type`, and a reply over the server's max_payload throws out of the
+        // publish; either would end the iterator and take the session deaf with it.
+        try {
+          const parsed: unknown = JSON.parse(decoder.decode(message.data))
+          if (typeof parsed !== "object" || parsed === null) continue
+          const request = parsed as AgentStreamControlMessage
+          if (request.type !== "replay" && request.type !== "watch") continue
+          refreshSettings()
+          if (
+            request.type === "replay" ||
+            !viewerAttached ||
+            now() - commandsRefreshedOnWatchAt >= AGENT_STREAM_WATCH_INTERVAL_MS
+          ) {
+            refreshCommands()
+            if (request.type === "watch" && viewerAttached) commandsRefreshedOnWatchAt = now()
+          }
+          // Taken before this message arms anything, so a bare replay from a client that never
+          // attached a viewer gets an empty history rather than the ring.
+          const reply = message.reply
+          const answer =
+            request.type === "replay" && reply !== undefined
+              ? JSON.stringify(publisher.replay(forSession))
+              : undefined
+          const arming = !publisher.watched
+          publisher.noteViewer()
+          viewerAttached = true
+          if (arming) publisher.publishState(agentStreamFramesSubject(forSession))
+          if (answer === undefined || reply === undefined) continue
+          connection.publish(reply, encoder.encode(answer))
+        } catch (error) {
+          warn(`a live view control message failed — ${messageFor(error)}`)
+        }
+      }
+    } catch {
+      // A dead iterator is a dropped connection, taken again below.
+    }
+    if (subscription === taken) subscription = undefined
+    if (stopped || session !== forSession) return
+    const retry = setTimeout(() => {
+      if (stopped || session !== forSession) return
+      subscribe()
+    }, AGENT_STREAM_RESUBSCRIBE_MS)
+    retry.unref()
+  }
+
+  function subscribe(): void {
+    if (stopped) return
+    subscription?.unsubscribe()
+    const taken = connection.subscribe(agentStreamControlSubject(session))
+    subscription = taken
+    void pump(taken, session)
+  }
+
+  // A `/clear` ends the conversation and the process goes on under a new id: the ring holds the
+  // previous one, and a viewer opening the new id must not be served it.
+  link.onSessionId((next: string) => {
+    if (stopped || !options.followsSessionId || next === session) return
+    session = next
+    publisher.reset()
+    stream.reset()
+    viewerAttached = false
+    commandsRefreshedOnWatchAt = Number.NEGATIVE_INFINITY
+    // `reset` dropped the two header frames with the conversation; what the mod already said
+    // still holds, so they are put back under the new id rather than read again.
+    publishSettings()
+    publishCommands()
+    subscribe()
+  })
+
+  const reading = (async (): Promise<void> => {
+    for await (const event of link.events) {
+      if (!primed) {
+        primed = true
+        refreshSettings()
+        refreshCommands()
+      }
+      if (event.kind === "model") model = event.model
+      stream.record(framesSubject(), event)
+      // A step is the one event that can change the thinking level, and the model event is the
+      // mod's own report of a model change: neither is worth a read of the mod to notice.
+      if (event.kind === "step" || event.kind === "model") publishSettings()
+    }
+  })()
+  void reading.catch((error: unknown) => {
+    warn(`the live view stopped reading this session's events — ${messageFor(error)}`)
+  })
+
+  subscribe()
+
+  return {
+    stop(): void {
+      if (stopped) return
+      stopped = true
+      subscription?.unsubscribe()
+      subscription = undefined
+    },
+  }
+}
+
 /** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json. With
  * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and inbound messages
  * off (`inbound.off`: no NATS server, or its seed refused), it serves the tools, which call the
@@ -1878,8 +2118,12 @@ export async function runEnvoyChannelServer(): Promise<void> {
   let stopping = false
   let session: ChannelSession | undefined
   // INFRA-1026: the link to this session's Claude Code mod, bound below once the MCP transport is
-  // up. It is this process's own socket, closed with the server.
+  // up. It is this process's own socket, closed with the server. `linked` resolves with it for
+  // the live view, which also needs the NATS connection this function opens further down.
   let modLink: ModLink | undefined
+  const linked = Promise.withResolvers<ModLink>()
+  // The Agents page's live view of this session, once both the link and the connection are up.
+  let agentStream: AgentStreamRunner | undefined
   const stop = (): void => {
     if (stopping) return
     stopping = true
@@ -1887,6 +2131,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     // A reminder waiting on a 15-minute WAITING wait holds no shutting-down server open.
     phaseHook?.stop()
     void modLink?.close().catch(() => undefined)
+    agentStream?.stop()
     if (session === undefined) {
       stopped.resolve()
       return
@@ -1915,6 +2160,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
       modLink = link
       // The server was already stopping when the bind finished: nothing will read this link.
       if (stopping) void link.close().catch(() => undefined)
+      else linked.resolve(link)
     },
     (error: unknown) => {
       process.stderr.write(
@@ -1958,6 +2204,20 @@ export async function runEnvoyChannelServer(): Promise<void> {
         ...(stamping ? { stampTitle } : {}),
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
+      })
+      // INFRA-1026: the Agents page's live view, once this session's mod has a link to bind to.
+      // It needs the bus as well as the link, so it starts here rather than beside the bind; a
+      // session whose link never binds never starts one, and runs as it did before.
+      const bus = connection
+      void linked.promise.then((link) => {
+        if (stopping) return
+        agentStream = startAgentStream({
+          connection: bus,
+          // Only a Claude-minted id follows `/clear`; the override names a fixed identity.
+          followsSessionId: configuredValue(overrideSessionId) === undefined,
+          link,
+          sessionID: identity.id,
+        })
       })
     }
     runtime = { identity, client, session }
