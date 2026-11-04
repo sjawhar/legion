@@ -15,6 +15,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -78,8 +79,10 @@ type liveSocket struct {
 	// resolves. Each events or agent subscription runs on a context derived from it.
 	ctx    context.Context
 	cancel context.CancelFunc
-	// human is whether the caller is a person, signed in by cookie, rather than a bearer.
-	human bool
+	// credential is the caller's credential as the upgrade resolved it, which is where every
+	// socket's authorization is decided: a frame carries no credential of its own, so a view the
+	// socket serves reads what the caller proved when it opened (holds).
+	credential *model.Credential
 	// queue holds the hub's frames and the socket's own refusals (Send).
 	queue chan any
 	// stream holds the frames of the events and agent subscriptions (SendWait).
@@ -113,20 +116,26 @@ type liveSocket struct {
 	beforePick func(socket *liveSocket, takesStream bool)
 }
 
-func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool) *liveSocket {
+func newLiveSocket(ctx context.Context, conn *gws.Conn, credential *model.Credential) *liveSocket {
 	ctx, cancel := context.WithCancel(ctx)
 	return &liveSocket{
-		conn:   conn,
-		ctx:    ctx,
-		cancel: cancel,
-		human:  human,
-		queue:  make(chan any, liveSocketQueue),
-		stream: make(chan liveStreamFrame, liveSocketStream),
-		full:   make(chan struct{}),
-		shut:   make(chan struct{}),
-		closed: make(chan struct{}),
-		subs:   map[string]*liveSub{},
+		conn:       conn,
+		ctx:        ctx,
+		cancel:     cancel,
+		credential: credential,
+		queue:      make(chan any, liveSocketQueue),
+		stream:     make(chan liveStreamFrame, liveSocketStream),
+		full:       make(chan struct{}),
+		shut:       make(chan struct{}),
+		closed:     make(chan struct{}),
+		subs:       map[string]*liveSub{},
 	}
+}
+
+// holds reports whether the caller's credential holds scope: the socket's own test of what the
+// caller may watch, which is model.Credential.Holds over the credential the upgrade kept.
+func (socket *liveSocket) holds(scope string) bool {
+	return socket.credential.Holds(scope)
 }
 
 // liveSocketAge is how long a socket opening now lives: Deps.LiveSocketAge's, or
@@ -312,11 +321,13 @@ func (socket *liveSocket) writeFrame(frame any) bool {
 	return true
 }
 
-// serveLiveSocket serves GET /ws/live to a signed-in person or an agent's bearer, recording which
-// it is. The upgrade keeps gorilla's same-origin check, so another site's page cannot open the
-// socket with a person's cookie.
+// serveLiveSocket serves GET /ws/live to a signed-in person or an agent's bearer, keeping what
+// that caller's credential may do: a frame carries no credential, so the credential the caller
+// proved here is what each of its views is answered against (liveSocket.credential). The upgrade
+// keeps gorilla's same-origin check, so another site's page cannot open the socket with a
+// person's cookie.
 func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
-	_, human, err := s.optionalActor(r)
+	actor, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return
@@ -327,7 +338,7 @@ func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 		return // the upgrader has answered the request
 	}
 	age := s.liveSocketAge()
-	socket := newLiveSocket(r.Context(), conn, human)
+	socket := newLiveSocket(r.Context(), conn, actor.Credential)
 	socket.beforePick = s.liveWriterBeforePick
 	s.liveSockets.add(socket)
 	defer s.liveSockets.remove(socket)

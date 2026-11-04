@@ -512,6 +512,14 @@ func answerers(blocks map[string]model.Ask) []string {
 // its row has it holds nothing new of his and carries nothing; and a block A did not hold, back
 // with an answer he gave before his approval, is his but no action of his since, so it carries
 // nothing either.
+//
+// Each of those answers of his must also have been one he could have approved with: made at a
+// browser, where he himself acted (no act), or by an agent of his under a credential holding the
+// approve scope (model.ScopeApprove). An approval is his to settle, and a credential he narrowed
+// to the person scope alone cannot settle what he settles; without this test an agent that may
+// not approve could carry an approval of his simply by answering a block, which is the one thing
+// the narrowing was meant to stop. The scopes read are the act's own, written when the answer
+// was made, so narrowing a token now cannot un-approve what it approved then.
 func carryVerdict(input carryInput) bool {
 	if input.approvedCut != input.cut {
 		return false
@@ -522,6 +530,9 @@ func carryVerdict(input carryInput) bool {
 			continue
 		}
 		if block.State != "answered" || block.Answer == nil || model.CanonicalLogin(block.Answer.User) != input.login || !block.Answer.At.After(input.approvedAt) {
+			return false
+		}
+		if !block.Answer.Act.Holds(model.ScopeApprove) {
 			return false
 		}
 		changed = true

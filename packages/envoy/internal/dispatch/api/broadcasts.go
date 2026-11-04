@@ -37,7 +37,7 @@ import (
 // the same capability list, and the response covers the race where a session's capabilities
 // or liveness changed in between. What persists is who was actually sent to.
 //
-// Broadcasting is human-only, like the one-session route it is built from.
+// Broadcasting needs the person scope (routeScopes), like the one-session route it is built from.
 
 // broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
 // request has already answered. Each worker takes a tracking context of its own
@@ -127,7 +127,7 @@ type broadcastTarget struct {
 // a retry of a send that landed owes nothing to the registry and must not fail because the
 // listener is down.
 func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -576,7 +576,7 @@ func (s *server) sendOwedBroadcastRecipients(ctx context.Context, read broadcast
 
 // GET /api/v1/broadcasts
 func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -623,7 +623,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/broadcasts/{id}
 func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	id := r.PathValue("id")

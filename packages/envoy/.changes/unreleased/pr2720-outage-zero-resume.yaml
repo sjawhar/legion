@@ -1,6 +1,0 @@
-kind: Fixed
-body: |-
-  A consumer-delivery registration whose `resume` names the stream's current `envoy_stream_id` at `seq` 0 now creates the session's consumer at sequence 1. Before, the listener ignored a `seq` of 0 and created the consumer at the stream's end, so a session with a cursor at 0, which has handled nothing of the stream, lost every message stored for it before it registered, such as those stored while its NATS connection was down. A `resume` without `seq` still starts the consumer at the stream's end.
-time: 2026-11-03T13:30:46.539461951Z
-custom:
-    Issue: pr2720

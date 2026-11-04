@@ -37,7 +37,7 @@ Extends docs/solutions/envoy/a-forward-to-a-captured-subject-is-stored-and-retri
 
 - `packages/envoy/cmd/listener/role_lane.go:77` (`roleForward.msgID`), written at the merge
   `e1639b5b` of main's #2446 into this pull request (diff check
-  https://github.com/sjawhar/legion/pull/2395#issuecomment-6562838986). Main's role lane named
+  https://github.com/cybermonklabs/legion/pull/2395#issuecomment-6562838986). Main's role lane named
   every forward by its dedupe key; this pull request's named a forward only when its key named
   its event, and otherwise sent none.
 - Main's `TestRoleLaneRefusedSharedQueueFallsBackToMachineGroupsAndStoresOneCopy`

@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
-import type { AgentToken } from "../../api/types";
+import type { AgentToken, DispatchScope } from "../../api/types";
 import { AgentTokensSection } from "./AgentTokensSection";
 
 const token: AgentToken = {
@@ -13,6 +13,7 @@ const token: AgentToken = {
   name: "architect",
   prefix: "AbCdEf12",
   revoked_at: null,
+  scopes: ["person", "approve"],
 };
 
 test("Settings exposes a new personal token once, copies it, and revokes an existing token", async () => {
@@ -122,6 +123,104 @@ test("Settings copies a new token through the legacy clipboard fallback", async 
   }
 });
 
+/** The box labelled `label` for `subject`, as a checkbox the test can read and click. */
+function box(label: string, subject: string): HTMLInputElement {
+  return screen.getByRole("checkbox", { name: `${label} (${subject})` }) as HTMLInputElement;
+}
+
+// A token's two scopes are what it may do: act as its person, and settle what its person
+// settles. The row shows the set the token holds and writes back the whole set, since the PATCH
+// replaces it rather than adding to it; no token holds Approve without Act as you, so each box
+// carries the other where the server would refuse the pair.
+test("a token's row shows the scopes it holds, and each change sends the whole set", async () => {
+  const personOnly: AgentToken = { ...token, scopes: ["person"] };
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([personOnly]);
+  const setAgentTokenScopes = spyOn(api, "setAgentTokenScopes").mockImplementation(
+    async (id: string, scopes: DispatchScope[]) => ({ ...personOnly, id, scopes })
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTokensSection />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole("cell", { name: "dsp_AbCdEf12…" });
+    expect(box("Act as you", "architect").checked).toBe(true);
+    expect(box("Approve and control credentials", "architect").checked).toBe(false);
+
+    fireEvent.click(box("Approve and control credentials", "architect"));
+    await waitFor(() =>
+      expect(setAgentTokenScopes).toHaveBeenCalledWith(
+        personOnly.id,
+        ["person", "approve"],
+        keyedAttempt
+      )
+    );
+    await waitFor(() =>
+      expect(box("Approve and control credentials", "architect").checked).toBe(true)
+    );
+    expect(box("Act as you", "architect").checked).toBe(true);
+
+    fireEvent.click(box("Act as you", "architect"));
+    await waitFor(() =>
+      expect(setAgentTokenScopes).toHaveBeenLastCalledWith(personOnly.id, [], keyedAttempt)
+    );
+    await waitFor(() => expect(box("Act as you", "architect").checked).toBe(false));
+    expect(box("Approve and control credentials", "architect").checked).toBe(false);
+  } finally {
+    cleanup();
+    queryClient.clear();
+    listAgentTokens.mockRestore();
+    setAgentTokenScopes.mockRestore();
+  }
+});
+
+// A new token holds both scopes unless the reader clears one, and the mint sends the set the
+// boxes hold.
+test("the mint form starts with both scopes and sends the set the reader chose", async () => {
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const createAgentToken = spyOn(api, "createAgentToken").mockResolvedValue({
+    ...token,
+    id: "22222222-2222-2222-2222-222222222222",
+    name: "reviewer",
+    scopes: ["person"],
+    token: "dsp_abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFG",
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTokensSection />
+      </QueryClientProvider>
+    );
+
+    expect(box("Act as you", "new token").checked).toBe(true);
+    expect(box("Approve and control credentials", "new token").checked).toBe(true);
+
+    fireEvent.click(box("Approve and control credentials", "new token"));
+    expect(box("Approve and control credentials", "new token").checked).toBe(false);
+    expect(box("Act as you", "new token").checked).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Token label"), { target: { value: "reviewer" } });
+    fireEvent.click(screen.getByRole("button", { name: "New token" }));
+    await waitFor(() =>
+      expect(createAgentToken).toHaveBeenCalledWith(
+        { name: "reviewer", scopes: ["person"] },
+        keyedAttempt
+      )
+    );
+  } finally {
+    cleanup();
+    queryClient.clear();
+    listAgentTokens.mockRestore();
+    createAgentToken.mockRestore();
+  }
+});
+
 /** A live token labelled `name`, made `offsetMs` from now: after a press when positive, before
  *  it when negative. */
 function madeAt(id: string, name: string, offsetMs: number): AgentToken {
@@ -211,7 +310,11 @@ test("a mint answered KEY_COMMITTED offers the one token made since the press, c
     fireEvent.click(replace);
     await waitFor(() => expect(page.revokeAgentToken).toHaveBeenCalledWith(lost.id, keyedAttempt));
     await waitFor(() => expect(page.createAgentToken).toHaveBeenCalledTimes(2));
-    expect(page.createAgentToken.mock.calls[1]?.[0]).toEqual({ name: "reviewer" });
+    // The replacement holds what the lost token held.
+    expect(page.createAgentToken.mock.calls[1]?.[0]).toEqual({
+      name: "reviewer",
+      scopes: ["person", "approve"],
+    });
     expect(await screen.findByText("dsp_replacement")).toBeDefined();
     expect(screen.queryByTestId("landed-without-answer")).toBeNull();
     expect(page.revokeAgentToken).toHaveBeenCalledTimes(1);

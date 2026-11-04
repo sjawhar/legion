@@ -87,14 +87,14 @@ with `set -eu`, so a failed download or checksum stops them before anything is i
 
 ```sh
 asset=${asset:-agent-secrets-amd64.tar.gz}
-tag=legion-envoy-$(curl -fsSL 'https://github.com/sjawhar/legion.git/info/refs?service=git-upload-pack' \
+tag=legion-envoy-$(curl -fsSL 'https://github.com/cybermonklabs/legion.git/info/refs?service=git-upload-pack' \
   | grep -aoE 'refs/tags/legion-envoy-v[0-9]+\.[0-9]+\.[0-9]+([^-0-9]|$)' | grep -aoE 'v[0-9.]+[0-9]' \
   | sort -u -t . -k 1.2,1n -k 2,2n -k 3,3n | tail -n 1)
 (
   set -eu
   test "$tag" != legion-envoy-
   echo "installing $tag"
-  base=https://github.com/sjawhar/legion/releases/download/$tag
+  base=https://github.com/cybermonklabs/legion/releases/download/$tag
   curl -fsSLO "$base/$asset"
   curl -fsSLO "$base/SHA256SUMS"
   grep " $asset\$" SHA256SUMS > "$asset.sha256"
@@ -116,10 +116,10 @@ workflow on `main` built the archive from the commit the tag names, run, in the 
 the GitHub CLI signed in:
 
 ```sh
-commit=$(gh api "repos/sjawhar/legion/commits/$tag" --jq .sha) &&
+commit=$(gh api "repos/cybermonklabs/legion/commits/$tag" --jq .sha) &&
   test -n "$commit" &&
-  gh attestation verify "$asset" --repo sjawhar/legion \
-    --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  gh attestation verify "$asset" --repo cybermonklabs/legion \
+    --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
     --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
 ```
 
@@ -158,7 +158,7 @@ agent-secrets register --wait 10 --exec -- <agent command>
 
 A Kubernetes pod or a Google Cloud VM does not use the helper or a person's approval: the Legion
 daemon enrolls its pods with their service-account tokens, and a VM enrolls itself (above). The
-docs site's [Log a machine in](https://sjawhar.github.io/legion/broker/guides/log-a-machine-in/)
+docs site's [Log a machine in](https://cybermonklabs.github.io/legion/broker/guides/log-a-machine-in/)
 guide covers each step in full.
 
 ## Common commands
@@ -170,7 +170,7 @@ Your own `tier=human` secret always goes to you for approval. A `shared` agent-t
 granted at once; a `shared` human-tier one waits for anyone who signs in to the broker. A
 service's secret goes only to that service's pods and VMs. Approvals happen on the broker's
 approval page, which the approver's Dispatch Inbox links to. The docs site's
-[Concepts](https://sjawhar.github.io/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) page has the full
+[Concepts](https://cybermonklabs.github.io/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) page has the full
 table.
 
 ```sh

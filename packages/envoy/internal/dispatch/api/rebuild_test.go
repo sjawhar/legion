@@ -18,8 +18,9 @@ import (
 )
 
 // A rebuild is only for a history ygo cannot load. A healthy, idle document can carry updates
-// newer than its latest version, so the human-only route refuses it without deleting any history.
-func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.T) {
+// newer than its latest version, so the route refuses it without deleting any history. The route
+// needs the person scope, which the deployment's shared token does not hold.
+func TestRebuildArtifactRouteNeedsThePersonScopeAndRefusesADocumentThatLoads(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
@@ -45,8 +46,8 @@ func TestRebuildArtifactRouteIsHumanOnlyAndRefusesADocumentThatLoads(t *testing.
 
 	path := "/api/v1/artifacts/" + artifact.ID + "/rebuild"
 	bearer := sessionRequest(t, handler, http.MethodPost, path, map[string]any{"actor": sessionActor()})
-	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer rebuild: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
+	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's rebuild: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
 	}
 	human := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{}, "alice")
 	if human.Code != http.StatusConflict || !strings.Contains(human.Body.String(), `"code":"DOCUMENT_LOADS"`) || !strings.Contains(human.Body.String(), "latest saved version ") || !strings.Contains(human.Body.String(), "Stop. Ask a person what to do with this document") || strings.Contains(human.Body.String(), "either") || strings.Contains(human.Body.String(), "replace") {

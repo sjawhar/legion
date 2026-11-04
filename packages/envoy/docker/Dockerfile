@@ -6,8 +6,8 @@
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. The web stage runs the copy of that Bun, named by digest;
 # .github/scripts/check-bun-version.sh holds that row's upstream tag to .bun-version.
-# ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
+# ghcr.io/cybermonklabs/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
 
 WORKDIR /repo
 
@@ -54,8 +54,8 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-# ghcr.io/sjawhar/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
+# ghcr.io/cybermonklabs/legion/ci, the copy of golang:1.27.1-alpine (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS build
 
 WORKDIR /src
 
@@ -115,10 +115,10 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
-# ghcr.io/sjawhar/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
-FROM ghcr.io/sjawhar/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+# ghcr.io/cybermonklabs/legion/ci, the copy of debian:bookworm-slim (.github/ci-images.yaml)
+FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
-LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
+LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -r envoy && useradd -r -g envoy envoy \
