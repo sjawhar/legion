@@ -204,7 +204,8 @@ export interface CarriedAnswers {
 }
 
 /** Where a session's list sits: right after the message (`messageKey`) that was the last of the
- *  request that first showed what it shows, and what it carried last. */
+ *  request that first showed what it shows, and the bytes it was placed with, which every later
+ *  request that keeps the place sends again. */
 interface Placement {
   readonly after: string;
   readonly carried: CarriedAnswers;
@@ -235,12 +236,18 @@ function showsNew(shown: CarriedAnswers, next: CarriedAnswers): boolean {
  * last list did not goes after the last message, where the model reads it as what arrived last,
  * and the session's list stays right after that message on every later request while it shows
  * nothing new: the model reads it as part of the conversation, and its bytes sit at the same place
- * in each request, so the cached prefix of each request runs through it. A session with no list
- * placed yet, or whose list's message left the conversation (a compaction summarized it), gets it
- * after the last message again. While a compaction may be converting the conversation
- * (`compacting`) the list goes after the last message and places nothing: a remote compaction
- * keeps only as many messages of its whole conversion as its cut's conversion holds, so a list
- * before the cut would push one out.
+ * in each request, so the cached prefix of each request runs through it. A list that keeps its
+ * place keeps the bytes it was placed with, not the text this request's read gave: the text holds
+ * what the read itself did (`As read at …; this read failed: …`), which changes from one request
+ * to the next on a loaded machine, and a changed byte inside the conversation costs the whole
+ * request behind it a prompt-cache miss. So a kept list can name a read older than this request's
+ * and can hold an item that has since aged out of the window; the next item a person writes
+ * re-renders the whole list after the last message. A session with no list placed yet, or whose
+ * list's message left the conversation (a compaction summarized it), gets it after the last
+ * message again. While a compaction may be converting the conversation (`compacting`) the list
+ * goes after the last message and places nothing: a remote compaction keeps only as many messages
+ * of its whole conversion as its cut's conversion holds, so a list before the cut would push one
+ * out.
  */
 function placeList(
   messages: readonly unknown[],
@@ -248,20 +255,22 @@ function placeList(
   request: SessionAnswersRequest,
   compacting: boolean
 ): unknown[] {
-  const list = userTextMessage(carried.text);
-  if (compacting) return [...messages, list];
+  if (compacting) return [...messages, userTextMessage(carried.text)];
   const sessions = placements.get(request.session) ?? new Map<string, Placement>();
   placements.set(request.session, sessions);
   const placed = sessions.get(request.id);
   if (placed !== undefined && !showsNew(placed.carried, carried)) {
     const index = messages.findLastIndex((message) => messageKey(message) === placed.after);
     if (index >= 0) {
-      sessions.set(request.id, { after: placed.after, carried });
-      return [...messages.slice(0, index + 1), list, ...messages.slice(index + 1)];
+      return [
+        ...messages.slice(0, index + 1),
+        userTextMessage(placed.carried.text),
+        ...messages.slice(index + 1),
+      ];
     }
   }
   sessions.set(request.id, { after: messageKey(messages.at(-1)), carried });
-  return [...messages, list];
+  return [...messages, userTextMessage(carried.text)];
 }
 
 export interface SessionAnswersRequest {
