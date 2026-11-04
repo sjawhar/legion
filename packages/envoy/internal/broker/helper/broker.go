@@ -1116,7 +1116,10 @@ func (b *Broker) logger() *slog.Logger {
 // Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
 // credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	return b.enroll(ctx, s.RuntimeID, s.Thumbprint, nil, "host")
+	// One reading: the runtime id and the thumbprint must be the same generation's, or the
+	// broker is asked to enrol one identity's key under another's name.
+	id := s.identity()
+	return b.enroll(ctx, id.RuntimeID, id.Thumbprint, nil, "host")
 }
 
 // EnrollSessionKey registers a key the helper does not hold, one a launcher enrolls for a session
@@ -1178,9 +1181,12 @@ func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint strin
 // Renew extends the lease with a proof signed by the session key. Unchanged: it always
 // authenticates with the session's own key, never the launcher credential.
 func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
-	id := s.EnrollmentID()
+	// One reading: the enrollment id and the key that signs for it must be the same
+	// generation's, or the proof names an enrollment the key does not hold.
+	cur := s.identity()
+	id := cur.EnrollmentID
 	url := b.URL + "/v1/enrollments/" + id + "/renew"
-	compact, err := proof.Sign(s.Key, id, http.MethodPost, url, time.Now())
+	compact, err := proof.Sign(cur.Key, id, http.MethodPost, url, time.Now())
 	if err != nil {
 		return time.Time{}, err
 	}

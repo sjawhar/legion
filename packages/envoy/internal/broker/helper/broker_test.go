@@ -813,7 +813,7 @@ func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	posts, _, _ := f.snapshot()
 	post := posts[0]
 	if post["kind"] != "session" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
-		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
+		post["thumbprint"] != sess.identity().Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)
 	}

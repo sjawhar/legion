@@ -16,6 +16,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/leasetime"
@@ -36,6 +37,11 @@ type Server struct {
 	// cmd/agent-secrets-helper sets leasetime.HelperMinRenew, the wait the broker's lease bound
 	// counts this renewer by, and a test sets a shorter one to drive the loop in real time.
 	MinRenew time.Duration
+	// dormantGraceNS is DefaultDormantGrace unless SetDormantGrace names another: how long a
+	// named session's identity is kept for it to come back to before SweepDormant revokes it.
+	// Atomic, because a test sets it while the Server's own goroutines (retire, Recover's log
+	// line) read it — a plain field there is a data race, and `go test -race` caught it.
+	dormantGraceNS atomic.Int64
 }
 
 // Serve accepts until ctx ends. Each connection carries one request.
@@ -223,9 +229,9 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, sessionID st
 	s.save()
 	s.adopt(ctx, sess)
 	if taken {
-		s.Log.Info("session registered, taking back the identity it had before", "pid", pid, "runtime_id", sess.RuntimeID, "session_id", sessionID)
+		s.Log.Info("session registered, taking back the identity it had before", "pid", pid, "runtime_id", sess.RuntimeID(), "session_id", sessionID)
 	} else {
-		s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID)
+		s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID())
 	}
 	return s.registerReply(sess, wait)
 }
@@ -262,11 +268,12 @@ func (s *Server) reclaimDormant(sessionID string) (runtimeID string, key *ecdsa.
 // costs nothing. A session that already has a DIFFERENT id is refused: an identity a session is
 // signing with is not another caller's to change.
 func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID string) (Response, bool) {
-	if sessionID == "" || sess.SessionID == sessionID {
+	cur := sess.identity()
+	if sessionID == "" || cur.SessionID == sessionID {
 		return Response{}, false
 	}
-	if sess.SessionID != "" {
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("this process is in session %s, which cannot become session %s", sess.SessionID, sessionID)}, true
+	if cur.SessionID != "" {
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("this process is in session %s, which cannot become session %s", cur.SessionID, sessionID)}, true
 	}
 	if held := s.Registry.LiveSessionID(sessionID); held != nil {
 		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session %s is already registered as pid %d; a second process may not take its broker identity", sessionID, held.PID)}, true
@@ -276,7 +283,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 		return Response{}, false
 	}
 	s.save()
-	s.Log.Info("session named by its launcher; enrolling it under that name", "pid", sess.PID, "runtime_id", sess.RuntimeID, "session_id", sessionID)
+	s.Log.Info("session named by its launcher; enrolling it under that name", "pid", sess.PID, "runtime_id", sess.RuntimeID(), "session_id", sessionID)
 	return Response{}, false
 }
 
@@ -303,7 +310,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		}
 	}
 	st := sess.snapshot()
-	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
+	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID(), Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
 	if resp.EnrollmentID == "" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -359,16 +366,19 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	if !ok {
 		return resp
 	}
+	// One reading: the key that signs must be the key of the enrollment the proof names, even
+	// if a rename lands between the two.
+	cur := sess.identity()
 	st := sess.snapshot()
-	id := st.EnrollmentID
-	if id == "" {
+	id := cur.EnrollmentID
+	if id == "" || st.EnrollmentID != id {
 		return s.notEnrolled(st)
 	}
-	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
+	compact, err := proof.Sign(cur.Key, id, method, url, time.Now())
 	if err != nil {
 		return Response{Code: CodeSign, Error: err.Error()}
 	}
-	return Response{OK: true, Proof: compact, EnrollmentID: id, RuntimeID: sess.RuntimeID}
+	return Response{OK: true, Proof: compact, EnrollmentID: id, RuntimeID: cur.RuntimeID}
 }
 
 // signRequest builds and signs a credential-request object naming one agent_secret
@@ -394,7 +404,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string,
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now())
+	compact, err := record.Sign(sess.identity().Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now())
 	if err != nil {
 		return Response{Code: CodeSign, Error: err.Error()}
 	}
@@ -494,7 +504,7 @@ func (s *Server) unregister(ctx context.Context, peer *Peer, pid int) Response {
 		return resp
 	}
 	s.retire(ctx, sess, "unregistered")
-	return Response{OK: true, RuntimeID: sess.RuntimeID}
+	return Response{OK: true, RuntimeID: sess.RuntimeID()}
 }
 
 func (s *Server) sessions() Response {
@@ -666,15 +676,19 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		}
 		var id string
 		var lease time.Time
+		// The generation this attempt belongs to, read before it starts: a rename landing while
+		// the broker call is in flight makes the answer the OLD identity's, which this session
+		// must not take (setEnrolledAt).
+		generation := sess.identity().Generation
 		// A login wakes the retry, so a session registered before it enrolls within about a second
 		// rather than when a backoff of up to a minute comes round.
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
 			if s.lacksCredential(err) {
-				s.Log.Error(cannotEnrollMsg, "runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
+				s.Log.Error(cannotEnrollMsg, "runtime_id", sess.RuntimeID(), "why", s.Broker.noCredentialReason(), "in", delay)
 				return
 			}
-			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)
+			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID(), "error", err, "in", delay)
 		}, func() error {
 			var err error
 			id, lease, err = s.Broker.Enroll(ctx, sess)
@@ -683,9 +697,17 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		if !enrolled {
 			return
 		}
-		sess.setEnrolled(id)
+		if !sess.setEnrolledAt(id, generation) {
+			// A rename landed while this enroll was in flight. The id belongs to the name this
+			// session no longer has; the next pass revokes it as the lapsed one and enrols
+			// under the new name.
+			s.Log.Info("an enrollment arrived for a name this session no longer has; enrolling again under its new one",
+				"runtime_id", sess.RuntimeID(), "enrollment_id", id)
+			sess.setLapsed(id)
+			continue
+		}
 		s.save()
-		s.Log.Info("session enrolled", "runtime_id", sess.RuntimeID, "enrollment_id", id)
+		s.Log.Info("session enrolled", "runtime_id", sess.RuntimeID(), "enrollment_id", id)
 		if !s.renewLoop(ctx, sess, lease) {
 			return
 		}
@@ -702,6 +724,10 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		interval := leasetime.HelperRenewAfter(time.Until(lease), s.MinRenew)
 		select {
 		case <-time.After(interval):
+		case <-sess.wakeCh():
+			// Rename lapsed this session's enrollment: enrol again now, under its new runtime
+			// id, rather than at the next renewal. enrollLoop revokes the lapsed id first.
+			return true
 		case <-sess.stop:
 			return false
 		case <-ctx.Done():
@@ -712,11 +738,11 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		if errors.As(err, &be) && (be.Code == "ENROLLMENT_NOT_LIVE" ||
 			(be.Code == "PROOF_INVALID" && strings.Contains(be.Message, "not live"))) {
 			id := sess.markLapsed("the broker refused this session's renew (" + be.Code + "); enrolling again")
-			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID, "code", be.Code, "enrollment_id", id)
+			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID(), "code", be.Code, "enrollment_id", id)
 			return true
 		}
 		if err != nil {
-			s.Log.Warn("renew failed; keeping the current lease", "runtime_id", sess.RuntimeID, "error", err)
+			s.Log.Warn("renew failed; keeping the current lease", "runtime_id", sess.RuntimeID(), "error", err)
 			continue
 		}
 		lease = next
@@ -740,10 +766,10 @@ func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) boo
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if s.lacksCredential(err) {
 			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it",
-				"runtime_id", sess.RuntimeID, "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
+				"runtime_id", sess.RuntimeID(), "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
 			return
 		}
-		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
+		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID(), "enrollment_id", id, "error", err, "in", delay)
 	}, func() error { return s.revokeOnce(ctx, id) })
 	if !revoked && ctx.Err() == nil {
 		go s.revoke(ctx, id)
@@ -774,14 +800,31 @@ func (s *Server) watchExit(ctx context.Context, sess *Session) {
 	s.retire(ctx, sess, "process exited")
 }
 
-// DormantGrace is how long a named session's identity is kept after its process goes away,
-// before its enrollment is revoked. A session the launcher named can come back — an omp
-// restarted in its pane, a `agentbox move`, a reboot's resume — and ending its enrollment
-// cancels every request Sami has not yet answered and revokes every grant he has given, which
-// is what dispatch://INFRA-1167 is about. It is well under the broker's own 15-minute lease,
-// so a session that never comes back loses its grants here, not at the lease; and a session
-// with no omp session id is revoked at once, exactly as before, since nothing could claim it.
-var DormantGrace = 3 * time.Minute
+// DefaultDormantGrace is how long a named session's identity is kept after its process goes
+// away, before its enrollment is revoked. A session the launcher named can come back — an omp
+// restarted in its pane, an `agentbox move`, a reboot's resume — and ending its enrollment
+// cancels every request its approver has not yet answered and revokes every grant they have
+// given, which is what dispatch://INFRA-1167 is about. It is well under the broker's own
+// 15-minute lease, so a session that never comes back loses its grants here, not at the lease;
+// and a session with no omp session id is revoked at once, exactly as before, since nothing
+// could claim it.
+//
+// It belongs to the Server, not to a package variable, so a test can choose it without writing
+// a global that the Server's own goroutines read — which is a data race, and was one: `go test
+// -race` caught it in TestANamedSessionThatEndsIsKeptForTheGraceThenRevoked.
+const DefaultDormantGrace = 3 * time.Minute
+
+// SetDormantGrace chooses this Server's grace; zero restores DefaultDormantGrace. Safe to call
+// while the Server runs, which is why the field behind it is atomic.
+func (s *Server) SetDormantGrace(d time.Duration) { s.dormantGraceNS.Store(int64(d)) }
+
+// dormantGrace is the Server's grace, DefaultDormantGrace when it names none.
+func (s *Server) dormantGrace() time.Duration {
+	if ns := s.dormantGraceNS.Load(); ns > 0 {
+		return time.Duration(ns)
+	}
+	return DefaultDormantGrace
+}
 
 // retire forgets the session. One with no omp session id has its enrollment revoked at once
 // (three tries; the lease is the fallback), as before. A named one is parked instead, for
@@ -795,29 +838,31 @@ func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 	if sess.peer != nil {
 		sess.peer.Close()
 	}
-	id := sess.EnrollmentID()
-	if sess.SessionID != "" && id != "" {
+	// One reading, so the record cannot pair one generation's name with another's key.
+	cur := sess.identity()
+	id := cur.EnrollmentID
+	if cur.SessionID != "" && id != "" {
 		gone := time.Now()
 		s.Registry.Park(Record{
-			PID: sess.PID, StartTicks: sess.StartTicks, RuntimeID: sess.RuntimeID,
-			EnrollmentID: id, SessionID: sess.SessionID, Key: encodeKey(sess.Key), GoneAt: &gone,
+			PID: sess.PID, StartTicks: sess.StartTicks, RuntimeID: cur.RuntimeID,
+			EnrollmentID: id, SessionID: cur.SessionID, Key: encodeKey(cur.Key), GoneAt: &gone,
 		})
 		s.save()
-		s.Log.Info("session retired; its identity is kept for it to come back to", "runtime_id", sess.RuntimeID, "why", why, "for", DormantGrace)
+		s.Log.Info("session retired; its identity is kept for it to come back to", "runtime_id", cur.RuntimeID, "why", why, "for", s.dormantGrace())
 		return
 	}
 	s.save()
 	if id != "" {
 		s.revoke(ctx, id)
 	}
-	s.Log.Info("session retired", "runtime_id", sess.RuntimeID, "why", why)
+	s.Log.Info("session retired", "runtime_id", cur.RuntimeID, "why", why)
 }
 
 // SweepDormant revokes the enrollment of every session that went dormant more than DormantGrace
 // ago and did not come back, and forgets it. The helper runs it on a ticker (SweepLoop); a test
 // calls it directly.
 func (s *Server) SweepDormant(ctx context.Context) {
-	expired := s.Registry.ExpiredDormant(time.Now().Add(-DormantGrace))
+	expired := s.Registry.ExpiredDormant(time.Now().Add(-s.dormantGrace()))
 	if len(expired) == 0 {
 		return
 	}
@@ -913,7 +958,7 @@ func (s *Server) Recover(ctx context.Context) {
 			gone := time.Now()
 			rec.GoneAt = &gone
 			if rec.EnrollmentID != "" && s.Registry.Park(rec) {
-				s.Log.Info("recorded session is gone; its identity is kept for it to come back to", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID, "for", DormantGrace)
+				s.Log.Info("recorded session is gone; its identity is kept for it to come back to", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID, "for", s.dormantGrace())
 				continue
 			}
 			s.Log.Info("recorded session is gone", "runtime_id", rec.RuntimeID)

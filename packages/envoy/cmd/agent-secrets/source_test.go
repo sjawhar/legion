@@ -242,7 +242,11 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 			return thumbprint, id == testEnrollmentID, nil
 		},
 		Replay: func(context.Context, string, time.Time) (bool, error) { return true, nil }}
-	var publicURL string
+	// Atomic, not a plain string: the test goroutine writes it after httptest.NewServer returns
+	// the URL, and the server's own handler goroutine reads it. No request is made before the
+	// write, so the value is always there — but the unsynchronized pair is a data race all the
+	// same, and `go test -race ./...` reports it.
+	var publicURL atomic.Pointer[string]
 	var reached, verified atomic.Int32
 	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1/requests/") {
@@ -250,7 +254,7 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 			return
 		}
 		reached.Add(1)
-		if _, err := verifier.Verify(r.Context(), r.Header.Get("Proof"), r.Method, publicURL+r.URL.Path, time.Now()); err != nil {
+		if _, err := verifier.Verify(r.Context(), r.Header.Get("Proof"), r.Method, *publicURL.Load()+r.URL.Path, time.Now()); err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"code":"PROOF_INVALID","error":"the proof does not verify"}`))
 			return
@@ -260,7 +264,7 @@ func TestAnIDThatWouldNotNameOnePathSegmentIsRefusedByName(t *testing.T) {
 		_, _ = w.Write([]byte(approvedStatusJSON))
 	}))
 	defer broker.Close()
-	publicURL = broker.URL
+	publicURL.Store(&broker.URL)
 	for _, id := range []string{"req%zz", "a b", "a/b", "req%25zz"} {
 		_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", id)
 		want := "agent-secrets status: " + strconv.Quote(id) + " is not a request id\n"

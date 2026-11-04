@@ -105,7 +105,7 @@ func TestANamedSessionEnrolsUnderItsSessionID(t *testing.T) {
 		t.Fatalf("runtime_id %q, want session-%s", resp.RuntimeID, testSessionID)
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
-	if sess == nil || sess.SessionID != testSessionID {
+	if sess == nil || sess.SessionID() != testSessionID {
 		t.Fatalf("the registered session does not carry its session id: %+v", sess)
 	}
 }
@@ -158,7 +158,7 @@ func TestARestartKeepsANamedSessionsEnrollment(t *testing.T) {
 	if sess == nil {
 		t.Fatal("the live process must be re-pinned")
 	}
-	if sess.Thumbprint != thumbprintOf(t, key) {
+	if sess.identity().Thumbprint != thumbprintOf(t, key) {
 		t.Fatal("a re-pinned named session must keep the key its record holds, not a fresh one")
 	}
 	waitFor(t, func() bool { return sess.EnrollmentID() == "enr-before" })
@@ -198,7 +198,7 @@ func TestARebootGivesTheResumedSessionItsIdentityBack(t *testing.T) {
 		t.Fatalf("runtime_id %q, want %s", resp.RuntimeID, SessionRuntimeID(testSessionID))
 	}
 	sess := r.srv.Registry.Get(os.Getpid())
-	if sess == nil || sess.Thumbprint != thumbprintOf(t, key) {
+	if sess == nil || sess.identity().Thumbprint != thumbprintOf(t, key) {
 		t.Fatal("the resumed session must sign with the key its own earlier incarnation used")
 	}
 	if got := r.revokes(t); len(got) != 0 {
@@ -229,9 +229,9 @@ func TestASessionThatDoesNotComeBackLosesItsGrants(t *testing.T) {
 		t.Fatalf("a session inside its grace was revoked: %v", got)
 	}
 
-	restore := DormantGrace
-	DormantGrace = 0
-	defer func() { DormantGrace = restore }()
+	// The grace is the Server's field, not a package variable: a test writing a global that the
+	// Server's own goroutines read is a data race, which `go test -race` caught here.
+	r.srv.SetDormantGrace(time.Nanosecond)
 	r.srv.SweepDormant(context.Background())
 	if got := r.revokes(t); len(got) != 1 || got[0] != "enr-before" {
 		t.Fatalf("the sweep revoked %v, want [enr-before]", got)
@@ -287,18 +287,24 @@ func TestASessionNamedAfterItStartedEnrolsUnderThatName(t *testing.T) {
 		t.Fatalf("register: %+v", first)
 	}
 	id := testSessionID
-	named := r.call(t, Request{Op: "register", WaitSeconds: 10, SessionID: &id})
+	// No WaitSeconds: naming the session revokes its old enrollment before it enrols under the
+	// new name, two broker round trips, and Call's own read deadline is 10 s — a register that
+	// waits that long server-side races it and times out under load. Poll instead.
+	named := r.call(t, Request{Op: "register", SessionID: &id})
 	if !named.OK || named.RuntimeID != SessionRuntimeID(testSessionID) {
 		t.Fatalf("naming the session: %+v", named)
 	}
-	if named.EnrollmentID == first.EnrollmentID {
-		t.Fatal("the session must enrol afresh under its new name, not keep the pid-derived enrollment")
-	}
-	waitFor(t, func() bool { return slices.Contains(r.revokes(t), first.EnrollmentID) })
 	sess := r.srv.Registry.Get(os.Getpid())
-	if sess == nil || sess.SessionID != testSessionID {
+	if sess == nil || sess.SessionID() != testSessionID {
 		t.Fatalf("the session did not take its name: %+v", sess)
 	}
+	// The enrollment it held for those few seconds is revoked, never carried over, and the
+	// session enrols afresh under its name.
+	waitFor(t, func() bool { return slices.Contains(r.revokes(t), first.EnrollmentID) })
+	waitFor(t, func() bool {
+		cur := sess.EnrollmentID()
+		return cur != "" && cur != first.EnrollmentID
+	})
 	// And a session that is already named is not another caller's to rename.
 	otherID := "99999999-2222-4333-8444-555555555555"
 	if resp := r.call(t, Request{Op: "register", SessionID: &otherID}); resp.OK || resp.Code != CodeBadRequest {
@@ -343,9 +349,7 @@ func TestANamedSessionThatEndsIsKeptForTheGraceThenRevoked(t *testing.T) {
 	if got := r.revokes(t); len(got) != 0 {
 		t.Fatalf("a named session's exit revoked %v straight away", got)
 	}
-	restore := DormantGrace
-	DormantGrace = 0
-	defer func() { DormantGrace = restore }()
+	r.srv.SetDormantGrace(time.Nanosecond)
 	r.srv.SweepDormant(context.Background())
 	if got := r.revokes(t); !slices.Contains(got, resp.EnrollmentID) {
 		t.Fatalf("the sweep revoked %v, want %s among them", got, resp.EnrollmentID)

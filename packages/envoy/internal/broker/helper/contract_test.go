@@ -280,7 +280,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if sess == nil {
 		t.Fatal("the registered session must still be resolvable by this test's own pid")
 	}
-	secrets := [][]byte{cred.key.D.Bytes(), sess.Key.D.Bytes(), boxKey.D.Bytes(), secondKey.D.Bytes()}
+	secrets := [][]byte{cred.key.D.Bytes(), sess.identity().Key.D.Bytes(), boxKey.D.Bytes(), secondKey.D.Bytes()}
 	logText := cr.logBuf.String()
 	for _, raw := range secrets {
 		for _, encoded := range []string{hex.EncodeToString(raw), base64.StdEncoding.EncodeToString(raw)} {

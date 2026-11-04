@@ -191,6 +191,63 @@ func UnitPath(getenv func(string) string) string {
 	return filepath.Join(dir, "systemd", "user", UnitName)
 }
 
+// LegacyStatePath is where the helper's session records used to live: beside its socket, under
+// the user's runtime directory. That directory is tmpfs and goes at a reboot, which is exactly
+// the event a named session's records must survive (dispatch://INFRA-1167), so DefaultStatePath
+// replaces it and MigrateStateFile moves what it finds there.
+func LegacyStatePath(getenv func(string) string) string {
+	return filepath.Join(filepath.Dir(DefaultSocket(getenv)), "sessions.json")
+}
+
+// DefaultStatePath is where the helper keeps its session records when AGENT_SECRETS_STATE_FILE
+// is unset: under $XDG_CONFIG_HOME (default $HOME/.config), beside the machine login, because a
+// named session's record holds that session's signing key and must outlive a reboot.
+func DefaultStatePath(getenv func(string) string) string {
+	dir := getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		dir = filepath.Join(getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "agent-secrets", "sessions.json")
+}
+
+// MigrateStateFile moves a records file left at the old runtime-directory path to the durable
+// one, once, when the durable path has none: a helper upgraded in place keeps the sessions it
+// had rather than revoking them all at its first start. A rename across filesystems (tmpfs to
+// the home disk) is expected to fail, so it copies and removes instead. Anything that goes
+// wrong is returned and only logged: a lost record costs the sessions it names their
+// continuity, never the helper its start.
+func MigrateStateFile(from, to string) error {
+	if from == "" || to == "" || from == to {
+		return nil
+	}
+	if _, err := os.Stat(to); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	data, err := os.ReadFile(from)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	tmp := to + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, to); err != nil {
+		return err
+	}
+	return os.Remove(from)
+}
+
 // Call sends one request and reads one reply, all within timeout, the dial included (the dial
 // alone also gives up after 2 s). A register with wait_seconds needs that much plus slack.
 func Call(sock string, req Request, timeout time.Duration) (Response, error) {

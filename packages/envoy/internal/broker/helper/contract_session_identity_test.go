@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ type contractValues struct {
 // for that exact method and URL, which is how every session route authenticates.
 func (cr *contractRig) sessionReq(t *testing.T, sess *Session, method, path string, body any) (int, []byte) {
 	t.Helper()
-	signed, err := proof.Sign(sess.Key, sess.EnrollmentID(), method, cr.broker.URL+path, time.Now())
+	signed, err := proof.Sign(sess.identity().Key, sess.EnrollmentID(), method, cr.broker.URL+path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestContractARebootKeepsAGrantTheSessionWasGiven(t *testing.T) {
 	sessionID := "11111111-2222-4333-8444-66666666cafe"
 
 	// --- the session registers under its omp session id ---
-	reg := cr.call(t, Request{Op: "register", WaitSeconds: 20, SessionID: &sessionID})
+	reg := cr.call(t, Request{Op: "register", WaitSeconds: 5, SessionID: &sessionID}) // under Call's own 10 s read deadline
 	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" {
 		t.Fatalf("register --session-id: %+v", reg)
 	}
@@ -135,7 +136,7 @@ func TestContractARebootKeepsAGrantTheSessionWasGiven(t *testing.T) {
 		t.Fatalf("the resumed session got %+v, want the enrollment it had, %s", resumed, reg.EnrollmentID)
 	}
 	after := next.Registry.Get(os.Getpid())
-	if after == nil || after.Thumbprint != before.Thumbprint {
+	if after == nil || after.identity().Thumbprint != before.identity().Thumbprint {
 		t.Fatal("the resumed session must present the key the broker knows")
 	}
 
@@ -184,7 +185,7 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 	cr.login(t)
 	sessionID := "11111111-2222-4333-8444-77777777beef"
 
-	reg := cr.call(t, Request{Op: "register", WaitSeconds: 20, SessionID: &sessionID})
+	reg := cr.call(t, Request{Op: "register", WaitSeconds: 5, SessionID: &sessionID})
 	if !reg.OK || reg.EnrollmentID == "" {
 		t.Fatalf("register --session-id: %+v", reg)
 	}
@@ -209,9 +210,8 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 	cr.cancel()
 	rebootRecords(t, cr.sessionsPath)
 
-	restore := DormantGrace
-	DormantGrace = 0
-	defer func() { DormantGrace = restore }()
+	// The grace is the Server's, never a package variable: a test writing a global that the
+	// Server's goroutines read is a data race, and was one.
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	next := &Server{
@@ -220,6 +220,7 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 			HTTP: http.DefaultClient, Log: log},
 		Hostname: "contract-test-host", PeerOf: PeerOf, Log: log, MinRenew: 50 * time.Millisecond,
 	}
+	next.SetDormantGrace(time.Nanosecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { next.Registry.Close(); cancel(); next.Broker.Close() })
 	if err := next.Broker.Start(ctx); err != nil {
@@ -238,5 +239,86 @@ func TestContractASessionThatDoesNotComeBackLosesItsGrant(t *testing.T) {
 	}
 	if _, ok := next.Registry.Dormant(sessionID); ok {
 		t.Fatal("the swept record must be forgotten")
+	}
+}
+
+// TestContractTheProductionRecordsPathSurvivesTheRuntimeDirectoryGoing is the defect the two
+// tests above could not catch, because each hands the helper a records path of its own: in
+// production the path comes from the launcher, and until dispatch://INFRA-1167 it was
+// `$XDG_RUNTIME_DIR/agent-secrets/sessions.json`, beside the socket — tmpfs, gone at the very
+// reboot the key must survive. This drives the DEFAULTS a real helper computes, removes the
+// whole runtime directory as a reboot does, and shows the records, the key in them and the
+// enrollment still there afterwards; it also shows a helper upgraded in place carrying the
+// records it finds at the old path over to the new one.
+func TestContractTheProductionRecordsPathSurvivesTheRuntimeDirectoryGoing(t *testing.T) {
+	home := t.TempDir()
+	runtime := t.TempDir()
+	getenv := func(key string) string {
+		switch key {
+		case "HOME":
+			return home
+		case "XDG_RUNTIME_DIR":
+			return runtime
+		}
+		return ""
+	}
+	legacy, durable := LegacyStatePath(getenv), DefaultStatePath(getenv)
+	if filepath.Dir(legacy) != filepath.Join(runtime, "agent-secrets") {
+		t.Fatalf("the old path is not under the runtime directory: %s", legacy)
+	}
+	if filepath.Dir(durable) != filepath.Join(home, ".config", "agent-secrets") {
+		t.Fatalf("the records must live beside the machine login, not in tmpfs: %s", durable)
+	}
+
+	// A helper of the previous release left its records at the old path; the first start of
+	// this one carries them over before Recover reads them.
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := recordNamed(t, legacy, 1, 1, testSessionID, "enr-before")
+	if err := MigrateStateFile(legacy, durable); err != nil {
+		t.Fatalf("migrating the records: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("the old records file must be gone once it is carried over: %v", err)
+	}
+	file, err := os.Stat(durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := file.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("the carried-over records are mode %04o; they hold a session key", perm)
+	}
+
+	// The reboot: the whole runtime directory goes, socket, old records and all.
+	if err := os.RemoveAll(runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := LoadRecords(durable)
+	if err != nil {
+		t.Fatalf("reading the records after the reboot: %v", err)
+	}
+	i := slices.IndexFunc(recs, func(rec Record) bool { return rec.SessionID == testSessionID })
+	if i < 0 {
+		t.Fatalf("the session's record did not survive the reboot: %+v", recs)
+	}
+	if recs[i].EnrollmentID != "enr-before" {
+		t.Fatalf("the record lost its enrollment: %+v", recs[i])
+	}
+	back, err := recs[i].PrivateKey()
+	if err != nil || back == nil {
+		t.Fatalf("the record lost its key: %v", err)
+	}
+	if !back.Equal(key) {
+		t.Fatal("the key that survived the reboot is not the one the session had, so the broker would not hand its enrollment back")
+	}
+
+	// And a second migration is a no-op: nothing overwrites the records that are now live.
+	if err := MigrateStateFile(legacy, durable); err != nil {
+		t.Fatalf("a second migration must do nothing: %v", err)
+	}
+	if again, err := LoadRecords(durable); err != nil || len(again) != len(recs) {
+		t.Fatalf("a second migration changed the records: %v %+v", err, again)
 	}
 }

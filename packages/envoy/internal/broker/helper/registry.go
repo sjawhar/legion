@@ -33,13 +33,23 @@ import (
 type Session struct {
 	PID          int
 	StartTicks   uint64
-	RuntimeID    string
-	SessionID    string
-	Key          *ecdsa.PrivateKey
-	Thumbprint   string
 	RegisteredAt time.Time
 
-	mu           sync.Mutex
+	mu sync.Mutex
+	// The four identity fields are mutable: Rename replaces all four at once when a launcher
+	// names a session. Every reader takes them together through identity(), under this mutex,
+	// never field by field — an enrollment must not pair one generation's runtime id with
+	// another's thumbprint, and a signature must not pair an old enrollment id with a
+	// replacement key. They are unexported so the compiler finds any reader that tries.
+	runtimeID  string
+	sessionID  string
+	key        *ecdsa.PrivateKey
+	thumbprint string
+	// generation counts the identities this session has had. An enroll or a renew carries the
+	// generation it started under, and its result is dropped when a rename has moved on since
+	// (setEnrolledAt): otherwise an enroll in flight when a rename lands would install the old
+	// identity's enrollment on the new one.
+	generation   uint64
 	enrollmentID string
 	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
 	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
@@ -54,8 +64,39 @@ type Session struct {
 	// which the next enrollment closes, so `register --wait` waits for the re-enrollment too.
 	ready chan struct{}
 	stop  chan struct{} // closed when the session is removed
-	peer  *Peer
+	// wake ends the renew wait at once when something OUTSIDE the loops lapses the enrollment —
+	// today only a rename. markLapsed alone does not reach renewLoop, which otherwise waits a
+	// third of the lease and acts only on a refused renew, so without this a renamed session
+	// would keep signing as its old runtime id until that renewal came round. Buffered one and
+	// sent to without blocking: a wake nobody is waiting for is one the next wait consumes.
+	wake chan struct{}
+	peer *Peer
 }
+
+// identity is one coherent reading of a session's broker identity: the four fields a rename
+// replaces together, the generation that reading belongs to, and the enrollment id live at the
+// same moment. Every caller that needs more than one of them takes an identity, so none can
+// pair values from either side of a rename.
+type identity struct {
+	RuntimeID    string
+	SessionID    string
+	Key          *ecdsa.PrivateKey
+	Thumbprint   string
+	Generation   uint64
+	EnrollmentID string
+}
+
+func (s *Session) identity() identity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return identity{RuntimeID: s.runtimeID, SessionID: s.sessionID, Key: s.key, Thumbprint: s.thumbprint,
+		Generation: s.generation, EnrollmentID: s.enrollmentID}
+}
+
+// RuntimeID and SessionID are the single-field readings a log line or a reply needs; anything
+// that needs two takes identity().
+func (s *Session) RuntimeID() string { return s.identity().RuntimeID }
+func (s *Session) SessionID() string { return s.identity().SessionID }
 
 // newSession makes a session around key, or around a fresh key when key is nil. A caller passes
 // one in only to keep an identity the broker already knows: Recover re-pinning a recorded
@@ -73,10 +114,39 @@ func newSession(pid int, ticks uint64, runtimeID, sessionID string, key *ecdsa.P
 		return nil, err
 	}
 	return &Session{
-		PID: pid, StartTicks: ticks, RuntimeID: runtimeID, SessionID: sessionID, Key: key, Thumbprint: tp,
-		RegisteredAt: time.Now(), ready: make(chan struct{}), stop: make(chan struct{}), peer: peer,
+		PID: pid, StartTicks: ticks, runtimeID: runtimeID, sessionID: sessionID, key: key, thumbprint: tp,
+		RegisteredAt: time.Now(), ready: make(chan struct{}), stop: make(chan struct{}),
+		wake: make(chan struct{}, 1), peer: peer,
 	}, nil
 }
+
+// rename replaces the session's identity under its own mutex and bumps the generation, so an
+// enroll or a renew already in flight cannot install its result afterwards. Only
+// Registry.Rename calls it, having already decided the name is free.
+func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID != "" {
+		return false
+	}
+	s.sessionID, s.runtimeID, s.generation = sessionID, runtimeID, s.generation+1
+	if key != nil {
+		if tp, err := proof.Thumbprint(&key.PublicKey); err == nil {
+			s.key, s.thumbprint = key, tp
+		}
+	}
+	return true
+}
+
+// wakeEnroll tells the session's loops to enrol again now; wakeCh is what they wait on.
+func (s *Session) wakeEnroll() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Session) wakeCh() <-chan struct{} { return s.wake }
 
 // SessionRuntimeID is the runtime id of a session named by an omp session id. It is the one place
 // the shape is written; scripts/agentbox builds the same string for an agent box, so a session
@@ -111,14 +181,27 @@ func (s *Session) snapshot() enrollmentState {
 }
 
 func (s *Session) setEnrolled(id string) {
+	s.setEnrolledAt(id, s.identity().Generation)
+}
+
+// setEnrolledAt records an enrollment an attempt that began at generation produced. A rename
+// since then has made that attempt the OLD identity's, whose enrollment this session must not
+// take, so the result is dropped and false returned; the caller enrols again under the name it
+// now has. Nothing else can change the generation, so a true answer means this id is this
+// session's own.
+func (s *Session) setEnrolledAt(id string, generation uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.generation != generation {
+		return false
+	}
 	s.enrollmentID, s.lastError = id, ""
 	select {
 	case <-s.ready:
 	default:
 		close(s.ready)
 	}
+	return true
 }
 
 // readyCh is the channel that closes when the session next enrolls (or already has).
@@ -186,7 +269,7 @@ func (s *Session) recordedEnrollmentID() string {
 
 func (s *Session) Info() SessionInfo {
 	st := s.snapshot()
-	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
+	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID(), EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
 }
 
 // Record is a Session as the records file holds it: enough to re-pin the process after a helper
@@ -324,7 +407,7 @@ func (r *Registry) LiveSessionID(sessionID string) *Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range r.byPID {
-		if s.SessionID == sessionID {
+		if s.SessionID() == sessionID {
 			return s
 		}
 	}
@@ -332,23 +415,26 @@ func (r *Registry) LiveSessionID(sessionID string) *Session {
 }
 
 // Rename gives a live session its omp session id and the runtime id that goes with it, and the
-// key an earlier incarnation of that session used when there is one. The enrollment it holds
-// becomes its lapsed one, so enrollLoop revokes that before enrolling the new runtime id. It
-// does nothing, and answers false, for a session that already has an id or has left the registry.
+// key an earlier incarnation of that session used when there is one. The registry mutex decides
+// that the session is still a member and the name is its to take; the session's own mutex
+// replaces the four identity fields together and bumps its generation, so no reader sees half a
+// rename and no enroll in flight can install the old identity's result (Session.rename). The
+// enrollment it holds becomes its lapsed one, so enrollLoop revokes that before enrolling the
+// new runtime id, and the wake makes that happen now rather than at the next renewal. It does
+// nothing, and answers false, for a session that already has an id or has left the registry.
 func (r *Registry) Rename(s *Session, sessionID, runtimeID string, key *ecdsa.PrivateKey) bool {
 	r.mu.Lock()
-	if cur, ok := r.byPID[s.PID]; !ok || cur != s || s.SessionID != "" {
+	if cur, ok := r.byPID[s.PID]; !ok || cur != s {
 		r.mu.Unlock()
 		return false
 	}
-	s.SessionID, s.RuntimeID = sessionID, runtimeID
-	if key != nil {
-		if tp, err := proof.Thumbprint(&key.PublicKey); err == nil {
-			s.Key, s.Thumbprint = key, tp
-		}
-	}
+	renamed := s.rename(sessionID, runtimeID, key)
 	r.mu.Unlock()
+	if !renamed {
+		return false
+	}
 	s.markLapsed("this session has been named " + sessionID + "; enrolling it under that name")
+	s.wakeEnroll()
 	return true
 }
 
@@ -475,9 +561,12 @@ func (r *Registry) Save() error {
 	}
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
-		rec := Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID(), SessionID: s.SessionID}
-		if s.SessionID != "" {
-			rec.Key = encodeKey(s.Key)
+		// One reading of the identity, so a record cannot pair one generation's runtime id with
+		// another's key.
+		id := s.identity()
+		rec := Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: id.RuntimeID, EnrollmentID: s.recordedEnrollmentID(), SessionID: id.SessionID}
+		if id.SessionID != "" {
+			rec.Key = encodeKey(id.Key)
 		}
 		recs = append(recs, rec)
 	}
@@ -491,11 +580,25 @@ func (r *Registry) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
+	dir := filepath.Dir(r.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// MkdirAll leaves an EXISTING directory's mode alone, so a records directory that was there
+	// already — the one the machine login lives in, made by an older release or by hand — could
+	// stay group- or world-readable while holding a session's signing key. Correct it on every
+	// save, so no write lands in a directory anyone else can list.
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	tmp := r.path + ".tmp"
+	// O_EXCL through CreateTemp-like semantics is not needed here (the name is ours and the
+	// directory is 0700), but the mode is: WriteFile applies it only when it creates the file,
+	// so a .tmp left by an interrupted save with a wider mode is corrected before it is written.
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, r.path)

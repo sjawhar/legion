@@ -173,7 +173,13 @@ const approvedStatusJSON = `{"state":"granted","grant_id":"grant-approved","reco
 func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	t.Helper()
 	counters := &brokerCounters{}
-	var audience string
+	// Atomic, not a plain string: it is written once httptest.NewServer has a URL to give, and
+	// read by the server's own handler goroutines. No request arrives before the write, so the
+	// value is always there — but the unsynchronized pair is a data race all the same, which
+	// `go test -race ./...` reports (TestNoFormPrintsACredentialTheBrokerURLCarries,
+	// TestWhatAScriptReadsIsUnchanged). TestRequestSignsARequestObject below already guards its
+	// own copy with a mutex, for the same reason.
+	var audience atomic.Pointer[string]
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.createRequest, 1)
@@ -190,7 +196,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			counters.lastSessionID = *body.SessionID
 			counters.mu.Unlock()
 		}
-		obj, err := record.VerifyRequestObject(body.Request, audience, time.Minute, time.Now())
+		obj, err := record.VerifyRequestObject(body.Request, *audience.Load(), time.Minute, time.Now())
 		if err != nil || len(obj.Details) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -203,7 +209,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"grant_id": "grant-granted", "record_id": nil, "approver": nil,
 			})
 		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED", "PENDING_ME_NO_PAGE":
-			writeJSON(w, pendingAnswer(name, audience, true))
+			writeJSON(w, pendingAnswer(name, *audience.Load(), true))
 		case "APPROVED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-approved", "state": "granted",
@@ -262,7 +268,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				return
 			}
 		}
-		writeJSON(w, pendingAnswer(name, audience, false))
+		writeJSON(w, pendingAnswer(name, *audience.Load(), false))
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
@@ -297,7 +303,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		writeJSON(w, settings)
 	})
 	srv := httptest.NewServer(mux)
-	audience = srv.URL
+	audience.Store(&srv.URL)
 	return srv, counters
 }
 
