@@ -158,7 +158,8 @@ func (s *server) markNodeLinksStale(ctx context.Context, artifactID string, deci
  }
  if len(ids)==0{return nil}
  rows,err:=s.deps.Store.Pool.Query(ctx,`
- select input.ord, first.text, latest.number, changed.text
+ select input.ord, first.text, latest.number, changed.text,
+   exists(select 1 from document_indexed_versions indexed where indexed.artifact_id=$1::uuid and indexed.version=latest.number)
  from unnest($2::text[],$3::int[],$4::timestamptz[]) with ordinality input(block,version,at,ord)
  left join lateral (select t.text from document_block_texts t where t.artifact_id=$1::uuid and t.block_id=input.block and t.version<=input.version order by t.version desc limit 1) first on true
  left join lateral (select v.number from artifact_versions v where v.artifact_id=$1::uuid and v.created_at<=input.at order by v.number desc limit 1) latest on true
@@ -167,11 +168,11 @@ func (s *server) markNodeLinksStale(ctx context.Context, artifactID string, deci
  if err!=nil{return err}
  defer rows.Close()
  for rows.Next(){
-  var ord int;var first,changed *string;var version *int
-  if err:=rows.Scan(&ord,&first,&version,&changed);err!=nil{return err}
+  var ord int;var first,changed *string;var version *int;var indexed bool
+  if err:=rows.Scan(&ord,&first,&version,&changed,&indexed);err!=nil{return err}
   place:=places[ord-1];decision:=&decisions[place.decision]
   if first==nil || decisionNodeText(*first)==decision.Text{continue}
-  decision.Links[place.link].Stale=version==nil || changed!=nil && decisionNodeText(*changed)!=decision.Text
+  decision.Links[place.link].Stale=version==nil || indexed && (changed==nil || decisionNodeText(*changed)!=decision.Text)
  }
  return rows.Err()
 }

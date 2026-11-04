@@ -49,8 +49,8 @@ func useTestBlockSchema(t testing.TB, value BlockSchema) {
 // carries targets. The shipped schema declares two: a plan task's serves and needs, the first of
 // which a check shares.
 func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
-	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"needs", "serves"}) {
-		t.Fatalf("the shipped schema's link kinds = %v, want needs and serves", kinds)
+  if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
+    t.Fatalf("the shipped schema's link kinds = %v, want decided_by, from_ask, needs, serves and shaped", kinds)
 	}
 	if err := validateBlockSchema(blockPointerTestSchema(nil)); err != nil {
 		t.Fatalf("validate the test schema: %v", err)
@@ -90,8 +90,8 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 		{Name: "note", BlockAttributeSchema: BlockAttributeSchema{Kind: BlockAttributeString}},
 	}})
 	useTestBlockSchema(t, twice)
-	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"needs", "serves"}) {
-		t.Fatalf("link kinds of the types declaring serves = %v, want [needs serves]", kinds)
+  if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
+    t.Fatalf("link kinds of the types declaring serves = %v, want each relation once", kinds)
 	}
 	var served BlockSchema
 	if err := json.Unmarshal(SchemaJSON(), &served); err != nil || len(served.Types) != len(twice.Types) {

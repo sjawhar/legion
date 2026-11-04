@@ -12124,13 +12124,12 @@ describe("executeDispatchTool", () => {
     expect(requested).toContain(`/api/v1/issues/DSP-42/messages/${message}`);
   });
 
-  // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
-  // whatever its fragment, as the SPA and the server read the same page.
-  test("maps the SPA's decisions page to the issue's decisions.md", () => {
+  // Each decision result links its node. The view itself belongs to the issue.
+  test("maps the SPA's decisions page to its issue", () => {
     const server = "http://dispatch.test";
     for (const page of ["/issues/DSP-42/decisions", "/issues/DSP-42/decisions#b-ship-it"]) {
       expect(dispatchRefFromUrl(`${server}${page}`, server)).toBe(
-        "dispatch://DSP-42/artifact/decisions-md"
+        "dispatch://DSP-42"
       );
     }
   });

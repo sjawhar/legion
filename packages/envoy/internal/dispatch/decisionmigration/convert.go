@@ -41,7 +41,7 @@ func Plan(markdown, source string) ([]Entry, error) {
   body, err := pmdoc.Render(&pmdoc.Node{Type:"doc",Children:children})
   if err != nil { return err }
   digest := sha256.Sum256([]byte(fmt.Sprintf("%s/%d",source,len(entries))))
-  entry := Entry{ID:"decision-"+hex.EncodeToString(digest[:12]),Title:title,Body:strings.TrimSpace(body),Replaced:replaced}
+  entry := Entry{ID:"decision-"+hex.EncodeToString(digest[:12]),Title:title,Body:strings.TrimSpace(body),Replaced:replaced,Review:title=="Imported decision context"}
   for _, ref := range text.Extract(body, "") {
    switch ref.Kind {
    case "ask":
@@ -79,9 +79,11 @@ func Plan(markdown, source string) ([]Entry, error) {
    heading:=words.String()
    if level<=2 { inReplaced=level==2 && heading=="Replaced" }
    if level==2 && !inReplaced || level==3 && inReplaced { title=heading; replaced=inReplaced }
+   if level==1 && heading!="Decisions" { title="Imported decision context";replaced=false;children=append(children,node) }
    continue
   }
-  if title!="" { children=append(children,node) }
+  if title=="" {title="Imported decision context";replaced=false}
+  children=append(children,node)
  }
  if err := closeEntry(); err != nil { return nil,err }
  return entries,nil

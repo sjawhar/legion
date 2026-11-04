@@ -21,7 +21,7 @@ Part | Content
 `Requirements` | a `:::requirement` block each, `**R1.**` on, its source (`From:`)
 `Verification` | the issue's `verification.md`, a `:::check` block each: `serves`, `surface`, `run`, `when`, `negative_control`
 `Design` | How it meets them; a value and its reason for each limit, size and time
-`Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
+`Decisions` | The spec's decision nodes and answered ask blocks, at the section each shaped
 
 `serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
 
@@ -30,7 +30,7 @@ Part | Content
 For each spec, ask, comment and message:
 
 - Write in `skill://asd-ste100`'s strict mode.
-- Write about the current design, never the person or how people reached it, and never quote people or upload their words.
+- Write about the current design. Keep a person's answered ask in its spec, with the answer unchanged; do not restate or rewrite their words as an agent decision.
 - Link each source where the person wrote it, each id whole. With no link, state the design.
 - In a spec, cite code by file and symbol, never a line number: it goes stale at the next edit.
 - A sentence that cites a gate passing (test, review, check) also says what the pass does not show: "Tests pass: a wrong verdict, not a missing one."
@@ -55,16 +55,18 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-Each choice you made alone, and each a person made in an answered ask, is a `##` section of the issue's `decisions.md`.
+An answered ask is the decision node itself. Keep it in the spec, in its section, with the person's selected options and answer unchanged. Never remove or move a person's answered decision out of a spec.
 
-- The heading names the choice; the text gives the reason and the options weighed.
-- Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask, `dispatch://KEY/ask/<id>`.
-- An unsure section adds a paragraph that starts `Unsure:`: what would change your mind.
-- A replaced section moves under a final `## Replaced` as a `###`.
+For a choice you made yourself, write a `:::decision` block in the spec with `title` naming the choice. Its body gives your reason and the options you weighed. The Decisions tab labels it as the agent's choice.
+
+- Set `shaped="dispatch://KEY/spec#b-<id> ..."` on the decision or ask node for each spec block it shaped (`doc-read --blocks` lists the ids; write ids percent-encoded).
+- A choice derived from an ask may set `from_ask="dispatch://KEY/ask/<id>"` for provenance. That does not turn the agent's choice into the person's answer.
+- `decided_by` is a canonical person login, when the decision genuinely belongs to that person. It is not a place for an agent's interpretation.
+- Add an `Unsure:` paragraph for what would change your mind. Set `replaced="true"` when the agent's choice no longer applies; retain the node and its identity.
 
 ## Old specs
 
-At your next edit, rewrite a spec outside the outline whole in one version, moving its ask blocks with `doc-edit`'s `move`; restate each retelling, quotation or unlinked attribution as design, or cut it.
+At your next edit, rewrite prose outside the outline in one version. Retain every answered ask in its section with its identity and the person's answer unchanged. Move only open asks with `doc-edit`'s `move`; do not turn a person's answered decision into an agent's summary.
 
 ## Approval
 

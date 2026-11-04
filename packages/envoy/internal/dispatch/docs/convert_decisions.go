@@ -6,6 +6,7 @@ import (
  "io"
  "slices"
  "strings"
+  "github.com/jackc/pgx/v5"
 
  "github.com/sjawhar/envoy/internal/dispatch/decisionmigration"
  "github.com/sjawhar/envoy/internal/dispatch/model"
@@ -24,9 +25,9 @@ type DecisionConversion struct {
 type legacyDecisionDocument struct { id,key,spec string }
 
 // ConvertDecisionDocuments is deliberately not a boot repair. Without apply it only reads and
-// reports. Each source is converted and removed in one joined document transaction, so retrying
-// never appends a second node or loses the source after a partial failure. Run after deploying
-// the decision-aware build, with old builds stopped: they refuse documents with decision nodes.
+// reports. Each issue is converted in one joined document transaction, so retrying never
+// appends a second node. Source versions, reviews and resolved conversations remain on the
+// retired history document. Old builds refuse documents containing decision nodes.
 func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out io.Writer) (DecisionConversion,error) {
  ctx=store.WithTransactionTracking(ctx)
  var report DecisionConversion
@@ -47,12 +48,16 @@ func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out 
  rows.Close()
  if err:=rows.Err();err!=nil{return report,err}
  converted:=map[string]bool{}
- for _,source:=range sources {
-  if source.spec=="" || source.id==source.spec{return report,fmt.Errorf("%s decisions document %s has no separate spec; left untouched",source.key,source.id)}
-  result,err:=s.convertDecisionDocument(ctx,source,apply,out)
-  if err!=nil{return report,fmt.Errorf("%s %s: %w",source.key,source.id,err)}
-  report.Documents++;report.Moved+=result.Moved;report.Dropped+=result.Dropped;report.Restored+=result.Restored;report.Review+=result.Review
-  converted[source.key]=true
+ for first:=0;first<len(sources);{
+  last:=first+1
+  for last<len(sources)&&sources[last].key==sources[first].key{last++}
+  group:=sources[first:last]
+  for _,source:=range group{if source.spec==""||source.id==source.spec{return report,fmt.Errorf("%s decisions document %s has no separate spec; left untouched",source.key,source.id)}}
+  result,err:=s.convertDecisionIssue(ctx,group,apply,out)
+  if err!=nil{return report,fmt.Errorf("%s: %w",sources[first].key,err)}
+  report.Documents+=len(group);report.Moved+=result.Moved;report.Dropped+=result.Dropped;report.Restored+=result.Restored;report.Review+=result.Review
+  converted[sources[first].key]=true
+  first=last
  }
  // An answered ask removed from a spec remains attributable to it through its block id and
  // recorded block text. Also restore these on issues with no legacy decisions document.
@@ -68,7 +73,7 @@ func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out 
  for rows.Next(){var source legacyDecisionDocument;if err:=rows.Scan(&source.key,&source.spec);err!=nil{rows.Close();return report,err};if !converted[source.key]{repairs=append(repairs,source)}}
  rows.Close();if err:=rows.Err();err!=nil{return report,err}
  for _,source:=range repairs {
-  result,err:=s.convertDecisionDocument(ctx,source,apply,out)
+  result,err:=s.convertDecisionIssue(ctx,[]legacyDecisionDocument{source},apply,out)
   if err!=nil{return report,err};report.Restored+=result.Restored
  }
  fmt.Fprintf(out,"convert-decisions: documents=%d moved=%d dropped=%d restored=%d review=%d apply=%t\n",report.Documents,report.Moved,report.Dropped,report.Restored,report.Review,apply)
@@ -76,14 +81,25 @@ func (s *Service) ConvertDecisionDocuments(ctx context.Context, apply bool, out 
  return report,nil
 }
 
-func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecisionDocument,apply bool,out io.Writer)(DecisionConversion,error){
+func (s *Service) convertDecisionIssue(ctx context.Context,sources []legacyDecisionDocument,apply bool,out io.Writer)(DecisionConversion,error){
  var report DecisionConversion
  tx,err:=s.store.Pool.Begin(ctx);if err!=nil{return report,err};defer tx.Rollback(ctx)
- if apply {
+ if apply{
   var key string
-  if err:=tx.QueryRow(ctx,`select key from issues where key=$1 for update`,source.key).Scan(&key);err!=nil{return report,err}
+  if err:=tx.QueryRow(ctx,`select key from issues where key=$1 for update`,sources[0].key).Scan(&key);err!=nil{return report,err}
  }
  joined,ledger:=s.Join(withLifecycleWrite(withOwnerVerified(ctx)),tx);defer ledger.Discard()
+ for _,source:=range sources{
+  result,err:=s.convertDecisionDocument(joined,tx,source,apply,out)
+  if err!=nil{return report,err}
+  report.Moved+=result.Moved;report.Dropped+=result.Dropped;report.Restored+=result.Restored;report.Review+=result.Review
+ }
+ if apply{if err:=ledger.Commit(ctx);err!=nil{return report,err}}
+ return report,nil
+}
+
+func (s *Service) convertDecisionDocument(joined context.Context,tx pgx.Tx,source legacyDecisionDocument,apply bool,out io.Writer)(DecisionConversion,error){
+ var report DecisionConversion
  var entries []decisionmigration.Entry
  var legacyBlocks []model.ArtifactBlock
  if source.id!="" {
@@ -91,6 +107,13 @@ func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecis
   legacyBlocks=blocks
   entries,err=decisionmigration.Plan(markdown,source.id);if err!=nil{return report,err}
   fmt.Fprintf(out,"%s decisions.md (%s) -> spec (%s)\n",source.key,source.id,source.spec)
+  rows,err:=tx.Query(joined,`select 'comment',id::text from comments where not resolved and (artifact_id=$1::uuid or anchor->>'artifact_id'=$1::text)
+    union all select 'ask',id::text from asks where state='open' and (block_artifact_id=$1::uuid or anchor->>'artifact_id'=$1::text)`,source.id)
+  if err!=nil{return report,err}
+  var open []string
+  for rows.Next(){var kind,id string;if err:=rows.Scan(&kind,&id);err!=nil{rows.Close();return report,err};open=append(open,kind+" "+id)}
+  rows.Close();if err:=rows.Err();err!=nil{return report,err}
+  if len(open)>0{fmt.Fprintf(out,"  refuse: open conversations: %s\n",strings.Join(open,", "));return report,fmt.Errorf("source has open conversations; left untouched")}
  }
  _,specBlocks,err:=s.TextWithBlocks(joined,source.spec);if err!=nil{return report,err}
  held:=map[string]bool{}
@@ -105,9 +128,23 @@ func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecis
  var asks []model.Ask
  for rows.Next(){ask,err:=ScanAsk(rows);if err!=nil{rows.Close();return report,err};asks=append(asks,ask)}
  rows.Close();if err:=rows.Err();err!=nil{return report,err}
+ knownAsks:=map[string]bool{}
+ for _,ask:=range asks{knownAsks[ask.ID]=true}
+ for i:=range entries{if entries[i].Drop{for _,id:=range entries[i].Asks{if !knownAsks[id]{entries[i].Drop=false;entries[i].Review=true}}}}
+ restoredMarkdown:=map[string]string{}
+ changed:=false
  additions:=[]string{}
  for _,ask:=range asks{
-  if ask.BlockID!=nil && ask.BlockArtifactID!=nil && *ask.BlockArtifactID==source.spec && held[*ask.BlockID]{continue}
+  var shaped []string
+  for _,entry:=range entries{if entry.Drop && slices.Contains(entry.Asks,ask.ID){for _,ref:=range entry.Shaped{if !slices.Contains(shaped,ref){shaped=append(shaped,ref)}}}}
+  if ask.BlockID!=nil && ask.BlockArtifactID!=nil && *ask.BlockArtifactID==source.spec && held[*ask.BlockID]{
+   if len(shaped)>0{
+    for _,block:=range specBlocks{if block.ID==*ask.BlockID{for _,attribute:=range block.Attributes{if attribute.Name=="shaped"{for _,ref:=range strings.Fields(attribute.Value){if !slices.Contains(shaped,ref){shaped=append(shaped,ref)}}}}}}
+    fmt.Fprintf(out,"  relate ask %s -> spec blocks %s\n",ask.ID,strings.Join(shaped," "))
+    if apply{if err:=s.SetBlockAttributes(joined,source.spec,*ask.BlockID,map[string]any{"shaped":shaped},conversionActor);err!=nil{return report,err};changed=true}
+   }
+   continue
+  }
   // Move only the legacy source, a row-only cited ask, or a missing spec ask whose history
   // establishes provenance. A current ask in another document stays its source there.
   restore:=ask.BlockArtifactID==nil || source.id!="" && ask.BlockArtifactID!=nil && *ask.BlockArtifactID==source.id
@@ -122,11 +159,9 @@ func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecis
   if held[id]{return report,fmt.Errorf("cannot restore ask %s: spec block %s already has a different owner",ask.ID,id)}
   node,err:=conversionAskNode(ask,id);if err!=nil{return report,err}
   // A restatement's shaped edges move to the actual ask, never to a copy of its answer.
-  var shaped []string
-  for _,entry:=range entries{if entry.Drop && slices.Contains(entry.Asks,ask.ID){shaped=append(shaped,entry.Shaped...)}}
   if len(shaped)>0{node.Attrs["shaped"]=shaped}
   markdown,err:=pmdoc.Render(&pmdoc.Node{Type:"doc",Children:[]*pmdoc.Node{node}});if err!=nil{return report,err}
-  additions=append(additions,markdown);held[id]=true;report.Restored++
+  restoredMarkdown[ask.ID]=markdown;held[id]=true;report.Restored++
   fmt.Fprintf(out,"  restore ask %s -> spec#b-%s (same ask row and answer)\n",ask.ID,id)
   if apply {
    if ask.BlockArtifactID!=nil && *ask.BlockArtifactID!=source.spec && *ask.BlockArtifactID!=source.id {
@@ -137,22 +172,26 @@ func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecis
   }
  }
  for _,entry:=range entries{
-  if entry.Drop{report.Dropped++;fmt.Fprintf(out,"  drop ask-only record %q (asks %s)\n",entry.Title,strings.Join(entry.Asks,","));continue}
+  if entry.Drop{
+   for _,id:=range entry.Asks{if markdown,found:=restoredMarkdown[id];found{additions=append(additions,markdown);delete(restoredMarkdown,id)}}
+   report.Dropped++;fmt.Fprintf(out,"  drop ask-only record %q (asks %s)\n",entry.Title,strings.Join(entry.Asks,","));continue
+  }
   if held[entry.ID]{return report,fmt.Errorf("spec already holds conversion block %s while source still exists; left untouched",entry.ID)}
   markdown,err:=entry.Markdown(func(id string)string{return "dispatch://"+source.key+"/ask/"+id});if err!=nil{return report,err}
   additions=append(additions,markdown);held[entry.ID]=true;report.Moved++
   fmt.Fprintf(out,"  move %q -> spec#b-%s as agent's record\n",entry.Title,entry.ID)
   if entry.Review{report.Review++;fmt.Fprintf(out,"    review attribution: narrative cites an ask; preserved, not presented as the person's words\n")}
  }
- if !apply{return report,nil}
- // Removing the source must not silently orphan a separate conversation or a linked file.
+ for _,ask:=range asks{if markdown,found:=restoredMarkdown[ask.ID];found{additions=append(additions,markdown)}}
  if source.id!=""{
-  var anchored int
-  if err:=tx.QueryRow(joined,`select count(*) from comments where artifact_id=$1::uuid or anchor->>'artifact_id'=$1`,source.id).Scan(&anchored);err!=nil{return report,err}
-  if anchored>0{return report,fmt.Errorf("source has %d anchored/owned comments; move those conversations to the spec before --apply",anchored)}
+  fmt.Fprintf(out,"  retire source as decision-history-%s.md (versions, reviews and closed conversations retained)\n",source.id)
  }
+ if !apply{return report,nil}
  if len(additions)>0{
   if _,err:=s.ApplyOps(joined,source.spec,[]model.EditOp{{Op:"insert",After:"end",Markdown:strings.Join(additions,"\n\n")}},conversionActor,nil);err!=nil{return report,err}
+  changed=true
+ }
+ if changed{
   version,err:=s.NamedVersion(joined,source.spec,"Decision nodes replace the separate decision document",conversionActor);if err!=nil{return report,err}
   // A receipt is moved only when its visible text is unchanged; the sum remains the guard.
   for _,entry:=range entries{
@@ -170,9 +209,11 @@ func (s *Service) convertDecisionDocument(ctx context.Context,source legacyDecis
   }
  }
  if source.id!=""{
-  if _,err:=tx.Exec(joined,`delete from artifacts where id=$1::uuid`,source.id);err!=nil{return report,err}
+  history:="decision-history-"+source.id
+  if _,err:=tx.Exec(joined,`update artifacts set name=$2,slug=$3 where id=$1::uuid`,source.id,history+".md",history);err!=nil{return report,err}
+  if _,err:=s.ReplaceText(joined,source.id,"Decision nodes are in dispatch://"+source.key+"/spec. Earlier versions retain the conversion history.\n",conversionActor);err!=nil{return report,err}
+  if _,err:=s.NamedVersion(joined,source.id,"Retire the separate decision document",conversionActor);err!=nil{return report,err}
  }
- if err:=ledger.Commit(ctx);err!=nil{return report,err}
  return report,nil
 }
 

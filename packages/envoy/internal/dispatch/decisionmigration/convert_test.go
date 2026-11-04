@@ -26,3 +26,8 @@ func TestConversionKeepsAmbiguousHumanAttributionForReview(t *testing.T) {
  entries, err := Plan("## About 2 months\n\nSami chose this in dispatch://GTM-8/ask/f0c4c572. The estimate assumes internal models.\n\nUnsure: model access can change.\n", "gtm-source")
  if err != nil || len(entries) != 1 || entries[0].Drop || !entries[0].Review { t.Fatalf("ambiguous human wording must not be discarded: %#v %v", entries,err) }
 }
+
+func TestConversionPreservesProseOutsideHeadingSections(t *testing.T) {
+ entries,err:=Plan("# Decisions\n\nKeep this context too.\n\n## A choice\n\nIts reasoning.\n","source")
+ if err!=nil||len(entries)!=2||!entries[0].Review||entries[0].Body!="Keep this context too."{t.Fatalf("unsectioned content: %#v %v",entries,err)}
+}
