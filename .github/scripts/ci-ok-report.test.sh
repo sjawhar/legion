@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `ci-ok-report.sh` and the `post-check-run.sh` it posts with: a job posts ci-ok only
-# once lint and every job `changes` selected have reported, a re-run's report replaces the
-# earlier attempt's, the verdict is ci-ok.sh's, and a list GitHub refuses posts nothing.
+# once lint and every job `changes` selected have reported, a merge-group run whose verdict a
+# failure already decided posts at once instead, a re-run's report replaces the earlier
+# attempt's, the verdict is ci-ok.sh's, and a list GitHub refuses posts nothing.
 #
 # Each case writes the run's artifact names, which are the jobs' reports, and the `changes` the
 # reporting job saw, and runs the real scripts with a stand-in `gh` first on PATH: it answers the
@@ -156,6 +157,40 @@ report ci-ok-lint-1-success ci-ok-typecheck-1-success
 run_report "$selects"
 check "exits 0" "$(is "$status" 0)"
 check "posts nothing" "$(is "$(posted)" 0)"
+
+# What `changes` gave the reporting job where envoy-client is selected and worker-image is not,
+# so lint, typecheck and envoy-client are the jobs of a merge-group run.
+group_selects='{"result": "success", "outputs": {"typecheck": "true", "envoy_client": "true", "worker_image": "false", "docs": "false"}}'
+
+echo "case: a merge_group run whose reporting job failed posts without waiting"
+report ci-ok-typecheck-1-failure
+jobs typecheck=completed/failure lint=in_progress envoy-client=queued
+run_report "$group_selects" merge_group
+check "exits 0" "$(is "$status" 0)"
+check "posts one check run" "$(is "$(posted)" 1)"
+check "failing" "$(is "$(field .conclusion)" failure)"
+check "records a running job at its live status" \
+  "$(contains "$(field .output.summary)" '^lint: in_progress$')"
+check "records a queued job at its live status" \
+  "$(contains "$(field .output.summary)" '^envoy-client: queued (selected')"
+check "says the failing job decided it" \
+  "$(contains "$(field .output.summary)" 'Decided by typecheck, whose failure decides this merge-group run')"
+
+echo "case: the same shape on a pull_request run waits"
+report ci-ok-typecheck-1-failure
+jobs typecheck=completed/failure lint=in_progress envoy-client=queued
+run_report "$group_selects"
+check "exits 0" "$(is "$status" 0)"
+check "posts nothing" "$(is "$(posted)" 0)"
+check "waits on the unreported jobs" "$(contains "$out" 'ci-ok waits on lint, envoy-client,')"
+
+echo "case: a merge_group run with no failure waits"
+report ci-ok-typecheck-1-success
+jobs typecheck=completed/success lint=in_progress envoy-client=queued
+run_report "$group_selects" merge_group
+check "exits 0" "$(is "$status" 0)"
+check "posts nothing" "$(is "$(posted)" 0)"
+check "waits on the unreported jobs" "$(contains "$out" 'ci-ok waits on lint, envoy-client,')"
 
 echo "case: a job the map does not name reported"
 report ci-ok-lint-1-success ci-ok-typecheck-1-success ci-ok-worker-image-1-success ci-ok-contracts-1-success

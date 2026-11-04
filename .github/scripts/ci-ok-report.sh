@@ -14,6 +14,17 @@
 # Otherwise it says which jobs it waits on and exits 0: each of those reports later, and the last
 # of them finds every report.
 #
+# It does not wait on a merge_group run whose verdict is already decided: one where `changes`
+# failed, or where the reporting job's own report (its artifact, uploaded before the list is
+# read) is a failure. ci.yaml's merge-group follower then force-cancels the rest of that run, so
+# no later report can post at all, and the failing ci-ok must be posted by the failing job
+# itself, before the cancel. Such a run reads the jobs route (below) and records every still
+# unreported job at its live status: a job GitHub shows completed at its conclusion, one still
+# queued or running at that status (`queued`, `in_progress`), one the route does not list at all
+# as `unlisted`. None of those is `success`, so ci-ok.sh's verdict is failure, which is right: a
+# selected job that did not succeed fails ci-ok, and the run is about to be thrown away. A
+# refused read leaves those jobs unreported and the script waits as usual.
+#
 # The report is uploaded before the list is read, and GitHub serves an artifact once its upload
 # finishes, so of two jobs that finish together the second to read the list finds both reports
 # and posts; both may post, and the later check run is the one GitHub and the Legion daemon read.
@@ -103,18 +114,34 @@ decision=$(jq -n -L "$script_dir" --argjson changes "$CHANGES" --arg event "$EVE
   --argjson map "$selected_by" --argjson pr "$pull_request_only" \
   --argjson names "$(jq -R . <<<"$names" | jq -s 'map(select(. != ""))')" "$program")
 
+# A merge_group run whose verdict is already decided: `changes` failed, or this job's own report
+# (the artifact it uploaded before the list was read) is a failure. ci.yaml's follower cancels
+# the rest of the run, so a job that has not reported never will, and this job posts the verdict
+# now rather than waiting for a report that the cancel prevents.
+decided=false
+decided_by="the last job of the run to report"
+if [ "$EVENT" = merge_group ] \
+  && jq -e --arg job "$JOB" '.needs.changes.result == "failure" or .needs[$job].result == "failure"' \
+    <<<"$decision" >/dev/null; then
+  decided=true
+  decided_by="whose failure decides this merge-group run before its follower cancels the rest"
+fi
+
 # A job that ended before its first step ran (a service container that never started, a runner
 # lost) never reports, so a run whose other jobs all reported would never get ci-ok. When one or
-# two jobs are left unreported, read the run's jobs once (the latest attempt's, as GitHub lists
-# them): each such job GitHub shows completed stands at its conclusion, a called workflow's jobs
-# (`<job> / <its job>`) together. Fewer reads than every job reading the list, which the token's
-# hourly limit could not carry; a job that ends unreported as the run's very last leaves ci-ok
-# unposted, and re-running it posts ci-ok. A failed read leaves the jobs unreported.
+# two jobs are left unreported, or the verdict is decided and the run is about to be cancelled,
+# read the run's jobs once (the latest attempt's, as GitHub lists them): each such job GitHub
+# shows completed stands at its conclusion, a called workflow's jobs (`<job> / <its job>`)
+# together. Fewer reads than every job reading the list, which the token's hourly limit could not
+# carry; a job that ends unreported as the run's very last leaves ci-ok unposted, and re-running
+# it posts ci-ok. A failed read leaves the jobs unreported. On a decided run a job that is not
+# completed stands at the status GitHub shows it at (`queued`, `in_progress`), and one the route
+# does not list at all at `unlisted`: neither is `success`, so ci-ok.sh fails it.
 unreported=$(jq '.pending | length' <<<"$decision")
-if [ "$unreported" -ge 1 ] && [ "$unreported" -le 2 ] \
+if [ "$unreported" -ge 1 ] && { [ "$unreported" -le 2 ] || [ "$decided" = true ]; } \
   && jobs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
     --jq '.jobs[] | {name, status, conclusion}'); then
-  decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" '
+  decision=$(jq --argjson jobs "$(jq -s . <<<"$jobs")" --argjson decided "$decided" '
     def ended($job):
       [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))] as $mine
       | if ($mine | length) > 0 and all($mine[]; .status == "completed") then
@@ -124,8 +151,11 @@ if [ "$unreported" -ge 1 ] && [ "$unreported" -le 2 ] \
             elif any(. == "success") then "success"
             else "skipped" end
         else null end;
+    def live($job):
+      [$jobs[] | select(.name == $job or (.name | startswith($job + " / ")))
+       | select(.status != "completed") | .status] | first // "unlisted";
     reduce .pending[] as $job (.;
-      ended($job) as $result
+      (ended($job) // (if $decided then live($job) else null end)) as $result
       | if $result == null then . else (.pending -= [$job]) | (.needs[$job].result = $result) end)' \
     <<<"$decision")
 fi
@@ -151,7 +181,7 @@ else
   title=${title:-ci-ok.sh failed}
 fi
 {
-  echo "Decided by $JOB, the last job of the run to report ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))."
+  echo "Decided by $JOB, $decided_by ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))."
   echo
   echo '```text'
   echo "$verdict"

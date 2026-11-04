@@ -6,9 +6,9 @@
 # entry's pinned script count as reading every Go file of the repository and every file under a
 # Go module's directory, a why that cites a step must name a workflow file that still holds it,
 # CI_OK_SELECTED_BY must map every job changes gates, it and CI_OK_PULL_REQUEST_ONLY must say what
-# each job's if: tests, every job but changes must end with the ci-ok report step and no job may be
-# named for a required check, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
-# its filter.
+# each job's if: tests, every job but changes and those CI_OK_EXEMPT names must end with the ci-ok
+# report step and no job may be named for a required check, and a PUSH_WORKFLOWS workflow's
+# on.push.paths must equal its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -350,6 +350,38 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job and what its last step must be" \
   "$(contains "$out" "job app's last step is not \`uses: ./.github/actions/ci-ok-report\` with \`if: always()\`")"
+
+# cancel_job <root>: appends a merge-group-only job that exists to stop a run the queue has
+# thrown away. It reports nothing to ci-ok, as a job of CI_OK_EXEMPT must not.
+cancel_job() {
+  cat >> "$1/.github/workflows/ci.yaml" <<'YAML'
+  cancel:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel the rest of the run
+        run: gh run cancel "$GITHUB_RUN_ID"
+YAML
+}
+
+echo "case: a job CI_OK_EXEMPT names passes without the ci-ok report step"
+root=$(fixture ci-ok-exempt)
+cancel_job "$root"
+replace "$root/.github/workflows/ci.yaml" "CI_OK_PULL_REQUEST_ONLY: '[\"image\"]'" \
+  $'CI_OK_PULL_REQUEST_ONLY: \'["image"]\'\n  CI_OK_EXEMPT: \'["cancel"]\''
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "says what it checked" "$(contains "$out" 'every ci.yaml filter matches every file its job reads (1 gates)')"
+
+echo "case: a job CI_OK_EXEMPT does not name still needs the ci-ok report step"
+root=$(fixture ci-ok-exempt-absent)
+cancel_job "$root"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and what its last step must be" \
+  "$(contains "$out" "job cancel's last step is not \`uses: ./.github/actions/ci-ok-report\` with \`if: always()\`")"
 
 echo "case: a job named for a required check"
 root=$(fixture ci-ok-job)

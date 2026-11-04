@@ -137,6 +137,12 @@ env:
       "worker-image": "worker_image"
     }
   CI_OK_PULL_REQUEST_ONLY: '["worker-image"]'
+  # The jobs outside ci-ok's accounting: each exists only to stop a merge-group run the queue has
+  # already thrown away, so it runs only on `merge_group`, holds `actions: write`, runs no
+  # dependency code, reports no result to ci-ok and is no job any verdict waits for.
+  # check-ci-filters.sh asks none of the ci-ok rules of a job named here, and refuses one that
+  # carries the ci-ok-report step: ci-ok.sh fails a result for a job CI_OK_SELECTED_BY cannot map.
+  CI_OK_EXEMPT: '[]'
 
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
