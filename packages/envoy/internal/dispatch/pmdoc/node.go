@@ -324,7 +324,7 @@ func askContentError(node *Node, written bool) error {
 		if broken == "" {
 			if written && askWritesNoQuestion(ask.Children) {
 				id, _ := ask.Attrs[BlockIDAttr].(string)
-				found = fmt.Errorf("ask block %q holds its options and no question, which no one can answer; write the question on the line under the block's opening fence, above its options", id)
+				found = fmt.Errorf("ask block %q holds its options and no question, which no one can answer, where its content rule, %s, reads the question as the paragraph before them; write it on the line under the block's opening fence, above its options", id, BlockContentParagraphsOptionalBulletList)
 				return false
 			}
 			return true
@@ -369,7 +369,7 @@ func openingWords(text string) string {
 // this (AskWrittenContentError).
 func askWritesNoQuestion(children []*Node) bool {
 	return len(children) == 2 && children[0] != nil && children[0].Type == "paragraph" &&
-		oneLineText(children[0]) == "" && children[1] != nil && children[1].Type == "bullet_list"
+		len(children[0].Children) == 0 && children[1] != nil && children[1].Type == "bullet_list"
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
