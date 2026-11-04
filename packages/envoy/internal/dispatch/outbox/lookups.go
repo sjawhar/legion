@@ -548,6 +548,7 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 					if lowest, ok := pick.sessionOf[target]; !ok || *sessionID < lowest {
 						pick.sessionOf[target] = *sessionID
 						deliveries.targetFallbackKeys[target] = key
+						deliveries.targetFallbackSessions[target] = *sessionID
 					}
 				}
 			}

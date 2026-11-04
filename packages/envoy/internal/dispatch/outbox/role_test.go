@@ -723,3 +723,48 @@ func TestAHeldCopyOfARoleRouteReachesTheRolesHolder(t *testing.T) {
 		}
 	})
 }
+
+// A copy held back for a role route whose holder is the session the row's key names reaches that
+// session under the mention's own dedupe key, not a role forward's. A role fallback row exists
+// only for a route a mention of the session that route resolved to suppressed, so the holder a
+// pass resolves is usually that very session, and the mention's send may have landed before its
+// attempt failed - a receipt timeout, or a send handed the listener before a kill whose resend
+// then failed. The host drops a frame whose named dedupe key it claimed already, so a copy keyed
+// like the mention is dropped there and the session is shown the comment once; carried under
+// contracts.RoleForwardDedupePrefix, as a role route's own forward carries it, it would be a key
+// no host has seen, with an event id of its own, and that session would be shown the comment
+// twice (fallbackSend.send, roleForward.forwardKeyed). The prefix is right for every other
+// holder, which TestAHeldCopyOfARoleRouteReachesTheRolesHolder holds.
+func TestAFallbackPassForwardsARoleCopyToItsOwnMentionedHolderUnderTheMentionsKey(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	rig := newRoleRig(t)
+	// s1 is the session seedHeldRoleFallbackCopy mentions and suppresses the route by, and it
+	// holds the role the route names.
+	const role, holder, target = "reviewer", "s1", "session:s1"
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	deps := rig.deps()
+	commentID := seedHeldRoleFallbackCopy(ctx, t, deps, role)
+
+	publishFallbackCopies(ctx, deps, unfenced{})
+
+	held := readHeldCopy(t, rig.database, commentID, contracts.RoleTopicPrefix+role)
+	if !held.published || !held.settled || held.attempts != 0 {
+		t.Fatalf("the role route's held copy is attempts=%d settled=%v published=%v, want it forwarded to %s by the one pass",
+			held.attempts, held.settled, held.published, holder)
+	}
+	forwards := recv.received()
+	if len(forwards) != 1 {
+		t.Fatalf("%s was sent %d copies, want the held one: %+v", holder, len(forwards), forwards)
+	}
+	want := contracts.AgentSendDedupeKey(holder, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+	if forwards[0].DedupeKey != want {
+		t.Fatalf("the copy forwarded to %s is keyed %q, want the mention's own key %q, which its host drops",
+			holder, forwards[0].DedupeKey, want)
+	}
+	if strings.HasPrefix(forwards[0].DedupeKey, contracts.RoleForwardDedupePrefix) {
+		t.Fatalf("the copy forwarded to the session its own mention names carries %q, want no role forward's prefix",
+			forwards[0].DedupeKey)
+	}
+}

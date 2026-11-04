@@ -243,6 +243,19 @@ func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, it
 // and only a session consumer of its own reaches it.
 func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan error {
 	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
+	return f.forwardKeyed(sender, item)
+}
+
+// forwardKeyed is that request itself: item sent to the holder's agent subject as it is, under
+// whatever dedupe key it already carries, which is the role forward's prefixed one for every
+// forward of a role's own route (forward).
+//
+// The one sender of an item whose key is already the one its holder dedupes on is the fallback
+// pass, for a copy whose role resolved to the very session the row's key names (fallbackSend.send):
+// that session's host was given the mention's own key by a send that landed before the attempt
+// failed, so a copy carrying it is dropped there, while the role forward's prefix would make it a
+// key no host has seen and show the comment twice.
+func (f *roleForward) forwardKeyed(sender bus.Sender, item contracts.Envelope) <-chan error {
 	subject := contracts.AgentSubject(f.holder)
 	return sender.Request(subject, item, bus.RequestOptions{
 		MsgID:           bus.ForwardMsgID(item.DedupeKey, subject),

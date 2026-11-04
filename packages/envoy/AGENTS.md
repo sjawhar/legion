@@ -4334,7 +4334,9 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   Of several failed targets the lowest target string keys it;
   the mode in it is the one the comment recorded on the mention, read from `comment_mentions` beside the attempts, and the mode a target's attempts went in never shows in it, every attempt of one mention sending under that one key.
   Every other destination the event's own publish reaches, a role route included, carries `dispatch-<event id>`;
-  a fallback copy carries its key's failed attempt's key whatever its destination (`targetFallbackKeys` for a row keyed by a target).
+  a fallback copy carries its key's failed attempt's key whatever its destination (`targetFallbackKeys` for a row keyed by a target), with two exceptions on a role route:
+  a copy forwarded to a role holder that is some other session is a role forward and carries `contracts.RoleForwardDedupePrefix` in front of that key, as every role forward does (`roleForward.forward`), while one whose holder is the very session the row's key names goes under that key alone, which that session's host drops (`fallbackSend.send`, `roleForward.forwardKeyed`);
+  and a copy kept on a role's kept lane is stored under that key too and prefixed by whoever forwards it on to the role's next holder (`roleForward.keep`, the drain in `cmd/listener/role_keep.go`).
 
 - A held-back copy blocks the event only when no send of it failed or was lost:
   a send NATS denied (`bus.ErrPublishDenied`) or any other failure of the event backs it off as a failure, its attempt counted;
@@ -4345,6 +4347,8 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   a receipt timeout records the attempt `failed` though the listener may have delivered the mention, a first attempt stranded `pending` past the minute may have landed before its sender stopped, and the outbox settles it and publishes the copy, and a send the killed process had handed the listener before it died, whose delivery sweep resend then fails for good (the listener down after the restart), is followed by the fallback pass's copy.
   Each way the copy carries the mention's own dedupe key, so the host, which drops a frame whose event id it saw or whose named dedupe key it claimed within `DELIVERY_DUPLICATE_WINDOW_MS` (`createDeliveryDedupe` in `packages/envoy-client`), drops it;
   and the stream, whose MsgId is the dedupe key and the subject, stores it no second time within its 72-hour duplicate window.
+  A copy held for a role route reaches the mentioned session under the mention's own key as well, which is what makes this promise hold for a role route at all:
+  such a row exists only for a route a mention of the session that route resolved to suppressed, so the pass that forwards its copy to a holder that is still that session leaves the role forward's prefix off (`fallbackSend.send`), and a prefixed key, which no host has claimed, would show it the comment a second time.
   A session no mention reached never claimed that key and is shown the copy.
   A session one comment mentions under two targets is sent one mention per target, so it can still see the copy beside a mention of the other target, no more copies than had every mention landed.
   A retry of the mention after the copy landed repeats the copy's key too, whichever mode it goes in:
