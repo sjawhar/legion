@@ -2846,8 +2846,8 @@ LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic 
   Anthropic's own endpoint when unset; a gateway key needs its gateway's URL here.
   `prerequisites` refuses a URL [`model_base_url_refusal`](lib/model-endpoint.sh) refuses, and refuses the variable under `gateway`.
 
-- Legion's two role Apps: this deployment's own pair by default, each key read through `agent-secrets`, or another pair through `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_IMPLEMENT_APP_KEY_NAME`, `LEGION_E2E_REVIEW_APP_ID`, `LEGION_E2E_REVIEW_APP_KEY_NAME` and `LEGION_E2E_APP_KEY_RUNNER` ([`lib/github-apps.sh`](#libgithub-appssh)), as Stage 3 reads them.
-  `prerequisites` proves each key is its id's App against GitHub's `GET /app` ([`read_app_logins`](#libworkflowsh)), and `legion.yaml`'s `github_apps` is the block it proved.
+- Legion's two role Apps: this deployment's own pair by default, each App's installation tokens minted through `agent-secrets`, or another pair through `LEGION_E2E_IMPLEMENT_APP_ID`, `LEGION_E2E_IMPLEMENT_APP_SECRET`, `LEGION_E2E_REVIEW_APP_ID` and `LEGION_E2E_REVIEW_APP_SECRET` ([`lib/github-apps.sh`](#libgithub-appssh)), as Stage 3 reads them.
+  `prerequisites` proves each App from its token against GitHub's `GET /apps/<slug>` ([`read_app_logins`](#libworkflowsh)), and `legion.yaml`'s `github_apps` is the block it proved.
 
 - `PARKED_DECISION_EVIDENCE_DIR`: the evidence directory.
   The default is a fresh `/tmp` directory.
@@ -2886,7 +2886,7 @@ Each checkpoint prints `== <name>`, what it saw, and `ok <name>`.
 The first failure ends the run and names the checkpoint.
 The transcript records the duration of each wait.
 
-- `prerequisites`: The tools, the two role Apps proved against GitHub's `GET /app` (`read_app_logins`), the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`.
+- `prerequisites`: The tools, the two role Apps proved from their tokens against GitHub's `GET /apps/<slug>` (`read_app_logins`), the inputs of the model route, no leftover of an earlier run (`refuse_leftovers legion-e2e-pd`), the proof human, and a read of `sjawhar/legion-smoke`.
   Then the script unsets the environment.
 
 - `rig`: The tokens, Postgres, NATS, the listener on a port the kernel chose (`start_held`), Dispatch on a port its keeper holds for the run (`keep_port`, `start_kept`), the project and its repository mapping, the isolated profile with this checkout's `pi-envoy` and `pi-legion`, and the model route.
