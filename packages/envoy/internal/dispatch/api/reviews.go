@@ -244,7 +244,7 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, reviews)
 }
 
-// POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (humans only)
+// POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (the person and approve scopes)
 func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		State  string  `json:"state"`

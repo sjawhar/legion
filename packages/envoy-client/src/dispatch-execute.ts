@@ -2765,10 +2765,11 @@ const INBOX_QUESTION_HEAD = 80;
 
 /**
  * Whether the person has deferred this row and its moment is still ahead: the Inbox page's own
- * `isSnoozed` (`packages/dispatch/web/src/features/inbox/snooze.ts`), re-read here because the
- * `dispatch` command shares no code with the web app. The window is absolute, so nothing an agent
- * does to the ask shortens it; a row Dispatch lists with no snooze at all is not deferred, and
- * neither is one whose moment has passed.
+ * `isSnoozed` (`packages/dispatch/web/src/features/inbox/snooze.ts`), re-read here and held to
+ * the page by Dispatch's browser test (`packages/dispatch/e2e/inbox-cli.e2e.ts`), which compares
+ * this command's bands with the page's. The window is absolute, so nothing an agent does to the
+ * ask shortens it; a row Dispatch lists with no snooze at all is not deferred, and neither is one
+ * whose moment has passed.
  */
 function inboxSnoozed(row: InboxRow, now: number): boolean {
   if (row.snoozed_until === null) return false;
@@ -3773,9 +3774,9 @@ export async function executeDispatchTool(
     try {
       [identity, rows] = await Promise.all([client.whoami(), client.inbox("me")]);
     } catch (error) {
-      // Both routes read the caller's own scopes, and a credential without `person` is refused
-      // 403 OAUTH_SCOPE_REQUIRED, whose message names the scope: the code is what the caller acts
-      // on, so it reaches the text.
+      // The inbox route needs `person`, and a credential without it is refused 403
+      // OAUTH_SCOPE_REQUIRED, whose message names the scope: the code is what the caller acts
+      // on, so it reaches the text. `whoami` needs no scope.
       throw refusalWithCode(error);
     }
     const viewer = whoamiPerson(identity);

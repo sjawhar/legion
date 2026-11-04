@@ -289,7 +289,7 @@ document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two
 - `DEV_SIGNIN_LOGIN`, as `block-graph.sh` takes it. Recording a review is a person's write alone,
   so the two review sections sign that person in with a cookie jar and answer the approval requests
   the script opened; unset, each prints one
-  `SKIP: review …: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews is human-only …`
+  `SKIP: review …: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews needs a person's …`
   line and every other section runs.
 
 It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a

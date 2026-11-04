@@ -54,11 +54,11 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 }
 
 // putProjectDefaultAssignee sets a project's default assignee, or clears it with an explicit
-// null. Human-only, as the file's head says. A body without an assignee is refused (400
-// INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A login that
-// is not a person who has signed in is refused here (400 ASSIGNEE_NOT_ALLOWED) so a typo never
-// becomes a stored default; a default that goes stale later is not refused but ignored, by the
-// create chain.
+// null. It needs the `person` scope, as the file's head says. A body without an assignee is
+// refused (400 INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A
+// login that is not a person who has signed in is refused here (400 ASSIGNEE_NOT_ALLOWED) so a
+// typo never becomes a stored default; a default that goes stale later is not refused but
+// ignored, by the create chain.
 func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireScope(w, r, model.ScopePerson)
 	if !ok {
