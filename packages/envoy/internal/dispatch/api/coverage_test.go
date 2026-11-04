@@ -232,11 +232,11 @@ func TestApprovalRequestSaysWhenTheSpecMarksNoRequirements(t *testing.T) {
 }
 
 // unreadableSpecDocs fails the next read of one document's text, once. That read is the one the
-// coverage makes (requirementBlocksIn, which calls docs.API.Text), and failing it there is what
-// makes this test decide anything: a failure armed on the document store instead is taken only
-// when the read reaches the store, and a read whose room is resident never does (heldTree,
-// docs/read_cache.go), so the issue's creation, which leaves the spec's room resident, decided
-// whether the arming was seen at all.
+// coverage makes (requirementBlocksIn, through typedBlocksIn's docs.API.Text, results.go), and
+// failing it there is what makes this test decide anything: a failure armed on the document store
+// instead is taken only when the read reaches the store (coldRead, docs/read_cache.go), and a read
+// whose room is resident never does (heldTree, docs/mutation.go), so the issue's creation, which
+// leaves the spec's room resident, decided whether the arming was seen at all.
 type unreadableSpecDocs struct {
 	docs.API
 	mu     sync.Mutex
