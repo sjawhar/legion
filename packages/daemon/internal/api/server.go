@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -123,6 +124,13 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
+	// Memory is the project's `memory` block (config.Project.Memory), under whose mode the
+	// operator's spawn draws the memory group of a tree it opens for the first time
+	// (memorygroup.Draw). The zero block is a project that names none, which draws every tree
+	// `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
+	// memorygroup.CryptoCoin, and a test pins it.
+	Memory     config.Memory
+	MemoryCoin func() (bool, error)
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -174,9 +182,12 @@ type Options struct {
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
 // an operator root opens its tree's lifecycle before its claim is stored, and the tree's close
-// reserves the tree's cleanup, then finishes it once every claim of the tree has retired.
+// reserves the tree's cleanup, then finishes it once every claim of the tree has retired. The
+// open's created callback runs in the open's own transaction where it created the tree's row, and
+// is where the tree's memory group is drawn (store.Store.OpenTreeLifecycle).
 type TreeLifecycles interface {
-	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
+	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority,
+		created ...func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error)
 	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
@@ -215,6 +226,10 @@ type server struct {
 	grants     *credential.Grants
 	releaser   store.TreeReleaser
 	trees      TreeLifecycles
+	// memory and coin are Options.Memory and Options.MemoryCoin: what the spawn's own draw of a
+	// tree it opens for the first time reads (drawMemory).
+	memory     config.Memory
+	coin       func() (bool, error)
 	pool       *pgxpool.Pool
 	handlers   []intake.Handler
 	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
@@ -266,6 +281,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
+		memory:             opts.Memory,
+		coin:               opts.MemoryCoin,
 		grants:             opts.Grants,
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
@@ -285,6 +302,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	}
+	if s.coin == nil {
+		s.coin = memorygroup.CryptoCoin
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)

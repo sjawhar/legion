@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -212,7 +216,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator); errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		} else if err != nil {
@@ -243,6 +247,25 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	s.operatorDone(r, token)
 	writeJSON(w, status, operatorView(m.Claim()))
+}
+
+// drawMemory is the draw of tree's memory group, for the open that creates the tree's lifecycle
+// row to run in its own transaction (store.Store.OpenTreeLifecycle): the group this project's mode
+// gives the tree, recorded on the tree's root. An operator's tree usually has no issue record at
+// all, and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no
+// record is invented. A daemon with no workflow keeps no records to draw on, and draws nothing.
+func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) error {
+	if s.records == nil {
+		return nil
+	}
+	return func(ctx context.Context, tx pgx.Tx) error {
+		group, err := memorygroup.Draw(s.memory.Mode, s.coin)
+		if err != nil {
+			return err
+		}
+		_, err = s.records.DrawMemory(ctx, tx, tree, string(group), string(s.memory.Mode), time.Now())
+		return err
+	}
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's

@@ -17,12 +17,31 @@ import (
 
 // OpenTreeLifecycle is the explicit authority entry point. Workflow admission calls it inside its
 // fact transaction; the authenticated operator route calls it before its root claim is persisted.
-func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+//
+// created, where one is given, runs in the same transaction as the open, and only where this call
+// created the tree's row (treelifecycle.Lifecycle.Created): the tree's memory group is drawn there
+// (internal/memorygroup), so no crash between the two can leave a lifecycle whose tree was never
+// drawn for. A failing created fails the open, and the row goes with the transaction. It is a
+// trailing optional rather than a plain parameter because most callers — every one that opens a
+// tree to seed or to test it — have nothing to run there, and a nil one of those is the same as
+// none.
+func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority,
+	created ...func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error) {
 	var lifecycle treelifecycle.Lifecycle
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		opened, err := treelifecycle.Open(ctx, tx, project, tree, authority)
 		if err != nil {
 			return err
+		}
+		if opened.Created {
+			for _, run := range created {
+				if run == nil {
+					continue
+				}
+				if err := run(ctx, tx); err != nil {
+					return err
+				}
+			}
 		}
 		lifecycle = opened
 		return nil

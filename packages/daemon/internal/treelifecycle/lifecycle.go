@@ -31,6 +31,11 @@ type Lifecycle struct {
 	Authority          Authority
 	CleanupStarted     bool
 	CleanupConfirmedAt time.Time
+	// Created is this call's own insert of the tree's row: true only where Open created the
+	// lifecycle, false for every read of one and for every later epoch of it. The draw of the
+	// tree's memory group (internal/memorygroup) is made exactly once, when the row is first
+	// created, so it is the one caller that asks; Read answers false, since it creates nothing.
+	Created bool
 }
 
 var (
@@ -115,7 +120,7 @@ func Open(ctx context.Context, tx pgx.Tx, project, tree string, authority Author
 		if err != nil {
 			return Lifecycle{}, fmt.Errorf("create tree lifecycle %s: %w", tree, err)
 		}
-		return Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority}, nil
+		return Lifecycle{Project: project, Tree: tree, Epoch: 1, Authority: authority, Created: true}, nil
 	}
 	if err != nil {
 		return Lifecycle{}, fmt.Errorf("read tree lifecycle %s: %w", tree, err)
