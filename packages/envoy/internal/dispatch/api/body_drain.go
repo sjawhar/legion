@@ -56,6 +56,16 @@ type transferBounds struct {
 	floor int64
 }
 
+// belowFloor reports whether moved bytes over elapsed is slower than the floor allows, once
+// elapsed is past the grace. Bounds with no floor (a test's) are below no floor, and neither is
+// a transfer still inside its grace. Both floors are judged here on the same grace and the same
+// rate - the one on an answer's writes (movingDeadline.tooSlow) and the one on a download's
+// reads of the file store (storeBody.Read) - so whichever end of a download dribbles is cut at
+// the same pace, each on the time that end itself spent.
+func (b transferBounds) belowFloor(moved int64, elapsed time.Duration) bool {
+	return b.floor > 0 && elapsed > b.grace && moved*int64(time.Second) < b.floor*int64(elapsed)
+}
+
 // defaultTransferBounds is what the deployment runs under.
 //
 // The idle bound is the read's own deadline (defaultReadDeadline, 20 s): long enough to outlast a
@@ -99,6 +109,12 @@ type movingDeadline struct {
 	// answer's writes are buffered that way (boundedAnswer), a body's reads are not, since a
 	// read returns with whatever has arrived.
 	buffered bool
+	// outside is time the transfer spent waiting on something that is not the far end, which
+	// the floor leaves out of what it judges: a download's answer is written as fast as the
+	// file store feeds it, so the time its reads spend inside the store's body is none of its
+	// reader's doing (serveFileVersion, storeBody.reading, leaveOutOfAnswerFloor). Nil for
+	// every other transfer, whose waiting is all the far end's.
+	outside func() time.Duration
 }
 
 // arm gives the bytes about to move the idle bound from now to move, and what the kernel already
@@ -164,6 +180,12 @@ var maxSendBuffer = sync.OnceValue(func() int64 {
 // tooSlow reports whether the transfer has moved its bytes slower than the floor allows, once it
 // has had its grace. A transfer with no floor (a test's) is never too slow.
 //
+// The time it judges is the time since the transfer's first bytes less whatever the transfer
+// waited on something other than its far end (outside): a download's writes wait on the file
+// store between them, and a store below the floor is judged by a floor of its own (storeBody)
+// rather than counted against the reader here, which cut every download that took longer than
+// the grace at the store's pace and blamed its reader for it.
+//
 // The bytes it judges are the ones the server has handed off - the ones the connection's writes
 // accepted - which run ahead of what the client has read by what the kernel still holds for it:
 // up to the send buffer and the client's receive window. A reader below the floor is therefore
@@ -174,8 +196,10 @@ var maxSendBuffer = sync.OnceValue(func() int64 {
 // end rather than to time a client's own pace.
 func (d *movingDeadline) tooSlow(now time.Time) bool {
 	elapsed := now.Sub(d.started)
-	return d.bounds.floor > 0 && elapsed > d.bounds.grace &&
-		d.moved*int64(time.Second) < d.bounds.floor*int64(elapsed)
+	if d.outside != nil {
+		elapsed -= d.outside()
+	}
+	return d.bounds.belowFloor(d.moved, elapsed)
 }
 
 // lift takes the bound off, which a transfer does at its end. Lifted, the connection carries no
@@ -731,10 +755,13 @@ func (w *drainingWriter) Unwrap() http.ResponseWriter {
 // drain at the floor on top of the idle bound (movingDeadline.drain), and a client that stops
 // reading is cut within idle plus that drain.
 //
-// A read whose deadline is its row's own, a file version download, has that deadline stopped at
+// A file version download (apiRoute.Download) has downloadDeadline's five minutes stopped at
 // this answer's first header or byte (beginsAnswer): the deadline bounds the work before the
 // answer, and from the first byte on this bound alone says how long the answer may take, so a
-// download of a large file to a slow but steady reader is written in full.
+// download of a large file to a slow but steady reader is written in full. Such a download also
+// tells this bound to leave the time its reads of the file store take out of what the floor
+// judges (movingDeadline.outside, leaveOutOfAnswerFloor), the store's pace being judged by a
+// floor of its own (storeBody).
 // Only a read is wrapped (serveRoute), and the websockets are mounted outside it, so no
 // long-lived connection is bounded here.
 type boundedAnswer struct {
@@ -756,6 +783,30 @@ func (a *boundedAnswer) begin() {
 	if a.beginsAnswer != nil {
 		a.beginsAnswer()
 		a.beginsAnswer = nil
+	}
+}
+
+// answerFloorKey keys the one thing a handler may say about the bound on its own answer: which
+// of its waiting the floor must not judge it on (movingDeadline.outside). It travels on the
+// read's context rather than on the writer because the layers between servedAsRead and a
+// handler wrap that writer as they please, and a handler is given whatever the layer above it
+// passed down; the context reaches it whole whoever wraps what.
+type answerFloorKey struct{}
+
+// boundsAnswerFloor puts set on a read's context, which servedAsRead does for every read it
+// bounds: set hands the answer's floor the time it is to leave out.
+func boundsAnswerFloor(ctx context.Context, set func(func() time.Duration)) context.Context {
+	return context.WithValue(ctx, answerFloorKey{}, set)
+}
+
+// leaveOutOfAnswerFloor tells the floor on ctx's answer to leave the time elapsed reports out of
+// what it judges: a download hands it the time its reads of the file store take
+// (serveFileVersion, storeBody.reading), which is waiting on the store and not on the reader the
+// floor is about. A context no bounded answer is being written on - a test calling a handler
+// directly - is told nothing.
+func leaveOutOfAnswerFloor(ctx context.Context, elapsed func() time.Duration) {
+	if set, ok := ctx.Value(answerFloorKey{}).(func(func() time.Duration)); ok {
+		set(elapsed)
 	}
 }
 
@@ -808,12 +859,12 @@ func (a *boundedAnswer) Flush() {
 // wire, header and all.
 const answerSniffed = 2 << 10
 
-// sent writes out what net/http still holds of the answer, under the bound, once the handler has
-// returned (returned; a panic unwinding leaves the connection to net/http), and answers what the
+// sent writes out what net/http still holds of the answer, under the bound, and answers what the
 // flush answered. Without it the response buffer (answerSniffed) and the connection's 4 KiB went
 // out after the bound was lifted, with no deadline on the connection and no WriteTimeout on the
 // server, so a download whose reader stopped before its last bytes held that reader's connection
-// and this goroutine until TCP gave up.
+// and this goroutine until TCP gave up. servedAsRead calls it after its handler has returned
+// normally, so a panic unwinding - a download's own abort - leaves the connection to net/http.
 //
 // Only an answer past what net/http measures is flushed. One inside it has nothing on the
 // connection to block on, and flushing it would send it chunked where net/http would have
@@ -821,8 +872,8 @@ const answerSniffed = 2 << 10
 // that wrote nothing is not answering (accesslog.ClientGone, refuseUnreadBody). A writer with no
 // connection of its own, a test's recorder, holds nothing back and reports none of this
 // (http.ErrNotSupported), as its deadline reports nothing (movingDeadline).
-func (a *boundedAnswer) sent(returned bool) error {
-	if !returned || a.moved <= answerSniffed {
+func (a *boundedAnswer) sent() error {
+	if a.moved <= answerSniffed {
 		return nil
 	}
 	a.arm()

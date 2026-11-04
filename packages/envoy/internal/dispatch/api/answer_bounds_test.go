@@ -256,6 +256,151 @@ func (b *stalledBody) Read(p []byte) (int, error) {
 
 func (b *stalledBody) Close() error { return b.body.Close() }
 
+// downloadBelowFloorMessage is the line serveFileVersion logs for a download the store's own
+// floor cut.
+const downloadBelowFloorMessage = "a file version's download was cut: the file store sent below the floor"
+
+// A store sending below the floor is cut by a floor of its own, logged at ERROR as the store's
+// doing, and the download's reader - which takes every byte the moment it arrives - is never
+// blamed for it. The answer's floor measures the time from its first header, which includes
+// every wait inside the store's body (storeBody.Read), so a store at half the floor failed the
+// answer's next write as soon as the grace was up and the download was logged at INFO as its
+// reader's doing: at the deployment's bounds every download needing more than about a minute at
+// a slow bucket's pace was cut, from about 1.2 MiB up at 20 KiB/s, and the operator got no ERROR
+// for the store. The reads' own time is now left out of the answer's floor
+// (leaveOutOfAnswerFloor), and the store is judged on it instead.
+func TestAStoreBelowTheFloorIsCutAsTheStoresDoingAndNotTheReaders(t *testing.T) {
+	// 4 KiB every 125 ms is 32 KiB/s, half the floor, and never silent for an idle bound.
+	const idle, grace, floor = 5 * time.Second, time.Second, 64 << 10
+	const chunk, every, size = 4 << 10, 125 * time.Millisecond, 512 << 10
+	// A loaded pod's scheduling, on top of the grace the store is cut after.
+	const margin = 10 * time.Second
+
+	logged := captureLog(t)
+	paced := &pacedStore{Memory: filestest.NewMemory(), chunk: chunk, every: every}
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		files: paced, downloadDeadline: time.Minute,
+	})
+	served.transfer = transferBounds{idle: idle, grace: grace, floor: floor}
+	artifact, _ := storeBackedVersion(t, handler, database, size)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	started := time.Now()
+	response := downloadOverARealConnection(t, httpServer.Listener.Addr().String(), "/api/v1/artifacts/"+artifact+"/versions/1", chunk)
+	// The client takes every byte as it arrives: what ends this download is the store's pace.
+	read, err := io.Copy(io.Discard, response.Body)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatalf("the download ended as if whole after %d of %d bytes: the store sent at half the %d bytes a second floor", read, size, int64(floor))
+	}
+	if elapsed < grace {
+		t.Fatalf("the download was cut %v in, want the store given its %v grace at the least", elapsed, grace)
+	}
+
+	line := awaitLineWith(t, logged, downloadBelowFloorMessage, margin)
+	if line == "" {
+		t.Fatalf("a store below the floor was not reported within %v; the log holds:\n%s", margin, logged.String())
+	}
+	if !strings.Contains(line, "level=ERROR") || !strings.Contains(line, "artifact="+artifact) ||
+		logField(line, "version") != "1" || logField(line, "size") != strconv.Itoa(size) {
+		t.Fatalf("the cut line names the wrong download, or is not the ERROR line a store's doing is: %s", line)
+	}
+	written, err := strconv.ParseInt(logField(line, "written"), 10, 64)
+	if err != nil || written <= 0 || written >= int64(size) {
+		t.Fatalf("the cut line says written=%q, want some but not all of the %d bytes: %s", logField(line, "written"), size, line)
+	}
+	rate, err := strconv.ParseInt(logField(line, "rate"), 10, 64)
+	if err != nil || rate <= 0 || rate >= floor {
+		t.Fatalf("the cut line says rate=%q, want the store's own pace, below the %d bytes a second floor: %s", logField(line, "rate"), int64(floor), line)
+	}
+	if blamed := awaitLineWith(t, logged, downloadCutMessage, 0); blamed != "" {
+		t.Fatalf("a store below the floor was logged as its reader's doing:\n%s", blamed)
+	}
+}
+
+// The other side: a store above the floor and a reader that is slow but above it too are sent
+// every byte, however many graces the download takes. The store's reads and the answer's writes
+// are judged apart, each on its own time, so neither end carries the other's waiting.
+func TestADownloadWhoseStoreAndReaderAreBothAboveTheFloorIsAnsweredInFull(t *testing.T) {
+	// The store at 320 KiB/s, the reader at 96 KiB/s: both above the floor, the reader the
+	// slower of the two, and the whole download takes several times the grace.
+	const idle, grace, floor = 5 * time.Second, time.Second, 64 << 10
+	const chunk, every, size = 8 << 10, 25 * time.Millisecond, 256 << 10
+	const takes, pause = 16 << 10, 170 * time.Millisecond
+
+	paced := &pacedStore{Memory: filestest.NewMemory(), chunk: chunk, every: every}
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		files: paced, downloadDeadline: time.Minute,
+	})
+	served.transfer = transferBounds{idle: idle, grace: grace, floor: floor}
+	artifact, file := storeBackedVersion(t, handler, database, size)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	started := time.Now()
+	response := downloadOverARealConnection(t, httpServer.Listener.Addr().String(), "/api/v1/artifacts/"+artifact+"/versions/1", takes)
+	hash := sha256.New()
+	block := make([]byte, takes)
+	for read := 0; read < size; {
+		time.Sleep(pause)
+		n, err := io.ReadFull(response.Body, block[:min(takes, size-read)])
+		read += n
+		hash.Write(block[:n])
+		if err != nil {
+			t.Fatalf("the download was cut %v in, after %d of %d bytes: %v",
+				time.Since(started).Round(time.Millisecond), read, size, err)
+		}
+	}
+	if got := hex.EncodeToString(hash.Sum(nil)); got != files.SHA256(file) {
+		t.Fatalf("the download hashed to %s, want the file's %s", got, files.SHA256(file))
+	}
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Fatalf("the download took %v, inside its %v grace: no floor was judged at all", elapsed, grace)
+	}
+}
+
+// pacedStore is a file store whose objects answer chunk bytes every tick: the bucket sending at
+// a rate of the test's choosing, where filestest.Memory hands the whole object over at once. Its
+// uploads are the memory store's, so a version uploaded through it is stored and read back as
+// any other.
+type pacedStore struct {
+	*filestest.Memory
+	chunk int
+	every time.Duration
+}
+
+func (s *pacedStore) Get(ctx context.Context, sha string) (*files.Object, error) {
+	object, err := s.Memory.Get(ctx, sha)
+	if err != nil {
+		return nil, err
+	}
+	return &files.Object{Body: &pacedBody{ctx: ctx, body: object.Body, chunk: s.chunk, every: s.every}, Size: object.Size}, nil
+}
+
+// pacedBody waits its tick before each chunk and ends with its context, as a bucket's body read
+// ends when the request it was opened under is cancelled (files.Store.Get).
+type pacedBody struct {
+	ctx   context.Context
+	body  io.ReadCloser
+	chunk int
+	every time.Duration
+}
+
+func (b *pacedBody) Read(p []byte) (int, error) {
+	select {
+	case <-time.After(b.every):
+	case <-b.ctx.Done():
+		return 0, context.Cause(b.ctx)
+	}
+	if len(p) > b.chunk {
+		p = p[:b.chunk]
+	}
+	return b.body.Read(p)
+}
+
+func (b *pacedBody) Close() error { return b.body.Close() }
+
 // downloadTestServer is a server whose uploads go to a fake bucket on loopback, reached through
 // the real SDK (files.NewS3, as a deployment opens its store), whose file version downloads are
 // bounded at deadline before their answers begin and whose transfers are bounded by bounds.
@@ -811,6 +956,46 @@ func TestTheLastBytesOfAnAnswerGoOutUnderItsBound(t *testing.T) {
 	}
 }
 
+// A pinned read's last bytes go out after its request-pool connection is back. The flush waits
+// on the connection as every other write does - up to the idle bound and the send buffer's
+// drain, about 148 s at the deployment's bounds - and it ran inside the pin, so a reader that
+// stopped just before the end held the pinned connection, and the read admission unit around
+// it, for that whole wait. Here the flush reads what the request pool still holds while it
+// runs: with the pin given back first, nothing.
+func TestAPinnedReadsLastBytesGoOutAfterItsPinIsBack(t *testing.T) {
+	// Past the buffer net/http measures an answer in, so there is something left to flush.
+	answer := strings.Repeat("the file version's bytes, ", 200)
+	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	served.transfer = transferBounds{idle: time.Second}
+	awaitQuietRequestPool(t, database.Pool)
+
+	heldAtFlush := int32(-1)
+	writer := &flushRecorder{ResponseRecorder: httptest.NewRecorder(), atFlush: func() {
+		heldAtFlush = database.Pool.Stat().AcquiredConns()
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/a1/versions/1", nil)
+	served.servedAsRead(time.Minute, false, true, func(w http.ResponseWriter, r *http.Request) {
+		var one int
+		if err := database.Pool.QueryRow(r.Context(), "select 1").Scan(&one); err != nil {
+			t.Errorf("take the read's pinned connection: %v", err)
+			return
+		}
+		if held := database.Pool.Stat().AcquiredConns(); held != 1 {
+			t.Errorf("the pinned read holds %d request-pool connections while it runs, want the one it pinned", held)
+		}
+		if _, err := w.Write([]byte(answer)); err != nil {
+			t.Errorf("write the answer: %v", err)
+		}
+	})(writer, request)
+
+	if writer.flushes != 1 {
+		t.Fatalf("the answer was flushed %d times, want the one flush that sends what net/http still holds", writer.flushes)
+	}
+	if heldAtFlush != 0 {
+		t.Fatalf("the request pool held %d connections while the answer's last bytes went out, want the pinned one given back first", heldAtFlush)
+	}
+}
+
 // flushRecorder is an answer's writer with a connection of its own: it takes the write deadlines
 // the bound sets and answers the flush that sends what net/http still holds with failure, as a
 // connection whose reader has stopped answers it.
@@ -822,10 +1007,16 @@ type flushRecorder struct {
 	// the one it ran under.
 	armedAtFlush int
 	deadlines    []time.Time
+	// atFlush runs while the flush is in flight, so a test can read what the request still
+	// holds as its last bytes go out.
+	atFlush func()
 }
 
 func (w *flushRecorder) FlushError() error {
 	w.flushes++
+	if w.atFlush != nil {
+		w.atFlush()
+	}
 	w.armedAtFlush = len(w.deadlines)
 	return w.failure
 }

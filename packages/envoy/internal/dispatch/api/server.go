@@ -131,7 +131,7 @@ type Deps struct {
 	ReadDeadline time.Duration
 	// DownloadDeadline replaces the deadline of the four file version downloads
 	// (downloadDeadline, apiRoute.Download), which bounds the work each does before its answer
-	// begins; zero is the row's own five minutes. Only a test sets one, so a download whose
+	// begins; zero is downloadDeadline's five minutes. Only a test sets one, so a download whose
 	// deadline passes under it is the test's choice rather than five minutes of wall clock.
 	DownloadDeadline time.Duration
 	// RouteRosterTTL replaces how long a stored listener answer serves issue reads and agents
@@ -709,9 +709,9 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 	handler = s.refuseUnstorableParameters(route.Pattern, handler)
 	if !route.TestHook {
 		if route.Method == http.MethodGet {
-			// A download's work before its answer is bounded at the row's five minutes
-			// (downloadDeadline), which a test shortens (Deps.DownloadDeadline); it is also the
-			// read whose deadline stops at its answer.
+			// A download's work before its answer is bounded at downloadDeadline's five
+			// minutes, which a test shortens (Deps.DownloadDeadline); it is also the read
+			// whose deadline stops at its answer.
 			if route.Download {
 				deadline = cmp.Or(s.deps.DownloadDeadline, downloadDeadline)
 			}
@@ -818,6 +818,10 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 // nothing else. boundedAnswer stops it at the answer's first header or byte
 // (boundedAnswer.beginsAnswer).
 //
+// A download tells that bound which of its own waiting the floor must not judge it on
+// (boundsAnswerFloor, leaveOutOfAnswerFloor): the time its reads of the file store take is the
+// store's pace, not its reader's, and the store is held to a floor of its own (storeBody).
+//
 // The last of an answer leaves under the bound as the rest of it did: net/http holds what the
 // handler wrote last in its response buffer and the connection's, and writes them after the
 // handler returns, over a connection whose deadline was lifted and a server that sets no
@@ -825,10 +829,14 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 // connection until TCP gave up and the access line read status=200 with every byte accounted
 // for. The flush sends them here instead, armed as every other write is (boundedAnswer.sent),
 // and a download whose last bytes are not taken is cut as one cut mid-stream is: logged at INFO
-// and aborted, so the access line carries aborted=true. A panic unwinding - a download's own
-// abort - flushes nothing, since the connection is already going; recover() would report it,
-// but only by swallowing the panic a deferred function cannot re-raise faithfully, so the
-// handler's own return sets the flag instead.
+// and aborted, so the access line carries aborted=true.
+//
+// It runs after the pin is given back, and only where the handler returned normally: a flush
+// can wait out the idle bound and the send buffer's drain, which the pinned request-pool
+// connection would otherwise be held for, and a panic unwinding - a download's own abort -
+// leaves the connection to net/http rather than flushing a connection that is already going.
+// Giving the pin back twice costs nothing (store.PinConnection), so the deferred unpin still
+// covers the panic.
 func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var ctx context.Context
@@ -848,21 +856,19 @@ func (s *server) servedAsRead(deadline time.Duration, download bool, pin bool, h
 			beginsAnswer:   beginsAnswer,
 		}
 		defer answer.lift()
+		ctx = boundsAnswerFloor(ctx, func(elapsed func() time.Duration) { answer.outside = elapsed })
+		unpin := func() {}
 		if pin {
-			var unpin func()
 			ctx, unpin = store.PinConnection(ctx)
 			defer unpin()
 		}
-		returned := false
-		defer func() {
-			if err := answer.sent(returned); err != nil && download {
-				slog.Info("dispatch: a file version's download was cut: its reader did not take its last bytes",
-					"path", r.URL.Path, "written", answer.moved, "error", err)
-				panic(http.ErrAbortHandler)
-			}
-		}()
 		handler(answer, r.WithContext(ctx))
-		returned = true
+		unpin()
+		if err := answer.sent(); err != nil && download {
+			slog.Info("dispatch: a file version's download was cut: its reader did not take its last bytes",
+				"path", r.URL.Path, "written", answer.moved, "error", err)
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 

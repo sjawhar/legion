@@ -21,15 +21,21 @@ body: |-
   short of its Content-Length with nothing logged. A download its reader does cut - one that
   stops reading, or falls below the floor - is logged once at INFO, naming the artifact, the
   version, the bytes written and the file's size, and its connection is closed under it.
-  The same bound now holds the file store to sending: a bucket that stops mid-object and keeps
-  its connection open is cut after 20 seconds of silence, logged at ERROR and closed under its
-  client, where it held the request's goroutine, the bucket's connection and the request's own
+  A bound of the same shape now holds the file store to sending, judged on the time the
+  download's reads of the bucket's body themselves take: a bucket that leaves one of those reads
+  unfinished for 20 seconds, which is a bucket sending below about 1.6 KB/s since each read waits
+  for about 32 KB of new bytes, and one whose bytes over that reading time fall below 32 KB/s
+  after a minute's grace, are both cut, logged at ERROR naming the store and closed under their
+  client, where they held the request's goroutine, the bucket's connection and the request's own
   room to run until that client hung up, so patient clients during a bucket incident filled the
-  read class and every read was then answered `429 OVERLOADED`. The last bytes of an answer the
+  read class and every read was then answered `429 OVERLOADED`. That reading time is left out of
+  what the reader's own floor is judged on, so a slow bucket is cut as the store's fault instead
+  of taking the download's reader down with it. The last bytes of an answer the
   server has begun writing go out under the bound as well, rather than being left to the
-  connection's buffers after the request with no deadline on them: a download whose reader does
-  not take them is cut there too, where it held the connection and the goroutine until TCP gave
-  up.
+  connection's buffers after the request with no deadline on them, and after the request's
+  pinned database connection is given back rather than while it still holds it: a download whose
+  reader does not take them is cut there too, where it held the connection and the goroutine
+  until TCP gave up.
   A write whose client is already sending now reads its whole body off the connection before it
   asks admission for room, where the server has none for it: it waits for room holding no unit,
   with nothing of its request left on the wire, so the time its body takes is none of its wait
