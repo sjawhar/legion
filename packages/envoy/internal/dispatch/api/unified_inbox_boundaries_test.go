@@ -33,9 +33,9 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
  insert into refs(from_kind,from_id,kind,to_kind,to_id,created_at) values
  ('message','00000000-0000-0000-0000-000000000104','mentions','person_mention','alice',now()),
  ('message','00000000-0000-0000-0000-000000000105','mentions','person_mention','alice',now());
- insert into block_refs(artifact_id,block_id,from_node,kind,to_kind,to_id) values
- ('00000000-0000-0000-0000-000000000100','part:one','CORE/artifact/notes#part:one','mentions','person_mention','alice'),
- ('00000000-0000-0000-0000-000000000200','part:one','CORE-1/spec#part:one','mentions','person_mention','alice');
+ insert into block_refs(artifact_id,block_id,from_node,kind,to_kind,to_id,created_version) values
+ ('00000000-0000-0000-0000-000000000100','part:one','CORE/artifact/notes#part:one','mentions','person_mention','alice',1),
+ ('00000000-0000-0000-0000-000000000200','part:one','CORE-1/spec#part:one','mentions','person_mention','alice',1);
  `); err != nil {
 		t.Fatal(err)
 	}

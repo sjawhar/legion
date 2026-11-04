@@ -289,7 +289,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_person_author",
 		"comments_created_text_id",
 		"messages_created_text_id",
-		"document_blocks_changed_node",
+		"document_blocks_changed_at",
 		"comment_mentions_comment_id_text",
 		"comment_deliveries_comment_id_text",
 		"message_deliveries_message_id_text",
