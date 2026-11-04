@@ -40,12 +40,10 @@ const SessionWireSchema = z.object({
   // The session's real machine, as the client reported it (machineID()); machine_id stays the
   // listener it last registered through. The session's owner is the listener its stored
   // subscription names (the one store.Registry.Match fans its topics out on), else the one on
-  // machine_id; only the owner delivers to a serve-port session, at this host unless the session
-  // runs on the owner's machine (registered through it, or this host is the owner's machine id)
-  // and the owner has a host bridge, and any other listener leaves inbox messages
-  // to it silently (session.go's ErrWrongMachine). Optional here only for a listener predating
-  // the field — the live listener always fills it in, falling back to machine_id itself
-  // (session.SessionEntry.HostOrMachine).
+  // machine_id; the owner relays the session's consumer, and any other listener leaves inbox
+  // messages to it silently (session.HandleAgentResult.OwnedElsewhere). No delivery reads host.
+  // Optional here only for a listener predating the field — the live listener always fills it in,
+  // falling back to machine_id itself (session.SessionEntry.HostOrMachine).
   host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
@@ -97,6 +95,20 @@ const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
   duplicate: z.boolean().optional(),
+});
+
+/**
+ * The publish route's answer. A role topic has three of them, told apart by status: 200, a
+ * session holds the role and the stream stored the forward for its consumer, with `holder`; 202,
+ * nobody holds the role, so the listener kept the message on the role's kept lane and hands it to
+ * the role's next holder, with `kept`, `kept_reason` and `holder` when a lapsed claim named one;
+ * 404, nothing was kept and the sender's own fallback must run, which `request` throws as an
+ * `EnvoyApiError`. 202 is a success answer, so it passes `response.ok` and reaches this schema —
+ * load-bearing: without it a kept message would read as a refusal.
+ */
+const PublishResponseSchema = EnvelopeResponseSchema.extend({
+  kept: z.boolean().optional(),
+  kept_reason: z.enum(["unclaimed", "holder_lapsed"]).optional(),
 });
 
 export type EnvoyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -206,6 +218,7 @@ export type SubscribeInput = {
   readonly sessionID: string;
   readonly directory: string;
   readonly topics: readonly string[];
+  /** Always 0: the listener refuses a registration whose port is above 0, naming the field. */
   readonly port: number;
   readonly title: string;
   readonly capabilities?: readonly string[];
@@ -311,6 +324,13 @@ export type PublishInput = (AgentSourceInput | HumanSourceInput) &
     readonly message: string;
     readonly payload?: string;
     readonly idempotencyKey?: string;
+    /**
+     * Only a role topic reads this. Unset, or true, keeps a message no live holder took on the
+     * role's kept lane for the role's next holder, which the listener answers 202 (`kept`).
+     * False keeps nothing, so the listener answers 404 and the sender's own fallback runs. The
+     * field is omitted from the wire unless set, so an older listener sees an unchanged request.
+     */
+    readonly keep?: boolean;
   };
 
 export type SetRoleInput = {
@@ -354,7 +374,17 @@ export type SendResult = {
 
 export type PublishResult = {
   readonly envelope: Envelope;
+  /** The session the message reached, or the one a lapsed claim named on a kept answer. */
   readonly holder?: string;
+  /**
+   * True on the listener's 202: no live holder took the message, so the listener kept it on the
+   * role's kept lane and hands it to the role's next holder. The message is not lost, so this is
+   * a success answer, not a refusal. Absent unless the listener answered it.
+   */
+  readonly kept?: boolean;
+  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. Read
+   * from the answer's own schema, so a reason a later listener adds is added in one place. */
+  readonly keptReason?: z.infer<typeof PublishResponseSchema>["kept_reason"];
 };
 
 export class EnvoyApiError extends Error {
@@ -590,13 +620,10 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
     // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
     // re-subscribes on each tick). The listener stores it separately from the registering
-    // listener's own machine_id, and the session's owner reaches a serve-port session at
-    // it unless the session runs on the owner's machine (registered through it, or this
-    // value is the owner's machine id) and the owner has a host bridge.
-    // The owner is the listener the session's stored subscription names, else the one it
-    // registered through; only the owner delivers to the session, and any other listener
-    // leaves inbox messages to it silently. With a port, a value that is not a host name
-    // or IP address is refused with 400 (expected: ["host"]).
+    // listener's own machine_id and reads it for no delivery: it is what a human-facing
+    // list shows as the session's machine. The owner is the listener the session's stored
+    // subscription names, else the one it registered through; only the owner relays the
+    // session's consumer, and any other listener leaves inbox messages to it silently.
     host: machineID(),
     plugin: input.plugin.name,
     plugin_version: input.plugin.version,
@@ -654,7 +681,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     },
     publish: async (input) => {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(
+      const response = PublishResponseSchema.parse(
         JSON.parse(
           await post("/v1/messages/publish", {
             source: input.source ?? "agent",
@@ -664,12 +691,16 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.payload === undefined ? {} : { payload: input.payload }),
             idempotency_key: idempotencyKey,
             ...messageMetadata(input),
+            // Omitted unless the caller set it, so an older listener sees an unchanged request.
+            ...(input.keep === undefined ? {} : { keep: input.keep }),
           })
         )
       );
       return {
         envelope: response,
         ...(response.holder === undefined ? {} : { holder: response.holder }),
+        ...(response.kept === undefined ? {} : { kept: response.kept }),
+        ...(response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }),
       };
     },
     unregisterSession: async (input) => {

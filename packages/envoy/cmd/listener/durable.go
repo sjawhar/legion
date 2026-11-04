@@ -398,9 +398,10 @@ func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string, sto
 // agentSubjectNeedsDelivery is durableNeedsDelivery for sessionID's agent subject: not needed when
 // the session's live entry holds it in its own consumer (one skipped delivery), nor when its
 // cached interest names another listener, which delivers it (session.HandleAgentMessage's
-// OwnedElsewhere). Everything else is decoded and delivered: a serving-port session of this
-// machine, an entry the previous build wrote for a session on no consumer, for which the path
-// raises its unreachable exception, and a session nobody has, for which it raises no_holder.
+// OwnedElsewhere). Everything else is decoded and delivered: a session of this machine whose
+// entry records no consumer of its own holding it - an entry the previous build wrote for a
+// session on the core path, or one whose read did not answer - for which the path raises its
+// unreachable exception, and a session nobody has, for which it raises no_holder.
 func agentSubjectNeedsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) (needed bool, skipped int) {
 	if entry, err := cfg.sessions.Get(sessionID); err == nil && entry.ConsumerHoldsStored(storedSeq) {
 		return false, 1

@@ -57,15 +57,15 @@ func Remove(item Interest, topics []string) Interest {
 
 // dropPrivateStreamTopics removes from topics every one reaching a private stream subject that is
 // not sessionID's own (bus.ReachesPrivateStreamSubject): another session's inbox, a
-// failed-delivery lane, a controller notice lane of a project whose controller role roles does not
-// name, or a wildcard overlapping one. Registry.Match fans a stored topic out to its serve-port
-// session, so such a topic would hand that session messages meant for another session or for
-// another project's controller. The listener refuses one at /v1/interests/subscribe; this drops
-// one a row stored before that guard held, and one whose role the session has since lost, so every
-// write of a row (Upsert, Remove) cleans it. roles is what the session holds now
-// (Registry.RolesHeldBy, read by controllerLaneRoles). sessionID is the row's key, not the
-// session_id its stored value names. It filters topics in place, so callers pass a slice they own
-// (Merge's and Remove's results are).
+// failed-delivery lane, a controller notice lane of a project whose controller role roles does
+// not name, or a wildcard overlapping one. Registry.Match fans a stored topic out to the listener
+// the row names, which delivers it to that row's session, so such a topic would hand that session
+// messages meant for another session or for another project's controller. The listener refuses
+// one at /v1/interests/subscribe; this drops one a row stored before that guard held, and one
+// whose role the session has since lost, so every write of a row (Upsert, Remove) cleans it.
+// roles is what the session holds now (Registry.RolesHeldBy, read by controllerLaneRoles).
+// sessionID is the row's key, not the session_id its stored value names. It filters topics in
+// place, so callers pass a slice they own (Merge's and Remove's results are).
 func dropPrivateStreamTopics(sessionID string, roles []string, topics []string) []string {
 	return slices.DeleteFunc(topics, func(topic string) bool {
 		return bus.ReachesPrivateStreamSubject(sessionID, topic, roles)

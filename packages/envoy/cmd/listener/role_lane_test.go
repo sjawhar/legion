@@ -29,7 +29,7 @@ import (
 // another holder's forwards are published and settled.
 func TestRoleLaneForwarderPublishesEachHoldersForwardsInOrderWithoutWaitingForOutcomes(t *testing.T) {
 	const perHolder = 50
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	silent, live := contracts.AgentSubject("ses_forwarder_silent"), contracts.AgentSubject("ses_forwarder_live")
 	release := make(chan struct{})
 	var mu sync.Mutex
@@ -481,46 +481,5 @@ func TestRoleLaneForwardTheStreamDoesNotStoreIsDeliveryFailed(t *testing.T) {
 	})
 	if roleForwardsLogged(role, listener) != 0 {
 		t.Fatalf("the listener logged the unstored forward as delivered:\n%s", listener.Output.String())
-	}
-}
-
-// A serving-port session holding a role has no NATS subscriber: when its entry records consumer
-// delivery, the stored forward is its delivery, pushed to the port from its consumer, so the role
-// message counts as delivered on the stream's acknowledgement alone, reaches the port once, and
-// raises no exception.
-func TestRoleLaneServingPortHolderTakesTheStoredForward(t *testing.T) {
-	uri := testnats.URL(t)
-	listener := startRoleLaneListeners(t, uri, nil, "role-lane-serving")[0]
-	sessionID := "ses_role_lane_serving_" + id.New()
-	role := "role-lane-serving-" + id.New()
-	port := startScriptedPort(t, sessionID)
-	registerScriptedSession(t, listener, port)
-	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
-	client := connectPublisher(t, uri)
-	exceptions, err := client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + contracts.RoleTopicPrefix + role)
-	if err != nil {
-		t.Fatalf("subscribe to the role's exceptions: %v", err)
-	}
-	if err := client.Conn.Flush(); err != nil {
-		t.Fatalf("flush the exception subscription: %v", err)
-	}
-
-	item := publishRoleMessage(t, client.Conn, role, "a role message for a serving port")
-	push := port.next(t, 10*time.Second)
-	if push.status != http.StatusNoContent {
-		t.Fatalf("the push answered %d, want 204", push.status)
-	}
-	requirePromptCarries(t, push.text, item)
-	waitFor(t, 5*time.Second, "the listener to log the forward delivered", func() bool {
-		return countRecords(listener, "listener role forwarded", func(record map[string]any) bool { return record["event_id"] == item.EventID }) == 1
-	})
-	// The forward window is 2 s: past it, a forward whose outcome the stream never gave would have
-	// raised its exception.
-	port.noPush(t, roleForwardTimeout+time.Second)
-	if message, err := exceptions.NextMsg(100 * time.Millisecond); err == nil {
-		t.Fatalf("the role message raised an exception: %s", message.Data)
-	}
-	if count := countRecords(listener, "listener role forward failed", func(map[string]any) bool { return true }); count != 0 {
-		t.Fatalf("the listener logged %d failed forwards for a holder that takes its messages from the stream", count)
 	}
 }

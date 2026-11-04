@@ -498,6 +498,18 @@ const nextFences = `[\n${fenceCases
   .map((line) => `  ${line}`)
   .join(",\n")}\n]\n`;
 
+// The names the browser editor's ProseMirror schema carries, which pmdoc's nodeTypes and
+// markTypes are held to (editor_node_names_test.go names every deliberate difference).
+const editorNamesOut = join(here, "..", "schema", "editor-node-names.json");
+const nextEditorNames = `${JSON.stringify(
+  {
+    nodes: Object.keys(engine.schema.nodes).sort(),
+    marks: Object.keys(engine.schema.marks).sort(),
+  },
+  null,
+  2
+)}\n`;
+
 const next = `${JSON.stringify(fixtures, null, 2)}\n`;
 if (check) {
   const current = readFileSync(out, "utf8");
@@ -505,7 +517,8 @@ if (check) {
   if (
     current !== next ||
     currentSplices !== nextSplices ||
-    readFileSync(fenceOut, "utf8") !== nextFences
+    readFileSync(fenceOut, "utf8") !== nextFences ||
+    readFileSync(editorNamesOut, "utf8") !== nextEditorNames
   ) {
     console.error("generated pmdoc fixtures are stale: run `bun run gen`");
     process.exit(1);
@@ -517,6 +530,7 @@ if (check) {
   writeFileSync(out, next);
   writeFileSync(spliceOut, nextSplices);
   writeFileSync(fenceOut, nextFences);
+  writeFileSync(editorNamesOut, nextEditorNames);
   console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }
 setBlockIdGenerator(null);

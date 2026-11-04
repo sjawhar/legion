@@ -121,10 +121,9 @@ The hub refuses these before it registers anything, with an error naming the inp
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
 - `listenerMachineId`: the user of one listener alone, which no session shares, granted
   `ListenerHostPermissions(listenerMachineId)`: the listener's own set, the session consumers'
-  calls included, with the plain `notifications.>` subscribe that
-  `ENVOY_SUBSCRIBE_ALL_TOPICS=1` needs. Give it that listener's `machineId`. Use it where the
-  listener's process is the only one holding the seed, so it keeps its sessions' consumers while
-  serving topics the stream does not store; a host whose sessions connect as the same user takes
+  calls included, with a plain `notifications.>` subscribe nothing uses any more. Give it that
+  listener's `machineId`. Use it where the listener's process is the only one holding the seed,
+  so it keeps its sessions' consumers; a host whose sessions connect as the same user takes
   `machineId` instead, since a session holding this set could create, pull and delete any
   session's consumer.
 - `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
@@ -231,10 +230,10 @@ VM's loopback, `127.0.0.1:9020`, and reaches NATS there too, on `nats://127.0.0.
 Serve forwards the tailnet's connections to the hub's port 9020 to that address. A self-subscribed
 client such as pi-envoy or claude-envoy registers and sends through
 `http://<h>.<tailnet>:9020`; it receives directly from NATS, with no listener of its own. A client
-that registers a serving port cannot receive delivery through this hub listener: its registration
-is the hub's machine, and the hub has no host bridge to reach the client's port. Run a listener
-beside that client instead. The listener's `/v1` API takes no bearer, which the listener allows
-only on a loopback address (`packages/envoy/cmd/listener/apiauth.go`), so the tailnet's policy
+that registers a port is refused: the listener answers 400 naming `port`, since it pushes to no
+session's port. Register with no port and receive from the session's own NATS consumer. The
+listener's `/v1` API takes no bearer, which the listener allows only on a loopback address
+(`packages/envoy/cmd/listener/apiauth.go`), so the tailnet's policy
 for port 9020 is the only thing that decides who may call it, and a caller gets the whole API
 with no credential: it can publish to any topic outside the agent topics with a `source` of its
 choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack, Legion and role

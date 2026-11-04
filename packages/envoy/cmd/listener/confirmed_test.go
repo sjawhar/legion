@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +22,21 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// publishTo publishes item to subject over core NATS and flushes, as a router that forwards an
+// envelope while it keeps its own topic does (bus.Client.PublishCoreContext). The stream captures
+// agent subjects, so a forward copy published to one is stored there.
+func publishTo(t *testing.T, client *bus.Client, subject string, item contracts.Envelope) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.PublishCoreContext(ctx, subject, item); err != nil {
+		t.Fatalf("publish %s to %s: %v", item.Topic, subject, err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the publish to %s: %v", subject, err)
+	}
+}
 
 // publishDeps is the harness's stores as main hands them to the /v1 routes, with the delivery
 // handlers' own config and a confirmation record of the route's own, as main wires the publish
@@ -46,13 +61,18 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 	return confirmed
 }
 
-// withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// delivery config over d's stores with a dedupe cache, startRoleForward(client) as the forward, a
-// logger and a delivered counter, and a confirmation record.
-func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
+// withRoleClaimDrain gives d the delivery configuration a route runs a kept-lane drain on, as main
+// wires it: a config over d's stores with the dedupe cache and the attempt cache the drain judges
+// a forward against (beforeForward), startRoleForward(client) as the forward, a logger, a
+// delivered counter, the drain's kept-expired counter and the guards two drains of one role take
+// (roleKeepGuards). POST /v1/roles/set hands a claim's handover this config (runKeptRoleDrain),
+// so a test that claims a role through that route needs it.
+func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
 	t.Cleanup(cache.Stop)
+	attempts := dedupe.New(5 * time.Minute)
+	t.Cleanup(attempts.Stop)
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -65,9 +85,20 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		registry:          d.registry,
 		sessions:          d.sessions,
 		dedupeCache:       cache,
+		attemptCache:      attempts,
 		logger:            logging.NewWithWriter("test", logs),
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
+		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
+		roleKeepDrains:    newRoleKeepGuards(),
 	}
+	return d
+}
+
+// withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: the
+// delivery config a kept copy's drain runs on (withRoleClaimDrain) and a confirmation record.
+func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
+	t.Helper()
+	withRoleClaimDrain(t, d)
 	d.confirmed = newConfirmedRecord(t)
 	return d
 }
@@ -166,7 +197,7 @@ func exceptionProbe(t *testing.T, client *bus.Client) *natsgo.Subscription {
 // A live holder answers no receipt, so its forward counts as delivered once the stream stored it:
 // the sender is answered 200 after the one forward, and the holder is not sent the envelope again.
 func TestPublishRouteAnswersStoredOnceTheHoldersForwardIsKept(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "stored-forward"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
 	frames := startStandIn(t, testnats.URL(t), "ses_holder")
@@ -196,7 +227,7 @@ func TestPublishRouteAnswersStoredOnceTheHoldersForwardIsKept(t *testing.T) {
 // the holder's agent subject, where the holder's consumer delivers it with acknowledgement and
 // redelivery. Nothing answers a receipt there, and the send waits for none.
 func TestPublishRouteStoresTheForwardForAHolderThatIsNotConnected(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "offline-holder"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_offline", role, nil)
 	probe := exceptionProbe(t, harness.client)
@@ -238,7 +269,7 @@ func TestPublishRouteStoresTheForwardForAHolderThatIsNotConnected(t *testing.T) 
 // of the first one's confirmation - forward the envelope to the holder twice, and the stream
 // stores that one copy.
 func TestPublishRouteStoresOneCopyOfARoleForwardSentTwice(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "stored-once"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_one_copy", role, nil)
 	frames := startStandIn(t, testnats.URL(t), "ses_one_copy")
@@ -309,7 +340,7 @@ func TestPublishRouteAnswersBusUnavailableWhenTheClaimReadStalls(t *testing.T) {
 // A holder that does not advertise the payload's delivery mode is refused as /v1/messages/send
 // refuses it, naming the holder, and is sent nothing.
 func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "no-steer"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_aside_only", role, []string{"aside"})
 	frames := startStandIn(t, testnats.URL(t), "ses_aside_only")
@@ -327,7 +358,7 @@ func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T)
 // A sender that holds the role itself is answered 200 and nothing is sent, to the holder or on the
 // role lane, as the role lane skips an echo.
 func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "self-held"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_self", role, nil)
 	frames := startStandIn(t, testnats.URL(t), "ses_self")
@@ -357,7 +388,7 @@ func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
 // A re-send under the key of a message its holder already confirmed is answered 200 and not
 // forwarded again: the holder took it once.
 func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
-	harness := newListenerDeliveryHarness(t, nil)
+	harness := newListenerDeliveryHarness(t)
 	const role = "repeat-key"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
 	frames := startStandIn(t, testnats.URL(t), "ses_holder")
@@ -381,16 +412,12 @@ func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
 }
 
 // A forward copy the stream stored on a session's agent subject reaches every listener's durable;
-// the durable acknowledges it and delivers it to nobody, so a serve-port session subscribed to the
-// copy's topic is not sent the message a second time.
+// the durable acknowledges it and delivers it to nobody, so a session subscribed to the copy's
+// topic is not given the message a second time.
 func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
-	var pushes atomic.Int32
-	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
-		pushes.Add(1)
-		return listenerDeliveryResponse(http.StatusNoContent), nil
-	}))
+	harness := newListenerDeliveryHarness(t)
 	const topic = "notifications.team.stored-copy"
-	harness.registerFanoutTarget(t, "ses_served", topic, nil)
+	harness.registerFanoutTarget(t, "ses_subscriber", topic, nil)
 	consumer := "listener-forward-copy-" + id.New()
 	subscription, err := startListenerSubscription(harness.client, consumer, harness.handler)
 	if err != nil {
@@ -417,7 +444,7 @@ func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got := pushes.Load(); got != 0 {
-		t.Fatalf("the durable pushed the copy to serve-port sessions %d times, want none", got)
+	if harness.config.dedupeCache.Seen(forwardCopy.DedupeKey, "ses_subscriber") {
+		t.Fatalf("the durable delivered the stored copy to the topic's subscriber, which is sent nothing for it")
 	}
 }

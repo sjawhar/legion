@@ -59,12 +59,12 @@ on:
   workflow_dispatch:
     inputs:
       pi_legion_version:
-        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary and to set as /opt/legion/pi-legion's manifest version in the image
         type: string
         required: false
         default: ""
       pi_envoy_version:
-        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary and to set as /opt/legion/pi-envoy's manifest version in the image
         type: string
         required: false
         default: ""

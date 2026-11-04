@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -22,10 +21,6 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
-
-const rolePatternString = `^[a-z0-9][a-z0-9_-]*$`
-
-var rolePattern = regexp.MustCompile(rolePatternString)
 
 type streamInfoLookup interface {
 	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
@@ -64,24 +59,31 @@ type sendResponse struct {
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
+// publishResponse is the publish route's accepted answer: the envelope as the listener built it,
+// the holder a role send's message reached, and - for a role send the listener could not deliver
+// and kept on the role's kept lane instead (roleSend.kept) - Kept and the case it was kept for.
+// Both are absent from every other answer, a delivered role send's included. A role send has
+// three answers and a sender tells them apart by status: 200, a live holder took the message;
+// 202, nobody holds the role and the message waits for whoever claims it; 404, nothing was kept.
 type publishResponse struct {
 	contracts.Envelope
 	Holder string `json:"holder,omitempty"`
+	Kept   bool   `json:"kept,omitempty"`
+	// KeptReason is the holder state the resolution found, the same two values and the same
+	// wire words the 404's own reason carries (roleHolderError.Reason): unclaimed, or
+	// holder_lapsed.
+	KeptReason roleHolderState `json:"kept_reason,omitempty"`
 }
 
 type subscribeResponse struct {
 	store.Interest
 	Warnings []string `json:"warnings,omitempty"`
 	// Delivery is the session's delivery (deliveryAnswer), present whenever the registration
-	// carried delivery or registered a serving port.
+	// carried a delivery object.
 	Delivery *deliveryAnswer `json:"delivery,omitempty"`
 }
 
 const unwiredRepositoryWarningTimeout = 750 * time.Millisecond
-
-func isValidRole(role string) bool {
-	return rolePattern.MatchString(role)
-}
 
 // hasCapability reports whether capabilities includes value. The Dispatch
 // server (packages/envoy/internal/dispatch/api) has its own copy of this
@@ -696,10 +698,11 @@ type deleteSessionResponse struct {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder,
-// answered once confirmed or when publishDeliveryWindow from the request's
-// arrival has passed (sendToRole in confirmed.go); a topic the stream captures
-// is answered once the stream stored it, and any other notifications. topic is
+// instead) and the listener's own kept lane, and sends the envelope. A role
+// topic is forwarded to its holder, answered once confirmed or when
+// publishDeliveryWindow from the request's arrival has passed (sendToRole in
+// confirmed.go); a topic the stream captures is answered once the stream
+// stored it, and any other notifications. topic is
 // refused by name, since nothing would store it for a session to read. An
 // explicit dedupe_key is used verbatim (a re-send a receiver's own dedupe
 // recognises); it is mutually exclusive with idempotency_key, may not begin
@@ -712,6 +715,15 @@ type deleteSessionResponse struct {
 // /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
 // which writes this route's one line per request with the answer; a confirmed send answers through
 // it too.
+//
+// keep is this route's own request field, meaningful only for a role topic, and unset means true:
+// a role message the listener cannot deliver is kept on the role's kept lane and handed to the
+// role's next holder, and the send is answered 202 kept rather than 404 (roleSend.kept). A sender
+// that holds a queue of its own and must get today's answer passes keep: false, which keeps
+// nothing and answers the 404. It is read by this route's give-up alone (roleSend.noHolder) and
+// rides no envelope, which travels on to the holder and back in the answer. A role token no claim
+// can name keeps nothing either, which the keep itself refuses, for this route and the role lane
+// alike (keepForNextHolder).
 func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrived := time.Now()
@@ -723,6 +735,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		var request struct {
 			messageBody
 			Topic string `json:"topic"`
+			Keep  *bool  `json:"keep"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
@@ -745,6 +758,10 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
+			return
+		}
+		if strings.HasPrefix(request.Topic, bus.KeptTopicPrefix) {
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to "+bus.KeptTopicPrefix+" topics; that lane is the listener's own, holding the copies it keeps for a role's next holder and the cursors of its drains")
 			return
 		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
@@ -779,7 +796,11 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToRole(ctx, w, record, d, item, role, arrived)
+			// The request's keep flag is read here and nowhere else: it belongs to this route's
+			// give-up (roleSend.noHolder) rather than to the envelope, which travels on to the
+			// holder and back in this route's own answer. No flag at all means keep, so every
+			// publisher that sets none is unchanged.
+			sendToRole(ctx, w, record, d, item, role, request.Keep == nil || *request.Keep, arrived)
 			return
 		}
 		// Every other topic that would deliver to no session is refused by name: a session reads
@@ -806,19 +827,23 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	}
 }
 
-// sessionInfo is the joined view of an Interest (topics, dir, machine) and a
-// SessionEntry (port). Returned by GET /v1/sessions. Its host is where the session runs, its
-// recorded host or else MachineID (HostOrMachine). Only the session's owner delivers to it
-// (session.Deliverer): the listener its stored subscription names, the one store.Registry.Match
-// delivers on, else the one MachineID names. The owner reaches a session registered through it at
-// its host bridge when one is set, else at the recorded host, else at host.docker.internal; a
-// session that re-registered through another listener is reached at its recorded host, else at
-// MachineID. Any other listener leaves inbox messages to the owner silently.
+// sessionInfo is the joined view of an Interest (topics, dir, machine) and a SessionEntry (its
+// title, its capabilities and how it receives). Returned by GET /v1/sessions. Its host is where
+// the session runs, its recorded host or else MachineID (HostOrMachine); no delivery reads it. An
+// inbox message is the session's owner's to deliver (session.HandleAgentMessage): the listener
+// its stored subscription names, the one store.Registry.Match delivers on, else the one MachineID
+// names. Any other listener leaves inbox messages to the owner silently.
 type sessionInfo struct {
-	SessionID      string   `json:"session_id"`
-	MachineID      string   `json:"machine_id"`
-	Host           string   `json:"host"`
-	Dir            string   `json:"dir"`
+	SessionID string `json:"session_id"`
+	MachineID string `json:"machine_id"`
+	Host      string `json:"host"`
+	Dir       string `json:"dir"`
+	// Port is 0 for every entry this listener writes: it refuses a registration that names a
+	// serving port (subscribeHandler) and delivers to no port. An entry an earlier listener
+	// stored with a port is answered with that port until it lapses (the session bucket's TTL).
+	// It is answered at all because every released client parses it
+	// (packages/envoy-client/src/transport.ts), and a client that does not tolerate its absence
+	// would break without it.
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
 	Capabilities   []string `json:"capabilities"`
@@ -1144,6 +1169,13 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 // turns a read of a role and the claim that
 // follows into one decision, which neither last-claim-wins nor a soft claim can do.
 //
+// A claim that landed also hands the role's kept lane to its new holder: whatever the listener
+// kept while the role had none is forwarded to the claimant (runKeptRoleDrain, which reads the
+// lane first and resolves the role's holder itself, so a claim of a role with nothing kept for
+// it costs one stream read and no resolution at all, and a lane with copies on it goes to the
+// claim that superseded this one when one has). That runs in a goroutine under a context of its
+// own, so this answer's status and body are exactly what they were and wait for none of it.
+//
 // logger is registerV1Routes's own. One decision of this route is logged with it: a soft claim that
 // takes a role from the predecessor it names because the claimant's entry or the predecessor's
 // carries no client instance id, which is the one takeover the route cannot tell from a different
@@ -1204,8 +1236,8 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		if !isValidRole(body.Role) {
-			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
+		if !roles.Valid(body.Role) {
+			writeJSONError(w, http.StatusBadRequest, "role must match "+roles.PatternString, "role")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
@@ -1233,6 +1265,13 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 		claimantInstanceID := entry.ClientInstanceID
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
+		// The claim renews the claimant's registration, so it writes the serving port out of
+		// the entry: this listener delivers nothing to a port, and a renewed entry still
+		// carrying one an earlier registration stored is a session that Resolve passes over as
+		// self-subscribed while Dispatch's outbox counts the stream's ack as its delivery
+		// (internal/dispatch/outbox), so its messages are reported delivered when nobody
+		// delivered them.
+		entry.Port = 0
 		if err := d.sessions.PutWithin(ctx, body.SessionID, entry); err != nil {
 			writeStoreError(ctx, w, fmt.Errorf("refresh role claimant registration: %w", err), http.StatusServiceUnavailable)
 			return
@@ -1301,6 +1340,7 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
+		go runKeptRoleDrain(*d.delivery, body.Role)
 		writeJSON(w, http.StatusOK, item)
 	}
 }
@@ -1642,15 +1682,15 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		// A session on a serving port is reached at the host it records (session.Deliverer), so a
-		// host that could change the delivery URL's authority or path is refused before anything is
-		// written. An absent host is an older plugin's, and a registration with no port is never
-		// dialled, so neither is checked.
-		if body.Port > 0 && body.Host != "" && !session.ValidHost(body.Host) {
-			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
+		// A registration naming a serving port is refused before anything is stored: this
+		// listener opens no connection to a session, so a stored registration carrying one
+		// would leave its session waiting for deliveries that never come. The refusal names the
+		// field, as every other refusal of this route does, and says what to send instead.
+		if body.Port > 0 {
+			writeJSONError(w, http.StatusBadRequest, "port is not supported: this listener delivers nothing to a session's port. Register with no port (port 0) and receive the session's messages from its own consumer (delivery.consumer).", "port")
 			return
 		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		// One read and one merge decide this registration's topics, which are both the row it
@@ -1705,7 +1745,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// A topic reaching a private stream subject that is not this session's (another session's
 		// inbox, a failed-delivery lane, another project's controller notice lane;
 		// bus.ReachesPrivateStreamSubject) is out of the plan (store.MergedTopics): the topics
-		// stored drive the listener's fan-out to serve-port sessions (`store.Registry.Match`) and
+		// stored drive the listener's fan-out (`store.Registry.Match`) and
 		// the filters of the session's own consumer (`sessionConsumerFilter`), and such a topic
 		// would hand this session messages meant for another session or for another project's
 		// controller. The plan drops such a topic from the stored row too, so a row an earlier
@@ -1740,9 +1780,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			logger.Warn("listener subscribe left topics out of the registration",
 				slog.String("session_id", body.SessionID), slog.Any("dropped", warnings))
 		}
-		// Every registration answered writes the session's entry. All but one holds the session's
-		// consumer and is relayed (sessionDelivery.register); the exception is a serving-port
-		// session this listener could give none, which its port is pushed to instead.
+		// Every registration answered writes the session's entry: it holds the session's
+		// consumer and is relayed (sessionDelivery.register), which is the only way a message
+		// reaches a session.
 		epochChanged := false
 		if delivery.relayed() {
 			previous, err := d.sessions.Get(body.SessionID)
@@ -1754,7 +1794,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			return
 		}
 		if delivery.relayed() {
-			d.consumers.relay.registered(body.SessionID, epochChanged)
+			// The mark tells it which of its runs restarted after this registration: those
+			// need no restart for its epoch (sessionRelays.apply).
+			d.consumers.relay.registered(body.SessionID, epochChanged, delivery.heard)
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)
 		defer cancelWarnings()

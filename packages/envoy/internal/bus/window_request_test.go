@@ -225,9 +225,9 @@ func TestARequestToASubjectNATSRefusesIsRefusedAtOnce(t *testing.T) {
 
 // A Request the stream refuses is answered by that refusal the moment it comes back, not after
 // the request's timeout: the stream answered, so a full stream's refusal reaches the caller as
-// bus.ErrStreamFull, as it does through a window's PublishAsync and through
-// Client.StartRequestStoredTo's Wait, and never as bus.ErrNotAcknowledged, which says the stream
-// gave no answer at all. Dispatch's outbox waits roleForwardAckTimeout for a role forward's
+// bus.ErrStreamFull, as it does through a window's PublishAsync, and never as
+// bus.ErrNotAcknowledged, which says the stream gave no answer at all. Dispatch's outbox waits
+// roleForwardAckTimeout for a role forward's
 // answer, so a refusal left to that timeout holds the forward's whole chain for five seconds and
 // is counted as a copy that might yet exist.
 func TestARequestAFullStreamRefusesIsAnsweredByThatRefusalAtOnce(t *testing.T) {

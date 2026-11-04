@@ -298,6 +298,22 @@ func TestConnectOwningStreamPurgesLegacyRoleMessagesBeforeDurableConsumerRestart
 		t.Fatalf("legacy role messages remained in stream after migration: %d", info.State.Msgs)
 	}
 
+	// nats-server releases a push binding on the consumer's own goroutine, after the client's
+	// Close is answered, so only the consumer's own report tells this test that the durable may
+	// be bound again; Client.Subscribe does not retry a "consumer is already bound" refusal.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		consumer, err := client.JS().ConsumerInfo(Stream, "legacy-role-replay")
+		if err != nil {
+			t.Fatalf("read the legacy durable consumer: %v", err)
+		}
+		if !consumer.PushBound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the server still reports the legacy durable consumer bound 10s after the legacy connection closed")
+		}
+	}
+
 	redelivered := make(chan struct{}, 1)
 	restartedSub, err := client.Subscribe("notifications.>", func(*nats.Msg) {
 		redelivered <- struct{}{}
@@ -326,6 +342,7 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.team.>",
 		"notifications.envoy.exceptions.notifications.agent.>",
 		"notifications.envoy.exceptions.notifications.team.>",
+		"notifications.envoy.kept.>",
 	}
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)

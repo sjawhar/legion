@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -95,6 +96,9 @@ type sessionDeliveryOutcome struct {
 	// beside the epoch: the durable path still delivers a stored message below it, which is in no
 	// consumer (session.SessionEntry.ConsumerStart).
 	consumerStart uint64
+	// heard is the registration's mark (sessionDelivery.mark), taken once its topics were stored
+	// and its consumer created or updated, when the session is relayed.
+	heard uint64
 }
 
 // relayed reports whether the session's entry records consumer delivery (session.DeliveryConsumer):
@@ -110,8 +114,9 @@ type sessionRelay interface {
 	// registered reports a registration of sessionID that recorded consumer delivery on its entry.
 	// epochChanged is set when the entry it replaced did not hold consumer delivery with the same
 	// epoch: the plugin connected anew, so the relay restarts the session's consumer at its ack
-	// floor before it relays again.
-	registered(sessionID string, epochChanged bool)
+	// floor before it relays again, unless the relay's run restarted the consumer after heard,
+	// the registration's mark (sessionDelivery.mark).
+	registered(sessionID string, epochChanged bool, heard uint64)
 }
 
 // sessionDelivery manages the session consumers (bus.SessionConsumers) for the listener's
@@ -127,6 +132,8 @@ type sessionDelivery struct {
 	// consumers has one (startSessionRelays sets it before /v1 opens, and main's start ends when
 	// that relay cannot start), so a registration answered consumer is relayed.
 	relay sessionRelay
+	// marks is the last mark taken (mark).
+	marks atomic.Uint64
 	// now is the clock of the no-grant backoff; time.Now unless a test sets it.
 	now func() time.Time
 	// beforeRegister runs at the top of each register call, before the consumer's filter is set;
@@ -138,7 +145,9 @@ type sessionDelivery struct {
 	beforeRegister func()
 	// locks keeps the consumer calls made for one session one at a time: a registration's create or
 	// filter update, an unsubscribe's filter update and the relay's restart at the ack floor, which
-	// deletes the consumer and creates it again when a message awaits an ack. A create landing
+	// deletes the consumer and creates it again when a message awaits an ack. Each reads the
+	// session's stored topics under the lock, so the filter the last of them writes is the stored
+	// set as it stood then, never a set read before another call wrote a newer one. A create landing
 	// between that delete and create would start the consumer at the stream's end and skip what the
 	// session has not acked. Under the lock a restart that read the floor and failed after its
 	// delete or create leaves that floor pending, and the next call that finds the consumer missing,
@@ -177,6 +186,14 @@ func (m *sessionDelivery) close() {
 	}
 }
 
+// mark returns the next of the marks that order registrations against the relay's restarts: a
+// registration takes one once its topics are stored and its consumer created or updated, and a
+// relay restart takes one, under the session's lock, before it reads the session's topics and
+// consumer. A restart whose mark is above a registration's read everything that registration
+// wrote, after the plugin subscribed the connection the registration names, so every frame it
+// sent reaches that connection.
+func (m *sessionDelivery) mark() uint64 { return m.marks.Add(1) }
+
 // drain drains the session-consumer connection, so the acks the relays sent reach the server,
 // within sessionConsumerDrain or what is left of ctx if that is less; with nothing left of ctx it
 // closes the connection. The relays are stopped first (sessionRelays.stop).
@@ -197,31 +214,24 @@ func (m *sessionDelivery) drain(ctx context.Context) {
 	}
 }
 
-// register gives a registration the session consumer every portless session is delivered through,
+// register gives a registration the session consumer every session is delivered through,
 // filtered on topics, the topics the registration's interest row will hold. One this listener
 // cannot give a consumer is refused by name, and the handler then writes nothing.
-//
-// A session on a serving port is the exception: the listener that owns it pushes to its port, so
-// a consumer it cannot be given leaves it registered with no delivery field, as a listener before
-// session consumers answered it, and its messages come down the durable path
-// (dispatch://INFRA-429 removes that path and this exception with it).
 func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
 	if m != nil && m.beforeRegister != nil {
 		m.beforeRegister()
 	}
-	outcome, refusal := m.consumerFor(ctx, body, topics)
-	if refusal != nil && body.Port > 0 {
-		return sessionDeliveryOutcome{}, nil
-	}
-	return outcome, refusal
+	return m.consumerFor(ctx, body, topics)
 }
 
 // consumerFor creates the session's consumer when the stream holds none (at the sequence after its
 // resume point when that names the stream's current identity, else at the stream's end) and
 // otherwise updates it to the current filter, before the registration answers; it refuses a
-// registration that asks for none, or that this listener can give none.
+// registration that asks for none, or that this listener can give none. The filter is the topics
+// the registration is about to store, so a message published on a newly followed topic once the
+// registration is answered is the consumer's to deliver.
 func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
-	if body.Port <= 0 && (body.Delivery == nil || !body.Delivery.Consumer) {
+	if body.Delivery == nil || !body.Delivery.Consumer {
 		// A registration with no delivery field at all is a plugin older than consumer delivery.
 		// It receives nothing either way, so it is told so rather than left registered and silent.
 		return sessionDeliveryOutcome{}, &deliveryRefusal{
@@ -256,12 +266,9 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 		return sessionDeliveryOutcome{}, m.refused(body.SessionID, err)
 	}
 	var startSeq uint64
-	var epoch string
-	if body.Delivery != nil {
-		epoch = body.Delivery.Epoch
-		if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
-			startSeq = resume.Seq + 1
-		}
+	epoch := body.Delivery.Epoch
+	if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
+		startSeq = resume.Seq + 1
 	}
 	unlock := m.locks.lock(body.SessionID)
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
@@ -280,6 +287,7 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 		},
 		epoch:         epoch,
 		consumerStart: start.StartSeq,
+		heard:         m.mark(),
 	}, nil
 }
 
@@ -344,9 +352,11 @@ func (m *sessionDelivery) granted() {
 // refollow sets the filter of sessionID's consumer to its stored interest topics after a change
 // that removed some (an unsubscribe), when the session's entry records consumer delivery; a
 // session whose entry records none, an entry the previous build wrote, or whose consumer is gone,
-// is left alone, and its next registration sets the filter. A failure is logged, not returned:
-// the consumer then still delivers a topic the session no longer follows, and the plugin drops a
-// frame no followed topic matches.
+// is left alone, and its next registration sets the filter. The topics are read under the
+// session's lock, as register's consumer call is made under it, so a registration that stored
+// more topics meanwhile and wrote its filter first is not overwritten with the set read before
+// it. A failure is logged, not returned: the consumer then still delivers a topic the session no
+// longer follows, and the plugin drops a frame no followed topic matches.
 func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, sessionID string) {
 	if m == nil || m.consumers == nil {
 		return
@@ -355,15 +365,16 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
+	defer cancel()
+	unlock := m.locks.lock(sessionID)
 	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
 	if err != nil {
+		unlock()
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
-	defer cancel()
-	unlock := m.locks.lock(sessionID)
 	err = m.consumers.UpdateFilter(ctx, sessionID, sessionConsumerFilter(sessionID, topics))
 	unlock()
 	if err != nil && !errors.Is(err, bus.ErrSessionConsumerNotFound) {

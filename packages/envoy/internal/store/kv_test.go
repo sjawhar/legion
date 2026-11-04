@@ -327,6 +327,74 @@ func TestMergeForUpsert_DropsStoredTopicsReachingAPrivateStreamSubject(t *testin
 	}
 }
 
+// A session that registers again through another listener moves its row: the machine id and the
+// directory the second registration carries are the ones the row keeps, so every reader of the row
+// - the fan-out index, the durable path's ownership and the sender stamp of a message the session
+// sends (cmd/listener/api.go's senderStamp) - names the listener the session is registered through
+// now, not the one it registered through first.
+func TestMergeForUpsertMovesTheRowToTheMachineAndDirectoryOfASecondRegistration(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_moved",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_moved"},
+	}
+	// The listener's subscribe handler's call shape: its own machine id and the body's directory.
+	item := Interest{SessionID: "ses_moved", MachineID: "machine-second", Dir: "/work/second"}
+
+	result, err := mergeForUpsert(cur, nil, item, 300, InterestPlan{Topics: []string{"notifications.agent.ses_moved"}})
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-second" {
+		t.Errorf("MachineID = %q, want the second registration's machine-second", result.MachineID)
+	}
+	if result.Dir != "/work/second" {
+		t.Errorf("Dir = %q, want the second registration's /work/second", result.Dir)
+	}
+}
+
+// A role claim carries the claiming listener's machine id and no directory (SetRoleWithPrevious),
+// so the row keeps the directory the session's registration stored: claiming a role never clears
+// the Cwd of the sender stamp.
+func TestMergeForUpsertKeepsTheStoredDirectoryForARoleClaimThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_claimant",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_claimant"},
+	}
+	item := Interest{SessionID: "ses_claimant", MachineID: "machine-first"}
+
+	result, err := mergeForUpsert(cur, nil, item, 301, InterestPlan{Topics: []string{"notifications.role.reviewer"}})
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.Dir != "/work/first" {
+		t.Errorf("Dir = %q, want the stored /work/first: the claim carries no directory", result.Dir)
+	}
+}
+
+// A request that carries no machine id keeps the stored one: a caller that names no machine says
+// nothing about where the session runs, so the row is left naming the listener it has.
+func TestMergeForUpsertKeepsTheStoredMachineIDForARequestThatCarriesNone(t *testing.T) {
+	cur := Interest{
+		SessionID: "ses_machineless",
+		MachineID: "machine-first",
+		Dir:       "/work/first",
+		Topics:    []string{"notifications.agent.ses_machineless"},
+	}
+	item := Interest{SessionID: "ses_machineless", Dir: "/work/first"}
+
+	result, err := mergeForUpsert(cur, nil, item, 302, InterestPlan{Topics: []string{"notifications.agent.ses_machineless"}})
+	if err != nil {
+		t.Fatalf("mergeForUpsert returned unexpected error: %v", err)
+	}
+	if result.MachineID != "machine-first" {
+		t.Errorf("MachineID = %q, want the stored machine-first", result.MachineID)
+	}
+}
+
 // --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
@@ -2301,6 +2369,9 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 	assertInterestMissing(t, reg, newSession)
 }
 
+// A hard claim's role write is unconditional (store.Registry.SetRoleWithPrevious), so a genuine
+// failure of it is still a failure: the claim is refused, the old holder keeps the role, and the
+// claimant's role topic is rolled back.
 func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2322,9 +2393,9 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	}
 
 	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
-		KeyValue:     reg.roleKV,
-		failUpdateAt: 1,
-		err:          errors.New("injected role update failure"),
+		KeyValue:  reg.roleKV,
+		failPutAt: 1,
+		err:       errors.New("injected role write failure"),
 	}}
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role update")
@@ -2335,6 +2406,8 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 	assertInterestMissing(t, reg, newSession)
 }
 
+// A soft claim of an unheld role creates its claim conditionally, so a genuine failure of that
+// create is still a failure: nothing holds the role and the claimant's role topic is rolled back.
 func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2349,7 +2422,7 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
 	}}
-	if _, err := reg.SetRole(sessionID, "example-host", role, false); err == nil {
+	if _, err := reg.SetRole(sessionID, "example-host", role, true); err == nil {
 		t.Fatal("SetRole must return the failed role create")
 	}
 
@@ -2564,7 +2637,10 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
+// A soft claim's create is conditional, and the claim that beat it to the key was this session's
+// own concurrent claim: the role is held by the session that asked for it, so the call is the
+// success it would have been had it won, not *ErrRoleHeld against itself and not a failure.
+func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2580,9 +2656,9 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	var concurrent Interest
 	var concurrentErr error
 	racingKV.beforeFirstCreate = func() {
-		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, false)
+		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, true)
 	}
-	first, firstErr := reg.SetRole(sessionID, "example-host", role, false)
+	first, firstErr := reg.SetRole(sessionID, "example-host", role, true)
 
 	if concurrentErr != nil {
 		t.Fatalf("concurrent SetRole: %v", concurrentErr)
@@ -2594,6 +2670,59 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 	assertInterestTopics(t, first, roleTopic)
 	assertRoleHolder(t, reg, role, sessionID)
 	assertInterestTopicsForSession(t, reg, sessionID, roleTopic)
+}
+
+// Every honest hard claim of one role lands, however many of them are made at once. A hard claim
+// is last-claim-wins and has no refusal in its contract, so no claimant may be answered a failure
+// because another's claim landed first: the conditional write this once made answered all but one
+// of a burst with JetStream's wrong last sequence (nats.ErrKeyExists), which POST /v1/roles/set
+// wrote as a 500. The role ends held by one of the claimants, and that holder's interest row names
+// the role topic: no cleanup takes the topic from the session that ended up holding the role.
+func TestSetRoleConcurrentHardClaimsOfOneRoleAllLand(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		role       = "legion-controller"
+		roleTopic  = "notifications.role.legion-controller"
+		claimants  = 24
+		idTemplate = "ses_claimant_%02d"
+	)
+	errs := make([]error, claimants)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range claimants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = reg.SetRole(fmt.Sprintf(idTemplate, i), "example-host", role, false)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("%s: concurrent hard claim of %s returned %v, want the claim it is promised", fmt.Sprintf(idTemplate, i), role, err)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	holder, err := reg.RoleHolder(role)
+	if err != nil {
+		t.Fatalf("read the role's holder after %d concurrent claims: %v", claimants, err)
+	}
+	claimed := false
+	for i := range claimants {
+		claimed = claimed || holder == fmt.Sprintf(idTemplate, i)
+	}
+	if !claimed {
+		t.Fatalf("after %d concurrent claims the role is held by %q, want one of the claimants", claimants, holder)
+	}
+	assertInterestTopicsForSession(t, reg, holder, roleTopic)
 }
 
 func TestSetRoleSoft_TakesUnheldAndOwnAndSupersedableRoles(t *testing.T) {
@@ -2655,7 +2784,7 @@ func TestSetRoleSoft_RefusesLiveHolderAndLeavesClaimUntouched(t *testing.T) {
 }
 
 func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
-	// Interleaving: role at A. B claims — its role-row CAS succeeds (row -> B)
+	// Interleaving: role at A. B claims — its role-row write lands (row -> B)
 	// — and before B's cleanup of A runs, A re-claims (row -> A). B's cleanup
 	// must not delete A's fresh claim. The previous implementation released
 	// through the role row whenever its holder equalled the old session, which
@@ -2669,9 +2798,9 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 		t.Fatalf("seed A: %v", err)
 	}
 
-	// B's role-row Update is the CAS write; fire A's re-claim right after it
-	// succeeds and before B proceeds to old-holder cleanup.
-	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
+	// B's role-row write is what makes B the holder; fire A's re-claim right
+	// after it lands and before B proceeds to old-holder cleanup.
+	racing := &afterRoleWriteKeyValue{KeyValue: reg.roleKV}
 	reg.roleKV = bus.KeyValue{KeyValue: racing}
 	racing.after = func() {
 		racing.after = nil
@@ -2687,13 +2816,23 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 	assertRoleHolder(t, reg, role, "ses_a")
 }
 
-type afterUpdateKeyValue struct {
+// afterRoleWriteKeyValue runs after, once, when a claim write lands: a hard claim's unconditional
+// Put, or a soft claim's conditional Update.
+type afterRoleWriteKeyValue struct {
 	natsgo.KeyValue
 
 	after func()
 }
 
-func (kv *afterUpdateKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
+func (kv *afterRoleWriteKeyValue) Put(key string, value []byte) (uint64, error) {
+	revision, err := kv.KeyValue.Put(key, value)
+	if err == nil && kv.after != nil {
+		kv.after()
+	}
+	return revision, err
+}
+
+func (kv *afterRoleWriteKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
 	revision, err := kv.KeyValue.Update(key, value, last)
 	if err == nil && kv.after != nil {
 		kv.after()

@@ -203,7 +203,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message gets an error when no session holds the role, when the holder refuses the message, and when the forward is not stored within four seconds. Its 200 says the stream stored the forward for the holder's consumer. It does not say that the holder read it. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says. A role message has three possible answers. First, a session holds the role, and the stream stores the forward for that holder's consumer. Its 200 says the stream stored it, and it does not say that the holder read it. Second, no session holds the role, or its holder's claim has lapsed. The listener then keeps the message, and gives it to the next session that claims that role in the hour that follows. This is a success, and the result says that the listener kept the message. Third, the listener keeps nothing and errs, which tells you to reach the agent some other way: the holder refuses the message, or the forward is not stored within four seconds. A team topic (such as notifications.team.deploy-squad.all) is stored like every other, so a session subscribed to it that was away still receives it when it returns, and one that subscribes after you publish does not. A notifications. topic no stream subject captures is refused by name: nothing would store it. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -266,6 +266,25 @@ export function sendConfirmationText(result: {
     return `sent to ${result.recipient} once: an earlier attempt under the same idempotency_key was already stored, so this one stored no second copy`;
   }
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The envoy_publish confirmation line both hosts show the model, so a kept answer reads the same
+ * on each. A kept answer is a success: the listener holds the message on the role's kept lane and
+ * hands it to the session that claims the role next, so the line says that and names no holder —
+ * on `holder_lapsed` the holder the answer carries is the lapsed claim's session, which never
+ * received the message.
+ */
+export function publishConfirmationText(result: {
+  readonly envelope: { readonly event_id: string };
+  readonly holder?: string;
+  readonly kept?: boolean;
+}): string {
+  const published = `published ${result.envelope.event_id}`;
+  if (result.kept === true) {
+    return `${published}; kept for the role: no session holds it yet, and the message waits for the session that claims it next`;
+  }
+  return result.holder === undefined ? published : `${published}; holder ${result.holder}`;
 }
 
 /**

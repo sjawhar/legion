@@ -15,6 +15,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -101,20 +102,20 @@ func newRoleRigOn(t *testing.T, url string, client *bus.Client, conn *natsgo.Con
 }
 
 // deps is the outbox's dependencies as cmd/dispatch wires them: role routes resolved through
-// roles.Buckets on the outbox's own client.
+// roles.Buckets on the outbox's own client, and that client the reader of a role's kept lane and
+// its drain cursor, which a keep's handover makes its pass over (Deps.KeptLanes).
 func (r *roleRig) deps() Deps {
 	holders := roles.NewBuckets(r.client)
-	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders}
+	return Deps{Store: r.database, Publisher: r.client, Broker: r.broker, RoleClaims: holders, Sessions: holders,
+		KeptLanes: r.client}
 }
 
-// claim makes holder role's holder, registered with entry, as a session plugin's registration does.
+// claim makes holder role's holder, registered with entry, as a session plugin's registration
+// does (claimUnder), and fails the test when that did not come off.
 func (r *roleRig) claim(t *testing.T, role, holder string, entry session.SessionEntry) {
 	t.Helper()
-	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim %s for %s: %v", role, holder, err)
-	}
-	if err := r.sessions.Put(holder, entry); err != nil {
-		t.Fatalf("register %s: %v", holder, err)
+	if err := r.claimUnder(role, holder, entry); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -401,8 +402,9 @@ func TestARoleRouteToAHolderWithNoServingPortIsPublishedOnTheStreamsAcknowledgem
 }
 
 // A role nobody claims has no holder: its route counts as reached, the event is published, and
-// nothing is sent to any session.
-func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
+// nothing is sent to any session - the copy kept for the role's next holder goes to that role's
+// kept lane, which is no session's subject (TestARoleRouteToAnUnheldRoleIsKeptForTheRolesNextHolder).
+func TestARoleRouteWithNoClaimIsPublishedWithNothingSentToASession(t *testing.T) {
 	rig := newRoleRig(t)
 	const role = "unclaimed"
 	rig.silent(t, contracts.RoleTopicPrefix+role)
@@ -422,11 +424,12 @@ func TestARoleRouteWithNoClaimIsPublishedWithNothingSent(t *testing.T) {
 	}
 }
 
-// A role route reached with nothing to send is no send of its batch. The event's first batch, with
-// no role reader, reaches the issue's topic and leaves the role route pending; once the event is
-// due again, the role, which nobody claims, is its only unreached destination, and the batch that
-// publishes it reports nothing sent.
-func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
+// The event's first batch, with no role reader, reaches the issue's topic and leaves the role
+// route pending; once the event is due again, the role, which nobody claims, is its only
+// unreached destination, and the batch that publishes it keeps the copy for the role's next
+// holder, the one send it makes. A role route reached with nothing to send at all is no send of
+// its batch, which TestARoleTokenNoClaimCanNameIsSkippedWithNothingKept holds.
+func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleKeepsItForTheNextHolder(t *testing.T) {
 	ctx := context.Background()
 	rig := newRoleRig(t)
 	const role = "unclaimed"
@@ -452,13 +455,14 @@ func TestABatchWhoseOnlyRouteLeftIsAnUnclaimedRoleSendsNothing(t *testing.T) {
 	if publishedAt(t, rig.database, event.ID) == nil {
 		t.Fatal("the event whose only route left is an unclaimed role was not published")
 	}
-	if second.sent != 0 || second.firstID != 0 || second.lastID != 0 || second.published != 1 {
-		t.Fatalf("the second batch = %+v, want it to publish the event with nothing sent", second)
+	if second.sent != 1 || second.firstID != event.ID || second.lastID != event.ID || second.published != 1 {
+		t.Fatalf("the second batch = %+v, want it to keep the event for the role's next holder and publish it", second)
 	}
 }
 
 // A claim whose holder's session is gone is released, with the listener's compare and set, and the
-// role then has no holder: the event is published with nothing sent, and the claim is gone.
+// role then has no holder: the event is published with nothing sent to its gone holder, its copy
+// kept for the role's next holder as an unclaimed role's is, and the claim is gone.
 func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_gone"
@@ -642,5 +646,66 @@ func TestAForwardTheStreamDidNotAcknowledgeIsCountedUnanswered(t *testing.T) {
 	}
 	if strings.Contains(body, `reason="failed"`) {
 		t.Fatalf("/metrics body = %q counts a forward NATS took as a publish failure", body)
+	}
+}
+
+// A role forward a full stream refuses is counted a failure and left to be retried. The stream
+// answered, and what it answered is that it stored nothing, so the holder's consumer has no copy
+// to deliver and the event is not published: its attempt is counted, its failure names the
+// refusal, and the next scan, once the stream has room, forwards it again and publishes it.
+// Counting that refusal as reached, which is what adding bus.ErrStreamFull to the ErrRefused case
+// of sendChains' settle would do, drops the event with no copy anywhere.
+func TestARoleForwardAFullStreamRefusesIsCountedFailedAndRetried(t *testing.T) {
+	const limit = 16 << 10
+	_, url := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{url}, bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("connect the outbox's client: %v", err)
+	}
+	t.Cleanup(client.Close)
+	rig := newRoleRigOn(t, url, client, testnats.Connect(t, url))
+	const role, holder = "reviewer", "ses_stream_full"
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	deps, registry := rig.countingDeps(t)
+	bustest.FillStream(t, client, 1024)
+
+	holding(t, deps).scan(context.Background(), unfenced{})
+
+	if publishedAt(t, rig.database, event.ID) != nil {
+		t.Fatal("the event whose role forward the full stream refused was published: nothing will send it again, and the stream holds no copy for the holder's consumer")
+	}
+	attempts, failure, _ := eventState(t, rig.database, event.ID)
+	if attempts != 1 {
+		t.Errorf("attempt_count = %d, want the refused attempt counted once so the event is retried", attempts)
+	}
+	if failure == nil || !strings.Contains(*failure, bus.ErrStreamFull.Error()) {
+		t.Errorf("publish_error = %v, want it naming %v", failure, bus.ErrStreamFull)
+	}
+	body := failureReasons(t, registry)
+	// Both destinations of the event - the role forward and the issue topic - were refused by the
+	// full stream, and a refusal the stream answered is a failure the scan retries.
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="failed"} 2`) {
+		t.Fatalf("/metrics body = %q, want both sends the full stream refused counted failures", body)
+	}
+	if strings.Contains(body, `reason="refused"`) {
+		t.Fatalf("/metrics body = %q counts a full stream's refusal as a destination's permanent refusal, which is counted reached and never sent again", body)
+	}
+
+	// With room on the stream again, the retry stores the copy the holder's consumer delivers and
+	// the event is published.
+	if err := client.JS().PurgeStream(bus.Stream); err != nil {
+		t.Fatalf("purge the stream: %v", err)
+	}
+	dueNow(t, rig.database, event.ID)
+
+	holding(t, deps).scan(context.Background(), unfenced{})
+
+	if publishedAt(t, rig.database, event.ID) == nil {
+		t.Fatal("the event was not published by the retry that ran once the stream had room")
+	}
+	if copies := storedCopies(t, client, contracts.AgentSubject(holder)); copies != 1 {
+		t.Errorf("the stream holds %d copies on %s, want the one copy the holder's consumer delivers",
+			copies, contracts.AgentSubject(holder))
 	}
 }
