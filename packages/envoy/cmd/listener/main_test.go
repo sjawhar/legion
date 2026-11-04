@@ -1442,11 +1442,12 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Allow watcher to propagate delete event to cache
-	time.Sleep(500 * time.Millisecond)
-	if _, err := registry.Get(context.Background(), "ses_delete_target"); err == nil {
-		t.Fatal("expected interest to be deleted")
-	}
+	// The handler deletes through the bucket and the cache the registry reads follows by watcher,
+	// so the read is retried until the delete has reached the cache.
+	waitFor(t, 5*time.Second, "the watcher to propagate the delete to the cache", func() bool {
+		_, err := registry.Get(context.Background(), "ses_delete_target")
+		return err != nil
+	})
 }
 
 func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {

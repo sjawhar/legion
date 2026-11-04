@@ -3085,15 +3085,29 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
-      # -parallel bounds how many of this package's 758 parallel tests run at once, and
-      # /usr/bin/time -v prints the whole process tree's peak resident memory at the end of the
-      # step, which is how the bound is chosen. The runner has 16 GiB and no swap: at the race
-      # detector's shadow memory, which it never gives back, four of this package's tests at once
-      # took the job past it, and the runner killed it mid-run with exit 143 and no test named
-      # (jobs 126439344272, 126547001537 and 126603083935, at 7.5, 14.1 and 8.8 minutes;
-      # dispatch://INFRA-1075). Raise it only against a fresh peak-RSS reading of this step.
+      # This job is the one the runner killed for memory: three times on this branch it ended with
+      # exit 143, "The runner has received a shutdown signal", with no test named and no output at
+      # all (jobs 126439344272, 126547001537 and 126603083935, at 7.5, 14.1 and 8.8 minutes;
+      # dispatch://INFRA-1075). The runner has 16 GiB and no swap, and the race detector's shadow
+      # memory, roughly four bytes a byte of heap, is mapped for good.
+      #
+      # Three things hold it down, and the step prints what it costs so the next reader need not
+      # guess: -parallel bounds how many of this package's 758 parallel tests run at once,
+      # GOMEMLIMIT makes the test binary collect rather than grow its heap past that much, and
+      # /usr/bin/time -v prints the process tree's peak resident memory at the end. go test shows
+      # nothing until a package ends, so the sampler beside it is what says whether the memory
+      # went to the compiler or to the tests, and how fast, when the runner kills the job again.
       - name: Race-test the document service
-        run: /usr/bin/time -v go test -race -timeout 60m -parallel 2 ./internal/dispatch/docs/
+        run: |
+          while :; do
+            echo "memory $(date -u +%T) $(free -m | awk '/^Mem:/{printf "used %s MiB of %s, available %s", $3, $2, $7}'), biggest $(ps -eo rss=,comm= --sort=-rss | head -1)"
+            sleep 20
+          done &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          /usr/bin/time -v go test -race -timeout 60m -parallel 2 ./internal/dispatch/docs/
+        env:
+          GOMEMLIMIT: 2GiB
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3200,8 +3214,8 @@ jobs:
   # its sender. It builds only under the `serverchange` tag, so envoy-go's unit run leaves it
   # out, and it is a job of its own because it outlives that step: it sends for at least a minute
   # and waits out each server's restart and the JetStream catch-up after it, which, beside the
-  # listener's other tests, is past what envoy-go's unit step holds under go test's default
-  # ten-minute package deadline. It runs the soak alone (-run TestServerChange), since envoy-go
+  # listener's other tests, is past the 20 minutes envoy-go's unit step gives the whole
+  # module. It runs the soak alone (-run TestServerChange), since envoy-go
   # runs the package's untagged tests already; the cluster runs in the test process
   # (internal/testnats), so it needs no container runtime and no database.
   listener-server-change:
