@@ -20,13 +20,13 @@ func TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess(t *testing.T
 	project := uniqueProjectKey(t, "SIM")
 	pair.a.createProject(t, project, "Simultaneous cursors")
 	_, artifactID := pair.a.createIssueIn(t, project, "Five at once", "x")
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
 	const readers = 5
 	editors := make([]*docstest.Peer, readers)
 	for i := range editors {
-		editors[i] = pair.openStoredEditor(t, pair.a, fmt.Sprintf("reader%d", i), artifactID, "x\n")
+		editors[i] = pair.openSyncedEditor(t, pair.a, fmt.Sprintf("reader%d", i), artifactID, "x\n")
 	}
-	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
+	carol := pair.openSyncedEditor(t, pair.a, "carol", artifactID, "x\n")
 	for i, editor := range editors {
 		if err := editor.SetAwareness(uint64(8000+i), cursorState(fmt.Sprintf("reader%d", i), i)); err != nil {
 			t.Fatalf("reader %d's cursor: %v", i, err)

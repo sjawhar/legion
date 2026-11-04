@@ -100,22 +100,6 @@ func connectWithScope(t *testing.T, serverURL, artifactID, login, scope, text st
 	return peer
 }
 
-// storeConnectAppend puts the append a browser's connect made behind a keystroke of the browser's
-// own: it types typed over from and waits until the store holds it. A connect hands its room the
-// sync of the browser's own document, which the room appends as it does any other update of that
-// browser, and that append can still be on its way when connectWithScope has returned - it waits
-// for the browser to hold the room's text, not for the room to have stored what the browser sent,
-// so waitForLandedAppends may find nothing of it to wait for. The room takes one browser's updates
-// in the order its socket sent them and appends them in that order, so the connect's append is
-// stored once this keystroke is. Left in flight, it lands wherever the test has got to by then.
-func storeConnectAppend(t *testing.T, database *store.Store, peer *docstest.Peer, artifactID, from, typed string) {
-	t.Helper()
-	typeOver(t, peer, from, typed)
-	waitFor(t, roomWait(t), "what the browser sent on connecting to be stored", func() bool {
-		return strings.Contains(storedMarkdown(t, database, artifactID), typed)
-	})
-}
-
 // requireEnds fails unless peer's socket is closed by its room within roomWait.
 func requireEnds(t *testing.T, peer *docstest.Peer, what string) {
 	t.Helper()
@@ -301,11 +285,9 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 	var failed atomic.Bool
 	taskA.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, serverA.URL, artifactID, "alice", "read-write", "before\n")
-	// Left in flight (storeConnectAppend), the connect's append lands after the head is read and
-	// takes the version the write below makes as task B (foldHistoryPastRoom writes at head + 1),
-	// which is then refused for a duplicate key.
-	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
-	waitForLandedAppends(t, taskA, artifactID)
+	// The connect stores nothing: alice's copy holds nothing the room lacks, and a transaction
+	// that changes nothing commits no update (ygo calls no update observer for one,
+	// reearth/ygo#350), so the head read below is the head her keystroke is appended on.
 	head := storedHead(t, database, artifactID)
 
 	holder, err := database.Pool.Begin(ctx)
@@ -316,7 +298,7 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
 		t.Fatalf("hold the document's lock: %v", err)
 	}
-	typeOver(t, alice, "connected", "typed before the close")
+	typeOver(t, alice, "before", "typed before the close")
 	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
 		t.Fatal("alice's append never came to wait on the document's lock")
 	}
@@ -400,19 +382,17 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 	var failed atomic.Bool
 	service.beforeFailedEviction = func(string) { failed.Store(true) }
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
-	// Left in flight (storeConnectAppend), the connect's append is admitted while the issue is
-	// open and stored after the head is read below, which moves the head this test reads back as
-	// standing still; refused by the close instead, it closes the room before alice's keystroke,
-	// which then shows nothing. The keystroke here is typed and stored while the issue is open.
-	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
 
 	closedAgo := closeMargin + 30*time.Second
 	if _, err := database.Pool.Exec(context.Background(),
 		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
 		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
 	}
+	// The connect stored nothing: alice's copy held nothing her room lacked, and a transaction
+	// that changes nothing commits no update, so this head stands still unless the gate stores
+	// her keystroke.
 	head := storedHead(t, database, artifactID)
-	typeOver(t, alice, "connected", "typed after the close")
+	typeOver(t, alice, "before", "typed after the close")
 	requireEnds(t, alice, "the gate refused alice's keystroke on the closed issue and left her browser connected")
 	if moved := storedHead(t, database, artifactID); moved != head {
 		t.Fatalf("the document moved from update %d to %d: the gate stored a browser's update on a closed issue", head, moved)
@@ -420,7 +400,7 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 	if failed.Load() {
 		t.Fatal("the refusal failed the room rather than closing it for its issue")
 	}
-	connectWithScope(t, server.URL, artifactID, "alice", "readonly", "connected\n")
+	connectWithScope(t, server.URL, artifactID, "alice", "readonly", "before\n")
 }
 
 // A close notified while the listener has no connection reaches nobody and is never sent again:

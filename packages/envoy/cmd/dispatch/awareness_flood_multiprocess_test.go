@@ -21,8 +21,8 @@ func TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T
 	project := uniqueProjectKey(t, "FLD")
 	pair.a.createProject(t, project, "Awareness flood")
 	_, artifactID := pair.a.createIssueIn(t, project, "Flooded", "x")
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
-	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
+	carol := pair.openSyncedEditor(t, pair.a, "carol", artifactID, "x\n")
 
 	flood := dialTabSocket(t, pair.a, artifactID, "mallory")
 	const invented = 2048
@@ -35,7 +35,7 @@ func TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T
 	flood.Close()
 	time.Sleep(time.Second)
 
-	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+	alice := pair.openSyncedEditor(t, pair.a, "alice", artifactID, "x\n")
 	if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 0)); err != nil {
 		t.Fatalf("announce alice's cursor: %v", err)
 	}
@@ -60,8 +60,8 @@ func TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess(t *testi
 	project := uniqueProjectKey(t, "FLL")
 	pair.a.createProject(t, project, "Live awareness flood")
 	_, artifactID := pair.a.createIssueIn(t, project, "Flooded live", "x")
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
-	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
+	carol := pair.openSyncedEditor(t, pair.a, "carol", artifactID, "x\n")
 
 	flood := dialTabSocket(t, pair.a, artifactID, "mallory")
 	const invented = 2048
@@ -87,7 +87,7 @@ func TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess(t *testi
 	}()
 	time.Sleep(time.Second)
 
-	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+	alice := pair.openSyncedEditor(t, pair.a, "alice", artifactID, "x\n")
 	if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 0)); err != nil {
 		t.Fatalf("announce alice's cursor: %v", err)
 	}

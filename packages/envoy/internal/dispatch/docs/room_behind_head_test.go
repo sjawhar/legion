@@ -2060,10 +2060,9 @@ func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testin
 		}
 	}
 	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
-	// Left in flight (storeConnectAppend), the connect's append lands after the fold below and is
-	// a second append admitted on the folded history, which is what this test counts.
-	storeConnectAppend(t, database, alice, artifactID, "before", "connected")
-	waitForLandedAppends(t, service, artifactID)
+	// The connect stores nothing: alice's copy holds nothing the room lacks, and a transaction
+	// that changes nothing commits no update (ygo calls no update observer for one,
+	// reearth/ygo#350), so her first keystroke is the only append the fold below can meet.
 	head := storedHead(t, database, artifactID)
 	room := service.srv.GetDoc(artifactID)
 
@@ -2075,7 +2074,7 @@ func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testin
 	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
 		t.Fatalf("hold the document's lock: %v", err)
 	}
-	typeOver(t, alice, "connected", "first keystroke")
+	typeOver(t, alice, "before", "first keystroke")
 	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
 		t.Fatal("alice's append never came to wait on the document's lock")
 	}
@@ -2096,10 +2095,9 @@ func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testin
 	requireEnds(t, alice, "the room whose history was folded under it left alice's browser connected")
 	alice = connectWithScope(t, server.URL, artifactID, "alice", "read-write", "first keystroke\n")
 	// The reload reads the folded history whole, so the room stands at the head it loaded, and
-	// this browser's connect append, which moves that head on, is taken into its cursor when it
-	// commits: the two meet, a moment after the connect rather than at it. A room left on the
-	// folded history would never meet the head: no stored row at or below its cursor remains for
-	// a catch-up to read.
+	// this browser's connect stores nothing to move that head on: the two meet. A room left on
+	// the folded history would never meet the head: no stored row at or below its cursor
+	// remains for a catch-up to read.
 	waitFor(t, roomWait(t), "the reloaded room to stand at the document's stored head", func() bool {
 		return !roomBehind(t, service, artifactID)
 	})

@@ -27,8 +27,8 @@ func TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess(t 
 	project := uniqueProjectKey(t, "MNY")
 	pair.a.createProject(t, project, "Many sockets")
 	_, artifactID := pair.a.createIssueIn(t, project, "Many sockets", "x")
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
-	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
+	carol := pair.openSyncedEditor(t, pair.a, "carol", artifactID, "x\n")
 
 	const sockets, perSocket = 200, docs.MaxAwarenessClientsPerSocketForTest
 	kept := sockets * perSocket
@@ -77,7 +77,7 @@ func TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess(t 
 			tracked, kept, sockets, perSocket)
 	}
 
-	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+	alice := pair.openSyncedEditor(t, pair.a, "alice", artifactID, "x\n")
 	if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 0)); err != nil {
 		t.Fatalf("announce alice's cursor: %v", err)
 	}

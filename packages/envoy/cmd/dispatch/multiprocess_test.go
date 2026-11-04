@@ -3614,16 +3614,20 @@ func (p *dispatchProcess) reconnectEditor(t *testing.T, login, artifactID string
 	return nil, fmt.Errorf("reconnect %s's tab: %w", login, last)
 }
 
-// openStoredEditor is openEditorAs that also waits, up to ten seconds, for the update the tab's
-// sync appends to be stored - a browser's provider answers the room's sync step 1 with its own
-// state, and the room appends that update even when it changes nothing, since ygo runs the room's
-// update observer for every transaction it commits - so the next thing the row does is the only
-// thing that moves the document.
-func (p *dispatchPair) openStoredEditor(t *testing.T, process *dispatchProcess, login, artifactID, want string) *docstest.Peer {
+// openSyncedEditor is openEditorAs that also checks that the tab's sync left the durable head
+// where it was, so the next thing the row does is the only thing that moves the document. A
+// browser's provider answers the room's sync step 1 with its own state, which changes nothing in
+// the room of a tab that has typed nothing, and the room stores nothing for a transaction that
+// changes nothing (ygo calls no update observer for one, reearth/ygo#350). openEditorAs has
+// waited for the room to send the tab the document, so the tab is synced when this returns.
+func (p *dispatchPair) openSyncedEditor(t *testing.T, process *dispatchProcess, login, artifactID, want string) *docstest.Peer {
 	t.Helper()
 	before := storedHead(t, p, artifactID)
 	editor := process.openEditorAs(t, login, artifactID, want)
-	p.waitStoredPast(t, artifactID, before, 10*time.Second, login+"'s tab's sync update on "+p.name(process))
+	if head := storedHead(t, p, artifactID); head != before {
+		t.Fatalf("the document moved from update %d to %d while %s's tab connected on %s: a sync that changes nothing stores nothing, so something else wrote the document",
+			before, head, login, p.name(process))
+	}
 	return editor
 }
 
@@ -3631,24 +3635,13 @@ func (p *dispatchPair) openStoredEditor(t *testing.T, process *dispatchProcess, 
 // test naming what was to be stored when it does not.
 func (p *dispatchPair) waitStoredPast(t *testing.T, artifactID string, head int64, within time.Duration, what string) {
 	t.Helper()
-	if err := p.storedPast(t, artifactID, head, within, what); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// storedPast is waitStoredPast for a caller with something of its own to report before the test
-// fails - the typists' row reports the room counters and each disconnect (keystroke) - so it
-// answers an error rather than failing the test where the head does not move.
-func (p *dispatchPair) storedPast(t *testing.T, artifactID string, head int64, within time.Duration, what string) error {
-	t.Helper()
 	deadline := time.Now().Add(within)
 	for storedHead(t, p, artifactID) <= head {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s was not stored within %v: the document still stands at update %d", what, within, head)
+			t.Fatalf("%s was not stored within %v: the document still stands at update %d", what, within, head)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	return nil
 }
 
 // storedText renders the document the store holds: its updates folded in order, which is what
@@ -3677,11 +3670,30 @@ func storedText(t *testing.T, pair *dispatchPair, artifactID string) string {
 	return renderDocument(document)
 }
 
+// storedCaughtUpWith waits up to within for the stored document to read as the editor's copy
+// does, so nothing the editor's socket has already sent the room is still on its way to the
+// store. It answers an error rather than failing the test, for a caller with something of its
+// own to report first: the typists' row reports the room counters and each disconnect
+// (keystroke).
+func (p *dispatchPair) storedCaughtUpWith(t *testing.T, artifactID string, editor *docstest.Peer, within time.Duration, whose string) error {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		held, stored := markdown(editor), storedText(t, p, artifactID)
+		if held == stored {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the store did not hold within %v what %s holds: that copy reads %q, the store reads %q", within, whose, held, stored)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // waitStoredHolds waits up to within for the stored document to hold want, and fails the test
-// naming what was to be stored when it does not. It is waitStoredPast for a row that typed
-// something: a browser's connect hands the room the state of its own copy, which the room appends
-// as it does any other update of that browser, so a head read taken right after a connect can be
-// passed by that append alone - this one passes only on the text.
+// naming what was to be stored when it does not. It is waitStoredPast for a row that cares which
+// update was stored: the head moves for whatever any writer of the document stores, and this one
+// passes on the text alone.
 func (p *dispatchPair) waitStoredHolds(t *testing.T, artifactID, want string, within time.Duration, what string) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -3861,16 +3873,19 @@ func (p *dispatchPair) keystroke(t *testing.T, artifactID string, typing *typist
 	for attempt := 1; ; attempt++ {
 		if peerEnded(typing.editor) {
 			typing.disconnects = append(typing.disconnects, typing.editor.CloseCode())
-			reconnected := storedHead(t, p, artifactID)
 			editor, err := typing.process.reconnectEditor(t, typing.login, artifactID)
 			if err != nil {
 				return fmt.Errorf("%s: %w", typing.who, err)
 			}
 			typing.editor = editor
-			// The room appends the state the tab sent on reconnecting, content or no content, so
-			// that append is waited for here: left in flight, it would pass the wait below on its
-			// own and the keystroke would be taken for stored.
-			if err := p.storedPast(t, artifactID, reconnected, 10*time.Second, typing.who+"'s reconnected tab's sync update"); err != nil {
+			// The tab hands the room the state of its own copy, which holds the keystroke the
+			// room that closed may never have stored. The room appends whatever of it the room
+			// lacks, and nothing at all where that sync changes nothing (ygo calls no update
+			// observer for a transaction that changes nothing, reearth/ygo#350), so what is
+			// waited for here is the store holding what the tab holds: an append of the tab's
+			// state left in flight would pass the wait below on its own and the keystroke would
+			// be taken for stored.
+			if err := p.storedCaughtUpWith(t, artifactID, editor, 10*time.Second, typing.who+"'s reconnected tab"); err != nil {
 				return err
 			}
 		}
@@ -4103,8 +4118,8 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
 			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
 		}
-		typists[0].editor = pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
-		typists[1].editor = pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
+		typists[0].editor = pair.openSyncedEditor(t, pair.a, "alice", artifactID, "x\n")
+		typists[1].editor = pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
 		const keystrokes = 200
 		var stopped error
 		typed := 0
@@ -4160,8 +4175,8 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
 			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
 		}
-		typists[0].editor = pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
-		typists[1].editor = pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
+		typists[0].editor = pair.openSyncedEditor(t, pair.a, "alice", artifactID, "x\n")
+		typists[1].editor = pair.openSyncedEditor(t, pair.b, "bob", artifactID, "x\n")
 		for keystroke := range 6 {
 			if err := pair.keystroke(t, artifactID, typists[keystroke%2]); err != nil {
 				t.Fatalf("keystroke %d: %v", keystroke+1, err)
@@ -4225,16 +4240,17 @@ func reconnectWithScope(t *testing.T, process *dispatchProcess, login, artifactI
 // once. A tab on the process that did not take the request is closed with the others and comes
 // back with the scope the issue now allows; an update sent on the closed issue is not stored.
 //
-// Bob opens his tab on B before alice opens hers on A, so the room alice is in stands at the
-// stored head when the issue closes: what closes her socket, if anything does, is the close.
+// Neither tab's connect stores anything - its sync changes nothing in the room it joins, and a
+// transaction that changes nothing commits no update - so both rooms stand at the stored head
+// when the issue closes: what closes their sockets, if anything does, is the close.
 func TestClosingAndReopeningAnIssueChangesEveryProcessesRooms(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "SHUT")
 	pair.a.createProject(t, project, "Closed across processes")
 	issueKey, artifactID := pair.b.createIssueIn(t, project, "Closed on the other process", "before")
 
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "before\n")
-	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "before\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "before\n")
+	alice := pair.openSyncedEditor(t, pair.a, "alice", artifactID, "before\n")
 	if scope := authenticateEditor(t, alice); scope != "read-write" {
 		t.Fatalf("alice's tab on A on an open issue was granted %q, want read-write", scope)
 	}
@@ -4364,7 +4380,7 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 		t.Fatalf("the decision's ask reads %s before the close, want open", ask.State)
 	}
 
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, pair.b.documentText(t, artifactID))
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, pair.b.documentText(t, artifactID))
 	if scope := authenticateEditor(t, bob); scope != "read-write" {
 		t.Fatalf("bob's tab on B on an open issue was granted %q, want read-write", scope)
 	}
@@ -4447,7 +4463,7 @@ func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	// document before its resumption does.
 	issueKey, artifactID := pair.b.createIssueIn(t, project, "Bob asks on B", "Intro.")
 
-	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "Intro.\n")
+	bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "Intro.\n")
 	const blockID = "ask-bob-region"
 	head := storedHead(t, pair, artifactID)
 	appendMarkdown(t, bob, ":::ask{#"+blockID+` urgency="med" multiple="false"}`+"\nWhich region goes first?\n:::\n")
@@ -4564,8 +4580,8 @@ func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 		_, artifactID = pair.b.createIssueIn(t, project, title, agentRowSpec)
 		waitForSettlementOwed(t, pair.database, artifactID, false)
 		want := pair.b.documentText(t, artifactID)
-		bob = pair.openStoredEditor(t, pair.b, "bob", artifactID, want)
-		bobsOtherTab = pair.openStoredEditor(t, pair.b, "bob", artifactID, want)
+		bob = pair.openSyncedEditor(t, pair.b, "bob", artifactID, want)
+		bobsOtherTab = pair.openSyncedEditor(t, pair.b, "bob", artifactID, want)
 		if pair.a.holdsRoom(t, artifactID) {
 			t.Fatalf("A holds a room of the document before the agent writes, so its write would not be the cold fork this case is about")
 		}
@@ -4648,10 +4664,10 @@ func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 			}
 			evicted = time.Now()
 			t.Logf("the earlier write closed B's room (bob's tab: close code %d); bob's tabs reconnect", bobsOtherTab.CloseCode())
-			bob = pair.reconnectStored(t, pair.b, "bob", artifactID)
-			bobsOtherTab = pair.reconnectStored(t, pair.b, "bob", artifactID)
-			// Bob's reconnects are writes on B, which close the room the earlier write's
-			// publish left on A: the judged write is to fork the store, as a cold write does.
+			bob = pair.reconnectSynced(t, pair.b, "bob", artifactID)
+			bobsOtherTab = pair.reconnectSynced(t, pair.b, "bob", artifactID)
+			// The judged write is to fork the store, as a cold write does, so the room the
+			// earlier write's publish left on A has to be gone before it runs.
 			deadline := time.Now().Add(5 * time.Second)
 			for pair.a.holdsRoom(t, artifactID) {
 				if time.Now().After(deadline) {
@@ -4689,16 +4705,21 @@ func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 	})
 }
 
-// reconnectStored reconnects login's tab on process and waits for the update its sync appends to
-// be stored, as openStoredEditor does for a first connection.
-func (p *dispatchPair) reconnectStored(t *testing.T, process *dispatchProcess, login, artifactID string) *docstest.Peer {
+// reconnectSynced reconnects login's tab on process and checks that its sync left the durable
+// head where it was, as openSyncedEditor does for a first connection. Its callers reconnect tabs
+// that have typed nothing, so the state such a tab sends changes nothing in the room it rejoins
+// and the room stores nothing for it.
+func (p *dispatchPair) reconnectSynced(t *testing.T, process *dispatchProcess, login, artifactID string) *docstest.Peer {
 	t.Helper()
-	head := storedHead(t, p, artifactID)
+	before := storedHead(t, p, artifactID)
 	editor, err := process.reconnectEditor(t, login, artifactID)
 	if err != nil {
 		t.Fatalf("%v:\n%s", err, process.Output.String())
 	}
-	p.waitStoredPast(t, artifactID, head, 10*time.Second, login+"'s reconnected tab's sync update on "+p.name(process))
+	if head := storedHead(t, p, artifactID); head != before {
+		t.Fatalf("the document moved from update %d to %d while %s's tab reconnected on %s: a sync that changes nothing stores nothing, so something else wrote the document",
+			before, head, login, p.name(process))
+	}
 	return editor
 }
 
@@ -4710,14 +4731,14 @@ func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 
 	t.Run("a read on B right after each write on A shows it and its token passes the next conditional write", func(t *testing.T) {
 		_, artifactID := pair.a.createIssueIn(t, project, "Written on A, read on B", "v0")
-		bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "v0\n")
+		bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "v0\n")
 		_, token := pair.a.textAndToken(t, artifactID)
 		reconnects := 0
 		for write := 1; write <= 50; write++ {
 			before, after := fmt.Sprintf("v%d", write-1), fmt.Sprintf("v%d", write)
 			if peerEnded(bob) {
 				reconnects++
-				bob = pair.reconnectStored(t, pair.b, "bob", artifactID)
+				bob = pair.reconnectSynced(t, pair.b, "bob", artifactID)
 			}
 			answer := pair.a.send(t, http.MethodPost, editPath(artifactID), editBody(t, before, after, token, false), asUser("alice"))
 			if answer.status != http.StatusOK {
@@ -4742,11 +4763,11 @@ func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 	// keeps its rooms current shows the mark whatever that write does.
 	t.Run("a mark placed by an editor on A is verified by a comment anchored through B", func(t *testing.T) {
 		issueKey, artifactID := pair.b.createIssueIn(t, project, "Marked on A, anchored through B", "The quick brown fox")
-		bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "The quick brown fox\n")
+		bob := pair.openSyncedEditor(t, pair.b, "bob", artifactID, "The quick brown fox\n")
 		pair.b.armLiveWritePause(t, artifactID, docs.PauseAfterCommit)
 		write := pair.b.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "brown", "red", "", false), asUser("carol"))
 		pair.b.awaitLiveWriteParked(t, artifactID, docs.PauseAfterCommit)
-		alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "The quick red fox\n")
+		alice := pair.openSyncedEditor(t, pair.a, "alice", artifactID, "The quick red fox\n")
 		markID := "mark-" + uniqueProjectKey(t, "M")
 		head := storedHead(t, pair, artifactID)
 		placeMark(t, alice, "alice", "quick", markID)
@@ -4830,7 +4851,7 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 
 	t.Run("a rebuild through A refuses a document live on B", func(t *testing.T) {
 		_, artifactID := pair.b.createIssueIn(t, project, "Live on B, rebuilt through A", "before")
-		pair.openStoredEditor(t, pair.b, "bob", artifactID, "before\n")
+		pair.openSyncedEditor(t, pair.b, "bob", artifactID, "before\n")
 		corruptHistory(t, pair, artifactID)
 		answer := pair.a.send(t, http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
 		if answer.status != http.StatusConflict || answer.code() != "DOCUMENT_LIVE" {
