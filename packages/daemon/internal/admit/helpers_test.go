@@ -185,10 +185,11 @@ func assertSlots(t *testing.T, pool *pgxpool.Pool, want []record.Slot) {
 }
 
 // assertWaiting compares the waiting line, in its order, with want. It reads the line exactly as
-// admission does (its judgeLine): the mirror rows of every issue a blocker can hold first, so
-// the line leaves out an issue one of them holds where it stands (record.LineFacts.Held), the
-// children-first judgement next, so it leaves out a parent whose own Dispatch children are
-// still open (record.LineFacts.ChildWaits), and then the line.
+// admission does, through the one judgement it promotes from (blockers.JudgeLine): the mirror
+// rows of every issue a blocker can hold first, so the line leaves out an issue one of them
+// holds where it stands (record.LineFacts.Held), the children-first judgement next, so it leaves
+// out a parent whose own Dispatch children are still open (record.LineFacts.ChildWaits), and
+// then the line.
 func assertWaiting(t *testing.T, pool *pgxpool.Pool, want []string) {
 	t.Helper()
 	var got []string
@@ -206,15 +207,11 @@ func assertWaiting(t *testing.T, pool *pgxpool.Pool, want []string) {
 		if err != nil {
 			t.Fatalf("read the line facts: %v", err)
 		}
-		rows, err := blockers.Load(ctx, tx, records, testProject, blockers.Judged(issues, nil))
+		_, _, line, err := blockers.JudgeLine(ctx, tx, records, testProject, issues, slots, facts, nil)
 		if err != nil {
-			t.Fatalf("read what the issues wait on: %v", err)
+			t.Fatalf("judge the waiting line: %v", err)
 		}
-		facts.Held = blockers.HeldIssues(rows, issues)
-		if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, records, testProject, issues, facts.Gates); err != nil {
-			t.Fatalf("judge what waits for its children: %v", err)
-		}
-		for _, waiting := range record.Waiting(issues, slots, facts) {
+		for _, waiting := range line {
 			got = append(got, waiting.Issue.Key)
 		}
 	})

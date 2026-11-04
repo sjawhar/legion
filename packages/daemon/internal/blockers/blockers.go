@@ -12,6 +12,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/jackc/pgx/v5"
@@ -66,8 +67,8 @@ func Load(ctx context.Context, tx pgx.Tx, store record.Store, project string, ke
 
 // Judged is the keys whose rows a judgement of issues and waiting reads (Blocked, and the
 // deciders it stands for): each root of waiting the rule does not exempt (WaitsOn), and each issue
-// a blocker can hold where it stands (Holdable: Holds, and StartUnblockedChildren's converse).
-// Load reads these and what they wait on.
+// a blocker can hold where it stands (Holdable: Holds, and the waiting line's own hold through
+// HeldIssues). Load reads these and what they wait on.
 func Judged(issues, waiting []record.Issue) []string {
 	keys := make([]string, 0, len(waiting))
 	for _, issue := range waiting {
@@ -120,7 +121,7 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 // is never reported as waiting on them.
 //
 // more is what a decider outside this package has already judged and rendered, which today is
-// the children-first wait (workflow.ChildWaitRows): that rule reads the mirror's parent column
+// the children-first wait (record.ChildWaitRows): that rule reads the mirror's parent column
 // against the daemon's records rather than an issue's blocked-by links, so it cannot be made
 // here, and it must still reach the one list a reader reads. A key both deciders name keeps one
 // row, with each one's issues in it — the deciders are independent, and an issue can wait on a
@@ -219,8 +220,8 @@ func Holds(rows map[string]Row, issue record.Issue) []string {
 // to an issue whose first phase an unfinished Dispatch issue holds, and it cannot judge that
 // itself, since internal/record may not read this package. Every caller that reads the line
 // therefore loads the mirror rows first (Load over Judged with no line) and fills the field from
-// here, so the line, the promotion's own skip and the state's `blocked` all answer from one
-// judgement of one read.
+// here, which JudgeLine does for all of them, so the line, the promotion's own skip and the
+// state's `blocked` all answer from one judgement of one read.
 func HeldIssues(rows map[string]Row, issues []record.Issue) map[string]struct{} {
 	held := make(map[string]struct{})
 	for _, issue := range issues {
@@ -229,4 +230,69 @@ func HeldIssues(rows map[string]Row, issues []record.Issue) map[string]struct{} 
 		}
 	}
 	return held
+}
+
+// JudgeLine reads what the issues of project wait on and builds the waiting line from it, in the
+// one order the two allow. First the mirror rows of every issue a blocker can hold (Judged with
+// no line), because the line must leave out every issue whose first phase one of them holds and
+// cannot judge that itself: internal/record may not read this package, so the hold is handed to
+// the line as a fact (record.LineFacts.Held, HeldIssues). The children-first wait is handed to
+// it the same way and for a like reason — the line is given facts rather than a transaction, and
+// that judgement reads the Dispatch mirror against the daemon's own records
+// (record.LineFacts.ChildWaits, record.ChildWaitsOf) — and is read again on each judgement
+// rather than stored anywhere, so a mirror row that has gone stale holds a parent for one pass
+// and no longer. Then the line. Then the rows of the issues the line itself names, which only the
+// line can say.
+//
+// rows is whatever the caller has already read, nil on its first judgement; judgeAgain reads only
+// the keys it does not hold, so a pass that reads the line twice makes one mirror read in all.
+// The facts come back with the held set and the child waits filled, so the release, the
+// promotion, the architect's notice and the state's `blocked` all answer from the one judgement.
+// slots is the caller's own read of the slots table, which record.Waiting reads as the set of
+// issues already holding one.
+//
+// It is the one place the line is judged: admission's own pass (admit's promoteHolds), the
+// projected state and the controller tick's read of what the project waits on all come through
+// here, so no two of them can judge the line from different reads or leave a later hold out of
+// one of the three.
+func JudgeLine(ctx context.Context, tx pgx.Tx, store record.Store, project string, issues []record.Issue,
+	slots []record.Slot, facts record.LineFacts, rows map[string]Row,
+) (map[string]Row, record.LineFacts, []record.LineEntry, error) {
+	if rows == nil {
+		rows = map[string]Row{}
+	}
+	rows, err := judgeAgain(ctx, tx, store, project, issues, nil, rows)
+	if err != nil {
+		return rows, facts, nil, err
+	}
+	facts.Held = HeldIssues(rows, issues)
+	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, store, project, issues, facts.Gates); err != nil {
+		return rows, facts, nil, fmt.Errorf("read what the unstarted issues of %s wait on under them: %w", project, err)
+	}
+	line := record.Waiting(issues, slots, facts)
+	rows, err = judgeAgain(ctx, tx, store, project, issues, line, rows)
+	return rows, facts, line, err
+}
+
+// judgeAgain adds to rows the mirror rows of every key the rebuilt line judges that the first
+// judgement did not name. The rows already read stand — no Dispatch issue finishes inside one
+// transaction — so only the new keys cost a read, and a round that names none costs nothing.
+func judgeAgain(ctx context.Context, tx pgx.Tx, store record.Store, project string, issues []record.Issue,
+	line []record.LineEntry, rows map[string]Row,
+) (map[string]Row, error) {
+	var fresh []string
+	for _, key := range Judged(issues, record.WaitingIssues(line)) {
+		if _, known := rows[key]; !known && !slices.Contains(fresh, key) {
+			fresh = append(fresh, key)
+		}
+	}
+	if len(fresh) == 0 {
+		return rows, nil
+	}
+	more, err := Load(ctx, tx, store, project, fresh)
+	if err != nil {
+		return rows, err
+	}
+	maps.Copy(rows, more)
+	return rows, nil
 }

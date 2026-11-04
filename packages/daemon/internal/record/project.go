@@ -142,16 +142,16 @@ type LineFacts struct {
 	// ChildWaits is the children-first judgement of this pass, by parent key: the issues whose
 	// own first phase the line must not offer a slot to because Dispatch still shows an open
 	// child under them. Only the caller can fill it — the judgement reads the Dispatch mirror's
-	// parent column against the daemon's own records, and lives in internal/workflow, which
-	// reads this package (workflow.ChildWaits) — and a caller that fills it with nothing says
-	// that nothing waits for its children. It is never stored: each admission pass computes it
-	// again, so a mirror row that has gone stale costs one pass and no more.
+	// parent column against the daemon's own records, which takes the transaction the line itself
+	// is never given (ChildWaitsOf) — and a caller that fills it with nothing says that nothing
+	// waits for its children. It is never stored: each admission pass computes it again, so a
+	// mirror row that has gone stale costs one pass and no more.
 	ChildWaits map[string]ChildWait
 }
 
 // ChildWait is why one parent's own first phase waits: the open Dispatch children under it, in
-// Dispatch key order. It is data alone — the rule that fills it is workflow.ChildWaits — so that
-// the waiting line, the state's `blocked` and the architect's notice all read one judgement.
+// Dispatch key order. It is data alone — the rule that fills it is ChildWaits — so that the
+// waiting line, the state's `blocked` and the architect's notice all read one judgement.
 type ChildWait struct {
 	Parent string
 	Open   []OpenChild
@@ -167,27 +167,40 @@ type OpenChild struct {
 	Cycle  string
 }
 
-// ReadLineFacts reads the facts of one admission pass for issues: one tree-lifecycle read, one
-// gate read and one read of the starts the project owes, whatever the number of trees, gates and
-// issues involved. project is the Dispatch project key; the lifecycles are keyed by the claim
-// project token the tree_lifecycles table uses (claim.ProjectToken), which is derived here so no
-// caller has to remember the difference.
-func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (LineFacts, error) {
-	token, err := claim.ProjectToken(project)
-	if err != nil {
-		return LineFacts{}, err
-	}
+// treeRoots is the key of every tree root among issues, which is what a read of the trees of a
+// whole pass is keyed by: their lifecycles and their design gates alike.
+func treeRoots(issues []Issue) []string {
 	roots := make([]string, 0, len(issues))
 	for _, issue := range issues {
 		if claim.IsTreeRoot(issue.Key, issue.Tree) {
 			roots = append(roots, issue.Key)
 		}
 	}
-	lifecycles, err := store.TreeLifecycles(ctx, tx, token, roots)
+	return roots
+}
+
+// ReadLifecycles is the lifecycle of each tree root among issues, by root key, in one read
+// whatever the number of trees: ReadLineFacts's first read, and the whole of what a judgement
+// that asks only whether a tree runs needs (workflow.Stranded). project is the Dispatch project
+// key; the lifecycles are keyed by the claim project token the tree_lifecycles table uses
+// (claim.ProjectToken), which is derived here so no caller has to remember the difference.
+func ReadLifecycles(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (map[string]treelifecycle.Lifecycle, error) {
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return nil, err
+	}
+	return store.TreeLifecycles(ctx, tx, token, treeRoots(issues))
+}
+
+// ReadLineFacts reads the facts of one admission pass for issues: one tree-lifecycle read
+// (ReadLifecycles), one gate read and one read of the starts the project owes, whatever the
+// number of trees, gates and issues involved. project is the Dispatch project key.
+func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (LineFacts, error) {
+	lifecycles, err := ReadLifecycles(ctx, tx, store, project, issues)
 	if err != nil {
 		return LineFacts{}, err
 	}
-	gates, err := store.Gates(ctx, tx, roots)
+	gates, err := store.Gates(ctx, tx, treeRoots(issues))
 	if err != nil {
 		return LineFacts{}, err
 	}

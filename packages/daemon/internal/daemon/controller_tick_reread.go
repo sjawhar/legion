@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"maps"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,7 +56,7 @@ func (w *workflowRuntime) observeWaitedOn(ctx context.Context) []intake.IssueSta
 // read-only transaction: the judgement the deciders themselves make, read rather than remade
 // (blockers.Blocked), over every root on the waiting line (record.Waiting), every recorded child
 // a blocker holds at phase.Admitted, and every open Dispatch child holding a parent's own first
-// phase (workflow.ChildWaitsOf). A candidate the rule exempts is read for nothing, as promotion
+// phase (record.ChildWaitsOf). A candidate the rule exempts is read for nothing, as promotion
 // admits it whatever its links say and nothing consults the answer (blockers.Exempt), and the
 // keys come out in that judgement's own order, by the issue waiting on them.
 //
@@ -83,23 +82,15 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The rows of every issue a blocker can hold are read before the line, which leaves such an
-	// issue out and cannot judge that itself (record.LineFacts.Held); the roots the line names
-	// are read after it, since only the line says which they are.
-	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(issues, nil))
+	// Judged through the one judgement admission itself promotes from (blockers.JudgeLine): the
+	// rows of every issue a blocker can hold come before the line, which leaves such an issue out
+	// and cannot judge that itself (record.LineFacts.Held); the issues the line names are read
+	// after it, since only the line says which they are.
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, w.records, w.dispatchProject, issues, slots, facts, nil)
 	if err != nil {
 		return nil, err
 	}
-	facts.Held = blockers.HeldIssues(rows, issues)
-	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, w.records, w.dispatchProject, issues, facts.Gates); err != nil {
-		return nil, err
-	}
-	waiting := record.WaitingIssues(record.Waiting(issues, slots, facts))
-	named, err := blockers.Load(ctx, tx, w.records, w.dispatchProject, blockers.Judged(nil, waiting))
-	if err != nil {
-		return nil, err
-	}
-	maps.Copy(rows, named)
+	waiting := record.WaitingIssues(line)
 	var keys []string
 	seen := make(map[string]struct{})
 	for _, blocked := range blockers.Blocked(rows, issues, waiting, record.ChildWaitRows(facts.ChildWaits)) {

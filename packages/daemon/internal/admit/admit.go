@@ -420,7 +420,7 @@ func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIss
 	if err != nil {
 		return nil, err
 	}
-	rows, facts, line, err := a.judgeLine(ctx, tx, issues, slots, facts, nil)
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, a.store, a.project, issues, ownSlots(issues, slots), facts, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +676,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.
 		// The engine consumed the snapshot when it recorded the snapshot's sequence: it kept its own
 		// status over a status Dispatch already showed (keepStatus), or re-entered a child, and wrote
 		// the observation itself. Recording the snapshot's status now would put a set-back's backlog
-		// on a running tree, whose slot releaseInactiveSlots would then free. Otherwise the snapshot's
+		// on a running tree, whose slot the release would then free. Otherwise the snapshot's
 		// move is recorded, as the live event's would be.
 		if refreshed.LastDispatchSeq >= summary.Seq {
 			return nil
@@ -1146,7 +1146,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			return 0, released, fmt.Errorf("list admission slots: %w", err)
 		}
 	}
-	rows, facts, line, err := a.judgeLine(ctx, tx, issues, slots, facts, nil)
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, a.store, a.project, issues, ownSlots(issues, slots), facts, nil)
 	if err != nil {
 		return 0, released, err
 	}
@@ -1158,7 +1158,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if issues, slots, facts, err = a.reread(ctx, tx); err != nil {
 			return 0, released, err
 		}
-		if rows, facts, line, err = a.judgeLine(ctx, tx, issues, slots, facts, rows); err != nil {
+		if rows, facts, line, err = blockers.JudgeLine(ctx, tx, a.store, a.project, issues, ownSlots(issues, slots), facts, rows); err != nil {
 			return 0, released, err
 		}
 	}
@@ -1344,7 +1344,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if issues, slots, facts, err = a.reread(ctx, tx); err != nil {
 			return admitted, released, err
 		}
-		if rows, facts, line, err = a.judgeLine(ctx, tx, issues, slots, facts, rows); err != nil {
+		if rows, facts, line, err = blockers.JudgeLine(ctx, tx, a.store, a.project, issues, ownSlots(issues, slots), facts, rows); err != nil {
 			return admitted, released, err
 		}
 	}
@@ -1371,63 +1371,6 @@ func (a *Admission) reread(ctx context.Context, tx pgx.Tx) ([]record.Issue, []re
 	}
 	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
 	return issues, slots, facts, err
-}
-
-// judgeAgain adds to rows the mirror rows of every key the rebuilt line judges that the first
-// judgement did not name. The rows already read stand — no Dispatch issue finishes inside one
-// transaction — so only the new keys cost a read, and a round that names none costs nothing.
-func (a *Admission) judgeAgain(ctx context.Context, tx pgx.Tx, issues []record.Issue, line []record.LineEntry,
-	rows map[string]blockers.Row,
-) (map[string]blockers.Row, error) {
-	var fresh []string
-	for _, key := range blockers.Judged(issues, record.WaitingIssues(line)) {
-		if _, known := rows[key]; !known && !slices.Contains(fresh, key) {
-			fresh = append(fresh, key)
-		}
-	}
-	if len(fresh) == 0 {
-		return rows, nil
-	}
-	more, err := blockers.Load(ctx, tx, a.store, a.project, fresh)
-	if err != nil {
-		return rows, err
-	}
-	maps.Copy(rows, more)
-	return rows, nil
-}
-
-// judgeLine reads what this project's issues wait on and builds the waiting line from it, in the
-// one order the two allow. First the mirror rows of every issue a blocker can hold
-// (blockers.Judged with no line), because the line must leave out every issue whose first phase
-// one of them holds and cannot judge that itself: internal/blockers reads internal/record, so
-// the hold is handed to the line as a fact (record.LineFacts.Held, blockers.HeldIssues). The
-// children-first wait is handed to it the same way and for the same reason — its rule lives in
-// internal/workflow, which also reads internal/record (record.LineFacts.ChildWaits,
-// workflow.ChildWaitsOf) — and is read again on each judgement rather than stored anywhere, so
-// a mirror row that has gone stale holds a parent for one pass and no longer. Then the line.
-// Then the rows of the roots the line itself names, which only the line can say.
-//
-// rows is whatever this pass has already read, nil on its first judgement; judgeAgain reads only
-// the keys it does not hold, so a pass that reads the line twice makes one mirror read in all.
-// The facts come back with the held set and the child waits filled, so the release, the
-// promotion, the architect's notice and the state's `blocked` all answer from the one judgement.
-func (a *Admission) judgeLine(ctx context.Context, tx pgx.Tx, issues []record.Issue, slots []record.Slot,
-	facts record.LineFacts, rows map[string]blockers.Row,
-) (map[string]blockers.Row, record.LineFacts, []record.LineEntry, error) {
-	if rows == nil {
-		rows = map[string]blockers.Row{}
-	}
-	rows, err := a.judgeAgain(ctx, tx, issues, nil, rows)
-	if err != nil {
-		return rows, facts, nil, err
-	}
-	facts.Held = blockers.HeldIssues(rows, issues)
-	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, a.store, a.project, issues, facts.Gates); err != nil {
-		return rows, facts, nil, fmt.Errorf("read what the unstarted issues of %s wait on under them: %w", a.project, err)
-	}
-	line := record.Waiting(issues, ownSlots(issues, slots), facts)
-	rows, err = a.judgeAgain(ctx, tx, issues, line, rows)
-	return rows, facts, line, err
 }
 
 // candidateWaitsOn is what a candidate of the line still waits on among the Dispatch issues its
@@ -1564,7 +1507,7 @@ func (a *Admission) tellChildrenFirst(ctx context.Context, tx pgx.Tx, issues []r
 // its own is still open — the children-first rule of dispatch://INFRA-980. It is the named seam
 // the safety net below asks, so that the rule arrives in one place rather than as a condition
 // spread through this file, and waits is the pass's own judgement of it
-// (record.LineFacts.ChildWaits, filled by judgeLine from workflow.ChildWaits): never a stored
+// (record.LineFacts.ChildWaits, filled by blockers.JudgeLine from record.ChildWaits): never a stored
 // flag, so a parent whose last open child has gone waits no longer than the pass that reads it.
 func (a *Admission) waitsForChildren(waits map[string]record.ChildWait, issue record.Issue) bool {
 	_, waiting := waits[issue.Key]

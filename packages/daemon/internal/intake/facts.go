@@ -424,7 +424,7 @@ type IssueStatus struct {
 	ClaimKnown bool
 	// Parent is the key of the issue's Dispatch parent, empty for a root or for a view that does
 	// not show one. The children-first rule reads the mirror's parent column to find what hangs
-	// under an issue (workflow.ChildWaits), so every observation that knows the parent carries it.
+	// under an issue (record.ChildWaits), so every observation that knows the parent carries it.
 	Parent string
 }
 

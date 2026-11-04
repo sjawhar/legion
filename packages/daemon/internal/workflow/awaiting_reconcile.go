@@ -130,7 +130,8 @@ func (e *Engine) ReconcileAwaiting(ctx context.Context, tx pgx.Tx, project strin
 // answerOpenGates answers each unanswered root of project waiting on a person whose design gate is
 // open, whatever opened it and whenever: a person's approval Dispatch recorded before the wait
 // began but applied after it, a registration's read of an approval, or a registration under
-// gates.design: off. The gate's opening advances no tree while the root waits (advanceAdmittedTree),
+// gates.design: off. The gate's opening starts no phase of the tree while the root waits, since
+// nothing of a waiting root's tree takes an admission slot,
 // and the person has nothing left to decide that holds the tree, so the root resumes with the next
 // free slot, told how its spec stands, and its tree advances then. A wait on the gate under
 // gates.design: off (the operator switched the gate off while the root waited on it) whose gate is

@@ -66,7 +66,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 	for _, issue := range issues {
 		recorded[issue.Key] = issue
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, s, project, issues)
+	lifecycles, err := record.ReadLifecycles(ctx, tx, s, project, issues)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 		// (record.TreeLive) but runs nothing yet, and its architect's task comes with its
 		// promotion, so nothing of it is stranded. Nor is anything of a root waiting on a person,
 		// whose architect its answer resumes.
-		if !facts.Lifecycles[root.Key].OpenUnderWorkflow() {
+		if !lifecycles[root.Key].OpenUnderWorkflow() {
 			continue
 		}
 		// current is the phase the start that would wake the claim names; the architect's names none.
