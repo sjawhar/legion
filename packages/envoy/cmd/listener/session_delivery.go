@@ -224,12 +224,14 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 	return m.consumerFor(ctx, body, topics)
 }
 
-// consumerFor creates the session's consumer when the stream holds none (at the sequence after its
-// resume point when that names the stream's current identity, else at the stream's end) and
-// otherwise updates it to the current filter, before the registration answers; it refuses a
-// registration that asks for none, or that this listener can give none. The filter is the topics
-// the registration is about to store, so a message published on a newly followed topic once the
-// registration is answered is the consumer's to deliver.
+// consumerFor creates the session's consumer when the stream holds none and otherwise updates it
+// to the current filter, before the registration answers; it refuses a registration that asks for
+// none, or that this listener can give none. The consumer is created at the sequence after its
+// resume point's seq when that point carries a seq, 0 included (which gives sequence 1), and names
+// the stream's current identity. A registration with no resume point, or one with no seq or naming
+// another identity, creates it at the stream's end. The filter is the topics the registration is
+// about to store, so a message published on a newly followed topic once the registration is
+// answered is the consumer's to deliver.
 func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, topics []string) (sessionDeliveryOutcome, *deliveryRefusal) {
 	if body.Delivery == nil || !body.Delivery.Consumer {
 		// A registration with no delivery field at all is a plugin older than consumer delivery.
@@ -267,8 +269,8 @@ func (m *sessionDelivery) consumerFor(ctx context.Context, body subscribeBody, t
 	}
 	var startSeq uint64
 	epoch := body.Delivery.Epoch
-	if resume := body.Delivery.Resume; resume != nil && resume.Seq > 0 && resume.StreamID == streamID {
-		startSeq = resume.Seq + 1
+	if resume := body.Delivery.Resume; resume != nil && resume.Seq != nil && resume.StreamID == streamID {
+		startSeq = *resume.Seq + 1
 	}
 	unlock := m.locks.lock(body.SessionID)
 	start, err := m.consumers.Ensure(ctx, body.SessionID, sessionConsumerFilter(body.SessionID, topics), startSeq)
