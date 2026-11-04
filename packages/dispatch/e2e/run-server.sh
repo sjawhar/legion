@@ -177,6 +177,22 @@ if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
   )
 fi
 
+# The server binary, read before the sweep below: DISPATCH_E2E_SERVER_BIN names a prebuilt
+# envoy-dispatch this run executes instead of building one from this checkout
+# (scripts/e2e/dispatch-claimant-delivery.sh's DISPATCH_BIN is the precedent), which
+# scripts/e2e/dispatch-two-builds.sh gives the build of an older commit so a base build and this
+# one run against one database. Unset, the build below is this checkout's, as it always was. The
+# path is made absolute here, against the caller's directory, since this script changes to
+# packages/envoy before it runs it.
+server_bin="${DISPATCH_E2E_SERVER_BIN:-}"
+if [ -n "$server_bin" ]; then
+  [[ "$server_bin" == /* ]] || server_bin="$PWD/$server_bin"
+  if [ ! -x "$server_bin" ]; then
+    echo "run-server.sh: DISPATCH_E2E_SERVER_BIN=$DISPATCH_E2E_SERVER_BIN is not an executable file" >&2
+    exit 2
+  fi
+fi
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -204,7 +220,8 @@ done
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
-# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# Build first, in the caller's toolchain environment, and exec the binary itself - or exec the
+# one DISPATCH_E2E_SERVER_BIN named, which is already built and is not this checkout's. A server
 # started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
@@ -213,7 +230,10 @@ cd "$(dirname "$0")/../../envoy"
 # once serialise: Go rewrites it only when the source changed, and a running server keeps the
 # inode it started from. The port is chosen only after the build, and held-port.py execs `env`,
 # which execs the server, so the pid a caller started is still the server's.
-flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+if [ -z "$server_bin" ]; then
+  flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
+  server_bin=./dispatch-e2e
+fi
 exec "${listen[@]}" env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
@@ -236,4 +256,4 @@ exec "${listen[@]}" env \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  ./dispatch-e2e
+  "$server_bin"

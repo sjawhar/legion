@@ -134,7 +134,12 @@ Playwright through `e2e/run.ts` with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on
 port, each is used as given when set and chosen by the OS when unset; the proxy starts before
 the servers, since both serve its origin, so A's and B's ports are held first (a
 `held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
-cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+cookies with one key the run generates, so a person stays signed in whichever answers.
+`DISPATCH_E2E_SERVER_BIN` runs a prebuilt `envoy-dispatch` instead of the one `run-server.sh`
+builds from this checkout, and `DISPATCH_E2E_SERVER_BIN_B` gives Dispatch B one of its own, so a
+run can put two builds of the server against the one database as `DISPATCH_E2E_WEB_DIST_B` puts
+two builds of the dashboard there; `scripts/e2e/dispatch-two-builds.sh` is the proof that uses
+them. It runs
 the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
 leaves out; arguments after `--` reach Playwright
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec

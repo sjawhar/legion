@@ -1631,7 +1631,12 @@ server's `DISPATCH_DEV_SIGNIN_SHARED_KEY`. It requires the key and `DISPATCH_E2E
 two-process mode, and sets both servers' `DISPATCH_SERVER_URL` to the proxy's origin. The harness
 generates that key once per run and hands it to both, so a person signed in through one process
 is signed in on the other, and points B at `DISPATCH_E2E_WEB_DIST_B` when it is set (default: A's
-dist). The proxy alternates each HTTP
+dist). `DISPATCH_E2E_SERVER_BIN` names a prebuilt `envoy-dispatch` that `run-server.sh` runs
+instead of building one from this checkout, read before its environment sweep as
+`scripts/e2e/dispatch-claimant-delivery.sh` reads `DISPATCH_BIN`, and refused when it is not an
+executable file; the harness gives B its own as `DISPATCH_E2E_SERVER_BIN_B`, so a run puts two
+builds of the server against one database the way `DISPATCH_E2E_WEB_DIST_B` puts two builds of
+the dashboard there (`scripts/e2e/dispatch-two-builds.sh`). The proxy alternates each HTTP
 request and each websocket upgrade between A and B (two turns, each starting at A), streams each
 response back as it arrives, and forwards `Host` and `Origin` unchanged. `X-Dispatch-E2E-Process: a|b` on any request
 pins it, over a `dispatch-e2e-process=a|b` cookie, which pins a whole browser context, websocket
