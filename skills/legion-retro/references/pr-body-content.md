@@ -1,14 +1,14 @@
 # The PR body lines the changed paths require
 
-Read this at steps 4 and 5 of `skill://legion-retro`. A failure here stops retro as its
+Read this at step 4 of `skill://legion-retro`. A failure here stops retro as its
 *When retro stops* section says.
 
-## Bring the body up to date before the push
+## Bring the body up to date before you complete
 
 A repository can require body lines derived from the pull request's changed paths (for example one
 checklist line when `src/**` changed and another when `docs/**` changed) and have a required check
-read them from the body. Your commits add `docs/solutions/` paths the approved body never
-accounted for, so that check fails at your head. The
+read them from the body. The body approved earlier in the round may not account for every path the
+pull request now changes, so that check fails at the head. The
 merger reports a stale body rather than rewriting it, and GitHub will not merge a head whose
 required check failed, so the merge waits.
 
@@ -17,9 +17,8 @@ required check failed, so the merge waits.
 1. Read your system prompt's deployment instructions, the repository's agent guide (`AGENTS.md`,
    `CLAUDE.md`), its pull request template (`.github/pull_request_template.md` or
    `.github/PULL_REQUEST_TEMPLATE/`), and the workflow under `.github/workflows/` that reads the
-   body, for lines they require per changed path. When they require none, skip to the push.
-2. List the paths the pull request will change once you push `<head>`, your last commit (the
-   approved head when you committed no learning):
+   body, for lines they require per changed path. When they require none, there is nothing to do.
+2. List the paths the pull request changes at `<head>`, the approved head your task names:
 
    ```bash
    base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head>)" --to <head> --name-only
@@ -28,10 +27,8 @@ required check failed, so the merge waits.
    `@json` makes `base` a quoted jj string literal; never paste a branch name between quotes
    yourself, because a name with a quote or revset character then breaks the command. For each
    path pattern the step 1 sources name, write the line they require when a listed path matches
-   it. Before you write a line that says work was done, do that work for the paths your commits
-   add, because the required check reads the line and does not redo the work. That work may
-   change files under `docs/solutions/` only, since any other path after the approved head voids
-   the approval. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths>`.
+   it. A line that says work was done names work this pull request did: retro commits nothing, so
+   a line whose work is undone is a finding for the architect, not work you do here.
 3. Make a directory outside `$LEGION_WORKSPACE` with `dir=$(mktemp -d)`, the one place you write
    outside it: jj would commit a file inside it, and a fixed name in a shared `/tmp` can hold
    another session's body. Save the live body as `$dir/before.md` (to restore on failure) and
@@ -45,16 +42,15 @@ required check failed, so the merge waits.
    parentheses keep `pipefail` to this line, since your shell persists and a later `cmd | head`
    would exit 141 under it. In `$dir/body.md`, change only the lines the step 1 sources derive
    from paths, adding a missing one where they place it. Leave every other line byte for byte,
-   the `E2E (implementer)` and `E2E (tester)` lines included.
-4. Write it back before the push:
+   the `Checks` block included.
+4. Write it back:
 
    ```bash
    cd -- "$LEGION_WORKSPACE" && gh api --method PATCH repos/<owner>/<repo>/pulls/<n> -F body=@"$dir/body.md"
    ```
 
-   The checks your push starts read the body as it stands then, and the merger merges the head
-   your push makes. An edit after the push re-runs only checks triggered by an edited body, and
-   they run at the approved head, without your commits, where they may fail.
+   A body edit changes no commit, so the reviewer's approval stands, and a check that judges the
+   body runs again at once on the head as it is.
 
-When the push is refused after step 4 wrote the body, write `$dir/before.md` back with the same
-command before you report the refusal, so the body matches the head GitHub has.
+When the write back is refused, or the check it feeds fails, report it to the architect as *When
+retro stops* says, with the command and its output.

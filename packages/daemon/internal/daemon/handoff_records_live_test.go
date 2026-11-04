@@ -60,6 +60,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/handoffimport"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -106,6 +107,7 @@ type handoffRecordsLive struct {
 // TestHandoffRecordsLive drives the proof's steps against one booted daemon and one Dispatch.
 // A10 runs last, since it stops Dispatch under the daemon.
 func TestHandoffRecordsLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newHandoffRecordsLive(t)
 	r.step("a6-a-40kb-handoff-reads-back-byte-identical-two-writes-are-versions-1-and-2", r.a6RoundTrip)
 	r.step("a6-control-a-body-one-byte-over-the-cap-is-refused", r.a6OverCap)

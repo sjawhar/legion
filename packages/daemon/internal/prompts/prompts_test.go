@@ -1,6 +1,7 @@
 package prompts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -51,7 +52,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`,
 			"read CI for everything static", "try to break it", "dispatch handoff-write --issue <issue> --phase test"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
-			"Retro's `docs/solutions/` commits may land above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
+			"Retro commits nothing, so nothing of retro's sits above your approved head", "`pullRequest.head` is the commit the pull request stands on"}},
 		// The merge the merger is told to run names the head GitHub must match, on a queue base and
 		// off it, and carries the message it writes itself; its completion is an ordinary phase
 		// completion, refused only on the grounds every phase worker's is (dispatch://INFRA-714, R2).
@@ -229,6 +230,112 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	retired := []string{"READY_CHECKS_NOT_GREEN", "no check is required on", "refused at READY"}
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+	}{
+		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
+		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
+		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		for _, phrase := range retired {
+			if strings.Contains(text, phrase) {
+				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
+			}
+		}
+	}
+}
+
+// An issue with no Verification document, or with one holding no `before_merge` check, is a
+// coverage gap every role names and none refuses (dispatch://INFRA-174, R1 and R2): every gate
+// counts the `check` blocks that exist, and a rule that made the empty case a failure would stop
+// every issue in flight on the day these prompts deploy. So the tester records the gap in its
+// handoff without failing the phase for it, the reviewer names it in its review without asking
+// for changes over it, and the architect's acceptance comment names it and decides, which is the
+// only gate on an issue that has no `before_merge` check. Each composed prompt that carries the
+// rule says the empty case and its role's answer to it, and no paragraph of that rule calls the
+// case a failure or a request for changes. Each is also told what a child proves: a child's own
+// check whose `serves` names the root's requirement, never a result against the root's own check.
+func TestTheComposedPromptsNameAnIssueWithNoBeforeMergeCheckAsAGap(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const empty = "no Verification document, or with one that holds no `before_merge` check"
+	// A rule paragraph that says any of these has made the gap a refusal again. They are matched
+	// against the lower-cased paragraph, so a sentence that opens with one is caught too.
+	refusals := []string{"a failure", "a test failure", "fail the phase", "fails the phase",
+		"request_changes", "request changes", "requests changes", "`rejected`",
+		"is proved by nothing", "has no evidence at all", "accepted by nobody"}
+	for _, tc := range []struct {
+		role    claim.Role
+		isRoot  bool
+		answers []string
+	}{
+		{claim.RoleTester, false, []string{"is a gap you name, never a reason of its own to send the issue back"}},
+		{claim.RoleReviewer, false, []string{"is a gap you name in your review, never a review that asks for changes"}},
+		{claim.RoleArchitect, false, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
+		{claim.RoleArchitect, true, []string{"your acceptance is the only gate on it", "name that gap in your acceptance comment and decide there"}},
+	} {
+		text := composedText(t, composer, tc.role, tc.isRoot)
+		paragraphs := ruleParagraphs(text, empty)
+		if len(paragraphs) == 0 {
+			t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, empty)
+		}
+		for _, paragraph := range paragraphs {
+			for _, refusal := range refusals {
+				if strings.Contains(strings.ToLower(paragraph), refusal) {
+					t.Errorf("the composed %s prompt (root %t) still calls the gap %q: %s",
+						tc.role, tc.isRoot, refusal, paragraph)
+				}
+			}
+		}
+		for _, want := range append(tc.answers, "`serves` names") {
+			if !strings.Contains(foldWhitespace(text), want) {
+				t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, want)
+			}
+		}
+	}
+}
+
+// foldWhitespace is one line of text, so a phrase a hard-wrapped prompt breaks over two lines is
+// still one phrase to match.
+func foldWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+// ruleParagraphs are the blank-line-separated paragraphs of a composed prompt that hold marker,
+// each folded to one line: a paragraph is the span a reader takes the rule and its framing from,
+// so it is the span a test asks what the rule calls its case. A composed prompt holds one per
+// part that carries the rule (the role's own part and the core its phase shares).
+func ruleParagraphs(text, marker string) []string {
+	var found []string
+	for _, paragraph := range strings.Split(text, "\n\n") {
+		if folded := foldWhitespace(paragraph); strings.Contains(folded, marker) {
+			found = append(found, folded)
+		}
+	}
+	return found
+}
+
+// What a phase proved is a result recorded against a `check` block of the issue's Verification
+// document (`dispatch result`), and the pull request body carries one line per check. No composed
+// prompt — any phase worker's, and the architect's in both its shapes — still teaches the two
+// lines the body carried before, the six-field `proof` array a handoff carried, or the
+// `Production:` line the production check wrote, which is now an `after_merge` result a closed
+// issue takes. The two line names are built from their role rather than written out, so a search
+// of the repository for either finds the texts that teach it and not this test.
+func TestNoComposedPromptTeachesAnE2ELineOrAProofArray(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	retired := []string{"`proof` array", "`Production:` line",
+		"pending deploy of", "the production-like proof", "the implementer's proof"}
+	for _, role := range []string{"implementer", "tester"} {
+		retired = append(retired, fmt.Sprintf("E2E (%s)", role))
+	}
 	for _, tc := range []struct {
 		role   claim.Role
 		isRoot bool

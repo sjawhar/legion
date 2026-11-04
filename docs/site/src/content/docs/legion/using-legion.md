@@ -98,15 +98,16 @@ You can read the pull request at any time. Legion's implementer writes its descr
 template, and the later phases fill in their own lines:
 
 - **Outcome** and **Why**: what changes for a user, and the issue it answers.
-- **Proven by** and **E2E (implementer)** / **E2E (tester)**: the command or run that exercised the
-  change on a production-like surface, what it showed, the commit it ran at, and one negative
-  control.
+- **Proven by** and **Checks**: one line per check of the issue's Verification document, each the
+  line Dispatch printed when the result was recorded — the check, when it runs, the verdict, the
+  commit it ran at and the role that ran it.
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
-- **Production**: written by the implementer after the merge closes the issue, once your deploy carries the change; `pending deploy of <sha>` until then.
+- The `after_merge` check, recorded by the implementer after the merge closes the issue, once your
+  deploy carries the change; its line reads `not yet run` until then.
 - Any line your repository's own instructions derive from the paths the change touches, such as a
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
-  change, its notes included, the way those instructions say, before it pushes the notes.
+  change, the way those instructions say.
 
 Legion's reviewer posts its review as the review App. A review from anyone with write access to the
 repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
@@ -136,7 +137,8 @@ off, and then it closes. The architect accepted the change before that, when the
 it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
 not hold that acceptance, since the root's close waits for it. After the close the
 implementer checks the change in production, once your deploy carries it, and records what it saw
-on the pull request's `Production:` line; a closed issue takes no further write, so look there.
+as the result of the issue's `after_merge` check, with that result's line on the pull request; a
+closed issue takes a result for such a check and no other write, so look in both places.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
 resumes.
 

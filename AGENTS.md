@@ -642,13 +642,13 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 **Phase roles:** architect → plan → implement → test → review → the architect's acceptance → retro → merge
 
 **Acceptance:** the reviewer's approval moves the issue to `accepting` (Dispatch status `needs_review`) once GitHub reports the approved head one it would merge, and there no worker runs:
-the tree's architect reads the tester's handoff, the pull request body's two `E2E` lines and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`;
+the tree's architect reads the tester's handoff, each `check` block of the issue's Verification document with its latest result (`dispatch results`), and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`;
 refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`;
 nothing beneath the issue holds it, since the tree's order is kept at the close, below) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round.
 An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there moves nothing, and is the architect's own read before it accepts.
 The architect's `catch-up` at each launch names, in its `reason`, every issue of the tree in `accepting`, since the reviewer's notice that moved it there is dropped while the architect's claim has failed.
 
-**Retro:** runs after the architect's acceptance and before the merger merges the head it reads.
+**Retro:** runs after the architect's acceptance and before the merger merges the head it reads; it commits nothing and records what the work taught as a `dispatch comment` on the issue.
 
 **The merge closes the issue:** the daemon reads the merged pull request and writes `done`.
 A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session;
@@ -661,16 +661,16 @@ The architect does nothing after the merge.
 **Production check:** work after the close.
 The implementer — the agent that developed the change
 — gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit:
-`pass` once it drove the changed path in production and wrote the pull request's `Production:` line (naming the merge commit and what woke the look);
+`pass` once it drove the changed path in production and recorded the result of the issue's `after_merge` check with `dispatch result` (at the merge commit, naming what woke the look), whose printed line goes in the pull request body;
 `pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request;
 when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge;
 or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge or Dispatch's announcement that every server process serves a build containing the merge;
 a wake while a look is open is kept for the next look);
-`fail` for a defect, never an issue the implementer files:
+`fail` for a defect, recorded as a failing result, never an issue the implementer files:
 a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller;
-either names the issue, the pull request, the merge commit, what was driven and what failed, and the `Production:` line names the message or the ask.
+either names the issue, the pull request, the merge commit, what was driven and what failed, and the result names the message or the ask.
 Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look.
-The record lives on the pull request alone, since Dispatch refuses a write on a closed issue; `legion state` prints `open production checks: …`.
+The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check and refuses every other write; `legion state` prints `open production checks: …`.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels
 — the daemon writes `in_progress`/`testing`/`needs_review`/`retro` through its outbox (a `dispatch_status` row it delivers to Dispatch) for the issues it runs, and a human may set any lifecycle status from the Dispatch dashboard.
@@ -873,7 +873,7 @@ A registration of a newer version keeps the gate's approval of an older one, as 
 with `off` the root architect is told so in its system prompt and adds no approval step, a registration approves the gate whatever it held, and no artifact event moves the gate, so an approval does not open a carried copy that was closed before the switch either;
 a changes request is still told to the architect, once, without closing the gate.
 Whether a human must approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it.
-Retro's commits, those that change `docs/solutions/`, are the only ones that may sit above the reviewer's approved head, and no Legion check compares the head that merges with the approved one:
+Retro commits nothing, so the head that merges is the head the reviewer approved, and no Legion check compares the two in any case:
 a repository that wants a later push reviewed says so in its own rulesets.
 The merger merges the pull request itself, as the implement App and at the head it read, which it names as the head GitHub must match (`gh pr merge <n> --squash --match-head-commit <head>`;
 on a base with a merge queue it enqueues the pull request with GraphQL `enqueuePullRequest` and `expectedHeadOid` instead, since `gh pr merge` there turns auto-merge on while a required check is pending, and it then watches the pull request until GitHub merges it or takes it out of the queue).
@@ -900,7 +900,8 @@ No lifecycle labels carry worker state.
 - Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact.
   A Legion planner's plan lives in its `plan` handoff record and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 
-- Learnings: `docs/solutions/<category>/<slug>-pr<number>.md`, `<number>` being the pull request's number (`skills/legion-retro/references/learnings.md`)
+- Learnings: a retro's `dispatch comment` on its issue, for the skill librarian (`skills/legion-retro/references/learnings.md`).
+  `docs/solutions/` holds the learnings written before that and stays as history; no role writes there.
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references.
 > These are marked with `[HISTORICAL]` headers.
