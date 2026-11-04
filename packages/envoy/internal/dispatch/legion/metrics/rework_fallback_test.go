@@ -84,6 +84,40 @@ func TestASendBackIsCountedFromTheStatusHistoryBeforeObservations(t *testing.T) 
 	}
 }
 
+// TestTheHoursAfterTheFirstReviewReadTheStatusHistoryBeforeObservations: metric 3's table "adds
+// the hours of implementing and testing after the first review". Those hours are read off the
+// phase timeline, and the pre-observation fallback places one span per phase in workflow order,
+// so implementing and testing both end before reviewing begins and the intersection is empty.
+// The review rounds and the send-back beside them now read the Dispatch status history, which
+// is the spec's third Rule detail; the hours did not move with them, and over the A2 corpus that
+// leaves 50.04 h of testing after a first review across 289 finished issues of which 236 were
+// sent back at least once. The fixture below is one of those issues.
+func TestTheHoursAfterTheFirstReviewReadTheStatusHistoryBeforeObservations(t *testing.T) {
+	issue := newIssue("INFRA-1").worked("implementer", hour(0)).closedAt(hour(9)).
+		statusAt(hour(0), "in_progress").
+		statusAt(hour(2), "testing").
+		// The first review.
+		statusAt(hour(3), "needs_review").
+		// Sent back: two hours of implementing and one of testing follow it.
+		statusAt(hour(4), "in_progress").
+		statusAt(hour(6), "testing").
+		statusAt(hour(7), "needs_review").
+		statusAt(hour(9), "done").
+		observeString("phase", hour(12), "done")
+
+	report := Compute(fixture(hour(-24), hour(24), issue), ScopeAll, hour(24))
+
+	row := report.Rework.Issues[0]
+	if row.ImplementingHoursAfterFirst != 2 {
+		t.Errorf("implementing hours after the first review = %g, want 2: the issue was in in_progress from hour 4 to hour 6, after the review at hour 3",
+			row.ImplementingHoursAfterFirst)
+	}
+	if row.TestingHoursAfterFirst != 1 {
+		t.Errorf("testing hours after the first review = %g, want 1: the issue was in testing from hour 6 to hour 7",
+			row.TestingHoursAfterFirst)
+	}
+}
+
 // TestAFilingUnderAGrandchildOfTheFilersRootIsInTheTree: metric 4 classes each filing "by the
 // parent it had at its `issue.created` event", into "a child of the filer's tree" or "any other
 // issue an architect or phase worker filed", and the Design's terms make a tree "a root with the
