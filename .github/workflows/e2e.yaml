@@ -162,7 +162,7 @@ jobs:
           # The module the proof builds: packages/daemon's driver, or packages/envoy's dispatch
           # and natsd.
           go-version-file: ${{ matrix.go_version_file }}
-          # No run of this repository outside a push to main writes an Actions cache entry, and
+          # Only a workflow that runs on a push to main writes an Actions cache entry here, and
           # this workflow saves none (ci.yaml's header, "Caches").
           cache: false
 

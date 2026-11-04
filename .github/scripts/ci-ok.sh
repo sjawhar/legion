@@ -25,8 +25,9 @@
 #                      (ci-ok.jq). check-ci-filters.sh holds it to ci.yaml.
 #   PULL_REQUEST_ONLY  a JSON array of the SELECTED_BY jobs whose `if:` also admits only
 #                      pull_request: one is selected only when EVENT is pull_request too.
-#                      check-ci-filters.sh holds it to ci.yaml. (A job that runs on no push, such
-#                      as docs, needs no list: `changes` sets its output false on a push.)
+#                      check-ci-filters.sh holds it to ci.yaml. (A job an event must hold back
+#                      otherwise needs no list: `changes` sets its output false there, as it does
+#                      for the nine slow suites on a pull request without the label full-ci.)
 # A job of NEEDS that SELECTED_BY does not name fails (ci-ok does not know what selects it), and
 # so does a SELECTED_BY job that is absent from NEEDS. It prints every job's result and whether it
 # was selected, and an `::error::` for each failure naming the job, its result and why.

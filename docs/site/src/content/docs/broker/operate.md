@@ -13,8 +13,11 @@ Secrets Manager or Google Cloud Secret Manager, and it starts nothing else.
 ## What to run
 
 The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/sjawhar/legion/envoy:<commit>`,
-which every push to `main` that touches the image's sources publishes (the image's default
-entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Pin it by digest
+which `.github/workflows/release-envoy-listener.yaml` publishes on a push to `main` that touches
+the image's sources (the image's default
+entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Of the builds
+waiting at once only the newest runs, and the build that replaces another holds that commit's
+change, so a commit may reach `main` without an image tag of its own. Pin the image by digest
 and verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows. To build it yourself:
 
 ```sh

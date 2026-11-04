@@ -4,9 +4,10 @@
 #
 # ci-ok.sh reads only its environment, so each case hands it the NEEDS ci-ok-report.sh would build
 # and the SELECTED_BY and PULL_REQUEST_ONLY of ci.yaml's env, shrunk to four jobs: typecheck,
-# envoy-client and docs, each selected by its own output (on a push `changes` sets docs' output
-# false, since docs-pages.yaml builds main's site), and worker-image, which also runs only on a
-# pull request. The script under test is the file CI runs.
+# envoy-client and docs, each selected by its own output, and worker-image, which also runs only
+# on a pull request. Some cases pass another event than pull_request, which is what
+# PULL_REQUEST_ONLY turns on; the script takes the event as a string and knows no workflow's
+# triggers. The script under test is the file CI runs.
 #
 # Run from anywhere: .github/scripts/ci-ok.test.sh
 # CI runs it in ci.yaml's test job.
@@ -38,7 +39,7 @@ needs() {
 selects='{"typecheck": "true", "envoy_client": "false", "worker_image": "true", "docs": "false"}'
 # The same with docs selected too.
 selects_docs='{"typecheck": "true", "envoy_client": "false", "worker_image": "true", "docs": "true"}'
-# What `changes` outputs on a push: docs is false there whatever the diff touched.
+# The same outputs read on another event, docs unselected: ci-ok.sh takes EVENT as given.
 push_selects='{"typecheck": "true", "envoy_client": "false", "worker_image": "true", "docs": "false"}'
 
 # run_ci_ok <needs> [<event>]: sets out and status. The event defaults to pull_request.
@@ -99,7 +100,7 @@ check "fails" "$(is "$status" 1)"
 check "names it" \
   "$(contains "$out" "^::error::worker-image ended skipped, but changes selected it (needs.changes.outputs.worker_image is true on a pull_request)")"
 
-echo "case: on a push, changes sets docs' output false, and docs was skipped"
+echo "case: changes' docs output is false and docs was skipped, on an event that is not a pull request"
 run_ci_ok "$(needs success "$push_selects" success typecheck=success envoy-client=skipped worker-image=skipped docs=skipped)" push
 check "passes" "$(is "$status" 0)"
 check "prints why it is not selected" \

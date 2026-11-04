@@ -20,8 +20,9 @@ related_issues:
 - **Key every `pull_request` concurrency group on `github.event.pull_request.number`.** A merged
   pull request's `closed` event carries `github.ref` = the base branch, so a ref key misses the
   pull request and lands in main's group; where that group cancels in progress it cancels main's
-  own run (Docs' Pages build here). Keep push and merge_group keys on `github.sha` (or the ref
-  where main's runs must queue, as Docs does).
+  own run (Docs' Pages build here). Keep a merge_group key on `github.sha`, and a push key on the
+  ref where main's runs must not overlap, as Docs does: its group runs one build at a time and
+  replaces the one waiting with the next push.
 - **Never give an event whose jobs all skip (`closed`, `converted_to_draft`) to a workflow that
   posts required checks.** A job skipped by its `if:` reports `skipped`, which GitHub's
   required-check rule and the Legion daemon count as passing, and the newest check run of a name

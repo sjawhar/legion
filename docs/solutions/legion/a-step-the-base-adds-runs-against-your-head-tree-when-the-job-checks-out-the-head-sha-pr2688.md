@@ -17,7 +17,8 @@ related_issues:
 
 Extends docs/solutions/legion/a-red-check-in-a-package-the-branch-does-not-touch-is-mains-until-mains-own-run-says-otherwise-pr2580.md.
 
-That page's step 3 reads the base's own push run for the failing job and splits on it: red on the
+That page's step 3 reads the base's own run for the failing job — the merge-group run whose head
+commit the base's tip is — and splits on it: red on the
 base means the cause is the base's, green on the base means "the red is yours or a flake. Re-run
 the failed jobs once." This case is the exception. The base is green by construction, the red is
 nobody's code, and the re-run cannot pass.
@@ -30,7 +31,7 @@ nobody's code, and the re-run cannot pass.
   merge ref, so almost every job gets the base's new step and the base's new file together and is
   unaffected. Only a job that overrides `ref:` to the head is exposed. Read the failing job's
   `with.ref:` in the workflow as the merge ref holds it; that expression is the whole rule.
-- **A missing-file error with the base green is this case, and the base's push run is not the
+- **A missing-file error with the base green is this case, and the base's own run is not the
   discriminator.** Pair the symptom with two reads of the file itself:
   `gh api repos/<owner>/<repo>/contents/<path>?ref=<your head>` answering 404 while `?ref=<base>`
   answers its bytes. An ancestry check (`jj log -r '<the base commit> & ::<your head>'` empty)

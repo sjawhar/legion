@@ -24,8 +24,9 @@ header says what is proved).
             filter covers. (envoy_smoke's image inputs are that check's too, but its job's go
             commands and other step reads are a gate here.)
   PUSH_WORKFLOWS  filter -> a workflow that runs that filter's job's work on a push to main in a
-            workflow of its own, selected by its `on.push.paths`, which must equal the filter: the
-            filter decides the pull request's and merge group's run, the paths main's.
+            workflow of its own, since ci.yaml runs on no push, selected by its `on.push.paths`,
+            which must equal the filter: the filter decides the pull request's and merge group's
+            run, the paths main's.
 
 A Read's glob is expanded over the repository's files; a why cites the step (at()) or the
 source line that reads it. at()'s third argument is the workflow file that holds the step, and

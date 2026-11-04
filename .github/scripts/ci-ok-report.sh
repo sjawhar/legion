@@ -29,9 +29,12 @@
 # finishes, so of two jobs that finish together the second to read the list finds both reports
 # and posts; both may post, and the later check run is the one GitHub and the Legion daemon read.
 # A job reports its own `job.status` (`always()`), so a failed, timed-out or cancelled job
-# reports too. A re-run attempt's report replaces that job's earlier one, and a job a failed-only
-# re-run did not run keeps its report from the attempt that ran it; during a whole re-run, a job
-# not yet re-run keeps its earlier attempt's report at this same head. A job `changes` did not
+# reports too. On a pull-request or dispatched run, a re-run attempt's report replaces that job's
+# earlier one, and a job a failed-only re-run did not run keeps its report from the attempt that
+# ran it; during a whole re-run, a job not yet re-run keeps its earlier attempt's report at this
+# same head. A merge-group run is never re-run: every job of such a re-run attempt skips
+# (ci.yaml's `changes` and the three `if:`s beside it), so the attempt runs this script nowhere,
+# posts nothing, and the first attempt's ci-ok stands. A job `changes` did not
 # select and that never reported was skipped. A selected job that never reports (one a
 # failed-only re-run left skipped, one cancelled before it started, one that ended before its
 # first step) stands at the conclusion GitHub lists for it once it is one of the last two (below),

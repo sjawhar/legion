@@ -28,8 +28,11 @@ post-retro head.
 
 - **Read the failing assertion before you choose, and triage by determinism at the merge commit,
   not by whether `main` has a fix.** A comparison that can go either way on the same tree (two
-  clock stamps under `toBeLessThan`, an ordering race) is a flake: `gh run rerun <run-id> --failed`
-  once, push nothing, and complete when it settles. A failure that is deterministic at the run's
+  clock stamps under `toBeLessThan`, an ordering race) is a flake: on a `pull_request` run,
+  `gh run rerun <run-id> --failed` once, push nothing, and complete when it settles. A flake in a
+  merge-group run is not re-run at all: every job of a re-run attempt of such a run skips, so the
+  implementer finishes its round and the pull request is tested again when it is queued again. A
+  failure that is deterministic at the run's
   merge commit (a type error, a missing symbol, a fixture `main` changed) fails the same way on a
   re-run, since the re-run fetches the same merge sha; only a head push refreshes it, and that is
   the forward-merge trigger "a fix for its only red check" of `skill://legion-worker`.

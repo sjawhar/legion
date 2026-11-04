@@ -148,7 +148,7 @@ jobs:
           ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
       # The built site, generated reference pages and copied media captions include no private
       # deployment repository, company, internal host, or Tailscale MagicDNS host. ci.yaml's lint
-      # job checks the sources, on a pull request and on a push to main alike.
+      # job checks the sources, on a pull request and on a merge group alike.
       - name: Check the built site has no private name, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh docs/site/dist
       # The caller's deploy job publishes this artifact. Only docs-pages.yaml asks for it.

@@ -59,7 +59,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   An `oven/bun` image declares its version nowhere, so the two builds that run those bytes refuse any Bun but the one `.bun-version` pins.
   Each row's tag is the upstream repository's last path element, then the upstream tag when the row names one, then the first eight characters of the digest, so one tag names one digest.
   `ci.yaml`'s `ci-images` job runs that copy and then the package half of the gate, in that order, and it is the one copy path:
-  it runs on a pull request, on a merge group and on a push to main, and a failed copy is re-run with `gh run rerun`.
+  it runs on every event `ci.yaml` runs on — a pull request, a merge group and a dispatch — and a failed copy is re-run with `gh run rerun` where the run is a pull request's, since every job of a re-run attempt of a merge-group run skips.
   Adding an image is one edit of that file.
   Moving one to a new version is two commits:
   the new version's row first, which that job copies while nothing pulls it yet, then the pin and every `FROM` onto it with the row they leave deleted
@@ -521,7 +521,8 @@ Each item below names a task and where its code is, then notes on it.
 
   Astro Starlight.
   `.github/workflows/docs-site.yaml` holds the build steps once, and two callers run it:
-  the `docs` job of `.github/workflows/ci.yaml` on pull requests and merge groups, and the `build` job of `.github/workflows/docs-pages.yaml` on every docs-selecting push to main, in push order, which then publishes the site to GitHub Pages.
+  the `docs` job of `.github/workflows/ci.yaml` on pull requests and merge groups, and the `build` job of `.github/workflows/docs-pages.yaml` on a docs-selecting push to main, which then publishes the site to GitHub Pages.
+  Of the main builds waiting at once only the newest runs, and each build covers the whole tree, so the site still ends at the newest docs-selecting commit.
   See `docs/site/README.md`; generated reference pages come from `docs/site/generators/`
 
 ## Conventions

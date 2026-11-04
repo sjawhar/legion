@@ -24,8 +24,9 @@ symptoms:
 
 # Join a Job to the CI Router
 
-`.github/workflows/ci.yaml` (name `CI`) is the one workflow every pull request, every merge-queue
-group and every push to main runs. It has no `paths:`. Its first job, `changes`, reads the paths
+`.github/workflows/ci.yaml` (name `CI`) is the one workflow every pull request and every
+merge-queue group runs, and the bypass check dispatches. It has no `paths:`. Its first job,
+`changes`, reads the paths
 the change touched and selects jobs through one dorny/paths-filter filter per job. `ci-ok`
 condenses every job's result into one check, and no job is `ci-ok`: every job but `changes` ends
 with the `ci-ok-report` step, and the last job of the run to finish posts `ci-ok` from it (the
@@ -54,12 +55,15 @@ workflows; this page covers this repository only.
    `checks: write`, which the step needs. A run whose last job lacks the step never gets `ci-ok`.
 5. **The job in `CI_OK_SELECTED_BY`** (ci.yaml's `env:`), mapped to the output its `if:` tests
    (`"<job>": "<filter>"`), and in `CI_OK_PULL_REQUEST_ONLY` too when its `if:` also admits only
-   `github.event_name == 'pull_request'`. A job that runs on no push gets its `changes` output
-   set false on a push instead (`github.event_name != 'push' && steps.filter.outputs.<filter> ||
-   'false'`), so `ci-ok` reads its skip there as unselected. `ci-ok` waits for the report of
+   `github.event_name == 'pull_request'`. A job an event must hold back gets its `changes` output
+   set false on that event instead of an `if:` that skips it, so `ci-ok` reads the skip as
+   unselected: that is how the nine slow suites are held back on a pull request that does not
+   carry the label `full-ci` (`(github.event_name != 'pull_request' ||
+   contains(github.event.pull_request.labels.*.name, 'full-ci')) && steps.filter.outputs.<filter>
+   || 'false'`). `ci-ok` waits for the report of
    every job the map says `changes` selected and fails one the map does not name, and
    `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test, or a
-   job lacks the report step (the section on `ci-ok` below says why).
+   job outside `CI_OK_EXEMPT` lacks the report step (the section on `ci-ok` below says why).
 6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
@@ -89,13 +93,16 @@ job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `cha
 posts no new `ci-ok` and the failed one stands. So `ci-ok-report.sh` and `ci-ok.sh` decide what
 `changes` selected from its outputs, through `CI_OK_SELECTED_BY` (one reading, in
 `.github/scripts/ci-ok.jq`): a job is selected when the output it maps to is `'true'`, and for a
-job in `CI_OK_PULL_REQUEST_ONLY` the run must also be a pull request's (docs, whose main build is
-docs-pages.yaml's, has its output set false on a push). Re-run the whole workflow instead.
+job in `CI_OK_PULL_REQUEST_ONLY` the run must also be a pull request's (`worker-image` is the one
+such job; main's image builds are release.yaml's). Re-run the whole workflow instead, on a
+`pull_request` run: every job of a re-run attempt of a merge-group run skips, so a merge-group
+run is never re-run, and the pull request is tested again when it is queued again.
 
 `check-ci-filters.sh` fails when `CI_OK_SELECTED_BY` is not exactly {job: the output its `if:`
 tests} for every job whose `if:` tests an output of `changes`, when `CI_OK_PULL_REQUEST_ONLY` is
 not exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`, when a job
-but `changes` does not end with the report step, and when a job is named `ci-ok` or `pr-title`,
+but `changes` and those `CI_OK_EXEMPT` names does not end with the report step, when a job
+`CI_OK_EXEMPT` names does carry it, and when a job is named `ci-ok` or `pr-title`,
 which would post a required check itself (a skipped job posts a pass). A wrong entry would fail a
 job its `if:` rightly skipped, pass one a re-run left skipped, or post `ci-ok` before a job
 reported.
@@ -104,11 +111,10 @@ A fork pull request's run gets a read-only token, which can post no check run, s
 request gets no `ci-ok` and no push-time `pr-title`: this repository takes no fork pull
 requests, whose runs wait for an approval nobody gives.
 
-A job whose main half must run in push order, as the docs site's Pages deploy must, cannot be a
-job of the router: each push to main is a router run of its own, and a job-level concurrency group
-takes jobs as their needs end, not in push order. Its main half is a push-only workflow of its own
-with a workflow-level group (`queue: max`, `cancel-in-progress: false`), whose `on.push.paths`
-equals the job's filter; the router job admits no push (its `changes` output is false on a push),
+A job whose main half must run on a push to main, as the docs site's Pages deploy must, cannot be
+a job of the router: the router runs on no push. Its main half is a push-only workflow of its own
+with a workflow-level group keyed on the ref (`cancel-in-progress: false`, and no `queue:` key,
+so of the pushes waiting only the newest builds), whose `on.push.paths` equals the job's filter,
 and `ci_job_reads.py`'s `PUSH_WORKFLOWS` pairs the filter with that workflow, so
 `check-ci-filters.sh` fails naming each pattern one list has and the other lacks.
 docs-pages.yaml is the one such workflow.
@@ -161,8 +167,9 @@ expands and the check does not read.
 
 ## What goes wrong when the filter misses a file
 
-A change to a file the filter misses skips the job. That happens on the pull request and again on
-main: on a push, `changes` selects by that push's own diff, so main skips the job too. Nothing
+A change to a file the filter misses skips the job. That happens on the pull request and again in
+the merge group that lands it: `changes` selects there by what the queued change touches against
+the queue base, so the group skips the job too, and no run on main follows. Nothing
 re-runs it later, and the break shows up in the next change that does select the job, far from its
 cause.
 
@@ -242,28 +249,39 @@ runs the check only when the change also touches one of its triggers. It runs go
 cold runner as on a warm machine; third-party packages fail to load, which loses no first-party
 package. Run it locally from anywhere: `.github/scripts/check-ci-filters.sh`.
 
-## Caches: only main writes
+## Caches: no job of the router writes one
 
-No pull-request or merge-queue run writes an Actions cache entry. A pull request's entries are
-scoped to its ref, no other pull request reads them, and they count against the repository's cache
-limit, where they evict main's entries.
+No run of `ci.yaml` saves an Actions cache entry. A pull request's entries are scoped to its ref,
+no other pull request reads them, and they count against the repository's cache limit, where they
+evict main's entries; a merge group's entries are no more readable than those. Only an event that
+writes the default branch's scope — a push to main — leaves an entry every later run can read, so
+the fills live in workflows that run there.
 
 - Give `actions/setup-go` `cache: false` and `id: setup-go`.
 - Restore with `actions/cache/restore`, keyed on the Go version setup-go installed
   (`key: <family>-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}`), with the
-  family's prefix as `restore-keys` only off main:
-  `restore-keys: ${{ github.ref != 'refs/heads/main' && format('<family>-{0}-', runner.os) || '' }}`
-  (the families are `go-daemon`, `go-docs`, `go-envoy`, `go-envoy-test`, `go-envoy-infra`,
-  `go-notices`). Main restores by the exact key only, so the entry it saves after a Go bump holds
-  nothing the older Go built; a pull request still falls back to the prefix. Each family keeps one
+  family's prefix as `restore-keys`
+  (`restore-keys: ${{ format('<family>-{0}-', runner.os) }}`; the families are `go-daemon`,
+  `go-docs`, `go-envoy`, `go-envoy-test`, `go-envoy-infra`, `go-notices`). In `ci.yaml` that
+  fallback applies on every run, a dispatched one on main included, because no job there saves.
+  A job that does save keeps the prefix off main alone
+  (`restore-keys: ${{ github.ref != 'refs/heads/main' && format('<family>-{0}-', runner.os) || '' }}`),
+  so the entry it saves after a Go bump holds nothing the older Go built; docs-site.yaml's build,
+  which docs-pages.yaml calls on main, is the one such job. Each family keeps one
   entry, refreshed only when Go is bumped. Do not
   key on go.sum: every go.sum change would leave a whole entry, up to a gigabyte, for seven days. A
   go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
   stale entry costs a run only what changed. Share a family only with the jobs that build the same
   packages, or whichever job saves first owns the entry the others then miss.
-- Save with `actions/cache/save` as the last step before the `ci-ok-report` step, with
-  `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
-  The workflow's only push trigger is main.
+- Add no `actions/cache/save` step here, and no `if:` that tests `github.event_name == 'push'` or
+  compares `github.ref` with a branch ref: the workflow runs on no push, so such a condition gates
+  its step on what no run ever is, and `check-ci-filters.sh` refuses it. A family a new job
+  restores is filled by `.github/workflows/ci-caches.yaml`, which runs on a push to main, looks
+  each key up (`lookup-only: true`, no `restore-keys`) and, only on a miss, runs what the job
+  builds and saves it under exactly the key and paths the restore names; `check-ci-filters.sh`
+  holds the save to the restore and fails when the two drift. `go-docs` is the exception:
+  docs-pages.yaml saves it on that same push, from the build job it shares with ci.yaml's docs
+  job.
 - The release workflows' Go builds (release.yaml's `legion_build`, release-envoy-infra.yaml's
   `build`) restore `go-daemon` and `go-envoy-infra` and save nothing, so they keep the prefix as
   `restore-keys` on main too: an entry they never save cannot grow.
@@ -277,11 +295,21 @@ group's `base_sha..head_sha` diff, what the queued change touches against the qu
 anything lands. A new job needs nothing extra for it. But a job whose `if:` names
 `github.event_name` must admit `merge_group`, or it skips on the group while its output selects
 it, and the run posts no `ci-ok` there, since `ci-ok` waits for that job's report. What skips a
-group does so on purpose: the cache saves (push only), lint's pull-request text check
+group does so on purpose: lint's pull-request text check
 (pr-title.yaml checks the text on the group), and worker-image (pull request only, so it is in
-`CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The
-docs job runs on a group and on a pull request but on no push (its output is false there): docs-pages.yaml
-builds and publishes main's site.
+`CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The nine slow suites go the
+other way: the queue is where their result normally comes from, and a pull request runs them only
+when it carries the label `full-ci`. The
+docs job runs on a group and on a pull request alike; docs-pages.yaml builds and publishes main's
+site on a push trigger of its own.
+
+Two things a group's run alone carries. Every job of a re-run attempt skips, so a merge-group run
+is never re-run: a group is tested once, and the pull request is tested again when it is queued
+again. And the run of a group that can no longer merge is force-cancelled by jobs of the workflow
+itself — `cancel-started` and one follower per job `ci-ok` waits for — which run only on
+`merge_group`, report nothing and are therefore named in `CI_OK_EXEMPT` rather than in
+`CI_OK_SELECTED_BY`. A new job `ci-ok` waits for takes a `cancel-<job>` follower and an entry in
+that list with it.
 
 ## Drafts run no test job
 
@@ -294,11 +322,12 @@ ready for review (`ready_for_review`) starts a run that selects by the same diff
 `if:` starts with `!cancelled()`, to run when `changes` failed as lint, typecheck and test do,
 must also carry `!github.event.pull_request.draft`.
 
-## Main pushes are never cancelled
+## A merge group's run is never cancelled by a newer one
 
-A newer push to a pull request cancels its older run. A push to main is a concurrency group of its
-own per commit and is never cancelled: `changes` selects by that push's own diff, and no later
-push's diff holds the jobs a dropped run would have selected. A merge group is likewise a group of
-its own per commit and is never cancelled. A cancelled main run would leave its commit untested for
-good. Keep a new job inside the workflow's group; do not give it a `concurrency:` that cancels on
-push.
+A newer push to a pull request cancels its older run. A merge group is a concurrency group of its
+own per commit and is never cancelled that way: the queue waits for its `ci-ok`, and a cancelled
+run would leave the tree it tests unjudged. A dispatched run keys on the commit it runs at and is
+never cancelled either. Only two acts stop such a run, both deliberate: the cancel jobs above,
+when the group can no longer merge, and `.github/workflows/dequeued.yaml`, when the group's pull
+request leaves the queue. Keep a new job inside the workflow's group; do not give it a
+`concurrency:` of its own.

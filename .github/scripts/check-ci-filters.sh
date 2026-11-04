@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ci.yaml's `changes` job selects each job through a dorny/paths-filter filter, and a change to a
-# file a job reads but its filter misses skips that job, on the pull request and again on main,
-# where nothing re-runs it. So every filter must match every file its job reads. For a Go job
-# that set moves with every import, embed and test file, so this check recomputes it on every
-# change to Go code, a module file or ci.yaml, and fails naming each file a filter misses.
+# file a job reads but its filter misses skips that job, on the pull request and again on the
+# merge group that lands it, after which nothing runs it. So every filter must match every file
+# its job reads. For a Go job that set moves with every import, embed and test file, so this
+# check recomputes it on every change to Go code, a module file or ci.yaml, and fails naming
+# each file a filter misses.
 #
 # What a job reads is, per gate (.github/scripts/ci_job_reads.py, GATES):
 #   * the closure of each go command the job runs, live: `go list -deps [-test] [-tags ...] [-race]`
@@ -45,9 +46,11 @@
 #      fails a job that map says changes selected unless it succeeded, and ci-ok-report.sh waits
 #      for exactly those jobs, so a wrong entry fails a job that was rightly skipped, passes one a
 #      failed-only re-run left skipped, or posts ci-ok before a job reported; a job but changes
-#      whose last step is not the ci-ok-report step, or that calls a workflow with no such step
-#      reporting for it, since a run that job ends never gets ci-ok; and a job named ci-ok or
-#      pr-title, which would post a required check itself,
+#      and those CI_OK_EXEMPT names whose last step is not the ci-ok-report step, or that calls a
+#      workflow with no such step reporting for it, since a run that job ends never gets ci-ok;
+#      a job CI_OK_EXEMPT names that does report to ci-ok, or that CI_OK_SELECTED_BY also maps,
+#      or that is no job of the file at all; and a job named ci-ok or pr-title, which would post
+#      a required check itself,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not
 #      name exactly that filter's patterns (anchors flattened), naming each missing and extra one,
 #      or that is missing or has no on.push.paths: it runs on main the work the filter's job runs

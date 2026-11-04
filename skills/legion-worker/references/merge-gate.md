@@ -44,13 +44,17 @@ other change to the head voids it.
   (`gh api repos/<o>/<r>/commits/<headRefOid>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). A required check
-  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
+  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: on a `pull_request`
+  run, re-run that run's
   failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
-  succeeded too. Find the run and job at the head: the head's runs
+  succeeded too. A merge-group run is never re-run: every job of a re-run attempt of one skips, so
+  the implementer finishes its round and the pull request is tested again when it is queued again.
+  Find the run and job at the head: the head's runs
   (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<headRefOid>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
   then each candidate run's jobs
   (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
-  A cancelled job: `gh run rerun <run-id> --failed`, which GitHub applies to the run's failed and
+  A cancelled job of a pull-request run: `gh run rerun <run-id> --failed`, which GitHub applies to
+  the run's failed and
   cancelled jobs and the jobs that depend on them, and to nothing that succeeded. Never
   `--job <job-id>` alone: under a routing workflow, re-running only the final job reads the
   cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is

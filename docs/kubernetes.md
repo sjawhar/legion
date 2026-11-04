@@ -681,7 +681,8 @@ A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
 the job holds only `contents: read` and no secret, so its rerun writes nothing), and `publish` releases that tag again, each step safe to repeat:
 the image is rebuilt, `worker_image_release` moves the `<legion version>` tag to the rebuild's digest, and the release body's "Worker image" names that digest.
 `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the version", that another run took the tag first:
-it publishes nothing and, when its commit still needs a release and no later run on main still running holds it, starts a new run on main itself, which decides the version again and re-stamps the binaries.
+it publishes nothing and, when its commit still needs a release and no later run on main still running holds it, starts a new run on main itself by `workflow_dispatch`, which decides the version again and re-stamps the binaries.
+That dispatched run is a concurrency group of its own, so no newer push to main replaces it while it waits; of the pushes waiting in the workflow's own per-ref group only the newest builds, and it holds the replaced commit's change.
 
 The build has no prerequisites outside this repository.
 After the first push there is one human action:

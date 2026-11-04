@@ -25,7 +25,9 @@ Extends docs/solutions/legion/a-red-check-in-a-package-the-branch-does-not-touch
   the answer step 2 wants, and it is unambiguous:
   `jj file list -r <head> 'root:<package>'` against
   `jj file list -r <base>@origin 'root:<package>'`, or a `grep` for the test's name in each. Then
-  go on to step 3 and take the verdict from the base's own push run.
+  go on to step 3 and take the verdict from the base's own run at that commit, which is the
+  merge-group run whose head commit it is:
+  `gh run list --repo <owner>/<repo> --commit <sha> --event merge_group --json databaseId,conclusion,headSha`.
 - **Run the test for real only after the forward merge brings it in**, and record that run. Before
   the merge there is nothing at your head to run.
 

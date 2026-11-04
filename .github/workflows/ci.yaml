@@ -1499,8 +1499,8 @@ jobs:
       # every push to a pull request that is not a draft and when a draft is marked ready, and
       # posts the verdict on the head as pr-title, the check main's ruleset requires.
       # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
-      # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
-      # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
+      # edited, a review is submitted or edited, or the merge queue runs its group. A merge-queue
+      # or dispatched run of this workflow carries no pull request. These run first, so a failed
       # check further down cannot keep pr-title from the head; a fork pull request's read-only
       # token posts nothing (.github/actions/ci-ok-report says why that is no loss here).
       - name: Check the pull request's title, body, branch name, commits, comments and reviews

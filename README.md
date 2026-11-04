@@ -163,7 +163,7 @@ Apache License 2.0; see [LICENSE](LICENSE). Code copied from other projects keep
 a `LICENSE` file beside it.
 
 Every artifact this repository ships — each release, and the documentation site, which the
-`.github/workflows/docs-pages.yaml` builds and deploys on each push to `main` whose change selects
+`.github/workflows/docs-pages.yaml` builds and deploys on a push to `main` whose change selects
 the `docs` build rather than on a release — carries the licenses of the third-party
 code in it, written at build time from what the build included, and the build fails when a
 dependency's license cannot be determined:
