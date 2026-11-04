@@ -1,0 +1,5 @@
+kind: Added
+body: Person pages list authored and received nodes from derived identity and delivery relations, with a read-only recorded-recipient census and unchanged graph reads for older builds.
+time: 2026-11-04T08:33:12Z
+custom:
+  Issue: pr2755

@@ -5,7 +5,9 @@ import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-test("a person's graph lists authored and recorded received nodes @phone", async ({ browser }, testInfo) => {
+test("a person's graph lists authored and recorded received nodes @phone", async ({
+  browser,
+}, testInfo) => {
   await resetDatabase();
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Graph identities" });
@@ -31,7 +33,12 @@ test("a person's graph lists authored and recorded received nodes @phone", async
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/people/alice");
+    await page.goto("/");
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+    await page.getByRole("link", { name: "Signed in as alice", exact: true }).click();
+    await expect(page).toHaveURL("/people/alice");
     await expect(page.getByRole("heading", { name: "alice", exact: true })).toBeVisible();
     const rows = page.getByRole("list", { name: "Person nodes" }).getByRole("listitem");
     await expect(rows).toHaveCount(2);
@@ -50,7 +57,8 @@ test("a person's graph lists authored and recorded received nodes @phone", async
     await page.screenshot({ path: testInfo.outputPath("person-nodes.png"), fullPage: true });
     await rows.nth(0).getByRole("link", { name: "Open" }).click();
     await expect(page).toHaveURL(`/issues/${issue.key}/comments/${received.id}`);
-    const surface = testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : page;
+    const surface =
+      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : page;
     await expect(surface.locator(`[data-turn="comment:${received.id}"]`)).toBeVisible();
   } finally {
     await alice.close();

@@ -317,6 +317,7 @@ function visits(seed: Seeded): readonly Visit[] {
       ],
       url: "/replies",
     },
+    { route: "/people/:login", shows: (page) => [heading(page, "alice")], url: "/people/alice" },
     { route: "/agents", shows: (page) => [heading(page, "Agents")], url: "/agents" },
     {
       // The preview is the headless renderer's: without it the bold is literal asterisks.

@@ -166,7 +166,7 @@ test("a name in the short form carries the full session id as its tooltip", asyn
   }
 });
 
-test("a user links to their person page while a system actor stays text, with no state or registry read", async () => {
+test("a user or system actor is its id as plain text, with no link, state, or registry read", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([]);
   const { client, view } = renderWith(
     <p>
@@ -179,8 +179,7 @@ test("a user links to their person page while a system actor stays text, with no
     await act(async () => {});
     expect(view.container.textContent).toBe("alice / architecture-importer");
     expect(view.container.querySelector("[data-agent-name]")).toBeNull();
-    expect(screen.getByRole("link", { name: "alice" }).getAttribute("href")).toBe("/people/alice");
-    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.queryByRole("link")).toBeNull();
     expect(screen.queryByRole("img")).toBeNull();
     expect(agents).not.toHaveBeenCalled();
     expect(client.getQueryCache().find({ queryKey: ["agents"] })).toBeUndefined();

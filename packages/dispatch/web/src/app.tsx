@@ -356,7 +356,19 @@ function NavigationContents({
       {/* Identity is chrome: who you are and how to leave are read once, while the navigation
           above is read on every visit, so the footer sits under it rather than over it. */}
       <div className={`mt-auto border-t pt-4 ${railBorder}`}>
-        <p className={`px-2 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
+        <p className={`px-2 text-sm ${railMutedText}`}>
+          {user.kind === "user" ? (
+            <Link
+              className={`inline-flex min-h-11 items-center ${railAccentText} ${railAccentHoverText}`}
+              onClick={onClose}
+              to={`/people/${encodeURIComponent(user.login)}`}
+            >
+              Signed in as {user.login}
+            </Link>
+          ) : (
+            <>Signed in as {user.login}</>
+          )}
+        </p>
         <button
           className={`mt-1 px-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
           disabled={signOutPending}

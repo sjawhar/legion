@@ -92,8 +92,8 @@ func TestPersonAliasesIncludeEventClaimAndDocumentActorsWithoutInventingRoles(t 
 		('CORE-1', 1, 'issue.updated', '{"kind":"user","id":" Event "}', false, '{}'),
 		('CORE-1', 2, 'issue.updated', '{"kind":"session","id":"token-session","owner":" Owner "}', false, '{}');
 		with document as (
-			insert into artifacts (issue_key, slug, name, kind, created_by)
-			values ('CORE-1', 'notes', 'notes.md', 'doc', '{"kind":"user","id":" Creator "}') returning id
+			insert into artifacts (issue_key, project_key, slug, name, kind, created_by)
+			values ('CORE-1', 'CORE', 'notes', 'notes.md', 'doc', '{"kind":"user","id":" Creator "}') returning id
 		) insert into artifact_versions (artifact_id, number, markdown, authors)
 		select id, 1, 'Words', '[{"kind":"user","id":" Credit "}]' from document;
 	`); err != nil {

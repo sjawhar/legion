@@ -18,6 +18,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 
 - `web/src/features/people/PersonPage.tsx` is `/people/<login>`, a paginated list of comments, messages and asks the person authored or their recorded session aliases received, from `GET /people/{login}/nodes` under `["person-nodes", login]`.
   Each row shows Authored or Received, its first line, creation time and an Open link when it has a page; direct messages link to the session conversation and have no `dispatch://` reference.
+  The signed-in name in the navigation footer links to the caller's person page; other user bylines keep their existing text-only rendering.
 
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/lib/timestamps.ts`'s `compareTimestamps` is how the SPA orders two server timestamps.
@@ -718,10 +719,8 @@ name alone and a screen reader hears the attribution once, all in one
 `<span data-agent-name=<id> data-agent-state=…>`. A name in the short form carries the full
 session id as that span's `title`: ids minted in the same minute share their first 8 characters.
 One resolver in the module (`resolveAgent`) gives the name and attribution to every drawn and
-spelled name there.
-A `user` actor links its id to `/people/<login>` by default; `kind="static"` keeps plain text and `kind="control"` leaves the host in charge of the control.
-A `system` actor stays plain text, and neither reads the registry.
-A role address (`role:…`)
+spelled name there. A `user` or `system` actor renders its id as plain text, inside the host
+control for `kind="control"`, and reads no registry. A role address (`role:…`)
 is an address, not an agent, and stays text. `className` lands on the outer span, which is always
 `min-w-0 [overflow-wrap:anywhere]`, so a name can never widen its host: in a flex row it shrinks
 below its text, and a long title with no space breaks mid-word rather than pushing a 390 px page
