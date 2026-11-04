@@ -84,6 +84,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/buildversion"
@@ -532,13 +533,12 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// nextBackoff advances the 2s -> 10s backoff every poll loop in this package uses.
+// nextBackoff advances the backoff the poll loops of this package keep: two seconds, doubling
+// to a ten-second cap. The renewer's own step is leasetime.NextBackoff, which the broker's
+// lease bound walks it by; these polls are nobody's lease, and a change made to move that
+// floor is not a change to how often `agent-secrets request --wait` asks.
 func nextBackoff(cur time.Duration) time.Duration {
-	next := cur * 2
-	if next > 10*time.Second {
-		next = 10 * time.Second
-	}
-	return next
+	return min(2*cur, 10*time.Second)
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +674,7 @@ func tokenUnreadable(enrollmentID string, carry renewToken, err error) string {
 }
 
 func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, carry renewToken, stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
-	backoff := 2 * time.Second
+	backoff := leasetime.RenewBackoffInitial
 	for {
 		var token string
 		var tokenErr error
@@ -709,10 +709,10 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				return 0
 			case <-after(backoff):
 			}
-			backoff = nextBackoff(backoff)
+			backoff = leasetime.NextBackoff(backoff)
 			continue
 		}
-		backoff = 2 * time.Second
+		backoff = leasetime.RenewBackoffInitial
 		lease := time.Until(expires)
 		if lease <= 0 {
 			lease = time.Second
@@ -720,7 +720,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-after(lease / 3):
+		case <-after(leasetime.RenewAfter(lease)):
 		}
 	}
 }
