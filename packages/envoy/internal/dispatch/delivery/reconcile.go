@@ -156,6 +156,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
+	record("reconcile pull request heads", r.reconcilePullRequestHeads(ctx, now))
 	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now))
@@ -454,6 +455,40 @@ func (r *Reconcile) reconcilePartialPullRequests(ctx context.Context) error {
 	return nil
 }
 
+// reconcilePullRequestHeads re-reads the pull request heads ListStalePullRequestHeads hands it,
+// at most PullRequestHeadBatch of them a pass, the longest unread first: the open rows Dispatch
+// last checked over PullRequestHeadStaleAfter ago, and the merged rows no read of GitHub has
+// ever reached that are attributed to nobody, each of those taken once. GitHub's `pull_request`
+// events carry every head move, so this is the backstop for an event that never arrived — a
+// delivery Dispatch was down for, a repository whose webhook was installed late — and the one
+// way a merge that happened while Dispatch was not listening reaches the head row at all. The
+// merged arm is the backstop for an envelope that arrived but said too little: one naming no
+// head repository attributes nobody, and only GitHub's own answer, which always names
+// `head.repo`, can attribute that row before a result at the merged head reads `older` for
+// good. A rate limit stops the batch and fails the pass, as every other GitHub step's does; any
+// other per-row failure is logged and leaves the row for the next pass.
+func (r *Reconcile) reconcilePullRequestHeads(ctx context.Context, now time.Time) error {
+	stale, err := ListStalePullRequestHeads(ctx, r.pool, PullRequestHeadBatch, now)
+	if err != nil {
+		return err
+	}
+	refresh := func(ctx context.Context, head PullRequestHead) error {
+		err := RefreshPullRequestHead(ctx, r.pool, r.github, head.Repo, head.Number, now)
+		if err == nil {
+			return nil
+		}
+		if limited, ok := githubapp.AsRateLimit(err); ok {
+			return limited
+		}
+		slog.Warn("dispatch delivery: re-read a pull request head", "repo", head.Repo, "number", head.Number, "error", err)
+		return nil
+	}
+	if err := boundedFanOut(ctx, reconcilePartialConcurrency, stale, refresh); err != nil {
+		return fmt.Errorf("rate-limited re-reading pull request heads: %w", err)
+	}
+	return nil
+}
+
 // attributionBackfillCalls bounds the GitHub calls reconcileAttributionInputs makes in one pass. A
 // row costs one call for the pull request and one per page of 100 commits
 // (fetchAttributionFacts): two for a pull request under 100 commits, at most maxAttributionCalls.
@@ -625,7 +660,7 @@ func (r *Reconcile) completePartialPullRequest(ctx context.Context, pr DeliveryP
 	if fetched.MergedAt == nil {
 		return nil
 	}
-	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched); err != nil {
+	if err := completePullRequest(ctx, r.pool, r.github, owner, repo, pr.Repo, pr.Number, fetched, nil); err != nil {
 		if limited, ok := githubapp.AsRateLimit(err); ok {
 			slog.Warn("dispatch delivery: stopped completing partial pull requests: rate limit", "repo", pr.Repo, "number", pr.Number, "error", err)
 			return limited

@@ -30,17 +30,19 @@ EOF
 ```
 
 - Write each child's spec as `skill://dispatch-writing-specs` says, scaled to the child: its
-  outline (`Summary` through `Acceptance`, a few sentences a part for a small child), a proposed
+  outline (a few sentences a part for a small child), each requirement marked as a `requirement`
+  block, a proposed
   answer to each point, each term a new reader may not know explained, no item number from another
   document (name a requirement of the root by what it says), and no text copied from the root that
-  does not apply to this child. The child's workers read only this spec.
+  does not apply to this child. Write the child's Verification document with it, one `check` block
+  per thing that must be proved. The child's workers read only this spec and those checks.
 - Before `dispatch issue` creates any child, dispatch a fresh red-team subagent
   (`task(agent="oracle")`) with the root spec, the tree's open children with their repositories
   and pull requests, and the proposed child list with each child's title and whole spec. Its
   mandate: *"You did not write this list. Argue that each child should not exist. Name every
   child that is a to-do, a fix found in review, a proof of the root's acceptance, or a part of
   the architect's own work, and say where it folds: the root's pull request or an open child's.
-  Then name every root requirement neither its pull request nor a child of this list carries."*
+  Then name every root requirement neither its pull request nor a listed child carries."*
   `wait` for its verdict, since it runs as a job of its own. A child survives only when it
   cannot ride in the root's pull request or an open child's: its code is in a repository no open
   pull request of this tree is in, or it is its own deploy, applied before other work of the
@@ -73,9 +75,9 @@ EOF
   the project's default assignee, which a person sets on the Settings page; under a personal token
   it goes to that token's owner (`dispatch whoami`). Set it only when a human told you a specific
   person owns that child.
-- Write into each child's acceptance that its pull request updates
-  `.dispatch/architecture/<id>.md` for each component whose code it changes, when the project has
-  architecture components (below).
+- Write a `check` of each child for the update of
+  `.dispatch/architecture/<id>.md` for each component whose code its pull request changes, when
+  the project has architecture components (below).
 
 A role token's `<project>` is not the `--project` above: it is the daemon's own project. The daemon
 encodes a token as `legion-<project>-<key>-<role>` with the key lower-cased, so project `acme`,

@@ -111,9 +111,9 @@ the same session.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
-| `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
-| `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
+| `accepting` | the architect | Reads the tester's handoff, each check of the issue's Verification document with its latest result, and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `retro` | implementer | Writes down what the work taught, as one comment on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes. It commits nothing. | implement App |
+| `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
 
 A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
@@ -218,10 +218,11 @@ A worker's completion names its record, and the daemon reads that record back fr
 it moves the issue: it refuses a record another session wrote, one of another issue, phase or
 version, and the record the role named for its previous phase. No handoff is a commit, so the
 issue branch carries only work, every push gets its own CI, and the merge brings no handoff onto
-the default branch. Only retro's notes under `docs/solutions/` may sit above the reviewer's
-approved head, so they cost no test or review round: the daemon compares the approved head with
-the head `READY` names, on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
-else changed since the approval, so that change goes back to review. The one other change it lets
+the default branch. Retro commits nothing, so the head `READY` names is the head the reviewer
+approved: the daemon compares the two
+on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
+but a commit under `docs/solutions/` changed since the approval, so that change goes back to
+review. The one other change it lets
 through is the removal of files under `.legion/`, where handoffs were committed before they moved
 to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
 
@@ -390,8 +391,9 @@ check in its live session as the issue closes. Each look of the check reaches th
 deployment instructions say (the merge commit published to your deploy role, with no reply
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
 the implementer drove the change in production through a user's own access path, drove each
-requirement of the issue only the deploy can show as the requirement names it, and wrote the
-pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
+requirement of the issue only the deploy can show as the requirement names it, and recorded the
+result of the issue's `after_merge` check, naming the merge commit and what woke the look, with
+that result's line on the pull request; `pending`,
 when production does not carry the merge yet, or an observation a requirement names has not
 happened yet; or `fail`, a requirement observed as not met, one still unobserved at the last
 look, or a defect, naming the issue, the pull
@@ -399,7 +401,7 @@ request, the merge commit, what it drove and what failed. A defect with a clear 
 controller, which gives it to the tree that owns that code and files an issue only when none does.
 One that needs a decision is a Dispatch ask on Legion's
 daily report issue, so you decide whether it needs an issue.
-The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
+The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check, and refuses every other write.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk
 with it, since an issue's disk belongs to its pod — while its conversation is kept in the session
