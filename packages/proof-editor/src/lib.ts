@@ -41,13 +41,14 @@ import { ParserState } from '@milkdown/transformer';
 import { commonmark } from '@milkdown/preset-commonmark';
 import { gfm } from '@milkdown/preset-gfm';
 import { history } from '@milkdown/plugin-history';
-import { collab, collabServiceCtx, type CollabService } from '@milkdown/plugin-collab';
+import { collab, collabServiceCtx, type CollabService, type YSyncOpts } from '@milkdown/plugin-collab';
 import { listener } from '@milkdown/plugin-listener';
 import { cursor } from '@milkdown/plugin-cursor';
 import { clipboard } from '@milkdown/plugin-clipboard';
 import { nord } from '@milkdown/theme-nord';
 import { yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
 import { collabCursorPlugin } from './collab-cursor-plugin';
+import { buildTheDocumentInBatches } from './progressive-build';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
@@ -449,24 +450,35 @@ export async function createProofEditor(
   // connecting without it: y-prosemirror's cursor plugin can throw (nodeSize
   // on undefined) if it evaluates awareness state before the ySync plugin's
   // mapping is populated.
-  editor.action((ctx) => {
-    const collabService = ctx.get(collabServiceCtx);
-    // Before the shared document renders: an ask two collaborators left off its content rule
-    // must not be deleted from it (see ./ask-content.ts).
-    relaxAskContentCheck(ctx.get(schemaCtx));
-    collabService.bindDoc(opts.ydoc);
-    collabService.mergeOptions({
-      yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
-    });
-    collabService.connect();
-
-    if (opts.awareness) {
-      // Mirrors CollabClient#setLocalUser: yCursorPlugin's cursor builder reads
-      // `awareness.getStates().get(clientId).user`.
-      opts.awareness.setLocalStateField('user', opts.user);
-      installCollabCursorsWhenReady(view, ctx, collabService, opts.awareness, () => alive);
-    }
+  const collabService = editor.ctx.get(collabServiceCtx);
+  // Before the shared document renders: an ask two collaborators left off its content rule
+  // must not be deleted from it (see ./ask-content.ts).
+  relaxAskContentCheck(editor.ctx.get(schemaCtx));
+  collabService.bindDoc(opts.ydoc);
+  collabService.mergeOptions({
+    yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
   });
+  // The document is built a batch of blocks at a time, each batch a task of its own, and the
+  // binding adopts the document and the mapping those batches made instead of drawing the whole
+  // document itself in one task (./progressive-build.ts, dispatch://INFRA-341 R11).
+  const mapping = await buildTheDocumentInBatches({
+    fragment: opts.ydoc.getXmlFragment('prosemirror'),
+    root,
+    schema: editor.ctx.get(schemaCtx),
+    view,
+  });
+  // `mapping` is `ySyncPlugin`'s own option - the one `initProseMirrorDoc` exists to fill - and
+  // Milkdown's `YSyncOpts`, written before y-prosemirror had it, does not name it; CollabService
+  // passes the whole object through to the plugin (`#createPlugins`).
+  collabService.mergeOptions({ ySyncOpts: { mapping } as unknown as YSyncOpts });
+  collabService.connect();
+
+  if (opts.awareness) {
+    // Mirrors CollabClient#setLocalUser: yCursorPlugin's cursor builder reads
+    // `awareness.getStates().get(clientId).user`.
+    opts.awareness.setLocalStateField('user', opts.user);
+    installCollabCursorsWhenReady(view, editor.ctx, collabService, opts.awareness, () => alive);
+  }
 
   const unregisterPopoverHook = marginMode
     ? () => {}

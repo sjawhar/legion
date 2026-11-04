@@ -19,8 +19,15 @@
 // page does, not how long it takes.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
-import { documentEditor, documentTransport } from "./editor";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  getArtifactBlocks,
+} from "./api";
+import { connectedDot, documentEditor, documentTransport, placeCaret } from "./editor";
 import {
   commentDiagrams,
   decisionBlockId,
@@ -34,11 +41,19 @@ import {
   sectionHeading,
   smallDocument,
 } from "./large-documents";
-import { measureDocument, printMeasurement } from "./large-documents-page";
+import { measureDocument, printMeasurement, throttleTheCpu } from "./large-documents-page";
 import { openCommentThread, settledScrollTop } from "./mermaid-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+
+declare global {
+  interface Window {
+    /** How many of the document's blocks the editor's root held at each animation frame, which
+     *  `framesOfTheBuild` records and the two progressive-build rows read. */
+    __blocksBuilt?: number[];
+  }
+}
 
 const agent = {
   actor: { id: "e2e-large-documents-agent", kind: "session" as const },
@@ -87,13 +102,17 @@ async function everythingOwedFinished(what: string): Promise<void> {
 async function seedDocument(
   name: string,
   content: string
-): Promise<{ issueKey: string; path: string }> {
+): Promise<{ artifactId: string; issueKey: string; path: string }> {
   await resetDatabase();
   await createProject({ key: "BIG", name: "Big documents" });
   const issue = await createIssue({ project: "BIG", title: "A document" }, agent);
   const uploaded = await createIssueArtifact(issue.key, { content, name }, agent);
   await everythingOwedFinished(name);
-  return { issueKey: issue.key, path: `/issues/${issue.key}/artifacts/${uploaded.artifact.slug}` };
+  return {
+    artifactId: uploaded.artifact.id,
+    issueKey: issue.key,
+    path: `/issues/${issue.key}/artifacts/${uploaded.artifact.slug}`,
+  };
 }
 
 interface Row {
@@ -275,6 +294,174 @@ test(`the editor opens ${documentNames.large} where its reader had got to @phone
       .boundingBox();
     expect(Math.abs((landed?.y ?? Number.NaN) - (where?.y ?? Number.NaN))).toBeLessThan(200);
   } finally {
+    await alice.close();
+  }
+});
+
+// The two rows below are about the build behind that swap. The editor is not drawn in one task
+// any more: it is built a batch of blocks at a time, each batch its own task, and the collab
+// binding adopts the document and the mapping those batches made rather than drawing the whole
+// document itself (`packages/proof-editor/src/progressive-build.ts`). Both hold the document's
+// socket (`documentTransport`), so the build begins when the row releases it, and both throttle
+// the renderer as the measurement does - not to time anything, but so the build lasts long
+// enough for the page to draw frames while it runs, which is the only state either row is about.
+
+/** How many of the document's blocks the editor's root holds, at whatever depth. The view wears
+ *  its `Document editor` name only once the build is over, and its root is hidden until then,
+ *  so neither `documentEditor` nor a visibility check reads a build in progress. */
+function blocksBuilt(page: Page): Promise<number> {
+  return page.locator(".proof-editor [data-block-id]").count();
+}
+
+/**
+ * Records, every animation frame until the editor is named, how many of the document's blocks
+ * the editor's root holds, and answers what was recorded.
+ *
+ * The reading is the page's own rather than a poll from here, because a poll cannot see a build
+ * in progress: the batches resume through `scheduler.yield()`, whose continuations outrank the
+ * task a `page.evaluate` needs, so the first count a poll is answered with is the whole
+ * document. The browser's own rendering runs between those batches, so a frame can read what a
+ * poll cannot - and a frame that reads part of a document is also the proof a reader wants,
+ * since a build that froze the page would have drawn no frame at all. Install before the
+ * navigation; read once the editor is open.
+ */
+async function framesOfTheBuild(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const built: number[] = [];
+    window.__blocksBuilt = built;
+    const look = () => {
+      const root = document.querySelector(".proof-editor");
+      if (root !== null) {
+        built.push(root.querySelectorAll("[data-block-id]").length);
+        // The last frame worth reading is the first one the finished editor is named in: after
+        // it every frame would pay for a scan of the whole document and read the same number.
+        if (root.querySelector('[aria-label="Document editor"]') !== null) return;
+      }
+      requestAnimationFrame(look);
+    };
+    requestAnimationFrame(look);
+  });
+}
+
+test(`the editor opens ${documentNames.large} with every block of it in the DOM @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(600_000);
+  const { artifactId, path } = await seedDocument("specs-large.md", largeDocument);
+  const blocks = await getArtifactBlocks(artifactId);
+  expect(blocks.length).toBeGreaterThan(100);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    await framesOfTheBuild(page);
+    const transport = await documentTransport(page, { holding: true });
+    await page.goto(path);
+    // The document's own draw is what the reader has while no socket has synced, and no editor
+    // has been built from it yet.
+    await expect(page.locator('[aria-label="Document text"] [data-block-id]').first()).toBeAttached(
+      { timeout: 240_000 }
+    );
+    expect(await blocksBuilt(page)).toBe(0);
+
+    await transport.release();
+    await expect(documentEditor(page)).toBeVisible({ timeout: 240_000 });
+
+    // Every block the server indexed the document under is in the editor's DOM, under the id a
+    // `#b-<id>` link lands on, rather than only counted: two different blocks satisfy a count.
+    // A code block is the one exception, and not a missing block: its node view builds its own
+    // element and stamps no id on it
+    // (`packages/proof-editor/src/mermaid-code-block-view.ts`), and this document's code blocks
+    // are the mermaid source of each of its diagrams and a TypeScript listing per section.
+    const identified = blocks
+      .filter((block) => block.type !== "code_block")
+      .map((block) => block.id);
+    expect(identified.length).toBeGreaterThan(blocks.length / 2);
+    const missing = await documentEditor(page).evaluate(
+      (editor, ids) =>
+        ids.filter((id) => editor.querySelector(`[data-block-id="${CSS.escape(id)}"]`) === null),
+      identified
+    );
+    expect(missing).toEqual([]);
+
+    // And the build really was in batches: the page drew frames holding part of the document
+    // and not all of it, which a build done in one task never shows.
+    const whole = await blocksBuilt(page);
+    const frames = await page.evaluate(() => window.__blocksBuilt ?? []);
+    expect(
+      frames.filter((held) => held > 0 && held < whole),
+      "no frame was drawn holding part of the document: it was built in one task, which is " +
+        "the freeze this build exists to end"
+    ).not.toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test(`an edit made while ${documentNames.large}'s editor is being built is in it when the build ends @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
+  const title = documentTitle(documentDiagrams.large);
+
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    // Bob has the document open and his caret in its first block before Alice's socket is let
+    // through, so the only thing left for him to do afterwards is press the keys.
+    const bobPage = await bob.newPage();
+    await bobPage.goto(path);
+    await expect(documentEditor(bobPage)).toContainText(title, { timeout: 240_000 });
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    await placeCaret(bobPage, "after", title);
+
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    await framesOfTheBuild(page);
+    const transport = await documentTransport(page, { holding: true });
+    await page.goto(path);
+    await expect(page.locator('[aria-label="Document text"] [data-block-id]').first()).toBeAttached(
+      { timeout: 240_000 }
+    );
+
+    // Bob writes a word at a time, from the moment Alice's socket is let through until her
+    // editor is open, so his writing covers the whole of her build rather than a moment the row
+    // has to guess at. He writes at a person's pace (`delay`) rather than as fast as the
+    // protocol allows, for the same reason: a hundred words typed in three seconds would all be
+    // written before her socket had even finished syncing. Which of his words crossed the build
+    // is not something either page can say; that his writing covered one is what the frames
+    // below prove.
+    await transport.release();
+    const opened = documentEditor(page)
+      .waitFor({ state: "visible", timeout: 240_000 })
+      .then(() => true);
+    const written: string[] = [];
+    let open = false;
+    void opened.then((it) => {
+      open = it;
+    });
+    while (!open && written.length < 120) {
+      const word = `Pangolin${written.length}`;
+      await bobPage.keyboard.type(` ${word}`, { delay: 25 });
+      written.push(word);
+    }
+    await opened;
+    expect(written.length).toBeGreaterThan(3);
+
+    // Alice's editor holds every word Bob wrote while it was being built, in the block he wrote
+    // them in.
+    await expect(documentEditor(page)).toContainText(written.join(" "), { timeout: 240_000 });
+    const whole = await blocksBuilt(page);
+    const frames = await page.evaluate(() => window.__blocksBuilt ?? []);
+    expect(
+      frames.filter((held) => held > 0 && held < whole),
+      "no frame was drawn holding part of the document, so Bob's words crossed no build and " +
+        "this run says nothing about an edit that does"
+    ).not.toEqual([]);
+  } finally {
+    await bob.close();
     await alice.close();
   }
 });
