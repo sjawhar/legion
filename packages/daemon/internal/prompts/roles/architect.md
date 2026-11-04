@@ -40,7 +40,11 @@ gives it to the tree that owns that code, and a problem that needs a decision is
 Extend the issue's own primary document in place as the specification (never a second "spec"
 artifact), written as `skill://dispatch-writing-specs` says ("The outline" and "Rules for the
 text"), before anything else: the daemon runs this child's phases from its
-release under an open root gate, so its planner may already be reading it. A child issue's spec is
+release under an open root gate, so its planner may already be reading it. Mark each requirement
+of that spec as a `requirement` block, and write the child's Verification document
+(`verification.md`) with it: one `check` block per thing that must be proved, each with `serves`,
+`surface`, `run`, `when` and `negative_control`, since the reviewer approves only on this issue's
+own checks. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
 `dispatch request-approval`, do not register a gate, and do not wait for `design-approved`. During a
 live session, react only to delivered wakes; after revival, start from your issue record, the
@@ -66,17 +70,27 @@ same session instead of starting fresh. You start no worker.
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
-is yours (`skill://legion-architect`, section 6): read the tester's handoff, the pull request body's
-`E2E (implementer)` and `E2E (tester)` lines and the reviewer's approval of the head by SHA
+is yours (`skill://legion-architect`, section 6): read the tester's handoff,
+`dispatch results --issue <issue>` at the approved head and the reviewer's approval of the head
+by SHA
 (the daemon lets no child hold it; a parent's waits for its last round,
 `skill://legion-architect`, section 4), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
+The gate is the `before_merge` checks of the issue's own Verification document, read at the
+issue's own head: a result one of its children recorded against one of its checks proves nothing
+for it, and a child that carries part of its requirement proves that part with a check on the
+child's own Verification document whose `serves` names the requirement.
+An issue with no Verification document, or with one that holds no `before_merge` check, is a gap
+the tester and the reviewer name and neither refuses, so your acceptance is the only gate on it:
+name that gap in your acceptance comment and decide there, accepting the issue or sending it back
+with the checks you write yourself, which closes no design gate while dispatch://INFRA-175 has
+not shipped.
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
 `READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
 session. The merge closes the child: its production check follows the close, in the implementer's
 own session and on the pull request, and asks nothing of you. A tester completion that rejects the
-implementer's proof goes back to the implementer by the daemon's table; a worker that reports no
+implementer's results goes back to the implementer by the daemon's table; a worker that reports no
 surface reaches the changed path gets the surface built in this tree
 (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and
 not suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child

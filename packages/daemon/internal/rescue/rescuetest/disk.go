@@ -1,7 +1,7 @@
 // Package rescuetest builds an issue pod's disk for the push check's tests: a bare repository
 // standing in for GitHub, and on the disk a jj clone of it with the issue's jj workspace, laid out
 // as workspace.Location lays a pod's out. Every command is the real git and jj from PATH, under
-// an environment that reads no configuration of whoever runs the tests.
+// fixtureenv.Isolated: no workspace, configuration, remote or credential of whoever runs the tests.
 package rescuetest
 
 import (
@@ -9,11 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -63,7 +63,7 @@ func New(t testing.TB, issue string) *Disk {
 		StateDir:  filepath.Join(root, "legion"),
 		Issue:     issue,
 		Branch:    "legion/" + issue,
-		Env:       Environment(home),
+		Env:       fixtureenv.Isolated(home),
 		Clone:     filepath.Join(root, "legion", "repos", "github.com", Owner, Repo),
 		Workspace: filepath.Join(root, "legion", "workspaces", Owner, Repo, strings.ToLower(issue)),
 	}
@@ -85,24 +85,6 @@ func New(t testing.TB, issue string) *Disk {
 	d.Run(d.Clone, "jj", "workspace", "add", "--name", strings.ToLower(issue), d.Workspace)
 	d.JJ("bookmark", "track", d.Branch, "--remote", "origin")
 	return d
-}
-
-// Environment is the environment a disk's commands run in: the process's own without any git or
-// jj configuration or identity it carries — a Legion pod hands every process a GIT_CONFIG_*
-// block of its own — and with a home, an empty user configuration and an identity of the test's.
-func Environment(home string) []string {
-	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
-		key, _, _ := strings.Cut(entry, "=")
-		return strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "JJ_") || key == "HOME" || key == "XDG_CONFIG_HOME"
-	})
-	return append(env,
-		"HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
-		"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid",
-		"GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid",
-		"JJ_CONFIG="+filepath.Join(home, "no-jj-config.toml"),
-		"JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
-	)
 }
 
 // Run runs argv in dir under the disk's environment and returns its trimmed output, failing the

@@ -670,7 +670,7 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	defer cancel()
 	env := append(slices.Clone(s.cfg.Env), "JJ_USER="+request.JJUser, "JJ_EMAIL="+request.JJEmail)
 	started := time.Now()
-	described, err := runAdoptionCommand(ctx, budget, started, env, describedArgs(jj, workspace))
+	described, err := runAdoptionCommand(ctx, budget, started, workspace, env, describedArgs(jj, workspace))
 	if err != nil {
 		return err
 	}
@@ -678,18 +678,21 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	if described != "" {
 		change = []string{jj, "new", "-R", workspace}
 	}
-	_, err = runAdoptionCommand(ctx, budget, started, env, change)
+	_, err = runAdoptionCommand(ctx, budget, started, workspace, env, change)
 	return err
 }
 
-// runAdoptionCommand runs one adoption command within the adoption's budget and returns its
-// trimmed standard output. A failure's report ends with a note on each stale git lock it names
-// (staleGitLockNote). The command timed out only when the budget ended it: once jj has exited on
-// its own, adoptionWaitDelay can hold Run open past the budget for a child still holding jj's
-// pipes, and jj's exit is then its answer. A command that never started because an earlier one
-// spent the budget timed out too.
-func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, env, args []string) (string, error) {
+// runAdoptionCommand runs one adoption command in dir, the workspace it names with -R, within the
+// adoption's budget and returns its trimmed standard output. jj also reads the repository of the
+// directory it runs in, whatever -R names, and migrates that repository's legacy configuration, so
+// the command never runs in the shim's own directory. A failure's report ends with a note on each
+// stale git lock it names (staleGitLockNote). The command timed out only when the budget ended it:
+// once jj has exited on its own, adoptionWaitDelay can hold Run open past the budget for a child
+// still holding jj's pipes, and jj's exit is then its answer. A command that never started because
+// an earlier one spent the budget timed out too.
+func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, dir string, env, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

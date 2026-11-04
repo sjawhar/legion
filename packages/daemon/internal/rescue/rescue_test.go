@@ -6,10 +6,13 @@ package rescue_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/rescue"
@@ -315,5 +318,29 @@ func TestAPushTheRemoteRefusesIsAnError(t *testing.T) {
 	}
 	if held := d.RemoteBranch(prefix + "-1"); held != "" {
 		t.Errorf("the remote holds %s-1 at %s, want no such branch", prefix, held)
+	}
+}
+
+// The tests' environment lets git use no transport but local files, whatever the repository's own
+// configuration allows: a clone whose origin is a loopback HTTP server, and whose configuration
+// allows http itself, is an error before the server sees one request.
+func TestTheTestsEnvironmentReachesNoNetworkRemote(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "no", http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	d := rescuetest.New(t, issue)
+	d.Write(d.Workspace, "feature.txt", "work that must not leave the test\n")
+	d.JJ("commit", "-m", "work that must not leave the test")
+	d.Run(d.Clone, "git", "remote", "set-url", "origin", server.URL+"/owner/repo.git")
+	d.Run(d.Clone, "git", "config", "protocol.http.allow", "always")
+	w := only(t, d, d.Check(context.Background(), prefix))
+	if w.Status != rescue.Failed || !strings.Contains(w.Error, "transport 'http' not allowed") {
+		t.Errorf("the check reported %+v, want git's refusal of the http transport", w)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Errorf("the loopback server received %d requests, want none", n)
 	}
 }
