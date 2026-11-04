@@ -153,6 +153,14 @@ Each item below names a task and where its code is, then notes on it.
   each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`.
   `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops")
 
+- **Test databases' shared rules**: `internal/pgclone/`
+
+  Dispatch's and the secrets broker's `storetest` harnesses:
+  one migrated template per test process, a `strategy file_copy` clone per test, and a free list a test's database goes back on once a reset worker has emptied it, rather than a drop per test (`Pool`, `Take`, `Release`, `Main`).
+  A database whose schema a test changed - a column default, a function, a trigger, a constraint, a schema or an `alter database` setting - fails the fingerprint the reset holds it to and is dropped instead, and `Main` reports how many were (`fingerprintQuery`).
+  Each harness keeps its own exported surface, environment variable, migrations and seed-schema name, and hands the pool a `Config`;
+  nothing in the pool names a table, a column or a migration, since it reads the schema it works on from the template's catalog at prepare time
+
 - **GitHub webhook redelivery**: `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go`
 
   Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API

@@ -16,22 +16,22 @@ func TestMain(m *testing.M) { os.Exit(Main(m)) }
 func TestACloneWritesTheLogOfAFileCopyNotOfTheTemplate(t *testing.T) {
 	Open(t) // prepares the template, or skips the test
 	ctx := context.Background()
-	conn, err := shared.admin.Acquire(ctx)
+	conn, err := shared.Admin().Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire an admin connection: %v", err)
 	}
 	defer conn.Release()
 	var templateBytes int64
-	if err := conn.QueryRow(ctx, "select pg_database_size($1)", shared.template).Scan(&templateBytes); err != nil {
+	if err := conn.QueryRow(ctx, "select pg_database_size($1)", shared.Template()).Scan(&templateBytes); err != nil {
 		t.Fatalf("read the template's size: %v", err)
 	}
 
-	name := randomName(t, "dispatch_test_")
+	name := shared.RandomName(t)
 	before := backendWALBytes(t, conn)
-	if _, err := conn.Exec(ctx, cloneStatement(name)); err != nil {
+	if _, err := conn.Exec(ctx, shared.CloneStatement(name)); err != nil {
 		t.Fatalf("clone the template: %v", err)
 	}
-	dropDatabase(name)
+	shared.Drop(name)
 	written := backendWALBytes(t, conn) - before
 
 	if written > templateBytes/100 {
