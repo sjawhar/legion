@@ -5,7 +5,7 @@ package docs
 // it before ygo closes it (peerWriteQueueBytes).
 
 // maxMessageBytes is the most one websocket message a browser sends may carry, ygo's
-// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.54.1-sami.3,
+// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.55.1-sami.1,
 // provider/websocket/server.go:150-157). It is a floor against a client that is not the editor at
 // all, never the bound on a document: the bound is weighPeerUpdate's, which walks a frame without
 // decoding it (walkUpdate) and refuses an oversized one before anything decodes it, so a frame at
@@ -29,17 +29,17 @@ const maxMessageBytes = 54 << 20
 // peerWriteQueueBytes is ygo's Server.PeerWriteQueueBytes: the bytes of frames queued for one
 // browser's socket and not yet taken off that queue by its writer. ygo refuses a frame to a socket
 // whose queued bytes already reach this and closes it, so the frame that crosses is queued and a
-// socket holds the budget and one frame at most (sjawhar/ygo v1.54.1-sami.3,
+// socket holds the budget and one frame at most (sjawhar/ygo v1.55.1-sami.1,
 // provider/websocket/write_budget.go:6-36). The three frames of a room's handshake are neither
 // refused nor charged, since a browser cannot ask for them again (writeHandshake, :48-58); the
-// writer credits a frame as it takes it off the queue, before it writes it (creditLocked, peer.go:913-917),
+// writer credits a frame as it takes it off the queue, before it writes it (creditLocked, peer.go:973-977),
 // so a socket also holds the frame its writer is in the middle of; and the close makes the read
-// loop drop the input the peer had already sent (closeConn, peer.go:888-893, reearth/ygo#343), so
+// loop drop the input the peer had already sent (closeConn, peer.go:943-948, reearth/ygo#343), so
 // one socket is closed and logged once however many asks it had in flight.
 //
 // It is the bound on what one browser can make the server hold. ygo's other bound,
 // PeerWriteQueueSize, counts frames alone - 512 of them, whatever their size
-// (defaultPeerWriteQueueSize, provider/websocket/server.go:208-212) - so what a socket can hold is
+// (defaultPeerWriteQueueSize, provider/websocket/server.go:224-228) - so what a socket can hold is
 // that count times the largest frame its room produces. A socket that completes the handshake and
 // then sends SyncStep1 frames whose answers it never reads is sent the room's whole state for each
 // one (peer.go:96-108): measured on 2026-10-31 over a real socket on a document of a mebibyte of

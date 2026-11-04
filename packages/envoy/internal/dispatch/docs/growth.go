@@ -59,8 +59,8 @@ import (
 // clear the write is the document counted (leavesPastDecodeCap gives the steps). The sum clears
 // nothing past the cap, because it counts characters and the cap counts structs: ygo's state
 // vector is each client's last item's clock plus that item's length (StructStore.StateVector,
-// crdt/store.go:237-248 in sjawhar/ygo v1.54.1-sami.3), a string's length is its UTF-16 length
-// (crdt/content.go:109), and one struct holds a whole run of typing. Measured on 2026-10-25, the
+// crdt/store.go:410-421 in sjawhar/ygo v1.55.1-sami.1), a string's length is its UTF-16 length
+// (crdt/content.go:113), and one struct holds a whole run of typing. Measured on 2026-10-25, the
 // shape room_heap_test.go builds, typed over as benchmarkLiveDocument types, sums to 52,575 clocks
 // at 51 KiB, 538,306 at 524 KiB and 1,050,470 at a mebibyte, past the 1,048,576 cap, where it
 // holds 77,600 structs (BenchmarkDecodeCapConfirmation); a 256 KiB document after a mebibyte of
@@ -429,9 +429,10 @@ func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, upda
 // document, and whether a walk of each bounds it: each struct an update carries, but a skip, with
 // the splits its integration can cause, and the two splits each delete range can cause. It counts
 // every range, the ones the room holds deleted already too, which the peer update hook charges
-// nothing (peerWeighing.added, deletedRuns.splitEnds): a transaction's update carries its
-// document's whole delete set (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3,
-// crdt/doc.go:616, crdt/update.go:388), so near the cap a write that deletes nothing new still
+// nothing (peerWeighing.added, deletedRuns.splitEnds): a transaction's update carries what that
+// transaction deleted (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:844-873,
+// written by encodeV1Locked, crdt/update.go:403), and a room that holds those clocks deleted
+// already takes them as deleting nothing, so near the cap a write that deletes nothing new still
 // goes on to the room's exact count and then to a copy (leavesRoomPastDecodeCap), which answer for
 // what it adds. Every struct of a transaction's update is its own new item, which no room holds
 // yet. An update the walk refuses is bounded by nothing, and its document is counted.
@@ -449,8 +450,8 @@ func updatesAdd(updates [][]byte) (uint64, bool) {
 
 // clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
 // since every one takes at least one clock, and says nothing past that: a struct of typed text
-// takes a clock for each character (crdt/store.go:237-248, crdt/content.go:109 in sjawhar/ygo
-// v1.54.1-sami.3).
+// takes a clock for each character (crdt/store.go:410-421, crdt/content.go:113 in sjawhar/ygo
+// v1.55.1-sami.1).
 func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64
 	for _, clock := range doc.StateVector() {
@@ -465,7 +466,7 @@ func clockSum(doc *crdt.Doc) uint64 {
 // can still cause. Of those structs, every one doc has integrated takes at least one clock of the
 // state vector (clockSum), but a parked one takes none: the state vector stops at the gap a parked
 // struct waits behind, and the encoded state carries each parked struct, with at most a skip over
-// the gap before it (withParked, crdt/update.go:230-258 in sjawhar/ygo v1.54.1-sami.3). So the
+// the gap before it (withParked, crdt/update.go:229-257 in sjawhar/ygo v1.55.1-sami.1). So the
 // encoded state holds at most the clock sum and two structs for each parked one, and the splits
 // are splitsAStructCanCause for each parked struct and each parked delete range
 // (crdt.Doc.PendingStats, crdt/doc.go:1183-1200). A room may park up to maxUpdateItems structs

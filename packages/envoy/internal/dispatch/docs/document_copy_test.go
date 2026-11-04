@@ -225,14 +225,14 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 			t.Fatal("the peer's room has gone")
 		}
 		// The room's own apply of a peer's update, as ygo makes it (applyToRoom, sjawhar/ygo
-		// v1.54.1-sami.3, provider/websocket/peer.go:289-295: ApplyUpdateV1Landed, which applies
+		// v1.55.1-sami.1, provider/websocket/peer.go:292-302: ApplyUpdateV1Held, which applies
 		// as ApplyUpdateV1 does and broadcasts what a failed apply left behind), with the room's
 		// persistence taking what it leaves.
 		if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {
 			t.Fatalf("the room refused the browser's update: %v", err)
 		}
-		// The store holds the update once a version past head declares its items: the peer's
-		// answer to the room's sync step 1, an empty update, can move the head first.
+		// The store holds the update once a version past head declares its items; the peer's
+		// sync, which changes nothing in the room, stores nothing.
 		stored := func() bool {
 			versions, err := persist.ListVersions(ctx, artifactID)
 			if err != nil {

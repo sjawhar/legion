@@ -59,8 +59,8 @@ func TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt(t *testing.T) {
 			}
 			chainedRun(t, doc, lastCharacter(t, doc), runner, run)
 			// The row is only a guard while its document carries what makes ygo run the cleanup:
-			// the ContentFormat items a mark is stored as (sjawhar/ygo v1.54.1-sami.3,
-			// crdt/item.go:340-344).
+			// the ContentFormat items a mark is stored as (sjawhar/ygo v1.55.1-sami.1,
+			// crdt/item.go:379-383).
 			formats := formatStructs(t, crdt.EncodeStateAsUpdateV1(doc, nil))
 			if formats != row.formats {
 				t.Fatalf("the %s document carries %d format structs, want %d", row.name, formats, row.formats)
@@ -119,7 +119,7 @@ const longSessionPlaceCharacters = 1_000
 // do. Each keystroke is one update the room takes as it is made, and each browser sees the other's
 // keystrokes between 5 and 20 updates late, drawn afresh at each keystroke. The client of the
 // second browser is the higher, so its items scan on past the first's at the same place
-// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179).
+// (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:189-202).
 //
 // Each place is driven in documents of its own, fresh from seed, and handed to take as one place's
 // updates in the order its room takes them. A conflict scan passes only the items between an
@@ -287,8 +287,8 @@ func TestNoStoredHeavyDocumentLoadsWithHalfItsScanTotalUsed(t *testing.T) {
 // 1,000,002 distinct items, the whole of roomScanTotal, each decoded as a room's load decodes its
 // stored state (decodeStoredCopy) at GOMAXPROCS=1 (measureLoad). The scanned copy takes at most
 // 1.5 s more than the unscanned one, and allocates at most twice bytesOfAScanMark more for each
-// item its scans pass, which is what ygo keeps a mark for (sjawhar/ygo v1.54.1-sami.3,
-// crdt/item.go:129-168). Set DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on
+// item its scans pass, which is what ygo keeps a mark for (sjawhar/ygo v1.55.1-sami.1,
+// crdt/item.go:138-180). Set DISPATCH_MEASURE_SCAN_TOTAL=1 to run it: 11 s here. Run on
 // 2026-10-30: the scanned copy re-scanned 1,000,002 items in 2.217 s, allocating 456,926,192 bytes
 // with a peak of 433,741,040 above the heap before it; the unscanned one, no item, 1.419 s,
 // 382,005,224 and 353,177,568: 0.798 s and 74,920,968 bytes more, 74.9 bytes a scan.
@@ -372,7 +372,7 @@ func lastCharacter(tb testing.TB, doc *crdt.Doc) crdt.ID {
 // browser's, perFrameScanCeiling. One frame scans a run of 400,000 distinct items once; the other a
 // run of 2,000 items two hundred times. lock-ms is the time from the apply's start to the room's
 // first update observer, which ygo runs once the transaction has released the document's lock
-// (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:830-838); ns/scan and the bytes a scanned item adds,
+// (sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:984-992); ns/scan and the bytes a scanned item adds,
 // against a frame of one item that scans nothing, are the per-item costs perFrameScanCeiling and
 // bytesOfAScanMark quote. Run it with -benchtime=1x: each iteration builds its room afresh, a
 // keystroke at a time.
@@ -521,11 +521,19 @@ func TestAnApplyNeverScansMoreThanItsAllowanceDrainIncluded(t *testing.T) {
 	runtime.KeepAlive(replica)
 }
 
-// A room's scan total survives a reload: a room takes browsers' updates whose scans add to its
-// total, flushes them to the store and closes; the room its next load makes starts its total at
-// what the stored state re-scans, which is what the room had come to, give or take the few
-// hundred items a decode of a state merges where the room took keystrokes one at a time.
-func TestTheRoomScanTotalSurvivesAReload(t *testing.T) {
+// A room's scan total is re-measured by each load: the room its next load makes starts its total
+// at what the stored state re-scans, which is what a decode of that history costs - the very work
+// the total is there to bound (roomScans, nearACap) - and never more than the room had come to.
+//
+// It is not the sum of what the room's own applies scanned, and at sjawhar/ygo v1.55.1-sami.1 it
+// is far below it for a shape like this one: the room's browsers scan as their frames arrive,
+// while a decode of the state integrates the clients' groups by descending client, where inserts
+// that name one anchor and no right origin are symmetric and ygo breaks at the first of them
+// (Item.integrate, case 1, crdt/item.go:189-202). Here four frames of fifty such items scan about
+// 75,000 items live and 500 in the re-scan. What bounds one apply is the per-frame ceiling
+// (scanCeiling), which no total changes, so a load that starts lower bounds the room by what its
+// own history costs rather than by work no later load repeats.
+func TestTheRoomScanTotalIsReMeasuredByEachLoad(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# Title\n\nOne paragraph of ordinary prose.\n")
 	ctx := context.Background()
@@ -571,8 +579,11 @@ func TestTheRoomScanTotalSurvivesAReload(t *testing.T) {
 	if live-loaded < 50_000 {
 		t.Fatalf("the room's browsers scanned %d items, want enough to tell a reload that kept them from one that did not", live-loaded)
 	}
-	if difference := reloaded - live; difference < -500 || difference > 500 {
-		t.Errorf("the reloaded room's scan total is %d, want within 500 of the %d the room had come to", reloaded, live)
+	if reloaded > live+500 {
+		t.Errorf("the reloaded room's scan total is %d, past the %d the room had come to: a load must never start a room past what its own history costs to decode", reloaded, live)
+	}
+	if again, err := rescan(stored.Update); err != nil || reloaded != int64(again) {
+		t.Errorf("the reloaded room started at %d scans and a re-scan of the same stored state counts %d (%v), want the load's total to be that re-scan", reloaded, again, err)
 	}
 	runtime.KeepAlive(reloadedRoom)
 }
@@ -658,7 +669,7 @@ func TestAServerWriteIsNeverRefusedByTheRoomsScanTotal(t *testing.T) {
 // usedUpScanBudget, and both are admitted; a frame of three items at that place, whose scans pass
 // usedUpScanBudget, is refused 4413 DOC_NEEDS_REBUILD and leaves the room as it was.
 func TestAUsedUpRoomStillTakesTypingAndRefusesALargerApplyAsNeedingARebuild(t *testing.T) {
-	state := tangledHistory(t, 2_000, roomScanTotal/2_000+2)
+	state := tangledHistory(t, 2_000, roomScanTotal)
 	room := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(room, state, nil); err != nil {
 		t.Fatal(err)

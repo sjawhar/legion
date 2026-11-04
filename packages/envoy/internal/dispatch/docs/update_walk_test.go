@@ -13,8 +13,8 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.54.1-sami.3,
-// crdt/merge.go:24-78), unexported, reached here as the independent count the walk is checked
+// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.55.1-sami.1,
+// crdt/merge.go:24-80), unexported, reached here as the independent count the walk is checked
 // against: it decodes every struct of an update into an Item, in the update's order for each
 // client, through the same decodeItem the room's apply runs, and drops only skips. ygo exports
 // nothing that counts structs (crdt.ContentIDsFromUpdateV1 coalesces them into runs), which is why
@@ -209,11 +209,12 @@ func TestTheUpdateWalkAcceptsEveryUpdateARoomTakes(t *testing.T) {
 	}
 }
 
-// A frame of valid structs ending in one bad byte is refused whole. ygo's apply refuses it too,
-// but only after it has integrated every struct before the bad byte (sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:110-117), which on a document that sets no scan bound or budget, as
-// newDocumentCopy's does not, stay in it, and which a room's bounded document takes back out only
-// once it has integrated them all: the work the hook's walk keeps off the room.
+// A frame of valid structs ending in one bad byte is refused whole, by the walk and by ygo's
+// apply, and the pin leaves the document holding none of it: a refusal before the apply finishes
+// takes back every struct it integrated (sjawhar/ygo v1.55.1-sami.1, reearth/ygo#340), on a
+// document that sets no scan bound or budget as newDocumentCopy's does. What the hook's walk
+// keeps off the room is the decode and the integration of those structs, not a document left
+// holding them.
 func TestTheUpdateWalkRefusesValidStructsBeforeOneBadByte(t *testing.T) {
 	update := newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done()
 	_, err := walkUpdate(update, fromPeer, nil)
@@ -224,8 +225,8 @@ func TestTheUpdateWalkRefusesValidStructsBeforeOneBadByte(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(room, update, nil); err == nil {
 		t.Fatal("ygo applied the frame without error")
 	}
-	if got := room.StateVector()[7]; got != 6 {
-		t.Fatalf("ygo's failed apply left client 7 at clock %d, want the 6 its three valid structs integrated", got)
+	if got := room.StateVector()[7]; got != 0 {
+		t.Fatalf("ygo's refused apply left client 7 at clock %d, want a document holding none of the frame", got)
 	}
 }
 
@@ -386,7 +387,7 @@ func TestTheUpdateWalkHoldsYgosBoundsAtTheirEdges(t *testing.T) {
 
 // ContentJSON's two encodings are read where ygo's decoder reads them. A JSON text of 116 to 127
 // bytes starts with a byte that is also a lib0 Any tag; ygo tries JSON text for every value and
-// lib0 Any only when that fails (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:1231-1262), and a walk
+// lib0 Any only when that fails (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1328-1359), and a walk
 // that chose otherwise would end the item somewhere else and misread every struct after it. Each
 // case is followed by a struct the walk must still read as ygo does.
 func TestTheUpdateWalkReadsJSONWhereYgoDoes(t *testing.T) {

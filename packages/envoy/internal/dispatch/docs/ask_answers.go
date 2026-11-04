@@ -84,7 +84,7 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, leavesPast
 		return
 	}
 	adds, bounded := r.addedStructs()
-	repairs := serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) { _, _ = r.writeLive(copied, nil) }}
+	repairs := serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) { _ = r.writeLive(copied, nil) }}
 	var err error
 	rendered := false
 	if leavesPastDecodeCap(repairs) {

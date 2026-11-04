@@ -245,7 +245,7 @@ func (b *roomBudget) reserve(ctx context.Context, deadline time.Time, room strin
 // What the sweeps know of the browsers is the room states' (unusedLocked, onlyDepartedLocked),
 // and those lag the sockets by ygo's teardown: ygo takes a leaving peer out of its room, flushes
 // the room's pending updates to the store and only then reports the departure (sjawhar/ygo
-// v1.54.1-sami.3, provider/websocket/peer.go:517-663, OnLastPeer), which is what marks the room's
+// v1.55.1-sami.1, provider/websocket/peer.go:574-720, OnLastPeer), which is what marks the room's
 // browsers departed (settleLastPeer). An admission that weighs the budget inside that window
 // finds every charged room held by a browser, nothing pending, and is refused at once though the
 // room it needs is already on its way out; its retry, which the transient close asks the editor

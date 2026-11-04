@@ -83,7 +83,7 @@ func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err er
 // browser's edit is refused by the room's totals, and only a rebuild leaves it small. A write
 // that only deletes can land, since a delete range splits an item only where one of its ends
 // falls inside that item, so a range covering whole items splits none of them and adds no struct
-// (sjawhar/ygo v1.54.1-sami.3, crdt/yarray.go:826-843), and it leaves the state as large as it
+// (sjawhar/ygo v1.55.1-sami.1, crdt/yarray.go:829-846), and it leaves the state as large as it
 // was: the document's own text is what a trim shortens, not its history. Supplied markdown does
 // not widen this: a history further from both caps is refused with or without it, and is trimmed
 // by a write.

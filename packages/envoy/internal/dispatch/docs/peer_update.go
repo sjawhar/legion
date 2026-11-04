@@ -116,8 +116,8 @@ const maxPeerByteCreep = 64 << 10
 
 // weighPeerUpdate is ygo's Server.OnPeerUpdate: the room hands it every update and whole-state
 // message a read-write browser sends, with the apply that would put it in the room, and a read-only
-// browser never reaches it (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:84-151,
-// provider/websocket/peer.go:266-273).
+// browser never reaches it (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:84-154,
+// provider/websocket/peer.go:271-277).
 // An update it does not apply is neither stored nor relayed to the room's other browsers, and the
 // *websocket.PeerClose it refuses with closes that one browser with that code and reason.
 //
@@ -128,7 +128,7 @@ const maxPeerByteCreep = 64 << 10
 // DocumentTooLargeCloseCode and DocumentUpdateRefusedCloseReason (documentUpdateRefused,
 // refusedWith, which keeps the walk's own error behind the close) and never applied, so ygo
 // integrates nothing of it and closes that browser with that code and reason
-// (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:38-52, :139-146). Under
+// (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:38-52, :142-149). Under
 // v1.51.3-sami.7 the browser was answered SyncStatus(0) and left connected; upstream
 // reearth/ygo#304 was merged in the form that closes it, with 4205 "Reset Connection" for a hook
 // error that is no *websocket.PeerClose, and a hook can keep a refused browser connected only by
@@ -238,7 +238,7 @@ const maxPeerByteCreep = 64 << 10
 // hook answers that is no *websocket.PeerClose, so ygo answers that browser SyncStatus(0) and
 // leaves it connected, exactly as a room without this hook does: the
 // apply ran, which is what keeps a refused browser connected where a refusal before the apply
-// closes it (provider/websocket/peer_update.go:136-151). The pending cap refuses such an update
+// closes it (provider/websocket/peer_update.go:139-154). The pending cap refuses such an update
 // before the apply scans or changes anything, so it costs the room neither charge nor scans
 // (TestAPendingCapRefusalCostsTheRoomNeitherChargeNorScans). The struct total refuses such an
 // update first: it counts each parked struct and parked delete range splitsAStructCanCause times
@@ -415,7 +415,7 @@ func documentUpdateRefused() *websocket.PeerClose {
 }
 
 // refusedWith is refusal, the close ygo answers the browser with - it reads it through errors.As
-// (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:139-146) - with cause behind it,
+// (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:142-149) - with cause behind it,
 // which no close frame carries: the rule that refused the update, its reason and the byte it
 // refused at, for the line ygo logs and for this package's tests.
 func refusedWith(refusal *websocket.PeerClose, cause error) error {

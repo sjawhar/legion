@@ -44,16 +44,19 @@ const applyHeapName = "apply"
 // room is. It is the update's own share (ownApplyHeap) and the room's (roomApplyHeap):
 //
 //   - the room's state vector, which ygo's apply copies into maps before it reads a struct
-//     (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:734) and its transaction twice more
-//     (crdt/doc.go:754, :858), each a slot for every client the room holds;
-//   - the update the transaction made, which ygo encodes for the room's update observers at every
-//     commit, one that changed nothing included (buildPhase2, crdt/doc.go:604-620, called at
-//     :789), by walking the room's whole store and building the delete set of all of it, a range
-//     for every deleted item before it compacts them (encodeV1Locked and buildDeleteSet,
-//     crdt/update.go:366-406 and :665-678): a price for every deleted item of the room, of which
-//     875,008 bytes measured for a one-character keystroke into a string of 10,000 deleted items
-//     among 10,000 live ones, against 2,328 into one of 20,000 live items and none deleted;
-//   - the marks its scans make, one for each distinct item they pass (crdt/item.go:129-168), at
+//     (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:736) and its transaction twice more
+//     (crdt/doc.go:937, :1014), each a slot for every client the room holds;
+//   - the update the transaction made, which ygo encodes for the room's update observers at
+//     every commit that changed the document (collectAndEncodeLocked, crdt/doc.go:844-873,
+//     called at :902), with that transaction's own deletions (reearth/ygo#350), and, for a whole
+//     state, by walking the room's store and building the delete set of all of it, a range for
+//     every deleted item before it compacts them (encodeV1Locked and buildDeleteSet,
+//     crdt/update.go:365-405 and :659-678). The term for the room's deleted items is kept as
+//     headroom: at sjawhar/ygo v1.54.1-sami.3, where every transaction's update carried the
+//     room's whole delete set, 875,008 bytes were measured for a one-character keystroke into a
+//     string of 10,000 deleted items among 10,000 live ones, against 2,328 into one of 20,000
+//     live items and none deleted;
+//   - the marks its scans make, one for each distinct item they pass (crdt/item.go:138-180), at
 //     bytesOfAScanMark each: the items they can pass are the room's and those the apply makes,
 //     no more than the room's structs and the structs the apply can hold, and never more than
 //     the per-frame ceiling, the most any allowance gives an apply (roomScans). An update that
@@ -61,10 +64,10 @@ const applyHeapName = "apply"
 //
 // The room's parked queue costs an apply nothing in proportion to it unless the apply reaches it:
 // a bounded document's apply keeps the parked structs and parked delete ranges by reference rather
-// than copying them (beginRemoteApply, crdt/apply_rollback.go:135-158), and a client's parked
+// than copying them (beginRemoteApply, crdt/apply_rollback.go:150-176), and a client's parked
 // delete ranges are retried only once an apply moves that client's clock past the first of them,
-// and only for a client the apply gave a struct (retryPendingDs, crdt/delete_set.go:139-154, and
-// StructStore.takeReadyDeletes, crdt/store.go:86-103). Measured on 2026-10-27, a keystroke
+// and only for a client the apply gave a struct (retryPendingDs, crdt/delete_set.go:197-212, and
+// StructStore.takeReadyDeletes, crdt/store.go:163-180). Measured on 2026-10-27, a keystroke
 // allocates 4,240 bytes into a room holding the most parked structs its struct total admits,
 // 349,517, and 4,240 into one holding the most parked delete ranges, 524,280. A retry an apply
 // does start re-parks what it cannot apply yet, a copy of that client's parked ranges: 44,739,304
@@ -121,10 +124,10 @@ func (w *peerWeighing) ownApplyHeap(frame int) uint64 {
 // TestEveryApplysTransientHeapIsWithinItsEstimate measures (2026-10-26: bytes one apply allocates
 // into a document with an update observer, per struct of a frame of 20,000 unless said, decode
 // and integration together unless said); that test holds the estimate over every measurement.
-// What each covers is what ygo's decode allocates (sjawhar/ygo v1.54.1-sami.3, decodeItem,
-// crdt/update.go:1057-1220; decodeContent, :1222-1364; decodeTypeContent, :1366-1431;
-// decodeDeleteSet, :1433-1477), and what integrating and encoding again for the room's observers
-// allocates (encodeItem, :461-588).
+// What each covers is what ygo's decode allocates (sjawhar/ygo v1.55.1-sami.1, decodeItem,
+// crdt/update.go:1154-1317; decodeContent, :1319-1462; decodeTypeContent, :1464-1520;
+// decodeDeleteSet, :1522-1579), and what integrating and encoding again for the room's observers
+// allocates (encodeItem, :441-559).
 const (
 	// applyHeapPerApply is the transaction, the decode's own state and the observers' encode of a
 	// small update: 2,336 bytes measured for the whole apply of a keystroke into the heaviest
@@ -138,8 +141,10 @@ const (
 	// (applyHeapPerRoomStruct), against 299 a client in a room of 20,000.
 	applyHeapPerRoomClient = 160
 	// applyHeapPerRoomStruct is each deleted item of the room, bounded by each struct the room
-	// holds, at every apply: 875,008 bytes measured for a keystroke into a string of 10,000
-	// deleted items among 10,000 live ones, 88 a deleted item.
+	// holds, at every apply: 875,008 bytes measured at sjawhar/ygo v1.54.1-sami.3, whose every
+	// transaction's update carried the room's whole delete set, for a keystroke into a string of
+	// 10,000 deleted items among 10,000 live ones, 88 a deleted item. The pin carries only the
+	// transaction's own deletions in that update (reearth/ygo#350), so the term is headroom.
 	applyHeapPerRoomStruct = 256
 	// applyHeapPerFrameByte is each byte of the frame: a string ygo copies out of it is one
 	// allocation of its bytes rounded up to a size class, at most twice them for a short one (a
@@ -164,8 +169,8 @@ const (
 	// its name.
 	applyHeapPerType = 192
 	// applyHeapPerNewStruct is a struct the update integrates: its place in the store and its
-	// parent, the splits of the items its origins fall inside (sjawhar/ygo v1.54.1-sami.3,
-	// crdt/update.go:928-933, crdt/item.go:82-105), and the observers' encode of it. 218 bytes
+	// parent, the splits of the items its origins fall inside (sjawhar/ygo v1.55.1-sami.1,
+	// crdt/update.go:976-981, crdt/item.go:83-114), and the observers' encode of it. 218 bytes
 	// measured for a GC struct, 327 for a one-character string naming both origins, 563 for one
 	// splitting the room's string at both, 526 for a margin entry of one null value.
 	applyHeapPerNewStruct = 384
@@ -271,7 +276,7 @@ func structApplyHeap(walked updateStruct) applyCost {
 
 // anyHeap is the applyCost of the lib0 Any values the walk counted in a struct's content, each
 // value at every depth with its arrays, its maps and those maps' entries, as anycodec's readAny
-// reads them (sjawhar/ygo v1.54.1-sami.3, internal/anycodec/decoder.go:261-393).
+// reads them (sjawhar/ygo v1.55.1-sami.1, internal/anycodec/decoder.go:261-393).
 func (s contentShape) anyHeap() applyCost {
 	return applyCost{
 		decode: s.anyValues*applyHeapPerAnyValue + s.anyArrays*applyHeapPerAnyArray +

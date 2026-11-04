@@ -129,7 +129,7 @@ const (
 // last character of the document's last text, a chain of usedUpChain one-character items, each of
 // a client of its own so none merges with its neighbour, and then items of one client each naming
 // the chain's first as its left origin and no right origin, so each scans the chain to its end
-// (Item.integrate, sjawhar/ygo v1.54.1-sami.3, crdt/item.go:116-202). The room the next load
+// (Item.integrate, sjawhar/ygo v1.55.1-sami.1, crdt/item.go:125-234). The room the next load
 // makes counts its scan total from that re-scan (servicePersistenceAdapter.LoadDoc), so it is
 // used up: typing in place goes on within usedUpScanBudget, a larger apply is refused
 // DOC_NEEDS_REBUILD, and a rebuild takes the document (nearACap). A real document reaches that
@@ -142,17 +142,27 @@ func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) 
 	if err != nil {
 		return err
 	}
-	// Each scanner passes the chain after its first item and stops at the scanner before it, of
-	// its own client and naming the same origins: about usedUpChain scans each.
-	scanners := roomScanTotal/usedUpChain + 2
+	// Each scanner is a client of its own, past the chain's, and sits between the chain's first
+	// item and one of its own: its left origin is the chain's first and its right origin the
+	// (usedUpChain-1-i)-th, so its integrate scans that stretch of the chain, about
+	// usedUpChain-i items (Item.integrate, crdt/item.go:125-234). They cannot share an anchor:
+	// two items naming the same left origin and the same right origin are symmetric, and ygo
+	// breaks at the first of them whichever order they arrive in (case 1, crdt/item.go:189-202),
+	// so scanners that all name the chain's first and no right origin scan one item each in a
+	// re-scan of the stored state, which integrates client groups by descending client.
+	scanners := 0
+	for ladder := 0; scanners < usedUpChain-1 && ladder < roomScanTotal; scanners++ {
+		ladder += usedUpChain - scanners
+	}
 	frame := encoding.NewEncoder()
-	frame.WriteVarUint(usedUpChain + 1) // client groups: the chain's, then the scanners'
+	frame.WriteVarUint(uint64(usedUpChain + scanners)) // client groups: the chain's, then the scanners'
 	writeChain(frame, origin, usedUpChain, usedUpChainClient)
-	frame.WriteVarUint(uint64(scanners))
-	frame.WriteVarUint(usedUpScanClient)
-	frame.WriteVarUint(0)
-	for range scanners {
-		writeOriginString(frame, crdt.ID{Client: usedUpChainClient, Clock: 0}, "k")
+	for i := range scanners {
+		frame.WriteVarUint(1) // structs in the group
+		frame.WriteVarUint(uint64(usedUpScanClient + i))
+		frame.WriteVarUint(0) // first clock
+		writeLadderString(frame, crdt.ID{Client: usedUpChainClient, Clock: 0},
+			crdt.ID{Client: crdt.ClientID(usedUpChainClient + usedUpChain - 1 - i), Clock: 0}, "k")
 	}
 	frame.WriteVarUint(0) // no delete set
 	if _, err := NewPgVersioned(s.store).AppendUpdate(ctx, artifactID, frame.Bytes()); err != nil {
@@ -178,7 +188,7 @@ func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) 
 // client ID is a random 32-bit number, so these collide with one no more often than any two
 // browsers' do, and all but about one in 30,000 of them are past the chain's, which is what makes
 // a browser's insert scan the chain rather than stop at its first item (Item.integrate, case 1,
-// sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179).
+// sjawhar/ygo v1.55.1-sami.1, crdt/item.go:189-202).
 const (
 	tangledChain       = 40_000
 	tangledChainClient = 100_000
@@ -191,7 +201,7 @@ const (
 // client of its own so none merges with its neighbour. An insert a browser made at that place
 // before the chain arrived - a paste at the end of that text, offline - names the same left origin
 // and no right origin, so its apply scans the chain to its end (Item.integrate, sjawhar/ygo
-// v1.54.1-sami.3, crdt/item.go:107-202): 40,000 items, past the 27,594 an update no rule weighs
+// v1.55.1-sami.1, crdt/item.go:116-234): 40,000 items, past the 27,594 an update no rule weighs
 // is allowed (scanCeiling(0)), so the room refuses it whole and the browser is closed 4413
 // DOC_TOO_TANGLED (documentTooTangled). Decoding the chain costs the room about one scan an item,
 // 40,001 of its 1,000,000-item scan total measured on this pod (the browser row of
@@ -260,11 +270,23 @@ func tangleProbe(origin crdt.ID) []byte {
 
 // writeOriginString writes one string item of content naming origin as its left origin and no
 // right origin, so its parent is its origin's and the wire does not name it (sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:1098-1118).
+// v1.55.1-sami.1, crdt/update.go:1195-1215).
 func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) {
 	frame.WriteUint8(byte(structString) | infoHasOrigin)
 	frame.WriteVarUint(uint64(origin.Client))
 	frame.WriteVarUint(origin.Clock)
+	frame.WriteVarString(content)
+}
+
+// writeLadderString writes one string item of content naming origin as its left origin and
+// rightOrigin as its right origin, the shape of an insert made between two items a document
+// holds: its integrate scans from the one to the other (Item.integrate).
+func writeLadderString(frame *encoding.Encoder, origin, rightOrigin crdt.ID, content string) {
+	frame.WriteUint8(byte(structString) | infoHasOrigin | infoHasRightOrigin)
+	frame.WriteVarUint(uint64(origin.Client))
+	frame.WriteVarUint(origin.Clock)
+	frame.WriteVarUint(uint64(rightOrigin.Client))
+	frame.WriteVarUint(rightOrigin.Clock)
 	frame.WriteVarString(content)
 }
 

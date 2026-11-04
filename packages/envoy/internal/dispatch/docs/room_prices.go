@@ -41,8 +41,8 @@ const bytesOfHeapAnElement = 500
 // past the largest. A mebibyte of prose holds 345.7 bytes for each of its 77,600 structs, which
 // carry its text, and is priced by its elements, 28,800,000 bytes a copy against 13,192,000 at
 // this price. A run of a million keystrokes typed one after another is no struct-dense document:
-// the decode of its state merges the run into one item (squashRuns, sjawhar/ygo v1.54.1-sami.3,
-// crdt/transaction.go:242-397), so a loaded copy holds 11 structs and 9 elements, priced at 4,500
+// the decode of its state merges the run into one item (squashRuns, sjawhar/ygo v1.55.1-sami.1,
+// crdt/transaction.go:275-430), so a loaded copy holds 11 structs and 9 elements, priced at 4,500
 // bytes, while both copies hold 20,410,464 bytes, about 10.2 bytes a character of the paragraph's
 // mebibyte of text in each copy: text in one paragraph is a cost neither this price nor the
 // element price follows, and the rendered-byte price does (bytesOfHeapARenderedByte). That test
@@ -54,8 +54,8 @@ const bytesOfHeapAStructHeld = 170
 // structs at bytesOfHeapAStructHeld or its rendered bytes at this, whichever is the most. Text in
 // long runs is what neither other price follows: ygo merges a run typed in one transaction into
 // one item as the transaction commits, and the decode of a state merges a run of keystrokes stored
-// each as an item of its own the same way (squashRuns, sjawhar/ygo v1.54.1-sami.3,
-// crdt/transaction.go:242-397), so a paragraph of a mebibyte loads as 11 structs making 9
+// each as an item of its own the same way (squashRuns, sjawhar/ygo v1.55.1-sami.1,
+// crdt/transaction.go:275-430), so a paragraph of a mebibyte loads as 11 structs making 9
 // elements, 4,500 bytes a copy at the element price, while each copy holds its text.
 //
 // Measured on 2026-10-28 (TestAResidentRoomsHeapPerStructOfItsState), what one copy of a resident
@@ -124,7 +124,7 @@ const bytesOfHeapAByteAtTheDensest = 1_126
 // XML text and the XML element, keyed or not - weighs 64 to 80 bytes more than it did under
 // sjawhar/ygo v1.51.3-sami.7, where the same frames read 354, 418, 498, 491 and 571: upstream
 // reearth/ygo#295 added cleanFormatting, fmtGen and attrCache to crdt.abstractType (sjawhar/ygo
-// v1.54.1-sami.3, crdt/abstract_type.go:105-110), which takes each of those allocations into the
+// v1.55.1-sami.1, crdt/abstract_type.go:105-115), which takes each of those allocations into the
 // next size class.
 // No kind that holds no shared type moved. The largest went from 570.7 to 634.7 bytes, past the
 // 620 this charged before.
@@ -139,9 +139,9 @@ const bytesOfHeapAStruct = 650
 // deletedRuns.splitEnds). A split allocates one item, and what it does with the content it divides
 // follows that content's kind rather than the kind of struct the split lands in: a string's text
 // and a deleted length are divided where they stand, the text as a slice of the bytes the item
-// already held (sjawhar/ygo v1.54.1-sami.3, crdt/content.go:52-70, :81-85, :114-120); a run of Any
+// already held (sjawhar/ygo v1.55.1-sami.1, crdt/content.go:56-74, :85-89, :118-124); a run of Any
 // or JSON values is divided into a slice of its own, sixteen bytes an interface header for each
-// value past the split (:170-174, :188-192), which the content price of the struct that carried
+// value past the split (:174-178, :192-196), which the content price of the struct that carried
 // the run covered when the hook admitted it, 120 bytes for each of its bytes against 16 for each
 // of its values (bytesOfHeapAByteOfValues). So a split is priced from the item, not from
 // bytesOfHeapAStruct, the heaviest kind's price. Measured on 2026-10-29 and read again unchanged

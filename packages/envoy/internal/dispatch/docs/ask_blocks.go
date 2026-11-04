@@ -155,19 +155,18 @@ func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
 	return changed
 }
 
-// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive) and
-// reports whether any changed it.
-func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
-	_, repaired, err := rewriteLive(doc, origin, r.repairLive)
-	return repaired, err
+// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive).
+func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) error {
+	_, err := rewriteLive(doc, origin, r.repairLive)
+	return err
 }
 
 // addedStructs bounds the structs the reconciliation's repairs add to the document they are
 // written into (writeLive), and reports whether any bound holds. Each repair sets attributes on
 // the one block it lands on (repairLive), at most askRepair.attributes of them, and pmdoc.Update
 // writes each attribute it sets as one map item whose origin is the attribute's last item, whole,
-// so it splits nothing (pmdoc's updateElement; crdt/yxml.go:510-525 in sjawhar/ygo
-// v1.54.1-sami.3), and each it deletes as a deletion of that item, which adds no struct; it writes
+// so it splits nothing (pmdoc's updateElement; crdt/yxml.go:504-519 in sjawhar/ygo
+// v1.55.1-sami.1), and each it deletes as a deletion of that item, which adds no struct; it writes
 // nothing of the rest of the tree, read in the same transaction and handed back as it was
 // (pmdoc's updateChildren). An answer is one of those attributes: its text is the value of one
 // item, however long. A repair that rewrites a block's wording (decidedWording) can write any

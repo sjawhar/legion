@@ -11,9 +11,9 @@ import (
 
 // jsonReencodeGrowth is the most a byte of JSON content can grow to once ygo writes it into the
 // room's state again. ygo keeps a JSON item's, a format's and an embed's values decoded and encodes
-// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:488-500 and :1563-1574). A JSON item whose values read only as lib0 Any, as ygo
-// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1231-1263), grows the most: each false,
+// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.55.1-sami.1,
+// crdt/update.go:468-480 and :1669-1680). A JSON item whose values read only as lib0 Any, as ygo
+// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1328-1360), grows the most: each false,
 // one byte, is written as the five of false with its length prefix, six bytes a byte. A JSON text
 // grows less: encoding/json writes a number below 10^21 in full, so the four bytes of 1e20, five
 // with their length prefix, become the twenty-one of 100000000000000000000, twenty-two with
@@ -83,9 +83,9 @@ type peerWeighing struct {
 // maxUpdateItems (groupVisitor), so it answers whatever the walk read before a refusal. That is
 // what a browser holding a history at the decode cap needs: its whole-state message, the history
 // with an edit made since, is past the cap, and the walk refuses it at the header of the group
-// that passes it; when the browser's own client sorts before the history's (ygo writes groups by
-// ascending client, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:386; Yjs by descending, yjs 13.6.32
-// src/utils/encoding.js:99), and a history one client wrote is one group, no struct of the history
+// that passes it; when the browser's own client sorts before the history's (ygo and Yjs both
+// write groups by descending client, sjawhar/ygo v1.55.1-sami.1, crdt/update.go:386-387; yjs
+// 13.6.32 src/utils/encoding.js:99), and a history one client wrote is one group, no struct of the history
 // is read before that refusal, and only the header shows it. Every rule the walk refuses a
 // history's handoff by - its count, its content, its delete set - comes at that header or after
 // it: the groups before it are the browser's own clients', carrying only what its editor wrote
@@ -100,8 +100,8 @@ type peerWeighing struct {
 // builds its document afresh on a new connection, a new Y.Doc with a client id of its own
 // (packages/dispatch/web/src/features/doc/connection.ts:153, :222-231), so what it writes next is
 // no retired client's. And no encoder begins a client group with anything but a struct it holds of
-// that client: ygo starts each group inside its first item (encodeV1Locked, crdt/update.go:366-406;
-// encodeStructStoreV1, crdt/merge.go:155-193, which writes a skip only between two items), and Yjs
+// that client: ygo starts each group inside its first item (encodeV1Locked, crdt/update.go:365-405;
+// encodeStructStoreV1, crdt/merge.go:157-195, which writes a skip only between two items), and Yjs
 // at the first struct of its store, which holds no skips (writeStructs, src/utils/encoding.js:57-71),
 // at the first struct of a merge, whose readers drop skips (mergeUpdatesV2, src/utils/updates.js:338,
 // writing a skip only between two structs of one client, :405-417), and never with a skip in a
@@ -189,9 +189,9 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 // splitsAStructCanCause is the most structs integrating one struct can add to a store beyond
 // itself, and the most applying one delete range can: each splits at most the item it starts in
 // and the item it ends in (an item's integrate splits the items holding its origin and its right
-// origin, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:928-935 and crdt/item.go:98-110, through
-// crdt/store.go:136-185; a delete range splits the items at its two ends,
-// crdt/delete_set.go:199-201).
+// origin, sjawhar/ygo v1.55.1-sami.1, crdt/update.go:976-981 and crdt/item.go:99-119, through
+// crdt/store.go:213-263; a delete range splits the items at its two ends,
+// crdt/delete_set.go:276-278).
 const splitsAStructCanCause = 2
 
 // added is what the walked update can add to the room's struct total: each new struct with the
@@ -282,8 +282,8 @@ func unrenderedBytes(walked updateStruct) uint64 {
 }
 
 // frameBytes is what walked, a struct past the room's state, can add to the room's frame total:
-// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:94-98 and :236-258, and encodeItem, :461-588), now and through whatever happens
+// to the whole-state frame (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.55.1-sami.1,
+// crdt/update.go:94-98 and :235-257, and encodeItem, :441-559), now and through whatever happens
 // to it later -
 //
 //   - its own bytes in the update (updateStruct.size), with what ygo's writing of its content
@@ -293,8 +293,9 @@ func unrenderedBytes(walked updateStruct) uint64 {
 //     a tag and a five-byte varint, and write it as a nine-byte float64 (writeAnyInt,
 //     encoding/encoder.go:283-299; internal/anycodec/decoder.go:276-284): half as much again.
 //     ygo writes every other content as it read it, and names a struct's origins and parent as
-//     the update did, or drops an origin it holds as a GC run for a parent named in no more bytes
-//     (encodeItem, dropGCOrigins at crdt/update.go:429-444, and :555-580);
+//     the update did, or writes an item it holds as a GC orphan - one whose parent could not be
+//     resolved (markGCOrphan, crdt/update.go:413-438) - in fewer bytes still (encodeItem,
+//     :458-466, and :533-551);
 //   - its place among the room's structs (placeBytes);
 //   - its deletion, by its own delete range or by whatever deletes it later - a block deleted
 //     around it, an entry written over it, a parent deleted before it arrives (deleteRangeBytes);
@@ -328,9 +329,9 @@ func frameBytes(walked updateStruct) uint64 {
 // (deletedRuns.splitEnds). The items it deletes are already priced for their deletion: by the
 // count (deletionReserve) or by the update that brought them (frameBytes). A range the room is
 // known to hold deleted adds nothing to the frame: ygo's encode writes the room's delete set from
-// its deleted items, merged where their clocks touch (buildDeleteSet, sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:665-678), and the room's parked ranges merged the same way (DeleteSet.Merge,
-// crdt/delete_set.go:66-83), so the clocks it names are written as they were, and it leaves no
+// its deleted items, merged where their clocks touch (buildDeleteSet, sjawhar/ygo v1.55.1-sami.1,
+// crdt/update.go:659-678), and the room's parked ranges merged the same way (DeleteSet.Merge,
+// crdt/delete_set.go:125-142), so the clocks it names are written as they were, and it leaves no
 // split.
 func deleteFrameBytes(client, clock, length, splits uint64) uint64 {
 	return deleteRangeBytes(client, clock, length) + splits*splitFrameBytes
@@ -338,7 +339,7 @@ func deleteFrameBytes(client, clock, length, splits uint64) uint64 {
 
 // maxVarintBytes is the most bytes a lib0 varint takes for any client or clock a room holds: the
 // walk refuses a varint past 53 bits from a browser (update_walk.go), a server write's client is 32
-// bits (crdt.NewClientID, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:419-426) and its clocks count
+// bits (crdt.NewClientID, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:481-488) and its clocks count
 // its own structs, and 53 bits take eight bytes of seven.
 const maxVarintBytes = 8
 
@@ -355,18 +356,18 @@ func varintBytes(v uint64) uint64 {
 // group of its own, should the room hold nothing of its client - the group's struct count, client
 // and first clock, and a byte more of the count of groups - or, should it park beyond a gap in its
 // client's clocks, the skip ygo writes before it, a byte and the gap's length, no more than its
-// clock (encodeStructStoreV1, sjawhar/ygo v1.54.1-sami.3, crdt/merge.go:155-193), with a byte more
+// clock (encodeStructStoreV1, sjawhar/ygo v1.55.1-sami.1, crdt/merge.go:157-195), with a byte more
 // of its group's struct count.
 func placeBytes(walked updateStruct) uint64 {
 	return 2 + varintBytes(walked.client) + varintBytes(walked.clock)
 }
 
 // deleteRangeBytes is the most deleting the clocks [clock, clock+length) of client adds to the
-// room's delete set as ygo writes it (encodeDeleteSet, sjawhar/ygo v1.54.1-sami.3,
+// room's delete set as ygo writes it (encodeDeleteSet, sjawhar/ygo v1.55.1-sami.1,
 // crdt/update.go:680-698): the range's clock and length, and should the delete set hold no range
 // of client, its client and a byte of its count of ranges; and a byte more of a count, of ranges
 // or of clients. A range that touches one the delete set holds is merged with it (buildDeleteSet,
-// :665-678) and adds less.
+// :659-678) and adds less.
 func deleteRangeBytes(client, clock, length uint64) uint64 {
 	return 2 + varintBytes(client) + varintBytes(clock) + varintBytes(length)
 }
@@ -376,7 +377,7 @@ func deleteRangeBytes(client, clock, length uint64) uint64 {
 const maxDeleteRangeBytes = 2 + 3*maxVarintBytes
 
 // splitFrameBytes is the most one split of an item the room holds can add to the room's frame
-// total (splitItem, sjawhar/ygo v1.54.1-sami.3, crdt/item.go:538). The right part becomes an item
+// total (splitItem, sjawhar/ygo v1.55.1-sami.1, crdt/item.go:588). The right part becomes an item
 // of its own, written with an info byte, its origin - the left part's last clock - and the item's
 // right origin, each a client and a clock, and its content's length (a string's bytes, a run's
 // values or clocks), whose bytes are the item's own, moved and not added; an item with an origin
@@ -389,7 +390,7 @@ const splitFrameBytes = 2 + 5*maxVarintBytes + maxDeleteRangeBytes + maxVarintBy
 // deletionReserve is the most deleting walked, a struct of the room's encoded state, can add to
 // the room's frame: the range it adds to the delete set (deleteRangeBytes), less what ygo gives
 // back of its content, which it writes as a deleted run's length once the item is deleted
-// (gcTxnDeleteSet, sjawhar/ygo v1.54.1-sami.3, crdt/snapshot.go:362-393, in every room, whose
+// (gcTxnDeleteSet, sjawhar/ygo v1.55.1-sami.1, crdt/snapshot.go:370-407, in every room, whose
 // documents keep ygo's GC on). A GC run, a deleted run and a skip are deleted already.
 func deletionReserve(walked updateStruct) uint64 {
 	switch walked.kind {

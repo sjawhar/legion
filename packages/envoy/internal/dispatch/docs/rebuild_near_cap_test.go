@@ -44,7 +44,7 @@ var atCapStates struct {
 // merge into one item, in the room or in a decode of its state.
 //
 // ygo anchors a text insert after the deleted items next to its left neighbour
-// (skipDeletedForTextAnchor, sjawhar/ygo v1.54.1-sami.3, crdt/ytext.go:766-809), and the
+// (skipDeletedForTextAnchor, sjawhar/ygo v1.55.1-sami.1, crdt/ytext.go:711-754), and the
 // fixture's first paragraph opens with deleted characters, so each of the more than half a million
 // inserts at its very head walked past all of them: 1,240 s of the 1,426 s the long-edited case of
 // TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame took on 2026-10-28, against
@@ -139,7 +139,7 @@ const agentRewritesEnv = "DISPATCH_REBUILD_AGENT_REWRITES"
 // The write is one that adds, not one that trims: a write trimming the long-edited document's
 // last line lands on it at the cap, since a delete range splits an item only where one of its
 // ends falls inside that item, so a range covering whole items splits none of them and adds no
-// struct (sjawhar/ygo v1.54.1-sami.3, crdt/yarray.go:826-843), and the document stays at the cap
+// struct (sjawhar/ygo v1.55.1-sami.1, crdt/yarray.go:829-846), and the document stays at the cap
 // it was already at, as logPastDecodeCap's comment allows for. What no document at the cap takes
 // is a write that adds a struct, and that is what a rebuild has to make room for.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
@@ -409,11 +409,12 @@ func TestARebuildNearACapClosesTheResidentRoomAndItsEditorsReAdmitTheRebuiltDocu
 	}
 }
 
-// tangledHistory is a document's history whose re-scan passes near roomScanTotal: its first
+// tangledHistory is a document's history whose re-scan comes to about scans items: its first
 // paragraph followed by chain one-character items, each of a client of its own so none merges
-// with its neighbour, and then scanners items each naming the chain's first as its left origin and
-// no right origin, so each scans the chain to its end, about chain items each.
-func tangledHistory(t *testing.T, chain, scanners int) []byte {
+// with its neighbour, and then a ladder of scanner items, each of a client of its own, each
+// sitting between the chain's first item and a chain item of its own, so each scans a stretch of
+// the chain (the ladder below).
+func tangledHistory(t *testing.T, chain, scans int) []byte {
 	t.Helper()
 	tree, err := pmdoc.Parse("# Tangled\n\nOne paragraph of ordinary prose.\n")
 	if err != nil {
@@ -448,9 +449,26 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 		chained = chained.group(1, client, 0).raw(byte(structString) | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("a")
 		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
 	}
-	scanning := newV1Frame(1).group(scanners, scanClient, 0)
-	for range scanners {
-		scanning = scanning.raw(byte(structString) | infoHasOrigin).uint(firstClient).uint(0).str("k")
+	// Each scanner is a client of its own, past the chain's, and sits between the chain's first
+	// item and one of its own: its left origin is the chain's first and its right origin the
+	// (chain-1-i)-th, so its integrate scans the chain from the first to that one (Item.integrate),
+	// about chain-i items. They cannot share an anchor: two items naming the same left origin and
+	// the same right origin are symmetric, and ygo's integrate breaks at the first of them
+	// whichever order they arrive in, so scanners that all name the chain's first and no right
+	// origin - as this fixture once wrote them - scan one item each in a re-scan of the room's
+	// state, which integrates client groups by descending client. The ladder reaches scans in
+	// total, or as near it as a chain of this length allows.
+	count, ladder := 0, 0
+	for count < chain-1 && ladder < scans {
+		ladder += chain - count
+		count++
+	}
+	scanning := newV1Frame(count)
+	for i := range count {
+		rightOrigin := uint64(firstClient + chain - 1 - i)
+		scanning = scanning.group(1, uint64(scanClient+i), 0).
+			raw(byte(structString) | infoHasOrigin | infoHasRightOrigin).
+			uint(firstClient).uint(0).uint(rightOrigin).uint(0).str("k")
 	}
 	for _, update := range [][]byte{chained.noDeletes(), scanning.noDeletes()} {
 		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
@@ -466,7 +484,7 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 // handoff (rescan, a count of the re-scan's transaction) and reads the same text. The
 // tangle's scanners, about 2,000 scans each, are enough to pass the total less one handoff.
 func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
-	state := tangledHistory(t, 2_000, (roomScanTotal-honestHandoffScans)/2_000+2)
+	state := tangledHistory(t, 2_000, roomScanTotal-honestHandoffScans)
 	history := decodedHistory(t, state)
 	scans, err := rescan(crdt.EncodeStateAsUpdateV1(history, nil))
 	if err != nil {
@@ -612,9 +630,11 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 }
 
 // oneClientWriter is the client that writes the whole of oneClientAtCapState's history, numbered
-// above the browser
+// below the browser
 // TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt
-// connects with, so ygo writes the browser's own group before the history's.
+// connects with: ygo and Yjs both write a state's client groups by descending client
+// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:386-387), so the browser's own group comes before
+// the history's.
 const oneClientWriter crdt.ClientID = 0x0ce1
 
 // oneClientAtCapState is a document's history one client wrote, standing at the decode cap: a
@@ -671,8 +691,8 @@ func oneClientAtCapState(t *testing.T) []byte {
 // browser hands back - its own unsent edits, then the history - is refused by the walk at the
 // history's header, the group that passes the cap, with no struct of the history read. The walk's
 // refusal is a plain error rather than a *websocket.PeerClose, which ygo answers SyncStatus(0)
-// and then closes with 4205 "Reset Connection" (sjawhar/ygo v1.54.1-sami.3,
-// provider/websocket/peer_update.go:139-151, provider/websocket/peer.go:266-283, over the
+// and then closes with 4205 "Reset Connection" (sjawhar/ygo v1.55.1-sami.1,
+// provider/websocket/peer_update.go:142-154, provider/websocket/peer.go:271-290, over the
 // Hocuspocus framing New sets); 4205 is what @hocuspocus/provider 2.x reconnects at once after,
 // so the browser would hand the same message back on every reconnect while each later edit of it,
 // naming the old history's items, parked. The room closes it with the document's own close and
@@ -689,7 +709,7 @@ func oneClientAtCapState(t *testing.T) []byte {
 // (TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip).
 func TestABrowserHoldingAHistoryARebuildReplacedIsClosedThoughTheWalkRefusesItBeforeReadingAnyOfIt(t *testing.T) {
 	skipAtTheBoundsUnderRace(t)
-	const browserClient crdt.ClientID = 1
+	const browserClient crdt.ClientID = 0x0ce2
 	state := oneClientAtCapState(t)
 	service, artifactID := newTestService(t)
 	storeHistory(t, service, artifactID, state)

@@ -192,8 +192,8 @@ func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
 // A transaction may reuse the rendering it cached only while the fork it was taken from still
 // describes the document, and the only thing that can say so is the fork itself, read on either
 // side of the one update it absorbs. Two reads of the room are two snapshots - websocket
-// Server.Apply holds no lock across its callback (sjawhar/ygo v1.54.1-sami.3,
-// provider/websocket/inject.go:303) - so a browser update landing between them is in one and not
+// Server.Apply holds no lock across its callback (sjawhar/ygo v1.55.1-sami.1,
+// provider/websocket/inject.go:308) - so a browser update landing between them is in one and not
 // the other, and a signal built from that pair concludes the room held while handing the fork the
 // very update it missed. The version is then written from a document that no longer exists.
 //

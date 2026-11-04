@@ -33,7 +33,7 @@ var (
 
 // The hook is driven here at its own level, as ygo drives it: the room's document, the update's
 // bytes, and an apply that applies the update to that document exactly as the room's own does
-// (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:84-89). What a real browser meets
+// (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:84-98). What a real browser meets
 // over a real socket is the real-process drive; what these rows pin is the rule itself.
 func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	atTheBound := proseAtLeast(pmdoc.MaxDocumentBytes)
@@ -364,7 +364,7 @@ func peerDocument(t *testing.T, room *crdt.Doc) (*crdt.Doc, *crdt.YXmlText) {
 }
 
 // firstText is the first text in node's document order, however deep it is nested. ygo's own node
-// interface is unexported (sjawhar/ygo v1.54.1-sami.3, crdt/yxml.go:16), so the walk takes each
+// interface is unexported (sjawhar/ygo v1.55.1-sami.1, crdt/yxml.go:16), so the walk takes each
 // child as it comes.
 func firstText(node any) *crdt.YXmlText {
 	var children []any
@@ -786,7 +786,7 @@ func BenchmarkPeerUpdateInsertMeasures(b *testing.B) {
 }
 
 // weighInto hands update to the hook for room, with an apply that applies it to room as ygo's own
-// does (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer_update.go:109-124), and reports what
+// does (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer_update.go:112-127), and reports what
 // the hook answered and whether it called the apply.
 func weighInto(service *Service, room *crdt.Doc, update []byte) (err error, called bool) {
 	err = service.weighPeerUpdate(websocket.PeerUpdateInfo{Room: "room", Doc: room, Update: update}, func() error {
@@ -849,26 +849,26 @@ func deleteRangesFrom(client uint64, n int) []byte {
 
 // An update the walk refuses is never applied: the hook refuses it with 4413
 // DOC_UPDATE_REFUSED, the walk's own error behind the close (documentUpdateRefused, refusedWith),
-// with which ygo closes that browser and relays nothing, and the room is as it was. ygo
-// integrates each struct as it decodes it (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:810-935):
-// on a document with no scan bound or budget, a frame of valid structs ending in one bad byte
-// leaves those structs in it, and a room's bounded document takes them back out only after it has
-// decoded and integrated every one (crdt/apply_rollback.go:9-21), the work the walk keeps off the
-// peer's read loop.
+// with which ygo closes that browser and relays nothing, and the room is as it was. ygo decodes
+// and integrates each struct of a frame before it finds a bad byte, and takes back what it
+// integrated when it refuses (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:822-996,
+// crdt/apply_rollback.go:10-36, reearth/ygo#340), so a frame of valid structs ending in one bad
+// byte leaves no document holding them - at the cost of that decode and that rollback, the work
+// the walk keeps off the peer's read loop.
 func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 	for _, row := range []struct {
 		name   string
 		update []byte
 		rule   error
-		// halfApplies is whether ygo's own apply into an unbounded copy of the room leaves part of
-		// the update in it before it fails: structs ygo integrated before it found the frame bad.
-		halfApplies bool
+		// ygoRefuses is whether ygo's own apply into an unbounded copy of the room refuses the
+		// update, which the pin leaves holding none of it (reearth/ygo#340).
+		ygoRefuses bool
 	}{
 		{
-			name:        "valid GC structs and then one bad byte",
-			update:      newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done(),
-			rule:        errUpdateUndecodable,
-			halfApplies: true,
+			name:       "valid GC structs and then one bad byte",
+			update:     newV1Frame(1).group(4, 7, 0).gc(2).gc(2).gc(2).raw(0xff).done(),
+			rule:       errUpdateUndecodable,
+			ygoRefuses: true,
 		},
 		{
 			name:   "a subdocument",
@@ -883,13 +883,13 @@ func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
-			if row.halfApplies {
+			if row.ygoRefuses {
 				copied, err := snapshotDocument(room)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := crdt.ApplyUpdateV1(copied, row.update, nil); err == nil || copied.StateVector()[7] == 0 {
-					t.Fatalf("ygo's own apply answered %v and left client 7 at clock %d, want it to fail having integrated structs", err, copied.StateVector()[7])
+				if err := crdt.ApplyUpdateV1(copied, row.update, nil); err == nil || copied.StateVector()[7] != 0 {
+					t.Fatalf("ygo's own apply answered %v and left client 7 at clock %d, want it refused with the copy unchanged", err, copied.StateVector()[7])
 				}
 			}
 			held := room.StateVector()
@@ -913,8 +913,8 @@ func TestAPeerUpdateTheWalkRefusesIsNeverApplied(t *testing.T) {
 
 // Every refusal the hook makes carries a code and a reason of Dispatch's own. ygo closes a peer
 // whose update the hook refused before the apply ran with 4205 "Reset Connection" for any error
-// that is no *websocket.PeerClose (sjawhar/ygo v1.54.1-sami.3,
-// provider/websocket/peer_update.go:38-52, :139-151), and @hocuspocus/provider 2.x reconnects at
+// that is no *websocket.PeerClose (sjawhar/ygo v1.55.1-sami.1,
+// provider/websocket/peer_update.go:38-52, :142-154), and @hocuspocus/provider 2.x reconnects at
 // once after 4205 and sends the refused frame again, which the same rule refuses again: a loop,
 // each round a whole sync. 4413 is the band the editor reads as permanent, so it drops the
 // refused edit and re-reads the document, and 4503 the transient one it keeps the edit for. The
@@ -1410,11 +1410,11 @@ func bornDeletedIn(t *testing.T, update []byte) int {
 
 // A browser's GC run over clocks the room holds live deletes none of them, and the room lists none
 // of them as deleted: ygo integrates a struct from the first clock the room does not hold
-// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:82-90), so the run's clocks stay live, and what the
+// (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:83-91), so the run's clocks stay live, and what the
 // room lists it reads from the delete set ygo writes into the update of its own transaction
 // (deletedRuns.list). Listed from the browser's bytes, as the room once listed them, one 22-byte
 // frame - a GC struct over every clock the room holds of each of its clients, and one of a client
-// it holds nothing of so that the frame integrates a struct born deleted - took the room's whole
+// it holds nothing of so that the frame delivers a struct born deleted - took the room's whole
 // document off the books: every later delete range over the text was covered (covers) and left no
 // end split (splitEnds), so the struct total, the structure part and the frame total each charged
 // it nothing until the measurer's next count. Here the honest delete of every other character of a
@@ -1462,8 +1462,17 @@ func TestAGCRunOverHeldClocksLeavesLaterDeletesCharged(t *testing.T) {
 	if charge.deletes().covers(uint64(first.Client), first.Clock, uint64(text.Len())) {
 		t.Errorf("the room lists the %d characters of its text from clock %d deleted, want it to list only what it holds deleted", text.Len(), first.Clock)
 	}
-	if !charge.deletes().covers(gcForgeryClient, 0, 1) {
-		t.Error("the room lists none of the clock the frame's GC run did delete, want the clocks the room integrated deleted listed")
+	// The clock the frame's GC struct delivered is one ygo holds deleted and no commit's delete
+	// set names: ygo appends such a struct to the store already deleted without integrating it
+	// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1161-1174 and :938-949), and a commit's update
+	// carries that transaction's deletions alone (reearth/ygo#350). The room lists it only once a
+	// load seeds the room's delete set (deletedRuns.seed), so a later delete of it is weighed
+	// against a list that does not hold it, which over-charges and never under-charges.
+	if ranges := crdt.DeleteSetFromDoc(room).Ranges(gcForgeryClient); len(ranges) == 0 {
+		t.Error("ygo holds none of the clock the frame's GC run delivered deleted, want it in the room's own delete set")
+	}
+	if charge.deletes().covers(uint64(gcForgeryClient), 0, 1) {
+		t.Error("the room lists a GC struct's clock, which no commit of its own deleted, want it to list only what its commits deleted")
 	}
 	after := weighHonest()
 	if after.deletes != before.deletes || after.added() != before.added() || after.splits != before.splits ||
@@ -1490,9 +1499,10 @@ func peerDeletingEveryOtherCharacter(t *testing.T, room *crdt.Doc) []byte {
 
 // gcRunOverHeldClocks is the forged frame: one GC struct over every clock the room holds of each of
 // its clients, which ygo integrates nothing of, and one GC struct of a client the room holds
-// nothing of (gcForgeryClient), which it integrates as a struct born deleted. Its groups are
-// written by ascending client, as ygo writes them (sjawhar/ygo v1.54.1-sami.3,
-// crdt/update.go:386).
+// nothing of (gcForgeryClient), which it appends as a struct born deleted. Its groups are
+// written by ascending client, which the decode reads in the order they are written, whatever
+// order ygo would write them in (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:386-387 writes a
+// state's groups by descending client).
 func gcRunOverHeldClocks(room *crdt.Doc) []byte {
 	held := room.StateVector()
 	frame := newV1Frame(len(held) + 1)
@@ -1502,19 +1512,21 @@ func gcRunOverHeldClocks(room *crdt.Doc) []byte {
 	return frame.group(1, gcForgeryClient, 0).gc(1).noDeletes()
 }
 
-// A GC run a browser's update integrates is one ygo holds deleted - ygo decodes a GC struct as an
-// item marked deleted (sjawhar/ygo v1.54.1-sami.3, crdt/update.go:447-456) - so its clocks are in
-// the delete set ygo writes into the update of the room's own transaction, and the room lists them
+// What the room lists is what its own commits deleted. A deleted item a browser's update
+// integrates is one of them: ygo decodes it as an item carrying ContentDeleted
+// (sjawhar/ygo v1.55.1-sami.1, crdt/update.go:1280-1288) and marks it deleted as it integrates
+// it, as Yjs does (crdt/item.go:298-306 and :453-455), so its range is in that transaction's
+// delete set, which is what the commit's update carries (reearth/ygo#350), and the room lists it
 // once its update observer drains that commit (roomCharge.applied, deletedRuns.list): a later
-// delete range over them is charged nothing. A deleted item is not one ygo holds deleted: ygo
-// decodes one as an item carrying ContentDeleted whose Deleted stays false
-// (crdt/update.go:1183-1191, decodeContent :1222-1229) and never marks it deleted as it integrates
-// (crdt/item.go:81-420), so buildDeleteSet, which lists item.Deleted alone (crdt/update.go:665-672),
-// holds no range of it and the room lists none of its clocks - though the walk reads it as a
-// struct born deleted, since ygo writes it back under the deleted reference (encodeItem,
-// crdt/update.go:488-491). The hook lists nothing of a browser's update itself, since a browser's
-// bytes say which clocks the browser holds deleted, not which the room does.
-func TestTheClocksAnAdmittedGCRunDeletesAreListedFromTheRoomsDeleteSet(t *testing.T) {
+// delete range over those clocks is charged nothing. A GC run is the exception: ygo decodes a GC
+// struct as an item already marked deleted and appends it to the store without integrating it
+// (crdt/update.go:1161-1174 and :938-949), so no transaction's delete set names it, the room's
+// own delete set holds it (buildDeleteSet lists item.Deleted alone, crdt/update.go:659-678), and
+// the room lists it only once a load seeds that set (deletedRuns.seed). A later delete over those
+// clocks is weighed against a list that does not hold them, which over-charges and never
+// under-charges. The hook lists nothing of a browser's update itself, since a browser's bytes say
+// which clocks the browser holds deleted, not which the room does.
+func TestAnAdmittedDeletedItemIsListedAndAnAdmittedGCRunIsNot(t *testing.T) {
 	const (
 		bornClient = 1<<40 + 7
 		bornRun    = 3
@@ -1539,25 +1551,37 @@ func TestTheClocksAnAdmittedGCRunDeletesAreListedFromTheRoomsDeleteSet(t *testin
 	}
 
 	admit("a GC run", newV1Frame(1).group(1, bornClient, 0).gc(bornRun).noDeletes())
-	if !charge.deletes().covers(bornClient, 0, bornRun) {
-		t.Fatalf("the room lists none of the %d clocks its apply of a GC run deleted, want them listed once its drain handed the commit over", bornRun)
+	if ranges := crdt.DeleteSetFromDoc(room).Ranges(crdt.ClientID(bornClient)); len(ranges) == 0 {
+		t.Fatal("ygo holds none of the GC run's clocks deleted, want the struct it appended already deleted")
 	}
-	again := newV1Frame(0).uint(1).uint(bornClient).uint(1).uint(0).uint(bornRun).done()
+	if charge.deletes().covers(bornClient, 0, bornRun) {
+		t.Fatalf("the room lists the %d clocks of a GC run no commit of its own deleted, want it to list only its commits' deletions", bornRun)
+	}
+	gcAgain := newV1Frame(0).uint(1).uint(bornClient).uint(1).uint(0).uint(bornRun).done()
+	overCharged := peerWeighing{held: room.StateVector(), known: charge.deletes()}
+	if _, err := walkUpdate(gcAgain, fromPeer, &overCharged); err != nil {
+		t.Fatal(err)
+	}
+	if overCharged.added() == 0 || overCharged.frame == 0 {
+		t.Fatalf("a delete range over a GC run's clocks weighs %d structs and %d frame bytes, want the room to over-charge what its list does not hold",
+			overCharged.added(), overCharged.frame)
+	}
+
+	admit("a deleted item", rootedDeletedItem(itemClient, itemRun))
+	if ranges := crdt.DeleteSetFromDoc(room).Ranges(crdt.ClientID(itemClient)); len(ranges) == 0 {
+		t.Fatal("ygo holds none of the deleted item's clocks deleted, want the item its integrate marked deleted")
+	}
+	if !charge.deletes().covers(itemClient, 0, itemRun) {
+		t.Fatalf("the room lists none of the %d clocks its commit deleted, want them listed once its drain handed the commit over", itemRun)
+	}
+	itemAgain := newV1Frame(0).uint(1).uint(itemClient).uint(1).uint(0).uint(itemRun).done()
 	repeat := peerWeighing{held: room.StateVector(), known: charge.deletes()}
-	if _, err := walkUpdate(again, fromPeer, &repeat); err != nil {
+	if _, err := walkUpdate(itemAgain, fromPeer, &repeat); err != nil {
 		t.Fatal(err)
 	}
 	if repeat.added() != 0 || repeat.splits != 0 || repeat.frame != 0 || repeat.structureHeap() != 0 {
 		t.Fatalf("a delete range over clocks the room holds deleted weighs %d structs, %d splits, %d frame bytes and %d structure bytes, want nothing of each",
 			repeat.added(), repeat.splits, repeat.frame, repeat.structureHeap())
-	}
-
-	admit("a deleted item", rootedDeletedItem(itemClient, itemRun))
-	if ranges := crdt.DeleteSetFromDoc(room).Ranges(crdt.ClientID(itemClient)); len(ranges) != 0 {
-		t.Fatalf("ygo holds %v of the deleted item deleted, want an item it holds live", ranges)
-	}
-	if charge.deletes().covers(itemClient, 0, 1) {
-		t.Fatalf("the room lists clocks of a deleted item ygo holds live, want it to list only what ygo holds deleted")
 	}
 }
 
@@ -1836,8 +1860,9 @@ func chainedCharacters(n int) []byte {
 // three runs, each into a fresh document from into: an upper bound on the heap the apply adds at
 // its peak, since no byte it holds can be one it did not allocate. The document has an update
 // observer, as every room does (ygo's own, and the room's, onLoadDocument), so the apply
-// encodes the update its transaction made for the observers (sjawhar/ygo v1.54.1-sami.3,
-// crdt/doc.go:616-620) as a room's does. Two collections before each run empty the pool ygo's
+// encodes the update its transaction made for the observers (sjawhar/ygo v1.55.1-sami.1,
+// collectAndEncodeLocked, crdt/doc.go:844-873) as a room's does. Two collections before each run
+// empty the pool ygo's
 // encoders come from (encoding/pool.go:17-19), whose primary and victim caches each survive one,
 // so the encode grows its buffer from nothing, as it does in a pod whose pool a collection emptied.
 // scanRefused is whether the apply is to be refused by the document's scan budget

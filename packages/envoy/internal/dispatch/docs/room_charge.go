@@ -44,7 +44,7 @@ const earlyCountCharge = 16 << 20
 // prices the struct total of the whole state once its structs outweigh its elements (copyHeap),
 // which every struct the structure part charged is part of. The structure part over-charges what
 // merges back too: ygo squashes a run of typed characters into one item and re-merges a split
-// nothing came between (sjawhar/ygo v1.54.1-sami.3, crdt/transaction.go:26-31), while each struct
+// nothing came between (sjawhar/ygo v1.55.1-sami.1, crdt/transaction.go:39-44), while each struct
 // is charged as one of its own with both its splits; and it charges every struct at the heaviest
 // kind's price, rendered or not, so a rendered struct is charged here beside its count's price of
 // the elements it makes. What deletes leave behind - tombstones a rendering does not show - is
@@ -107,15 +107,17 @@ func (c *roomCharge) adds(content int64) {
 // committed, which the room's update observer hands over (renderedReplica.chargeAdded): its
 // content a rendering can show to the uncounted part, as contentAdded counts it, its structure
 // having been charged by the hook that admitted it (grew). From the same walk it lists the
-// update's delete set as the room's (deletedRuns.list): ygo writes the room's whole delete set
-// into the update of every transaction (buildDeleteSet and encodeV1Locked, sjawhar/ygo
-// v1.54.1-sami.3, crdt/update.go:665-678 and :387), so what the apply of the browser's update
-// actually deleted is in it, which is the room's own answer for what the browser's bytes only
-// claimed: a browser's GC run over clocks the room holds live deletes none of them, and a deleted
-// item of its own ygo holds live (deletedRuns). The structs of the update are not read into the
-// list at all, since a struct the walk reads as born deleted is not always one ygo holds deleted
-// (deletedRuns). A range the list holds already costs a read of it and no more, so a keystroke
-// into a room of thousands of deleted runs, whose update carries every one of them, pays the walk
+// update's delete set as the room's (deletedRuns.list): ygo writes the transaction's own
+// deletions into the update of every commit (cloneDeleteSet(txn.deleteSet) in
+// collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:861, written by
+// encodeV1Locked, crdt/update.go:403; reearth/ygo#350), so what the apply of the browser's
+// update actually deleted is in it, which is the room's own answer for what the browser's bytes
+// only claimed: a browser's GC run over clocks the room holds live deletes none of them, and a
+// delete range past the clocks the room holds parks and deletes nothing (deletedRuns). The
+// structs of the update are not read into the list at all, since a struct the walk reads as born
+// deleted is not always one ygo holds deleted, and one it does hold deleted the commit's delete
+// set names already (deletedRuns). A range the list holds already costs a read of it and no
+// more, and a keystroke's update carries no delete range at all, so the listing costs the walk
 // the charge already makes and nothing besides.
 //
 // A delete range weighed between the apply and this drain finds those clocks unlisted and is
@@ -162,16 +164,17 @@ func (c *roomCharge) grew(structure int64) {
 // its content a rendering can show to the uncounted part, as contentAdded counts it, and its
 // structure to the structure part, priced as the hook prices a browser's update
 // (peerWeighing.structureHeap). Every struct the update carries is new to the room, since ygo
-// encodes a transaction's update from the state before it (sjawhar/ygo v1.54.1-sami.3,
-// buildPhase2, crdt/doc.go:616-620), so each is charged with the splits its integration can cause,
-// with the splits each delete range can leave at its ends (deletedRuns.splitEnds) and
+// encodes a transaction's update from the state before it (sjawhar/ygo v1.55.1-sami.1,
+// collectAndEncodeLocked, crdt/doc.go:844-873), so each is charged with the splits its
+// integration can cause, with the splits each delete range can leave at its ends
+// (deletedRuns.splitEnds) and
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
 // raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner.
 //
-// The same walk lists the update's delete set as the room's (deletedRuns.list), which is the room's
-// whole delete set at that commit, every range of it weighed before it is listed: ygo sorts and
-// merges each client's ranges as it decodes them (crdt/update.go:1474), so no two ranges of one
-// update touch, and listing one leaves what the rest are charged as it was. The structs of the
+// The same walk lists the update's delete set as the room's (deletedRuns.list), which is what
+// that commit deleted, every range of it weighed before it is listed: ygo sorts and merges each
+// client's ranges as it decodes them (crdt/update.go:1527), so no two ranges of one update
+// touch, and listing one leaves what the rest are charged as it was. The structs of the
 // update are not read into the list, here as in applied. One walk reads the content, the structure
 // and the delete set. An update the walk cannot read is charged its bytes as content, as
 // contentAdded charges it, and the structure the walk read before it refused. Nil, a replica no
@@ -266,9 +269,9 @@ func (c *roomCharge) deletes() *deletedRuns {
 // contentAdded is the bytes of content update, one transaction's update as the room's update
 // observer is handed it, added that a rendering can show: the content of each struct it carries,
 // every one of them new to the room, since ygo encodes a transaction's update from the state
-// before it (sjawhar/ygo v1.54.1-sami.3, buildPhase2, crdt/doc.go:616-620), whoever wrote it - a
-// browser's update the peer hook admitted, or the server's own write. Its delete set, which ygo
-// fills with every deleted item of the room on every transaction, adds nothing and is not counted:
+// before it (sjawhar/ygo v1.55.1-sami.1, collectAndEncodeLocked, crdt/doc.go:844-873), whoever
+// wrote it - a browser's update the peer hook admitted, or the server's own write. Its delete
+// set, what that transaction deleted (reearth/ygo#350), adds nothing and is not counted:
 // charging the update's bytes, as the budget did, charged a heavily edited room its whole delete
 // set again on every keystroke. So a whole-state handoff of a document the room already holds,
 // which integrates nothing, adds nothing; and a struct parked until what it waits for arrives

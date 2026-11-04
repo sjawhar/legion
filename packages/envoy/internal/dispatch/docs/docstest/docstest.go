@@ -24,8 +24,10 @@ import (
 )
 
 // Peer is a writable connection to a document's room that behaves as a browser's provider does: it
-// applies every sync message the room sends to Doc, answers the room's sync step 1, and sends the
-// updates its own transactions make.
+// asks the room for the document with a sync step 1 of its own as it connects, applies every sync
+// message the room sends to Doc, answers the room's sync step 1, and sends the updates its own
+// transactions make. The room sends its document only in answer to a peer's sync step 1, as the
+// Yjs and Hocuspocus servers do, so a peer that asked for nothing would hold none of it.
 type Peer struct {
 	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it.
 	Doc *crdt.Doc
@@ -47,9 +49,9 @@ type Peer struct {
 }
 
 // Dial connects a peer to artifactID's room at url, the document websocket's full address with its
-// schema_version, with header naming the caller, and starts its reader. doc is the peer's copy of
-// the document: a new one, or the copy a reconnecting browser kept. The connection closes when t
-// ends.
+// schema_version, with header naming the caller, starts its reader, and asks the room for what doc
+// lacks. doc is the peer's copy of the document: a new one, or the copy a reconnecting browser
+// kept. The room's answer arrives on Answers. The connection closes when t ends.
 func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *crdt.Doc) *Peer {
 	t.Helper()
 	peer, err := DialContext(context.Background(), url, header, artifactID, doc)
@@ -79,6 +81,10 @@ func DialContext(ctx context.Context, url string, header http.Header, artifactID
 		peer.endedAt = time.Now()
 		close(ended)
 	}()
+	if err := peer.Write(ygsync.EncodeSyncStep1(doc)); err != nil {
+		peer.Close()
+		return nil, fmt.Errorf("ask document %s's room for the document: %w", artifactID, err)
+	}
 	return peer, nil
 }
 

@@ -1941,7 +1941,7 @@ jobs:
       # deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
       # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
       # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
       # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
@@ -3020,6 +3020,10 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The broker's store, which the package's contract tests open (brokerstoretest.Open in
+      # internal/dispatch/api/contract_test.go) and skip without; a skip is a pass, so without this
+      # variable they never run under the race detector.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -202,7 +202,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The total is an exact count plus what the hook admitted since it. The count walks the room's
 // encoded state (countRoomStructs), which carries parked structs and parked delete ranges
-// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.54.1-sami.3, crdt/update.go:236-258). It is taken at
+// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.55.1-sami.1, crdt/update.go:235-257). It is taken at
 // the room's load, beside the load's rendering (keepReplica), with each count the service's
 // measurer makes of the room (elementMeasurer.count), and by the hook to confirm a total near or
 // past the cap. What the hook admits after it is each update's addition (peerWeighing.added): its
@@ -233,11 +233,11 @@ const structTotalRecheck = maxUpdateItems / 64
 // block-id stamp - and an update injected through ygo, allowInject), which ask the decode cap in
 // their own way (refuseUndecodable, leavesPastDecodeCap) and are bounded there, not here. The one
 // place that sees each of them, whoever wrote it, is the document's update observer: ygo fires it
-// for every transaction it commits, even one that writes nothing, with the transaction's origin
-// (crdt/doc.go:606-608, :697-715), on the committing goroutine. So the total registers an
+// for every transaction that changes the document, with the transaction's origin
+// (crdt/doc.go:680-700, :780-793), on the committing goroutine. So the total registers an
 // observer of its own (observed), and the hook names the origin of each apply it is running while
 // it runs it (applying): ygo's peer, the origin ygo applies a browser's update with
-// (provider/websocket/peer_update.go:84-97). Several browsers' applies can run at once, each its
+// (provider/websocket/peer_update.go:84-98). Several browsers' applies can run at once, each its
 // own peer, so the origins are a multiset. A transaction of any other origin marks the total
 // stale. A list of the server's writes would miss the next one added; the observer cannot. A stale
 // total within structTotalStaleMargin of the cap is confirmed by an exact count before the hook
@@ -246,7 +246,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The hook reserves an update's addition before its apply and holds no lock across the apply:
 // ygo fires a transaction's update observers after it has released the document's lock, on the
-// committing goroutine (crdt/doc.go:830-838), so a lock held from the check through the apply
+// committing goroutine (crdt/doc.go:984-992), so a lock held from the check through the apply
 // would hold every other browser of the room while one apply sat in an observer
 // (TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth holds one there). Under a
 // short lock (admissions) the hook checks the running total, which counts every reservation in
@@ -339,7 +339,7 @@ func retiredClientsOf(doc *crdt.Doc) map[crdt.ClientID]uint64 {
 
 // retiredClock reads a retired client's clock as ygo decodes the int64 a rebuild wrote: lib0 Any
 // writes an integer within 32 bits as a varint, which decodes as an int64, and a larger one within
-// 2^53 as a float64 (sjawhar/ygo v1.54.1-sami.3, encoding/encoder.go:283-299,
+// 2^53 as a float64 (sjawhar/ygo v1.55.1-sami.1, encoding/encoder.go:283-299,
 // internal/anycodec/decoder.go:276-296). A clock of zero retires nothing.
 func retiredClock(value any) (uint64, bool) {
 	switch value := value.(type) {
@@ -436,7 +436,7 @@ func (t *roomTotals) observed(_ []byte, origin any) {
 // hookApplies reports whether origin is the origin of an apply the hook is running (applying): a
 // browser's update, whose structure the hook charges itself (roomCharge.grew). Every transaction
 // commits inside the apply that made it, whose update observers ygo fires before the apply returns
-// (sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:830-838), so the room's update observer, which drains
+// (sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:984-992), so the room's update observer, which drains
 // the room's update log there, finds each of the hook's updates while its apply is still running;
 // any other origin is the server's own write, whose structure that observer charges
 // (renderedReplica.chargeAdded). Nil, a total no load made, runs no apply of the hook's.

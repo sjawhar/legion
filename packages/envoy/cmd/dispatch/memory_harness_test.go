@@ -659,7 +659,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
 // which Dispatch's rooms speak (docs.New sets Server.HocuspocusFraming), puts the room's name before
-// each (sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:104-118).
+// each (sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go:104-118).
 const (
 	frameSync       = 0
 	frameSyncStatus = 8
@@ -754,10 +754,10 @@ func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
 	return opened
 }
 
-// tryOpenBrowser connects to the document's room and waits for the room's whole state, which ygo
-// sends a peer once the room has loaded and the peer is registered in it (sjawhar/ygo
-// v1.54.1-sami.3, provider/websocket/server.go:2160-2171), then sends a Ping and waits for its
-// Pong: a first frame lifts ygo's handshake deadline (server.go:2176-2204), so a socket held open
+// tryOpenBrowser connects to the document's room, asks for its state as a browser does and waits
+// for it, which ygo sends a peer once the room has loaded and the peer has asked (sjawhar/ygo
+// v1.55.1-sami.1, provider/websocket/server.go:2256-2264), then sends a Ping and waits for its
+// Pong: a first frame lifts ygo's handshake deadline (server.go:2272-2300), so a socket held open
 // without an edit is not closed thirty seconds in. A socket the server closes before any of that -
 // the room budget's refusal, which completes the upgrade only to close it (refuseOverRoomBudget) -
 // returns the *gws.CloseError it was closed with.
@@ -774,6 +774,13 @@ func (p *memoryServer) tryOpenBrowser(artifactID string) (*browser, error) {
 		left:       make(chan struct{}),
 	}
 	go opened.read()
+	// The room hands a joining peer its state only once the peer asks for it (reearth/ygo#342),
+	// as @hocuspocus/provider does on every connection: without the ask the socket waits out
+	// ygo's handshake deadline and the room closes it.
+	if err := opened.write(documentFrame(artifactID, frameSync, ygsync.EncodeSyncStep1(crdt.New()))); err != nil {
+		opened.leave()
+		return nil, err
+	}
 	if _, err := opened.await(frameSync); err != nil {
 		opened.leave()
 		return nil, err
@@ -828,7 +835,7 @@ func (b *browser) read() {
 // await is the room's next answer, which must carry tag, or the reason the socket ended first. A
 // SyncStep2 the room relays from another browser of the room - the whole state that browser handed
 // back, which ygo relays to the room's other peers as the frame it arrived in (applySyncUpdate,
-// sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer.go:266-283) - reads as the answer to a request
+// sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer.go:271-290) - reads as the answer to a request
 // for the room's state would, so a wait for any other answer passes over it.
 func (b *browser) await(tag uint64) (browserAnswer, error) {
 	timer := time.NewTimer(browserAnswerWithin)

@@ -34,8 +34,8 @@ type roomState struct {
 	connected map[uint64]model.Actor
 	// departedPeers is the browsers connected when ygo reported the room's last browser gone
 	// (settleLastPeer), each until its handler forgets it (removeConnection). ygo makes that report
-	// on the leaving browser's own socket (sjawhar/ygo v1.54.1-sami.3,
-	// provider/websocket/peer.go:658-664), before the handler that registered the browser returns
+	// on the leaving browser's own socket (sjawhar/ygo v1.55.1-sami.1,
+	// provider/websocket/peer.go:715-721), before the handler that registered the browser returns
 	// and removes it from connected (ServeHTTP), and the settlement it owes runs there first, which
 	// takes seconds for a mebibyte; meanwhile connected still names browsers that have gone. The
 	// room budget's sweep counts a room whose connected browsers have all departed as one that will
@@ -79,6 +79,12 @@ type roomState struct {
 	// recorded them, which is seq order for each room instance (queuedClass).
 	updateClasses  []*queuedClass
 	pendingUpdates int
+	// parked are the parked bytes of commits that parked something and changed nothing, which no
+	// OnUpdate hands to the room's persistence (classifyDrained). They wait here, with the cursor
+	// of the room instance that parked them, until a drainer that holds no replica lock and no
+	// document lock stores them (storeParked): a drain can run under a settlement's document lock,
+	// and the store takes that lock.
+	parked []parkedBytes
 	// shadow is what the latest committed live write left the room to measure again the classes
 	// of the browser updates stored after its own (roomShadow), nil while none is left.
 	shadow     *roomShadow
@@ -281,7 +287,7 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // registered in its place. The record has to go: it carries the failure, which every holder of it
 // still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
 //
-// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.54.1-sami.3,
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.55.1-sami.1,
 // provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's
@@ -337,12 +343,19 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
 // open writer, a running or armed settlement, a latest edit source no settlement has read, a
 // failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
-// browser, an update the room's persistence has not taken or appended, and an in-flight credit
-// whose append has not landed. Its caller holds state.mu.
+// browser, an update the room's persistence has not taken or appended, a commit's parked bytes not
+// yet stored, and an in-flight credit whose append has not landed. Its caller holds state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
 		!state.unsettled && state.failed == nil && len(state.connected) == 0 &&
-		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
+		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0 &&
+		len(state.parked) == 0
+}
+
+// parkedBytes is one commit's parked bytes and the cursor of the room instance that took them.
+type parkedBytes struct {
+	update []byte
+	cursor *roomCursor
 }
 
 // onlyDepartedLocked is whether every browser state names as connected has departed
@@ -385,8 +398,8 @@ func (s *Service) queueUpdateClass(room string, update []byte, class documentUpd
 // transaction's observers after the transaction has released the document's lock, so two peers'
 // updates reach persistence in the order their read loops hand them on, which need not be the
 // order the room recorded them in; the order they are stored in is the room's all the same
-// (flushThrough). Two commits that change nothing encode alike, so a class already handed is
-// never taken a second time.
+// (flushThrough). Two commits can encode alike - a browser's deletion and a repair's of the same
+// items - so a class already handed is never taken a second time.
 func (s *Service) consumeUpdateClass(room string, update []byte) (*queuedClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {

@@ -155,9 +155,6 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	updates := make(chan struct{}, 1)
 	var unsubscribe func()
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if s.afterReadWarm != nil {
-			s.afterReadWarm(artifactID)
-		}
 		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
 			select {
 			case updates <- struct{}{}:
@@ -170,6 +167,10 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return Anchored{}, err
+	}
+	// The room can be evicted from here on: no close retires a room while an Apply is inside it.
+	if s.afterReadWarm != nil {
+		s.afterReadWarm(artifactID)
 	}
 
 	timer := time.NewTimer(s.markWait)
@@ -1032,10 +1033,10 @@ func unmarkFound(txn *crdt.Transaction, fragment *crdt.YXmlFragment, expired []p
 // unmarkRunStructs is the most structs unmarking one run of text adds to a document. pmdoc.Unmark
 // formats each run of the text's delta that carries the mark, and ygo's
 // Format of one key over a run writes at most two format items - the mark's end where the run
-// begins (insertAttributes, crdt/ytext.go:949-960 in sjawhar/ygo v1.54.1-sami.3) and its value
-// restored where the run ends (insertNegatedAttributes, :966-985) - and splits at most two
-// items, the one holding the run's start (findTextPos, :876-895) and the one holding its end
-// (:614-617). The format items it meets inside the run it deletes, which adds no struct.
+// begins (insertAttributes, crdt/ytext.go:894-905 in sjawhar/ygo v1.55.1-sami.1) and its value
+// restored where the run ends (insertNegatedAttributes, :911-930) - and splits at most two
+// items, the one holding the run's start (findTextPos, :821-840) and the one holding its end
+// (:559-562). The format items it meets inside the run it deletes, which adds no struct.
 const unmarkRunStructs = 4
 
 // markedRuns is how many runs of text in tree carry one of marks: each text node's mark of a

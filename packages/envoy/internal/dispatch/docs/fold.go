@@ -107,7 +107,7 @@ func mergedThrough(updates updateSource) ([]byte, error) {
 		return nil, err
 	}
 	merged, err := crdt.MergeUpdatesV1(stored...)
-	if err = invalidOnce(err); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("merge document updates: %w", err)
 	}
 	return merged, nil
@@ -348,7 +348,7 @@ func fold(ctx context.Context, updates updateSource, maxPending int) (state []by
 		parts := [][]byte{state}
 		if err := updates(func(update []byte) error {
 			rest, err := crdt.DiffUpdateV1(update, made)
-			if err = invalidOnce(err); err != nil {
+			if err != nil {
 				return fmt.Errorf("read parked document update: %w", err)
 			}
 			parts = append(parts, rest)
@@ -357,7 +357,7 @@ func fold(ctx context.Context, updates updateSource, maxPending int) (state []by
 			return nil, nil, nil, err
 		}
 		if state, err = crdt.MergeUpdatesV1(parts...); err != nil {
-			return nil, nil, nil, fmt.Errorf("keep parked document updates: %w", invalidOnce(err))
+			return nil, nil, nil, fmt.Errorf("keep parked document updates: %w", err)
 		}
 	}
 	doc = nil

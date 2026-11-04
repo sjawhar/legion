@@ -34,7 +34,7 @@ const (
 	// unless that is this number.
 	peerWriteQueueBytesForTest = 60 << 20
 	// writeQueueFrameCap mirrors ygo's default PeerWriteQueueSize, 512 frames whatever their size
-	// (defaultPeerWriteQueueSize, sjawhar/ygo v1.54.1-sami.3, provider/websocket/server.go:208-212):
+	// (defaultPeerWriteQueueSize, sjawhar/ygo v1.55.1-sami.1, provider/websocket/server.go:224-228):
 	// the only bound on a peer's queue before the budget. The single-socket drive asks for that many
 	// whole states, so what it would hold with the budget off is what the frame cap alone allows.
 	writeQueueFrameCap = 512
@@ -47,7 +47,7 @@ const (
 )
 
 // writeQueueCloseLine is what ygo logs for each peer its byte budget closes, with the figures
-// behind it (peer.enqueueLocked, sjawhar/ygo v1.54.1-sami.3,
+// behind it (peer.enqueueLocked, sjawhar/ygo v1.55.1-sami.1,
 // provider/websocket/write_budget.go:6-30). It reaches the server's own log because ygo logs
 // through slog.Default() while Server.Logger is unset (provider/websocket/server.go:168-174),
 // which cmd/dispatch sets at boot (main).
@@ -149,7 +149,7 @@ func requireBudgetFigures(t *testing.T, closed writeQueueClose, what string, lar
 // silentSocket is a document socket that completes its room's handshake - it reads the room's
 // SyncStep1 and the whole state the room hands it - and then never reads again while it asks for
 // that whole state over and over. Each SyncStep1 it sends is answered with one whole-state
-// SyncStep2 (sjawhar/ygo v1.54.1-sami.3, provider/websocket/peer.go:99-111), which the server
+// SyncStep2 (sjawhar/ygo v1.55.1-sami.1, provider/websocket/peer.go:99-111), which the server
 // queues for a socket that is not draining it: this is the shape that grew a server's heap without
 // bound before the budget, a forty-one-byte ask for three megabytes held.
 type silentSocket struct {
@@ -201,8 +201,8 @@ func (s *silentSocket) askForState() []byte {
 // flood asks the room for its whole state frames times over, never reading an answer, and stops at
 // the first ask the socket cannot take, which is how the server's close reaches this side. It
 // reports how many asks were written and why the last was not. The server drops the asks it has
-// not answered when the budget closes the socket (closeConn, sjawhar/ygo v1.54.1-sami.3,
-// provider/websocket/peer.go:888-893), so the flood is never answered more times than it is closed
+// not answered when the budget closes the socket (closeConn, sjawhar/ygo v1.55.1-sami.1,
+// provider/websocket/peer.go:943-948), so the flood is never answered more times than it is closed
 // for.
 func (s *silentSocket) flood(frames int) (int, error) {
 	ask := s.askForState()
@@ -231,7 +231,7 @@ func (s *silentSocket) ended(within time.Duration) error {
 // writeQueueHeapMargin is how far above the budget and two whole-state frames the single-socket
 // drive lets the server's memory rise over what it held idle with the same room open. The budget
 // bounds the frames a socket holds queued, and the frame its writer is in the middle of is a
-// second frame beside them (creditLocked, sjawhar/ygo v1.54.1-sami.3,
+// second frame beside them (creditLocked, sjawhar/ygo v1.55.1-sami.1,
 // provider/websocket/write_budget.go:38-46); neither bounds the garbage that making those frames
 // leaves, and at the runtime's own collector ratio the whole-state encode behind each frame is
 // garbage until the next cycle. Measured on 2026-10-31 over three runs (the drive logs every
@@ -320,7 +320,7 @@ func TestASocketThatNeverReadsIsClosedWithinItsWriteQueueBudget(t *testing.T) {
 
 // runOfWords is a document of one paragraph: size bytes of plain words in a single run of text,
 // which a room loads as a handful of structs, since the decode merges a run into one item
-// (squashRuns, sjawhar/ygo v1.54.1-sami.3, crdt/transaction.go:242-397), and renders as one
+// (squashRuns, sjawhar/ygo v1.55.1-sami.1, crdt/transaction.go:275-430), and renders as one
 // paragraph. Its whole state is that text, so a socket asking for it is sent a mebibyte a time for
 // a copy rather than for a walk of the tens of thousands of structs a mebibyte of proseMarkdown's
 // sections holds.

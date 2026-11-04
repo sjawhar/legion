@@ -232,25 +232,25 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 // it stands, read inside that transaction, which holds the document's lock, and reports whether it
 // changed the tree; only a changed tree is written. A repair computed on a tree read before the
 // transaction and written back would revert whatever another writer wrote after that read
-// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
-func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+// (LEGION-479). It returns the tree as the transaction left it; whether the transaction changed the
+// document is the update ygo emits for it, or its absence.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, error) {
 	fragment := doc.GetXmlFragment(fragmentName)
 	var live *pmdoc.Node
-	changed := false
 	err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		var readErr error
 		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
 			return readErr
 		}
-		if changed = edit(live); !changed {
+		if !edit(live) {
 			return nil
 		}
 		return pmdoc.Update(transaction, fragment, live)
 	}, origin)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return live, changed, nil
+	return live, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
@@ -361,7 +361,7 @@ func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.54.1-sami.3, crdt/yxml.go:353-368) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.55.1-sami.1, crdt/yxml.go:351-366) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -503,6 +503,11 @@ const sizeUnmeasured = -1
 // room budget prices it from its bytes at the densest price (copyHeap), never at the element bound
 // and never at nothing.
 const elementsPastCounting = math.MaxInt64
+
+// emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
+// for a commit that kept only parked bytes, and calls no OnUpdate for that commit
+// (crdt.LoggedUpdate).
+var emptyUpdateV1 = crdt.EncodeStateAsUpdateV1(crdt.New(), nil)
 
 // forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking
 // the write's rendering in place of one avoided, so a test can assert that a write reads its fork

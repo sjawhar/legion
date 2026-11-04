@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,11 +119,12 @@ func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
 
 // The room budget's sweep leaves a room an Apply is inside its callback on, and closes it once
 // that Apply has returned. ygo's Apply holds the room's in-flight count "to protect rm from a
-// concurrent eviction while in use" and its idle sweep honours that count, but its CloseRoom does
-// not (sjawhar/ygo v1.54.1-sami.3, provider/websocket/inject.go:332-335 and :489-640): a close
-// takes the room out of the server's map whatever is inside an Apply on it, and the apply's write
-// then lands on a room the server no longer holds, which the next read does not load. A decision
-// whose body a browser broke would then read as the body it replaced, and an ask edit of it would
+// concurrent eviction while in use" (sjawhar/ygo v1.55.1-sami.1, provider/websocket/inject.go:337-340),
+// its idle sweep honours that count, and its CloseRoom answers websocket.ErrRoomInUse rather than
+// taking the room out from under the apply (reearth/ygo#342). The budget's close takes the room's
+// applies hold before it tries at all (closeUnused), so it leaves the room without an error and
+// without touching the room's record, and nothing of the apply's write is lost: a decision whose
+// body a browser broke would otherwise read as the body it replaced, and an ask edit of it would
 // be made on that body rather than refused.
 func TestTheBudgetSweepLeavesARoomAnApplyIsWriting(t *testing.T) {
 	service, _ := newTestService(t)
@@ -177,12 +179,15 @@ func TestTheBudgetSweepLeavesARoomAnApplyIsWriting(t *testing.T) {
 }
 
 // The rebuild's close of the room whose history it replaces gives way to a Server.Apply inside
-// its callback on the room, and closes it once that Apply has returned (evictBeforeRebuild). A
-// forced close would take the room out of the server's map under that apply, whose commit then
-// reaches the store only through the room's retiring persistence worker: landing before
-// RebuildTx, it is deleted with the history the rebuild replaces; landing after it, it puts the
-// replaced history's structs on top of the rebuilt seed. A refused close leaves the room's record
-// as it found it, its armed settlement included, since the rebuild it refuses goes no further.
+// its callback on the room, and closes it once that Apply has returned (evictBeforeRebuild). The
+// close must not land under that apply: the apply's commit would reach the store only through the
+// room's retiring persistence worker, landing before RebuildTx, where it is deleted with the
+// history the rebuild replaces, or after it, where it puts the replaced history's structs on top
+// of the rebuilt seed. ygo refuses such a close itself (websocket.ErrRoomInUse, reearth/ygo#342),
+// and the guard the budget's closes take refuses it before it is tried, rather than waiting for
+// the apply as Evict's own close does (roomServer.closeWhenFree): a refused close leaves the
+// room's record as it found it, its armed settlement included, since the rebuild it refuses goes
+// no further.
 func TestTheRebuildsCloseLeavesARoomAnApplyIsWriting(t *testing.T) {
 	service, _ := newTestService(t)
 	ctx := context.Background()
@@ -211,6 +216,172 @@ func TestTheRebuildsCloseLeavesARoomAnApplyIsWriting(t *testing.T) {
 	}
 	if service.srv.GetDoc(artifactID) != nil {
 		t.Fatal("the rebuild's close left the room live")
+	}
+}
+
+// A close whose caller stopped waiting must not still take a free room. Evict receives its
+// context from an API caller, and a cancellation before the close begins leaves the resident
+// editor connected for the next request rather than reporting a close that happened after its
+// caller gave up.
+func TestEvictWithACancelledContextLeavesTheRoomResident(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load document room: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := service.Evict(ctx, artifactID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("evict with a cancelled context = %v, want %v", err, context.Canceled)
+	}
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("evict with a cancelled context closed the resident room")
+	}
+}
+
+func TestACancelledEvictionLeavesTheFailedRoomForItsOwnEviction(t *testing.T) {
+	server := websocket.NewServer()
+	server.RoomIdleTimeout = time.Hour
+	service := &Service{srv: newRoomServer(server)}
+	entered, release, applied := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	evicting, evict := make(chan struct{}), make(chan struct{})
+	var released, evicted sync.Once
+	letGo := func() { released.Do(func() { close(release) }) }
+	recoverRoom := func() { evicted.Do(func() { close(evict) }) }
+	service.beforeFailedEviction = func(string) {
+		close(evicting)
+		<-evict
+	}
+	t.Cleanup(func() {
+		letGo()
+		recoverRoom()
+		<-applied
+		service.evictWG.Wait()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	go func() {
+		defer close(applied)
+		if err := server.Apply(context.Background(), "room", func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(entered)
+			<-release
+		}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Errorf("hold the room open: %v", err)
+		}
+	}()
+	<-entered
+	service.failRoom("room", errors.New("failed room"))
+	<-evicting
+	state := service.lockExistingState("room")
+	done := state.failedDone
+	service.unlockState("room", state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := service.Evict(ctx, "room"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled eviction = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if !service.roomFailed("room") || server.GetDoc("room") == nil {
+		t.Fatal("cancelled eviction must keep the resident room's failure until its own eviction closes it")
+	}
+	letGo()
+	<-applied
+	recoverRoom()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failed room's eviction did not finish")
+	}
+	if server.GetDoc("room") != nil || service.roomFailed("room") {
+		t.Fatal("the failed room's eviction must close the room and clear its failure")
+	}
+}
+
+func TestAnEvictionHandsOverFailureOnlyAfterTheRoomCloses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		closed bool
+	}{
+		{"closed", nil, true},
+		{"already gone", websocket.ErrRoomNotFound, true},
+		{"cancelled", context.Canceled, false},
+		{"deadline", context.DeadlineExceeded, false},
+		{"still in use", websocket.ErrRoomInUse, false},
+		{"shutdown", websocket.ErrServerShutdown, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &Service{srv: newRoomServer(websocket.NewServer())}
+			state := newRoomState()
+			state.failed = errors.New("failed room")
+			service.rooms.Store("room", state)
+			var closed bool
+			service.afterRoomClosed = func(string) { closed = true }
+			err := service.forgetEvicted("room", state, test.err)
+			if test.closed && err != nil || !test.closed && !errors.Is(err, test.err) {
+				t.Fatalf("eviction error = %v, close error = %v", err, test.err)
+			}
+			if state.released != test.closed || closed != test.closed || service.roomFailed("room") == test.closed {
+				t.Fatalf("released=%v afterRoomClosed=%v failure=%v, want closed=%v", state.released, closed, service.roomFailed("room"), test.closed)
+			}
+		})
+	}
+}
+
+// A caller inside the room that is not a Server.Apply of the service's own - a browser joining,
+// a relay's Inject, an Apply that has not taken the budget's hold yet - is ygo's to refuse: its
+// CloseRoom answers websocket.ErrRoomInUse (reearth/ygo#342). The budget's close must read that
+// as the room it left, not as an eviction that failed: the sweep counts a close it is told
+// happened as memory freed (sweepRooms), so a room reported closed while it is still resident
+// would leave the budget over its limit with nothing pending to free it, and every admission
+// waiting on it refused until something else moved. Here the room is held by an Apply the
+// service's own gate knows nothing of, so ygo is the one that refuses, and the close answers
+// "not closed" with no error and closes the room once the caller has left.
+func TestTheBudgetsCloseLeavesARoomYgoSaysIsInUse(t *testing.T) {
+	server := websocket.NewServer()
+	server.RoomIdleTimeout = time.Hour
+	service := &Service{srv: newRoomServer(server)}
+	entered, release, applied := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	letGo := func() { released.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		letGo()
+		<-applied
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	go func() {
+		defer close(applied)
+		// Taken through ygo's own Apply, not roomServer.Apply, so the close's applies hold is
+		// free and ygo is what refuses the close, as it does for a browser joining the room.
+		if err := server.Apply(context.Background(), "room", func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(entered)
+			<-release
+		}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Errorf("hold the room open: %v", err)
+		}
+	}()
+	<-entered
+
+	if closed, err := service.srv.closeUnused("room", nil); closed || err != nil {
+		t.Fatalf("the budget's close of a room ygo says is in use = %t, %v, want it to leave the room with no error", closed, err)
+	}
+	if server.GetDoc("room") == nil {
+		t.Fatal("the budget's close closed a room a caller was inside")
+	}
+	letGo()
+	<-applied
+	if closed, err := service.srv.closeUnused("room", nil); !closed || err != nil {
+		t.Fatalf("the budget's close once the caller had left = %t, %v, want it closed", closed, err)
+	}
+	if server.GetDoc("room") != nil {
+		t.Fatal("the budget's close left the room resident")
 	}
 }
 

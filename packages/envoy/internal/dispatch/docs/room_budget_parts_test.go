@@ -51,7 +51,8 @@ func chargeParts(charge *roomCharge) (structure, content, measuredAt, weight int
 // writes into the update of that commit (roomCharge.applied, deletedRuns.list), so the handoff
 // that carries those ranges back is charged nothing for them. A delete range the room parks is
 // in no delete set ygo builds, so the room lists none of it and every update carrying it again is
-// charged for it again, which over-charges and never under-charges.
+// charged for it again; so is the delete range of a GC struct a browser sent, which ygo holds
+// deleted but no commit's delete set names. Both over-charge and neither under-charges.
 func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount(t *testing.T) {
 	service, room, replica, charge := drainedPeerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n")
 	service.measurer.interval = noInterval
@@ -94,8 +95,8 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	// both ends, but for the first's start, the client's first clock, where its first item starts.
 	// ygo parks them whole, since the room holds no clock of that client, so they delete nothing
 	// and no delete set ygo builds holds them: the same ranges sent again, and the room's own
-	// whole state, which carries parked ranges back (withParked, sjawhar/ygo v1.54.1-sami.3,
-	// crdt/update.go:230-258), are charged for them again.
+	// whole state, which carries parked ranges back (withParked, sjawhar/ygo v1.55.1-sami.1,
+	// crdt/update.go:229-257), are charged for them again.
 	parked := int64((5*splitsAStructCanCause - 1) * bytesOfHeapASplit * roomCopies)
 	if grew := admit("delete ranges", deleteRangesFrom(78, 5)); grew != parked {
 		t.Fatalf("five delete ranges grew the structure part by %d bytes, want %d", grew, parked)
@@ -103,8 +104,15 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 	if grew := admit("the same delete ranges again", deleteRangesFrom(78, 5)); grew != parked {
 		t.Fatalf("five parked delete ranges grew the structure part by %d bytes on their second apply, want the %d of their first", grew, parked)
 	}
-	if grew := admit("the whole state the room holds, its parked delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != parked {
-		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want the %d its parked ranges are charged again", grew, parked)
+	// The handoff carries the parked ranges and the delete range of the GC structs above: ygo
+	// appends a GC struct to the store already deleted (sjawhar/ygo v1.55.1-sami.1,
+	// crdt/update.go:1161-1174 and :938-949), so its clocks are in the room's own delete set but
+	// in no commit's delete set, which is all the room lists (deletedRuns, reearth/ygo#350). That
+	// range is charged the one split its end can leave - its start is the client's first clock -
+	// which over-charges and never under-charges.
+	handoff := parked + bytesOfHeapASplit*roomCopies
+	if grew := admit("the whole state the room holds, its parked delete ranges included", crdt.EncodeStateAsUpdateV1(room, nil)); grew != handoff {
+		t.Fatalf("a handoff of the document the room holds grew its structure part by %d bytes, want the %d its parked ranges and the GC run's end are charged again", grew, handoff)
 	}
 	structure, _, _, _ := chargeParts(charge)
 	otherRoot := newV1Frame(1).group(1, 79, 0).rooted(byte(structString), "other", "").str("x").noDeletes()
@@ -131,12 +139,12 @@ func TestTheRoomBudgetsStructurePartGrowsWithEachAdmittedStructAndSurvivesACount
 
 // The structure part charges a delete range's splits once, for a range the room did not already
 // hold deleted: the room's delete set at its load is listed (deletedRuns.seed), and so is the
-// delete set of every commit the room's drain hands over, which is the room's whole delete set at
-// that commit (deletedRuns.list). So a browser's whole-state handoff of a document edited into
-// 2,000 deleted runs, and a keystroke from a client that encodes the whole delete set with
-// each transaction as ygo does (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3,
-// crdt/doc.go:616, crdt/update.go:388), are charged nothing for the runs: the keystroke is charged
-// its one struct alone. A new deletion in the middle of a run of text is charged its range's two
+// delete set of every commit the room's drain hands over, which is what that commit deleted
+// (deletedRuns.list). So a browser's whole-state handoff of a document edited into
+// 2,000 deleted runs, and a keystroke whose own transaction deletes nothing, so its update
+// carries no delete range at all (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1,
+// crdt/doc.go:844-873, reearth/ygo#350), are charged nothing for the runs: the keystroke is
+// charged its one struct alone. A new deletion in the middle of a run of text is charged its range's two
 // splits, and the same update sent again nothing, its clocks having been listed from the commit
 // the hook's own apply made; a new deletion of one character between two the room holds deleted is
 // charged nothing, since both its ends are clean already (deletedRuns.splitEnds).
@@ -192,10 +200,10 @@ func TestTheRoomBudgetChargesADeleteRangeOnlyOnce(t *testing.T) {
 
 // The room's update observer charges the content each transaction adds, whoever wrote it - here
 // the server's own writes - to the uncounted part, at the densest price at both copies, and never
-// the transaction's bytes: ygo's update for a transaction carries the room's whole delete set
-// every time (buildPhase2 and encodeV1Locked, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:616,
-// crdt/update.go:388), so a keystroke into a document of 2,000 deleted runs is a frame of
-// thousands of bytes that adds two, and its structure part one struct, whatever runs the
+// the transaction's bytes: ygo's update for a transaction carries what that transaction deleted
+// (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:844-873, reearth/ygo#350),
+// where at v1.54.1-sami.3 it carried the room's whole delete set every time, so a keystroke into
+// a document of 2,000 deleted runs adds two bytes of content, and its structure part one struct, whatever runs the
 // frame carries. A transaction that only deletes adds nothing, and a whole-state handoff of the
 // document the room holds adds nothing. A count re-bases the uncounted part, here one the measurer
 // makes early, as the content passes earlyCountCharge.
@@ -242,8 +250,10 @@ func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing
 	if typed < 4_000 || typed > 4_010 {
 		t.Fatalf("4,000 characters typed in one transaction left %d bytes uncounted, want their 4,000 and the content's length", typed)
 	}
-	// Every other character deleted: 2,000 deleted runs, which every later transaction's update
-	// carries.
+	// Every other character deleted: 2,000 deleted runs. The pin writes only the transaction's
+	// own deletions into its update (reearth/ygo#350), so a later keystroke's update is a frame
+	// of its own bytes, where at sjawhar/ygo v1.54.1-sami.3 every update carried all 2,000 runs
+	// and ran past 2,000 bytes. The charge counts what the transaction added either way.
 	deleted := write("delete every other character", inText(func(text *crdt.YXmlText, txn *crdt.Transaction) {
 		for i := range 2_000 {
 			text.Delete(txn, i, 1)
@@ -258,8 +268,8 @@ func TestTheRoomBudgetChargesATransactionsAddedContentNotItsDeleteSet(t *testing
 	added := uncounted() - typed
 	// The keystroke's struct, its splits and its content, a character and its length, as text.
 	structure := int64((bytesOfHeapAStruct + splitsAStructCanCause*bytesOfHeapASplit + 2*bytesOfHeapAByteOfText) * roomCopies)
-	if keystroke < 2_000 || added != 2 || after-before != 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure {
-		t.Fatalf("a keystroke's %d-byte update added %d bytes of content and %d of charge, want a frame carrying the 2,000 deleted runs that adds its 2 bytes of content and one struct, %d of charge",
+	if keystroke > 200 || added != 2 || after-before != 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure {
+		t.Fatalf("a keystroke's %d-byte update added %d bytes of content and %d of charge, want a frame of its own transaction's bytes that adds its 2 bytes of content and one struct, %d of charge",
 			keystroke, added, after-before, 2*bytesOfHeapAByteAtTheDensest*roomCopies+structure)
 	}
 	held := uncounted()
@@ -938,8 +948,8 @@ func TestTheRoomBudgetAdmitsDeletesUnderPressureWithinTheReserveAndRefusesThemPa
 
 // browserTreeEdit is the update a browser holding a copy of room sends for change to its Proof
 // tree, written by the tree diff the editor's writes come to (pmdoc.Update), as ygo's update
-// observer encodes it: the transaction's structs and the copy's whole delete set (buildPhase2 and
-// encodeV1Locked, sjawhar/ygo v1.54.1-sami.3, crdt/doc.go:616, crdt/update.go:388). browser is
+// observer encodes it: the transaction's structs and what that transaction deleted
+// (collectAndEncodeLocked, sjawhar/ygo v1.55.1-sami.1, crdt/doc.go:844-873). browser is
 // the copy, made from room when nil, so successive edits build on each other as one browser's do.
 func browserTreeEdit(t *testing.T, room, browser *crdt.Doc, change func(tree *pmdoc.Node)) (*crdt.Doc, []byte) {
 	t.Helper()
@@ -1014,8 +1024,11 @@ func TestTheRoomBudgetsPressureReserveHoldsWhatAFullServerIsAskedToTake(t *testi
 			text := tree.Children[2+cut].Children[0]
 			text.Text = strings.Replace(text.Text, strings.Repeat("word ", cutBytes/5), "", 1)
 		})
-		if weighed := weighedFresh(t, shrink); weighed.inserted != 0 || weighed.deletes < uint64(cut+1) {
-			t.Fatalf("cut %d inserts %d and carries %d delete ranges, want nothing inserted and the cuts so far", cut+1, weighed.inserted, weighed.deletes)
+		// Each cut's update carries that cut's own delete range and no other: the pin writes a
+		// transaction's own deletions into its update (reearth/ygo#350), where at
+		// sjawhar/ygo v1.54.1-sami.3 every update carried the cuts before it as well.
+		if weighed := weighedFresh(t, shrink); weighed.inserted != 0 || weighed.deletes != 1 {
+			t.Fatalf("cut %d inserts %d and carries %d delete ranges, want nothing inserted and its own cut alone", cut+1, weighed.inserted, weighed.deletes)
 		}
 		if err, called := weighInto(service, room, shrink); err != nil || !called {
 			t.Fatalf("cut %d was answered %v (applied %t), want it admitted", cut+1, err, called)

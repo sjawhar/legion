@@ -146,7 +146,7 @@ const scanGap = 500
 
 // The client of the person whose update is measured is the higher one in each fixture: a client
 // that loses the tie-break against an item at the same place stops its scan there
-// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:170-179), and one that wins scans on past every item at
+// (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:189-202), and one that wins scans on past every item at
 // that place, which is the order whose count the room's scan total has to hold.
 const (
 	scanFirstClient  crdt.ClientID = 1_001
@@ -159,8 +159,8 @@ const tangledTypist crdt.ClientID = 5
 // tangledRoom is chargedPeerRoom's room, its document bounded by its scan budget (newRoomScans),
 // after a browser of client tangledTypist typed typed characters onto the end of its paragraph, one
 // keystroke an update through the hook. Each keystroke stays an item of its own in the room, since
-// ygo merges a run of typed characters only within one transaction (sjawhar/ygo v1.54.1-sami.3,
-// crdt/transaction.go:242-247).
+// ygo merges a run of typed characters only within one transaction (sjawhar/ygo v1.55.1-sami.1,
+// crdt/transaction.go:275-280).
 func tangledRoom(t *testing.T, typed int) (*Service, *crdt.Doc, *renderedReplica, *roomCharge) {
 	t.Helper()
 	service, room, replica, charge := chargedPeerRoom(t)
@@ -215,7 +215,7 @@ func tangledFrame(t *testing.T, room *crdt.Doc, typed int) []byte {
 
 // scanningFrame is client's frame of items 1-character strings, each naming origin as its left
 // origin and no right origin, so the scan of each passes every item after origin in its list
-// (sjawhar/ygo v1.54.1-sami.3, crdt/item.go:152-200) up to one of client's own.
+// (sjawhar/ygo v1.55.1-sami.1, crdt/item.go:168-232) up to one of client's own.
 func scanningFrame(client crdt.ClientID, origin crdt.ID, items int) []byte {
 	f := newV1Frame(1).group(items, uint64(client), 0)
 	for range items {
@@ -268,8 +268,8 @@ func requireRoomAsItWas(t *testing.T, before, after roomPicture) {
 }
 
 // An update the room's bounded document refuses leaves no trace in the room's bookkeeping but what
-// its scans cost, as it leaves none in the document (sjawhar/ygo v1.54.1-sami.3,
-// crdt/apply_rollback.go:9-21): a frame whose scans pass its allowance, which every other rule of
+// its scans cost, as it leaves none in the document (sjawhar/ygo v1.55.1-sami.1,
+// crdt/apply_rollback.go:10-23): a frame whose scans pass its allowance, which every other rule of
 // the hook admits and an unbounded copy of the room applies, is refused with 4413 DOC_TOO_TANGLED,
 // and the room's document, the budget's used bytes, the room's structure part, its struct total and
 // its recorded delete ranges are as they were, while its scan total holds the items the refused
