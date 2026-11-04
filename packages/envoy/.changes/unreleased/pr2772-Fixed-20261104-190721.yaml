@@ -1,0 +1,5 @@
+kind: Fixed
+body: Dispatch's GitHub intake handles one pull-request event once. It keyed a pull request by its subject's repository, so the two copies of one event under a renamed repository's two names keyed apart and two handlers ran at once on one pull request's row, each fetching the same pull request. A message whose subject names a repository other than the one its payload names is no longer wanted.
+time: 2026-11-04T19:07:21.954428869Z
+custom:
+    Issue: pr2772
