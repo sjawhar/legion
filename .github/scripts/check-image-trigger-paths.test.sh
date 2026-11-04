@@ -814,10 +814,14 @@ check "always() is read as ungated" "$(is "$status" 0)"
 
 echo "case: an if: this check does not model is refused, never read as ungated"
 shape_index=0
-# The last three are a positive draft test and an == 'closed' test, which would skip every
-# pinnable build (the next case's comment says why).
+# The three after the first four are a positive draft test and an == 'closed' test, which would
+# skip every pinnable build (the next case's comment says why). The last four are the attempt
+# guard's neighbours: only `github.run_attempt == '1'`, which skips no first attempt, is
+# neutral, and an event exclusion is read beside a neutral term alone.
 for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false" \
-  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
+  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'" \
+  "github.run_attempt" "github.run_attempt == '2'" "github.run_attempt != '1'" \
+  "github.event_name != 'merge_group' || github.actor == 'dependabot'"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-unmodelled-$shape_index")
   gate_probe "$root" "  docker:
@@ -841,7 +845,10 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
   "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'" \
   '"!github.event.pull_request.draft"' "github.event.action != 'closed'" \
   "\${{ !github.event.pull_request.draft && needs.changes.outputs.img == 'true' }}" \
-  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'"; do
+  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'" \
+  "github.run_attempt == '1'" \
+  "github.run_attempt == '1' && needs.changes.outputs.img == 'true'" \
+  "\${{ (github.event_name != 'merge_group' || github.run_attempt == '1') && needs.changes.outputs.img == 'true' }}"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-neutral-$shape_index")
   gate_probe "$root" "  docker:
@@ -891,6 +898,33 @@ gate_probe "$root" "  docker:
 changes_if "$root" "github.event.pull_request.draft"
 run_check "$root"
 check "a positive draft test on the needed changes job is refused" "$(is "$status" 1)"
+check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
+
+# ci.yaml's shape: the changes job every image gate is inherited from skips a merge-group re-run
+# attempt, which runs on the commit attempt 1 ran on, so the build's coverage is unchanged and
+# the filter beside the gate is still read.
+root=$(fixture gate-attempt-on-changes)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}"
+run_check "$root"
+check "the merge-group re-run guard on the needed changes job passes" "$(is "$status" 0)"
+check "  and the build job's filter is still read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+
+# The control: the same guard against any other attempt skips the first attempt of a change, so
+# it is refused on the needed job too.
+root=$(fixture gate-attempt-on-changes-refused)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ github.event_name != 'merge_group' || github.run_attempt == '2' }}"
+run_check "$root"
+check "an attempt test the allowlist does not admit is refused on the needed job" "$(is "$status" 1)"
 check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
 
 echo "case: the draft term is admitted only under pull request triggers that list ready_for_review"

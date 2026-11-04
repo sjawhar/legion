@@ -185,10 +185,17 @@ EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
 # only widens, so gate_outputs looks for it only among the neutral conjuncts. Their opposites
 # (`github.event.pull_request.draft`, `== true`, `github.event.action == 'closed'`) skip every
 # build a deployment pins, so they stay refused.
+#
+# `github.run_attempt == '1'` is neutral in the same sense: a re-run attempt runs on the commit
+# attempt 1 ran on, so a term that admits attempt 1 alone narrows by attempt and never by path,
+# and every change still reaches the build on its first attempt. ci.yaml's merge-group runs carry
+# it (the comment above its `changes` job says why a re-run of a group must do nothing). Only
+# that one comparison is admitted: `github.run_attempt` against any other value, or against
+# nothing at all, can skip the first attempt of a change, so it stays refused.
 DRAFT = re.compile(r"!\s*github\.event\.pull_request\.draft", re.I)
 NEUTRAL = re.compile(
     r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?"
-    rf"|{DRAFT.pattern}|github\.event\.action\s*!=\s*'closed'",
+    rf"|{DRAFT.pattern}|github\.event\.action\s*!=\s*'closed'|github\.run_attempt\s*==\s*'1'",
     re.I,
 )
 # The activity types a `pull_request` or `pull_request_target` trigger without `types` runs on.
@@ -839,9 +846,10 @@ def gate_outputs(
     other `||` terms there only widen, so they are allowed); or made entirely of terms that do
     not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, the
     two event terms `!github.event.pull_request.draft` and `github.event.action != 'closed'`,
-    and a CALL_MODE comparison on an input `modes` admits; or an event term —
-    `github.event_name == '<event>'` tests joined by `||`, which admits only those events, or
-    one `github.event_name != '<event>'`, which excludes that event; or it is refused, quoting
+    `github.run_attempt == '1'`, and a CALL_MODE comparison on an input `modes` admits; or an
+    event term — `github.event_name == '<event>'` tests joined by `||`, which admits only those
+    events, or one `github.event_name != '<event>'`, which excludes that event, and which,
+    ||-joined with such neutral terms, excludes none of them; or it is refused, quoting
     the term. The `if:` skips a draft when one of those neutral conjuncts holds the draft term;
     in the filters clause the draft term only widens. gating_filters admits that skip only
     under triggers that list `ready_for_review`; the comment above NEUTRAL says why. `modes`
@@ -864,8 +872,17 @@ def gate_outputs(
         if all(match and match.group(1) == "==" for match in named):
             admitted &= {match.group(2).lower() for match in named}
             continue
-        if len(terms) == 1 and named[0] and named[0].group(1) == "!=":
-            admitted.discard(named[0].group(2).lower())
+        # One `github.event_name != '<event>'`, alone or ||-joined with neutral terms. Alone it
+        # excludes that event. Beside a neutral term — ci.yaml's `github.event_name !=
+        # 'merge_group' || github.run_attempt == '1'` — the named event still reaches the job
+        # whenever the neutral term holds, so no event is excluded and, since no term of the
+        # disjunct narrows by path, nothing is. A term that is neither leaves the disjunct
+        # refused, as `github.event_name == 'pull_request' || vars.RUN_IT == 'true'` is.
+        rest = [term for term in terms if not neutral(term, modes)]
+        excluded = EVENT_TERM.fullmatch(rest[0]) if len(rest) == 1 else None
+        if excluded and excluded.group(1) == "!=":
+            if len(rest) == len(terms):
+                admitted.discard(excluded.group(2).lower())
             continue
         spoiled = [modes[name.lower()] for name in CALL_MODE.findall(part) if modes.get(name.lower())]
         if spoiled:
@@ -891,7 +908,7 @@ def gate_outputs(
             f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
             f"still admits `skipped`, `github.event_name == '<event>'` tests joined by ||, one "
             f"`github.event_name != '<event>'`, `!github.event.pull_request.draft`, "
-            f"`github.event.action != 'closed'`) beside it{hint}"
+            f"`github.event.action != 'closed'`, `github.run_attempt == '1'`) beside it{hint}"
         )
     if not clauses:
         return [], admitted, skips_draft

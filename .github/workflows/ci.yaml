@@ -142,13 +142,57 @@ env:
   # dependency code, reports no result to ci-ok and is no job any verdict waits for.
   # check-ci-filters.sh asks none of the ci-ok rules of a job named here, and refuses one that
   # carries the ci-ok-report step: ci-ok.sh fails a result for a job CI_OK_SELECTED_BY cannot map.
-  CI_OK_EXEMPT: '[]'
+  # The 31 of them are `cancel-started` and one follower per job ci-ok waits for on a merge-group
+  # run, written as CI_OK_SELECTED_BY above is, a JSON array over lines rather than one long one.
+  CI_OK_EXEMPT: |
+    [
+      "cancel-started",
+      "cancel-lint",
+      "cancel-ci-images",
+      "cancel-typecheck",
+      "cancel-test",
+      "cancel-docs",
+      "cancel-contracts",
+      "cancel-conflicts-script",
+      "cancel-envoy-client",
+      "cancel-pi-shared",
+      "cancel-pi-envoy",
+      "cancel-pi-legion",
+      "cancel-dispatch-ui",
+      "cancel-dispatch",
+      "cancel-dispatch-browser-multiprocess",
+      "cancel-claude-envoy",
+      "cancel-envoy-go-checks",
+      "cancel-envoy-go",
+      "cancel-envoy-infra-go",
+      "cancel-envoy-go-race",
+      "cancel-envoy-go-race-pmdoc",
+      "cancel-envoy-go-race-api",
+      "cancel-envoy-go-race-docs",
+      "cancel-dispatch-memory",
+      "cancel-dispatch-multiprocess",
+      "cancel-listener-server-change",
+      "cancel-broker-multiprocess",
+      "cancel-envoy-smoke",
+      "cancel-envoy-e2e-local",
+      "cancel-envoy-session-stall",
+      "cancel-ci-filters"
+    ]
 
 jobs:
   # Selects the jobs that read what this change touched. Skipped on a draft pull request, so no
   # test job runs; marking it ready for review starts a run that selects by the same diff.
+  #
+  # Also skipped on a re-run attempt of a merge-group run, here and in the three `if:`s below
+  # that do not test an output of this job (lint, typecheck and test); every other job's `if:`
+  # tests `needs.changes.outputs.<x> == 'true'`, which is false once this job is skipped, so
+  # those four terms skip the whole run. A group is tested once: the queue tests a pull request
+  # it removed again when it is added again, and a merge-group run this file's cancel acts
+  # (the comment above `cancel-started`) force-cancelled has descendants they already cancelled,
+  # so a passing re-run of it would leave those groups waiting for a ci-ok that never comes. A
+  # re-run must therefore do nothing and post nothing.
   changes:
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -1431,7 +1475,7 @@ jobs:
   # Reads the whole tree, so it runs on every non-draft run, also when `changes` failed.
   lint:
     needs: changes
-    if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
@@ -1689,7 +1733,7 @@ jobs:
   # run posts no new ci-ok and the failed one stands: re-run every job instead.
   typecheck:
     needs: changes
-    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') && (needs.changes.result != 'success' || needs.changes.outputs.typecheck == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -1730,7 +1774,7 @@ jobs:
 
   test:
     needs: changes
-    if: ${{ !cancelled() && !github.event.pull_request.draft && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
+    if: ${{ !cancelled() && !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') && (needs.changes.result != 'success' || needs.changes.outputs.test == 'true') }}
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the goroutine dump that names it. A step's worst case is therefore its largest
@@ -3617,3 +3661,941 @@ jobs:
       attestations: write
     with:
       ci-ok-changes: ${{ toJSON(needs.changes) }}
+
+  # The merge queue's cancel acts. Main's queue builds each group on top of the group below it,
+  # so when a group fails, every group built on it can no longer merge: the queue rebuilds them,
+  # while their ci.yaml merge-group runs, which nothing cancelled, run to the end and decide
+  # nothing. A doomed run's runner time is what these jobs take back. Both acts are decided by
+  # .github/scripts/merge-group-cancels.sh, which makes no GitHub call and prints, in the order
+  # to act on them, `cancel <run id>` lines and then `self` (the failed act) or `self-doomed`
+  # (the started act, when it applies); its header says what it reads and why:
+  #
+  #   * `cancel-started` runs at the start of every merge-group run, with no `needs:` so that it
+  #     starts at once. It cancels the older groups of the same pull request the queue has
+  #     replaced, and ends this run when its chain of parents reaches a group whose ci-ok failed.
+  #   * one follower per job ci-ok waits for (`cancel-<job>`), which `needs:` its job and runs
+  #     when that job's result is `failure` or `cancelled`. `cancelled` is the result a job cut
+  #     off by its `timeout-minutes` reports to its follower, and the follower does run (measured
+  #     on probe run 41869007039); a force-cancelled run leaves no follower running at all, so
+  #     there is no third case to tell apart. It cancels every unfinished merge-group run built
+  #     on this group, the nearest descendant first, and then this run.
+  #
+  # Each cancel is `POST /repos/{owner}/{repo}/actions/runs/{id}/force-cancel`, acted on in the
+  # order the script printed, and the `self` line LAST: cancelling this run first would kill the
+  # job before it had cancelled the descendants. A force-cancel bypasses `if: always()` — the
+  # step of a running job is left skipped, not run (measured on the same probe run) — so a
+  # force-cancelled run posts no ci-ok, which is what these acts want: a failing ci-ok on a group
+  # the queue still holds could take an innocent pull request out of the queue. The run whose job
+  # failed does post its own failing ci-ok first, from the merge-group branch of
+  # .github/scripts/ci-ok-report.sh, which posts at once instead of waiting for the reports the
+  # follower is about to cancel.
+  #
+  # Every job of both acts follows the same rules:
+  #   * it runs only on `merge_group` and only on attempt 1 (the comment above `changes` says why
+  #     a re-run attempt does nothing);
+  #   * `permissions:` is `actions: write` and nothing else. `gh run list` and the force-cancel
+  #     need it; the checkout needs no `contents: read`, because this repository is public and
+  #     GitHub serves a public repository's git data to any valid token — measured here with
+  #     `git ls-remote` over https against a public repository the token holds no grant on at
+  #     all, which succeeded;
+  #   * it carries no ci-ok-report step and reports nothing to ci-ok, so its id is in
+  #     CI_OK_EXEMPT in this file's env, outside ci-ok's accounting;
+  #   * it runs this repository's own .github/scripts/merge-group-cancels.sh from the run's own
+  #     checkout and nothing else: no bun, no go, no node, no installed dependency, no npm or
+  #     bunx tool. A merge-group run checks out the queued tree, so the script it runs is the
+  #     queued change's copy, which that change's review has read;
+  #   * its step's token is ${{ github.token }}, and its time limit is short: the act is a
+  #     handful of API calls.
+  #
+  # A force-cancel that fails leaves a warning rather than a red job: the run it names may have
+  # completed between the list and the call, and an act that reclaims nothing is no failure of
+  # the run it runs in.
+  cancel-started:
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: started
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          # CI_OK holds the ci-ok of every head the walk could reach, read one check run at a
+          # time, so only the heads worth reading are read: a run that completed `success` is no
+          # failed group, and a head this leaves out carries no ci-ok here, which dooms nothing.
+          # So the reads are bounded by the runs that did not complete `success` — 17 of the 61
+          # merge-group runs this repository had when this was written — and never by every
+          # merge-group run there has ever been. A run still in progress is read too: a run whose
+          # job failed posts its failing ci-ok before it ends, and that is the doom this act
+          # looks for. The `--limit` is 100 for the same reason the walk needs depth: the queue
+          # builds up to 20 groups at once, and gh's default of 20 runs would cut the chain off.
+          CI_OK=$(jq -r '[.[] | select(.conclusion != "success") | .headSha] | unique[]' <<<"$RUNS" |
+            while read -r sha; do
+              gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=ci-ok" \
+                --jq '.check_runs[0].conclusion // empty' |
+                jq -R --arg sha "$sha" 'select(. != "") | {($sha): .}'
+            done | jq -s 'add // {}')
+          export CI_OK
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self-doomed) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  # The followers, one per job ci-ok waits for on a merge-group run, in this file's order. Each
+  # is the same act on a different job; the comment above `cancel-started` says what it does and
+  # why. `worker-image` has none: its `if:` admits only pull_request (CI_OK_PULL_REQUEST_ONLY
+  # names it), so the queue never runs it and a follower of it could never fire — and a job that
+  # `needs:` it would sit behind the worker_image filter, which
+  # .github/scripts/check-image-trigger-paths.sh then stops proving matches only the files that
+  # image build reads, since the filter would gate a job that is no image build.
+  cancel-lint:
+    needs: lint
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.lint.result == 'failure' || needs.lint.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-ci-images:
+    needs: ci-images
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.ci-images.result == 'failure' || needs.ci-images.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-typecheck:
+    needs: typecheck
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.typecheck.result == 'failure' || needs.typecheck.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-test:
+    needs: test
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.test.result == 'failure' || needs.test.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-docs:
+    needs: docs
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.docs.result == 'failure' || needs.docs.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-contracts:
+    needs: contracts
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.contracts.result == 'failure' || needs.contracts.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-conflicts-script:
+    needs: conflicts-script
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.conflicts-script.result == 'failure' || needs.conflicts-script.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-client:
+    needs: envoy-client
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-client.result == 'failure' || needs.envoy-client.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-pi-shared:
+    needs: pi-shared
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-shared.result == 'failure' || needs.pi-shared.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-pi-envoy:
+    needs: pi-envoy
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-envoy.result == 'failure' || needs.pi-envoy.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-pi-legion:
+    needs: pi-legion
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.pi-legion.result == 'failure' || needs.pi-legion.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-dispatch-ui:
+    needs: dispatch-ui
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-ui.result == 'failure' || needs.dispatch-ui.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-dispatch:
+    needs: dispatch
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch.result == 'failure' || needs.dispatch.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-dispatch-browser-multiprocess:
+    needs: dispatch-browser-multiprocess
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-browser-multiprocess.result == 'failure' || needs.dispatch-browser-multiprocess.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-claude-envoy:
+    needs: claude-envoy
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.claude-envoy.result == 'failure' || needs.claude-envoy.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go-checks:
+    needs: envoy-go-checks
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-checks.result == 'failure' || needs.envoy-go-checks.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go:
+    needs: envoy-go
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go.result == 'failure' || needs.envoy-go.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-infra-go:
+    needs: envoy-infra-go
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-infra-go.result == 'failure' || needs.envoy-infra-go.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go-race:
+    needs: envoy-go-race
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race.result == 'failure' || needs.envoy-go-race.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go-race-pmdoc:
+    needs: envoy-go-race-pmdoc
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-pmdoc.result == 'failure' || needs.envoy-go-race-pmdoc.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go-race-api:
+    needs: envoy-go-race-api
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-api.result == 'failure' || needs.envoy-go-race-api.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-go-race-docs:
+    needs: envoy-go-race-docs
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-go-race-docs.result == 'failure' || needs.envoy-go-race-docs.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-dispatch-memory:
+    needs: dispatch-memory
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-memory.result == 'failure' || needs.dispatch-memory.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-dispatch-multiprocess:
+    needs: dispatch-multiprocess
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.dispatch-multiprocess.result == 'failure' || needs.dispatch-multiprocess.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-listener-server-change:
+    needs: listener-server-change
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.listener-server-change.result == 'failure' || needs.listener-server-change.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-broker-multiprocess:
+    needs: broker-multiprocess
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.broker-multiprocess.result == 'failure' || needs.broker-multiprocess.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-smoke:
+    needs: envoy-smoke
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-smoke.result == 'failure' || needs.envoy-smoke.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-e2e-local:
+    needs: envoy-e2e-local
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-e2e-local.result == 'failure' || needs.envoy-e2e-local.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-envoy-session-stall:
+    needs: envoy-session-stall
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.envoy-session-stall.result == 'failure' || needs.envoy-session-stall.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
+
+  cancel-ci-filters:
+    needs: ci-filters
+    if: ${{ github.event_name == 'merge_group' && github.run_attempt == '1' && (needs.ci-filters.result == 'failure' || needs.ci-filters.result == 'cancelled') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          ACT: failed
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --limit 100 --json databaseId,headSha,headBranch,status,conclusion,createdAt)
+          export RUNS
+          acts=$(.github/scripts/merge-group-cancels.sh)
+          while read -r act id; do
+            case $act in cancel) ;; self) id=$GITHUB_RUN_ID ;; *) continue ;; esac
+            gh api --silent --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" ||
+              echo "::warning::force-cancel of run $id failed; it may have completed already"
+          done <<<"$acts"
