@@ -76,9 +76,13 @@ refusal those checks did not predict.
 
 On a status write the daemon writes the status all the same, retrying it on the row's backoff
 until Dispatch takes it, so the status is set unless Dispatch refused the status itself — the
-reason says which — and only the reason beside it is on no issue: the issue's lifecycle stands
-and nothing waits on you. On a message the message is on no issue and nothing else about the
-issue changed: no phase moved, and no worker was told.
+reason says which. With the status set, only the reason beside it is on no issue: the issue's
+lifecycle stands and nothing waits on you. With the status refused, the issue keeps the status
+it had while the daemon's own record reads the one the write carried, and no retry of the
+daemon's closes that gap: ask a person with `dispatch ask` to set on the issue the status the
+reason names, saying what the record reads. The reason beside such a write may be on the issue
+already, which the notice says. On a message the message is on no issue and nothing else about
+the issue changed: no phase moved, and no worker was told.
 
 Either way, what a person still needs is yours to post on the issue with `dispatch comment`. A
 refused READY packet is nobody's to send again: the issue is in `awaiting_merge`, where no worker
