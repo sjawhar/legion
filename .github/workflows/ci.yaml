@@ -1861,6 +1861,9 @@ jobs:
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
 
+      - name: Test the merge-group cancel decision
+        run: .github/scripts/merge-group-cancels.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
