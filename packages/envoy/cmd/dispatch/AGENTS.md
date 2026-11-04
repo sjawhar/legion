@@ -808,14 +808,15 @@ requires a user sets `NATS_NKEY_SEED_FILE` too.
 ```sh
 cd packages/envoy
 export DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable'
-go test -timeout 20m ./internal/dispatch/api
-go test -timeout 20m $(go list ./internal/dispatch/... ./cmd/dispatch/... | grep -v '/internal/dispatch/api$')
+go test -timeout 20m ./internal/dispatch/... ./cmd/dispatch/...
 go vet ./...
 ```
 
-`internal/dispatch/api` alone takes close to `go test`'s default ten-minute package deadline (about
-600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` job runs it
-(`docs/testing.md`, "Go's package deadline").
+`internal/dispatch/api` is the module's largest Postgres-backed package and ran close to `go
+test`'s default ten-minute package deadline on its own, so every command that includes it passes
+`-timeout 20m` (`docs/testing.md`, "Go's package deadline").
+It no longer runs first or by itself: its tests run in parallel, and so do the other packages'
+(`docs/testing.md`, "A test that calls `t.Parallel()`").
 
 The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
 read its resident memory from `/proc`, so they build only under the `memory` tag and run in their

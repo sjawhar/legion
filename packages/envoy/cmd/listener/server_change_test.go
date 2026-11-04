@@ -11,8 +11,8 @@
 // is on, holding it off the hub for the window a plugin's reconnect wait leaves.
 //
 // Its own build tag, and its own CI job (listener-server-change), because one run sends for a
-// minute and then waits out each server's restart and the JetStream catch-up after it, past what
-// envoy-go's unit step holds under go test's ten-minute package deadline.
+// minute and then waits out each server's restart and the JetStream catch-up after it, which the
+// 20 minutes envoy-go's unit step gives the whole module would be spent on.
 
 package main
 
