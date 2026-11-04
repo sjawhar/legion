@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/memorygroup"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -294,7 +295,9 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
 		plan.ensureWorkspace = workflow.ensureWorkspace
-		plan.memoryGroup = workflow.treeMemoryGroup
+		// The memory group is read from the daemon's own store (treeMemoryGroup), not from here:
+		// the operator's spawn draws one with no workflow configured, and the launch that follows
+		// it must honour the draw it made.
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -586,10 +589,6 @@ type plan struct {
 	// (config.WriteMemoryInstructions), the last fragment of a memory-group launch's system
 	// prompt; "" when the project is off or its block names no instructions file.
 	memoryInstructions string
-	// memoryGroup answers whether a tree's root record carries the memory group
-	// (workflowRuntime.treeMemoryGroup); nil for a daemon with no workflow, which records no tree
-	// and so draws for none.
-	memoryGroup func(ctx context.Context, tree string) (bool, error)
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
@@ -855,6 +854,32 @@ func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabil
 		}
 	}
 	return nil
+}
+
+// treeMemoryGroup answers whether tree's root record carries the memory group, the word the draw
+// stored on it once and every later launch of the tree reads (record.Issue.MemoryGroup,
+// memorygroup.GroupMemory). An issue's memory group is its tree root's, and the root key is the
+// claim's own tree, so there is no ancestor walk; a tree with no record, and a root first opened
+// before the setting existed, carry no group and run without memory.
+//
+// It reads the daemon's own store rather than the workflow's, in a transaction of its own as the
+// supervisor's predicates read a record: the operator's spawn draws a tree's group through the
+// same store with no workflow configured (api's drawMemory), and a launch that could not read
+// that draw back would run the tree against a group the daemon had already recorded for it.
+func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bool, error) {
+	records := record.NewStore()
+	return func(ctx context.Context, tree string) (bool, error) {
+		var issue *record.Issue
+		err := st.Tx(ctx, func(tx pgx.Tx) error {
+			var err error
+			issue, err = records.Issue(ctx, tx, tree)
+			return err
+		})
+		if err != nil {
+			return false, fmt.Errorf("read the memory group of tree %s: %w", tree, err)
+		}
+		return issue != nil && issue.MemoryGroup == string(memorygroup.GroupMemory), nil
+	}
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
@@ -1128,7 +1153,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
-			memory: cfg.Projects[cfg.Project].Memory, memoryInstructions: p.memoryInstructions, memoryGroup: p.memoryGroup,
+			memory: cfg.Projects[cfg.Project].Memory, memoryInstructions: p.memoryInstructions,
+			memoryGroup: treeMemoryGroup(st),
 		},
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,

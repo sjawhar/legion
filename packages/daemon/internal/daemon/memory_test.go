@@ -149,8 +149,9 @@ func TestMemoryReachesOnlyTheRolesOfAMemoryTree(t *testing.T) {
 
 // With the mode off nothing reaches a launch, whatever a tree's record carries: the reader is not
 // even asked, so a project moved to off runs every tree, drawn or not, as it ran before the block
-// existed. A daemon with no workflow (no reader) records no tree and launches nothing with memory.
-func TestMemoryReachesNoLaunchWithTheModeOffOrNoWorkflow(t *testing.T) {
+// existed. A specs with no reader at all — which boot never builds, since the reader is the
+// daemon's own store (treeMemoryGroup) — launches nothing with memory either.
+func TestMemoryReachesNoLaunchWithTheModeOffOrNoReader(t *testing.T) {
 	asked := false
 	off := memorySpecs(t, config.MemoryOff, "/state/memory-instructions.md", false)
 	off.memoryGroup = func(context.Context, string) (bool, error) {
@@ -168,7 +169,7 @@ func TestMemoryReachesNoLaunchWithTheModeOffOrNoWorkflow(t *testing.T) {
 	none := memorySpecs(t, config.MemoryOn, "/state/memory-instructions.md", false)
 	spec = memorySpawn(t, none, "LEGION-1", "LEGION-2", claim.RoleTester)
 	if spec.Memory || spec.Prompt.MemoryInstructionsPath != "" {
-		t.Errorf("no workflow: Memory = %v, instructions = %q; want false and \"\"", spec.Memory, spec.Prompt.MemoryInstructionsPath)
+		t.Errorf("no reader: Memory = %v, instructions = %q; want false and \"\"", spec.Memory, spec.Prompt.MemoryInstructionsPath)
 	}
 }
 

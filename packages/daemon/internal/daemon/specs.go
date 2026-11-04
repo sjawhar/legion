@@ -42,8 +42,8 @@ type specs struct {
 	// prompt; "" when the block names none, which `mode: on` may, and nothing is then appended.
 	memoryInstructions string
 	// memoryGroup is whether tree's root record carries the memory group
-	// (workflowRuntime.treeMemoryGroup); nil for a daemon with no workflow, which records no tree,
-	// draws for none, and so launches nothing with memory.
+	// (treeMemoryGroup, over the daemon's own store); nil only in a test, since boot always sets it,
+	// and such a specs launches nothing with memory.
 	memoryGroup func(ctx context.Context, tree string) (bool, error)
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
@@ -187,7 +187,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		DeploymentInstructionsPath: s.instructions,
 	}
 	// The memory group is the tree's, read from its root's record and asked for only while the
-	// project's mode is not off: a daemon with no workflow (memoryGroup nil) records no tree, so
+	// project's mode is not off: a specs with no reader (memoryGroup nil, a test's) asks nothing, so
 	// none of its launches carries memory. A project whose block names no instructions file
 	// appends nothing, and its memory-group panes are the overlays alone.
 	if !s.memory.Off() && s.memoryGroup != nil {
