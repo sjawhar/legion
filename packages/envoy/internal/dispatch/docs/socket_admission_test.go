@@ -572,28 +572,35 @@ func TestAPreloadOfferedAfterAnEarlierRoomsLateUnloadIsNotKeptWhileTheRoomIsLoad
 }
 
 // A cold socket that offers its read while the room's load is running - after the load has looked
-// for a preload (LoadDoc) and before it records the room as loaded here (onLoadDocument) - offers
-// to a load that will never read it. The load takes that offer out as it records itself, so the
-// socket keeps neither the history nor its hold on the document's head-tracker entry while it
-// stays open.
+// for a preload (LoadDoc's takePreload) and before it records the room as loaded here
+// (onLoadDocument) - offers to a load that will never read it. The load takes that offer out as it
+// records itself, so the socket keeps neither the history nor its hold on the document's
+// head-tracker entry while it stays open. The load is held inside its own read of the store
+// (holdFirstLoadStore), which LoadDoc makes once takePreload has found nothing.
 func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	database := storetest.Open(t)
-	service, server := newTestServiceInstance(t, database)
 	artifactID := createDocuments(t, database, 1)[0]
-	// The first render of the room is the load's own (it read the store, so it renders the room
-	// itself, onLoadDocument): it waits here, past LoadDoc and before the load records the room.
-	loadRendering := make(chan struct{})
-	loadGo := make(chan struct{})
-	var calls atomic.Int64
-	var loadGoOnce sync.Once
-	letLoad := func() { loadGoOnce.Do(func() { close(loadGo) }) }
+	store := &holdFirstLoadStore{VersionedStore: NewPgVersioned(database), room: artifactID, reading: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	letLoad := func() { releaseOnce.Do(func() { close(store.release) }) }
 	t.Cleanup(letLoad)
-	service.admissionRendered = func(room string) {
-		if room == artifactID && calls.Add(1) == 1 {
-			close(loadRendering)
-			<-loadGo
+	store.armed.Store(true)
+	service := New(Deps{
+		Store:       database,
+		Persistence: store,
+		Events:      events.NewBroker(),
+		Identity:    headerIdentity(database),
+		ServerURL:   "https://dispatch.example",
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() {
+		letLoad()
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
 		}
-	}
+	})
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
 	offered := make(chan struct{})
 	var offeredOnce sync.Once
 	service.afterSocketPreload = func(room string, _ *persistence.LoadResult) {
@@ -604,9 +611,9 @@ func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	loaded := make(chan error, 1)
 	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
 	select {
-	case <-loadRendering:
+	case <-store.reading:
 	case <-time.After(roomWait(t)):
-		t.Fatal("the room's load never rendered the room, so nothing here is tested")
+		t.Fatal("the room's load never read the store, so nothing here is tested")
 	}
 
 	type opened struct {
@@ -649,4 +656,24 @@ func TestAPreloadOfferedWhileTheRoomLoadsIsReleasedAtThatLoad(t *testing.T) {
 	if got := headHolds(service, artifactID); got != 1 {
 		t.Errorf("the head tracker holds the document %d times while the cold socket is open, want the 1 the resident room holds", got)
 	}
+}
+
+// holdFirstLoadStore holds the first store read of room after it is armed, once that read has
+// returned and before Load hands it back: reading closes when it gets there, and release lets it
+// go. Every other read goes straight through.
+type holdFirstLoadStore struct {
+	VersionedStore
+	room    string
+	armed   atomic.Bool
+	reading chan struct{}
+	release chan struct{}
+}
+
+func (s *holdFirstLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	result, err := s.VersionedStore.Load(ctx, room)
+	if room == s.room && s.armed.CompareAndSwap(true, false) {
+		close(s.reading)
+		<-s.release
+	}
+	return result, err
 }
