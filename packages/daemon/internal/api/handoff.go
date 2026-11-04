@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -182,17 +184,14 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// attempt, so a packet it would refuse would never reach the human. Refused only by the post,
 	// the issue would already be in awaiting_merge, where no worker holds a phase and this
 	// merger's completion is over: nobody could send the shorter packet. Refused here, the issue
-	// stays in merging and the merger completes again with it. The text measured is the post
-	// itself, the packet with the row's outbox marker after it (record.LongestPost, built by the
-	// runner's own record.MessagePost.Posted for the longest marker any row could carry), since
-	// the marker is a block of its own after a packet that ends in a paragraph and code inside one
-	// that ends in an open fence: a packet that passes these bounds can be a post that does not.
+	// stays in merging and the merger completes again with it. The text measured is the post the
+	// outbox makes, not the packet alone (record.LongestPost).
 	var answer readyAnswer
 	if req.Ready {
 		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
 			return
 		}
-		if over := dispatch.CheckBody(record.LongestPost(record.ReadyPacket(req.Summary, answer.mergeNote))); over != nil {
+		if over := dispatchbody.Check(record.LongestPost(record.ReadyPacket(req.Summary, answer.mergeNote))); over != nil {
 			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
 				"the READY packet%s is one Dispatch refuses: %s: link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
 				byHandShare(answer.mergeNote), over))

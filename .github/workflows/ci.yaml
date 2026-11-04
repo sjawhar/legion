@@ -239,6 +239,11 @@ jobs:
             daemon_envoy_deps: &daemon_envoy_deps
               - 'packages/envoy/brokertest/*'
               - 'packages/envoy/daemonpermissions/*'
+              # dispatchbody is the one public door onto the Dispatch server's own block
+              # splitter, which the daemon refuses a close reason or a READY packet the server
+              # would refuse with (packages/daemon/internal/api): internal/dispatch/itemblocks
+              # below, and the document parser under it, are in the daemon's build through it.
+              - 'packages/envoy/dispatchbody/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -258,6 +263,12 @@ jobs:
               - 'packages/envoy/internal/broker/store/**'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              # text's testdata too: the daemon's race-tested packages compile it, and a compiled
+              # package's testdata is read by the job that compiles it.
+              - 'packages/envoy/internal/dispatch/text/**'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/oidc/**'
@@ -399,6 +410,16 @@ jobs:
               - 'packages/daemon/internal/wait/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
+              # packages/envoy/dispatchbody answers whether Dispatch would refuse a body with the
+              # server's own splitter, which the close route and the merger's READY completion
+              # hold their text to (packages/daemon/internal/api): the splitter, the document
+              # parser under it and the contracts both read come with it.
+              - 'packages/envoy/dispatchbody/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/listenfd/*'
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
@@ -658,9 +679,9 @@ jobs:
               # The Go copies its tests hold the TypeScript to: src/dispatch-href.test.ts:49-53 and
               # src/dispatch-text-references.test.ts:10-14 read the Go reader's JSON tables,
               # src/dispatch-block-ref.test.ts reads pmdoc's block pointer and typed block id
-              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - two
-              # Go files, pmdoc's generated block schema and contracts' own generated TypeScript -
-              # is current. pmdoc/schema is the block schema those generated types are the shape
+              # tables, and scripts/gen-go.test.ts checks every file scripts/gen-go.ts writes - the
+              # Go contract, pmdoc's generated block schema and contracts' own generated TypeScript
+              # - is current. pmdoc/schema is the block schema those generated types are the shape
               # of, so a change to it is a change to what this job generates for.
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-href-references.json'
               - 'packages/envoy/internal/dispatch/text/testdata/dispatch-text-references.json'
@@ -669,7 +690,6 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/contracts/generated.go'
               - 'packages/envoy/internal/dispatch/pmdoc/schema_generated.go'
-              - 'packages/daemon/internal/dispatch/generated.go'
             # The conflict measurement script's lint, typecheck and tests: its own directory (tests
             # and fixtures included; it imports nothing outside it), the Bun install and Bun it runs
             # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
@@ -770,7 +790,16 @@ jobs:
               # packages/daemon/internal, and scripts/skill-scenarios/daemon-pane.ts:27 runs
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
-              # daemon-pane.go compiles the daemon module, which reaches that envoy package.
+              # daemon-pane.go compiles the daemon module, which reaches these envoy packages:
+              # the migration identifier rule, and the Dispatch body check the close route and
+              # the merger's READY completion make with the server's own splitter
+              # (packages/envoy/dispatchbody, and the parser and contracts under it).
+              - 'packages/envoy/dispatchbody/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -853,18 +882,11 @@ jobs:
               # (internal/dispatch/api/lock_level_test.go:120-133).
               - 'packages/envoy/**'
               # `bun run check:go` (packages/contracts/scripts/gen-go.ts) reads contracts' schemas
-              # and sources, renders pmdoc's generated block schema from
-              # schemas/block-schema.schema.json, and checks the daemon's generated copy too
-              # (its outputs list, the files the generator owns).
+              # and sources, and renders pmdoc's generated block schema from
+              # schemas/block-schema.schema.json (its outputs list, the files the generator owns).
               - 'packages/contracts/scripts/gen-go.ts'
               - 'packages/contracts/schemas/**'
               - 'packages/contracts/src/**'
-              - 'packages/daemon/internal/dispatch/generated.go'
-              # The table of what the Dispatch server's splitter reads of the parser's corpus,
-              # which internal/dispatch/itemblocks writes with -update and compares without it
-              # (daemon_fixture_test.go:19): the daemon's own reader of the block grammar, which
-              # cannot import that splitter, is held to this fixture.
-              - 'packages/daemon/internal/dispatch/testdata/**'
               # The pmdoc fixture check and pmdoc's tests run pmdoc/gen, which imports the editor
               # (internal/dispatch/pmdoc/update_test.go:236-239).
               - 'packages/proof-editor/**'

@@ -550,26 +550,6 @@ ${keep}
 `;
 }
 
-// The daemon refuses a text at the call it arrives on — a root close's reason, a READY packet —
-// by the bounds the Dispatch server holds a body to, so no post the server will refuse reaches
-// the daemon's outbox. It carries its own copy of them rather than importing the envoy package:
-// its production build imports nothing from github.com/sjawhar/envoy.
-function renderDaemonDispatch() {
-  return `package dispatch
-
-// BlockUnits is the longest one block of a body Dispatch accepts, in UTF-16 code units as
-// Dispatch counts them. Generated from DISPATCH_BLOCK_UNITS in packages/contracts, the value the
-// server enforces and GET /api/v1/limits publishes, so the daemon's refusal at a call and the
-// server's refusal of the post cannot drift apart.
-const BlockUnits = ${DISPATCH_BLOCK_UNITS}
-
-// ItemBlocks is the most blocks one body Dispatch accepts may hold. Generated from
-// DISPATCH_ITEM_BLOCKS in packages/contracts, the value the server enforces and
-// GET /api/v1/limits publishes.
-const ItemBlocks = ${DISPATCH_ITEM_BLOCKS}
-`;
-}
-
 // The slice of JSON Schema that schemas/block-schema.schema.json uses, which the block schema
 // renderers below read. `x-ordered` marks an object whose keys carry their declaration order,
 // `x-go-type` names the Go type holding such an object, and `x-go-constants` names the Go
@@ -796,11 +776,6 @@ const outputs = [
   {
     path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
     rendered: renderContracts(envelope),
-    language: "go",
-  },
-  {
-    path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
-    rendered: renderDaemonDispatch(),
     language: "go",
   },
   {

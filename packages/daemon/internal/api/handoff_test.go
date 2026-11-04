@@ -19,6 +19,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -1109,10 +1111,10 @@ func TestHandoffCompleteRefusesAREADYPacketDispatchWouldRefuseAndAppliesTheShort
 	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	const emoji = "\U0001F600"
-	over := emoji + strings.Repeat("x", dispatch.BlockUnits-1)
+	over := emoji + strings.Repeat("x", dispatchbody.BlockUnits-1)
 	refusal := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: over, Ready: true, Commit: headSHA}),
 		http.StatusBadRequest, "READY_PACKET_TOO_LONG")
-	if want := fmt.Sprintf("block 1 is 1 characters over the %d-character block limit", dispatch.BlockUnits); !strings.Contains(refusal, want) {
+	if want := fmt.Sprintf("block 1 (text) is 1 characters over the %d-character block limit", dispatchbody.BlockUnits); !strings.Contains(refusal, want) {
 		t.Fatalf("refusal = %q, want it naming %q", refusal, want)
 	}
 	if got := facts.recorded(); len(got) != 0 {
@@ -1121,7 +1123,7 @@ func TestHandoffCompleteRefusesAREADYPacketDispatchWouldRefuseAndAppliesTheShort
 
 	// The same merger, still in merging, completes again one unit shorter, and that READY is
 	// applied: the refusal recorded nothing that would answer it ALREADY_RECORDED.
-	shortened := emoji + strings.Repeat("x", dispatch.BlockUnits-2)
+	shortened := emoji + strings.Repeat("x", dispatchbody.BlockUnits-2)
 	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: headSHA}))
 	if fact := lastCompletion(t, facts); !fact.Ready || fact.Commit != headSHA || fact.Summary != shortened {
 		t.Fatalf("applied fact = %#v, want the shortened READY at %s", fact, headSHA)
@@ -1143,14 +1145,14 @@ func TestHandoffCompleteRefusesAREADYPacketTheOutboxsMarkerCarriesOverTheBounds(
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	for _, tc := range []struct{ name, summary, want string }{
 		{"a packet of as many lines with text in them as Dispatch holds a body to blocks",
-			strings.TrimSuffix(strings.Repeat("y\n\n", dispatch.ItemBlocks), "\n\n"),
-			fmt.Sprintf("it is 1 blocks over the %d-block limit", dispatch.ItemBlocks)},
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks), "\n\n"),
+			fmt.Sprintf("body is 1 blocks over the %d-block limit", dispatchbody.ItemBlocks)},
 		{"a packet that ends inside an open code fence",
 			"see log\n\n```\n" + strings.Repeat("y", 31980),
-			fmt.Sprintf("block 2 is 28 characters over the %d-character block limit", dispatch.BlockUnits)},
+			fmt.Sprintf("block 2 (code_block) is 28 characters over the %d-character block limit", dispatchbody.BlockUnits)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if over := dispatch.CheckBody(record.ReadyPacket(tc.summary, "")); over != nil {
+			if over := dispatchbody.Check(record.ReadyPacket(tc.summary, "")); over != nil {
 				t.Fatalf("the packet on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
 			}
 			refusal := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: tc.summary, Ready: true, Commit: headSHA}),
@@ -1871,10 +1873,10 @@ func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T
 // with its note.
 func TestHandoffCompleteReadyRefusesAByHandPacketWithABlockOverTheBound(t *testing.T) {
 	h, facts, merger := newReadyHarness(t, byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`))
-	over := strings.Repeat("x", dispatch.BlockUnits+1)
+	over := strings.Repeat("x", dispatchbody.BlockUnits+1)
 	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: over, Ready: true, Commit: headSHA}),
 		http.StatusBadRequest, "READY_PACKET_TOO_LONG")
-	if !strings.Contains(message, "by-hand note") || !strings.Contains(message, "block 2 is 1 characters over") {
+	if !strings.Contains(message, "by-hand note") || !strings.Contains(message, "block 2 (text) is 1 characters over") {
 		t.Fatalf("a by-hand READY whose block passes the bound = %q, want it naming the by-hand note and block 2", message)
 	}
 	if got := facts.recorded(); len(got) != 0 {

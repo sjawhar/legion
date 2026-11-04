@@ -130,7 +130,7 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 // withdrawal is the READY's withdrawal for issue's pull request number, for reason. It is one
 // paragraph, so Dispatch measures it as one block: a long reason — a merge group's many failing
 // runs, say — is posted whole while that paragraph stays under Dispatch's block bound
-// (dispatch.BlockUnits), and nothing here cuts it to fit. A reason past the bound is refused on
+// (dispatchbody.BlockUnits), and nothing here cuts it to fit. A reason past the bound is refused on
 // the post, Dispatch refusing every attempt at it alike, and the outbox finishes that row and
 // tells the issue's architect Dispatch's own answer (the daemon package's messagePostRefused).
 // The implementer's task and the architect's checks-red carry the reason whole either way.

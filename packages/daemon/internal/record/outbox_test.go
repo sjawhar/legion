@@ -12,8 +12,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
@@ -439,44 +440,42 @@ func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) 
 }
 
 // LongestPost is what a caller checks before a message is recorded, and Posted is what the runner
-// posts, so no row's post may measure above it by either bound Dispatch holds a body to: the post
-// of the smallest row id and of the largest are the same text but for the marker's digits, and
-// the marker of math.MaxInt64 is the longest there is. The bodies here are the shapes where the
-// marker changes the measure: one ending in a paragraph, where the marker is a block of its own,
-// and one ending in an open code fence, where it is code inside the last block.
+// posts, so no row's post may pass a bound the text its caller checked clears: the post of the
+// smallest row id and of the largest are the same text but for the marker's digits, and the
+// marker of math.MaxInt64 is the longest there is. Each body here stands on a bound — the body
+// one block or one unit longer makes a post Dispatch refuses, which the case asserts — so a post
+// of some row that measured above LongestPost is refused below rather than passing unnoticed.
+// The shapes are the ones where the marker changes the measure: a body ending in a paragraph,
+// where the marker is a block of its own, and one ending in an open code fence, where it is code
+// inside the last block.
 func TestNoRowsPostMeasuresAboveLongestPost(t *testing.T) {
-	for _, body := range []string{
-		"",
-		"Closed by its architect before its first phase: no change.",
-		"line one\nline two\nline three",
-		"see log\n\n```\n" + strings.Repeat("y", 64),
-		"READY #42 at head\n\n```\nlog\n```\n\nthe rest of the packet",
+	// The blank line and the longest marker LongestPost puts after a body, which the fenced body
+	// below leaves room for inside its last block.
+	marker := len(LongestPost(""))
+	const fence = "see log\n\n```\n"
+	for _, tc := range []struct{ name, body, longer string }{
+		{"a body of paragraphs one block short of the bound on blocks",
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks-1), "\n\n"),
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks), "\n\n")},
+		{"a last paragraph on the bound on units, which the marker stands beside",
+			strings.Repeat("y", dispatchbody.BlockUnits),
+			strings.Repeat("y", dispatchbody.BlockUnits+1)},
+		{"an open code fence the marker falls inside, on the bound on units with it",
+			fence + strings.Repeat("y", dispatchbody.BlockUnits-len("```\n")-marker),
+			fence + strings.Repeat("y", dispatchbody.BlockUnits-len("```\n")-marker+1)},
 	} {
-		longest := LongestPost(body)
-		if want := (MessagePost{Body: body}).Posted(math.MaxInt64); longest != want {
-			t.Fatalf("LongestPost(%q) = %q, want the post of the largest row id %q", body, longest, want)
-		}
-		blocks, units := dispatch.MostBlocks(longest), longestBlock(longest)
-		for _, id := range []int64{1, 9, 10, 99, 100, 1_000_000, math.MaxInt64 - 1, math.MaxInt64} {
-			posted := (MessagePost{Body: body}).Posted(id)
-			if count := dispatch.MostBlocks(posted); count > blocks {
-				t.Errorf("the post of row %d holds %d blocks and LongestPost %d, so a body checked here is refused at the post", id, count, blocks)
+		t.Run(tc.name, func(t *testing.T) {
+			if over := dispatchbody.Check(LongestPost(tc.body)); over != nil {
+				t.Fatalf("the longest post of this body = %v, want one Dispatch takes", over)
 			}
-			if over := longestBlock(posted); over > units {
-				t.Errorf("the post of row %d has a block of %d units and LongestPost one of %d, so a body checked here is refused at the post", id, over, units)
+			if dispatchbody.Check(LongestPost(tc.longer)) == nil {
+				t.Fatalf("the longest post of this body one block or one unit longer is taken too, so the body is not on the bound and no post below could measure above it")
 			}
-		}
+			for _, id := range []int64{1, 9, 10, 99, 100, 1_000_000, math.MaxInt64 - 1, math.MaxInt64} {
+				if over := dispatchbody.Check((MessagePost{Body: tc.body}).Posted(id)); over != nil {
+					t.Errorf("the post of row %d = %v while the text its caller checked passes, so a body checked here is refused at the post", id, over)
+				}
+			}
+		})
 	}
-}
-
-// longestBlock is the longest block of text in UTF-16 code units, the measure Dispatch bounds a
-// block by.
-func longestBlock(text string) int {
-	longest := 0
-	for _, block := range dispatch.Blocks(text) {
-		if units := dispatch.Units16(block); units > longest {
-			longest = units
-		}
-	}
-	return longest
 }

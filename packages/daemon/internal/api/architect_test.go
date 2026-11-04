@@ -16,6 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/dispatchbody"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -1134,11 +1136,11 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	// The close posts the reason as a message before it writes the status, so a reason whose one
 	// block passes Dispatch's bound is refused here, naming the bound and how far over it is.
 	// Nothing is recorded: no fact reached the intake, so no outbox row carries the close.
-	overBlock := strings.Repeat("x", dispatch.BlockUnits)
+	overBlock := strings.Repeat("x", dispatchbody.BlockUnits)
 	refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": overBlock,
 	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
-	if want := "block 1 is 48 characters over the 32000-character block limit"; !strings.Contains(refusal, want) {
+	if want := "block 1 (text) is 48 characters over the 32000-character block limit"; !strings.Contains(refusal, want) {
 		t.Fatalf("refusal = %q, want it naming %q", refusal, want)
 	}
 	if got := facts.recorded(); len(got) != 1 {
@@ -1175,15 +1177,15 @@ func TestAnArchitectsCloseIsRefusedWhereTheOutboxsMarkerPassesTheBound(t *testin
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	for _, tc := range []struct{ name, reason, want string }{
 		{"a reason of as many lines with text in them as Dispatch holds a body to blocks",
-			strings.TrimSuffix(strings.Repeat("y\n\n", dispatch.ItemBlocks), "\n\n"),
-			fmt.Sprintf("it is 1 blocks over the %d-block limit", dispatch.ItemBlocks)},
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks), "\n\n"),
+			fmt.Sprintf("body is 1 blocks over the %d-block limit", dispatchbody.ItemBlocks)},
 		{"a reason that ends inside an open code fence",
 			"see log\n\n```\n" + strings.Repeat("y", 31980),
-			fmt.Sprintf("block 2 is 28 characters over the %d-character block limit", dispatch.BlockUnits)},
+			fmt.Sprintf("block 2 (code_block) is 28 characters over the %d-character block limit", dispatchbody.BlockUnits)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fact := intake.CloseRoot{Issue: "LEGION-208", Reason: tc.reason}
-			if over := dispatch.CheckBody(fact.Message()); over != nil {
+			if over := dispatchbody.Check(fact.Message()); over != nil {
 				t.Fatalf("the reason on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
 			}
 			refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
