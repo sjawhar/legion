@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 // signRequestFor signs an agent_secret request object over names whose grant lasts lifetime
@@ -157,6 +158,7 @@ func TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant(t *testing.T) {
 func TestANoTTLRequestDoesNotReuseAPostMigration12HourGrant(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
+	sessionDefaultFixture(t, m)
 
 	twelve, err := m.Create(ctx, enr, signRequestFor(t, m, key, 43200, "AUTO_TOKEN"), "")
 	if err != nil || twelve.GrantID == nil {
@@ -175,6 +177,7 @@ func TestANoTTLRequestDoesNotReuseAPostMigration12HourGrant(t *testing.T) {
 func TestANoTTLRequestJoinsAPreMigrationPendingRequest(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
+	sessionDefaultFixture(t, m)
 
 	old, err := m.Create(ctx, enr, signRequestFor(t, m, key, 43200, "DEEL_API_KEY"), "")
 	if err != nil || old.State != "pending" {
@@ -187,6 +190,7 @@ func TestANoTTLRequestJoinsAPreMigrationPendingRequest(t *testing.T) {
 	}
 
 	m2, enr2, key2, _ := newFixture(t)
+	sessionDefaultFixture(t, m2)
 	twelve, err := m2.Create(ctx, enr2, signRequestFor(t, m2, key2, 43200, "DEEL_API_KEY"), "")
 	if err != nil || twelve.State != "pending" {
 		t.Fatalf("Create(DEEL_API_KEY --ttl 12h) = %+v, %v; want pending", twelve, err)
@@ -245,12 +249,52 @@ func TestARequestOverlappingAPendingOneIsRefused(t *testing.T) {
 	}
 }
 
-// TestAGrantWithNoTTLLastsUntilItsSessionEnds is a request with no `--ttl`: its grant records no
+// TestAGrantWithNoTTLLastsTwelveHours is a request with no `--ttl` for secrets with no
+// default-grant tag: its grant, automatic or approved, records the broker's 12-hour default,
+// releases its values just before 12 hours have passed and refuses them after, while its session
+// is still live.
+func TestAGrantWithNoTTLLastsTwelveHours(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	want := int(DefaultGrantLifetime / time.Second)
+
+	auto, err := m.Create(ctx, enr, signRequest(t, m, key, "no ttl", "AUTO_TOKEN"), "")
+	if err != nil || auto.GrantID == nil || auto.LifetimeSeconds == nil || *auto.LifetimeSeconds != want {
+		t.Fatalf("Create(AUTO_TOKEN, no TTL) = %+v, %v; want a grant of %d s", auto, err, want)
+	}
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "no ttl", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create(DEEL_API_KEY) = %+v, %v; want pending", pending, err)
+	}
+	detail, err := m.ReadRecord(ctx, *pending.RecordID)
+	if err != nil || detail.LifetimeSeconds == nil || *detail.LifetimeSeconds != want {
+		t.Fatalf("record of a no-TTL request = %+v, %v; want lifetime %d", detail, err, want)
+	}
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil || approved.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v; want a grant", approved, err)
+	}
+	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
+		age(t, m, grantID, DefaultGrantLifetime-time.Minute)
+		if values, _, err := m.Values(ctx, grantID, enr, nil); err != nil || len(values) != 1 {
+			t.Fatalf("Values(%s grant) at 11h59m = %v, %v; want its value", name, values, err)
+		}
+		age(t, m, grantID, 2*time.Minute)
+		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+			t.Fatalf("Values(%s grant) at 12h01m = %v; want ErrGrantNotLive", name, err)
+		}
+	}
+}
+
+// TestAGrantWithNoTTLLastsUntilItsSessionEnds is a request with no `--ttl` for secrets tagged
+// default-grant=session: its grant records no
 // lifetime and no expiry, still releases its values a week on while its session is live, is listed
 // for the session and the operator with no expiry, and ends when the session does.
 func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
+	retag(t, m, sessionDefault(policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1")),
+		sessionDefault(policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")))
 
 	auto, err := m.Create(ctx, enr, signRequest(t, m, key, "until the session ends", "AUTO_TOKEN"), "")
 	if err != nil || auto.GrantID == nil {
@@ -306,5 +350,105 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 	}
 	if _, _, liveGrants := endedState(t, m, enr); liveGrants != 0 {
 		t.Fatalf("the ended session holds %d live grants, want 0", liveGrants)
+	}
+}
+
+// sessionDefault tags s default-grant=session, so a request naming no lifetime for it gets a grant
+// that lasts until its session ends.
+func sessionDefault(s secrets.LocalSecret) secrets.LocalSecret {
+	s.Tags[policy.TagDefaultGrant] = policy.DefaultGrantSession
+	return s
+}
+
+// sessionDefaultFixture retags the fixture's AUTO_TOKEN and DEEL_API_KEY default-grant=session.
+func sessionDefaultFixture(t *testing.T, m *Machine) {
+	t.Helper()
+	retag(t, m, sessionDefault(policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1")),
+		sessionDefault(policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")))
+}
+
+// TestAMixedNoTTLRequestLastsTwelveHours: a request naming no lifetime for one secret tagged
+// default-grant=session and one untagged gets the 12-hour default, not a session-long grant.
+func TestAMixedNoTTLRequestLastsTwelveHours(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	retag(t, m, sessionDefault(policytest.Secret("AUTO_TOKEN", fixtureOperator, policy.TierAgent, "auto-v1")),
+		policytest.Secret("OTHER_TOKEN", fixtureOperator, policy.TierAgent, "other-v1"))
+	got, err := m.Create(context.Background(), enr, signRequest(t, m, key, "mixed", "AUTO_TOKEN", "OTHER_TOKEN"), "")
+	if err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != int(DefaultGrantLifetime/time.Second) {
+		t.Fatalf("Create(mixed, no TTL) = %+v, %v; want lifetime 43200", got, err)
+	}
+}
+
+// TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours: a request that named no
+// lifetime while its secret was default-grant=session, still pending when the tag is removed (as
+// one pending across the deploy of the 12-hour default is), is granted 12 hours on approval.
+func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTwelveHours(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "pending", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil || pending.LifetimeSeconds != nil {
+		t.Fatalf("Create = %+v, %v; want pending with no lifetime", pending, err)
+	}
+	capped := policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")
+	capped.Tags[policy.TagMaxGrant] = "24h"
+	retag(t, m, capped)
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil || approved.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v", approved, err)
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil ||
+		expires == nil || time.Until(*expires) < 11*time.Hour || time.Until(*expires) > 13*time.Hour {
+		t.Fatalf("grant expires_at = %v, %v; want about 12 hours from now", expires, err)
+	}
+	if values, _, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(values) != 1 {
+		t.Fatalf("Values under max-grant 24h = %v, %v; want the value", values, err)
+	}
+	if got, err := m.Get(ctx, pending.ID); err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != 43200 {
+		t.Fatalf("Get = %+v, %v; want lifetime 43200", got, err)
+	}
+}
+
+// TestAMalformedTagAtApprovalKeepsTwelveHours: a pending no-lifetime request whose secret is
+// unserved at approval (default-grant=forever) is granted 12 hours, never a session-long grant.
+func TestAMalformedTagAtApprovalKeepsTwelveHours(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "pending", "DEEL_API_KEY"), "")
+	if err != nil || pending.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", pending, err)
+	}
+	bad := policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1")
+	bad.Tags[policy.TagDefaultGrant] = "forever"
+	retag(t, m, bad)
+	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
+	if err != nil {
+		return // refusing the approval is also safe
+	}
+	if approved.GrantID == "" {
+		return
+	}
+	var expires *time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, approved.GrantID).Scan(&expires); err != nil || expires == nil {
+		t.Fatalf("grant expires_at = %v, %v; want a 12-hour expiry", expires, err)
+	}
+}
+
+// TestANoTTLRetryJoinsAPendingNoLifetimeRequest: a request pending with no lifetime (from before
+// the 12-hour default) is joined by a retry that names no --ttl, not refused REQUEST_PENDING.
+func TestANoTTLRetryJoinsAPendingNoLifetimeRequest(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	sessionDefaultFixture(t, m)
+	old, err := m.Create(ctx, enr, signRequest(t, m, key, "old", "DEEL_API_KEY"), "")
+	if err != nil || old.LifetimeSeconds != nil {
+		t.Fatalf("Create = %+v, %v", old, err)
+	}
+	retag(t, m, policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"))
+	joined, err := m.Create(ctx, enr, signRequest(t, m, key, "retry", "DEEL_API_KEY"), "")
+	if err != nil || joined.ID != old.ID || !joined.Coalesced {
+		t.Fatalf("retry = %+v, %v; want %s joined", joined, err, old.ID)
 	}
 }

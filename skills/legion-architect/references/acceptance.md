@@ -5,10 +5,11 @@ at.
 
 ## Retro's result
 
-Retro output is `docs/solutions/`, the PR body content the repository's instructions derive from
-the pull request's changed paths at that head, and one `dispatch message` on the issue. Retro
-removes nothing, since every handoff is a record on the Dispatch issue, and a retro with no
-learnings pushes nothing. Retro writes no handoff and never rewrites the reviewer-approved head.
+Retro output is one `dispatch comment` on the issue with what the work taught, the PR body content
+the repository's instructions derive from the pull request's changed paths at that head, and one
+`dispatch message` on the issue. Retro commits nothing and pushes nothing, since every handoff is
+a record on the Dispatch issue and `docs/solutions/` is history no role writes to now. Retro
+writes no handoff and never rewrites the reviewer-approved head.
 
 When the implementer reports that it cannot compute that body content or do the work a line of it
 affirms, that its read of the body failed or came back empty, or that GitHub refused the body, it
@@ -23,7 +24,7 @@ Sign off an issue with no children once its evidence holds; a parent only after 
 
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'
-<acceptance: scope, integration evidence, the tester's handoff, both E2E lines, the approved head>
+<acceptance: scope, integration evidence, the tester's handoff, each check with its result, the approved head>
 EOF
 legion({ op: "sign_off", issue: "LEGION-40" })
 ```
@@ -43,7 +44,7 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
   in `accepting` returns the issue to `implementing` by the daemon's table.
-- No `Production:` line is asked here: the production check is the implementer's, after the close.
+- No `after_merge` result is asked here: the production check records it after the close.
 - A finding ask on the issue holds the acceptance: one a worker sent you, or one `dispatch read`
   lists under `Open asks:` whose question opens `Finding from ` or `Clear defect from `
   (`skill://legion-worker/references/findings.md`, "When no controller takes it"). Follow each
@@ -54,20 +55,23 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 
 ## The last round
 
-A parent's own pull request proves each of its criteria, so sign off a parent that has children
-only on an approved head that carries the merges of every child those criteria need. Each
-criterion needs tester evidence at that head, or, for a criterion in another repository, on that
-repository's default branch. Nothing in the tree builds on the parent's own merge, because that
+A parent's own pull request proves each of its checks, so sign off a parent that has children
+only on an approved head that carries the merges of every child those checks need. Each
+check needs a current passing result at that head, or, for a check in another repository, at a
+commit that repository's default branch carries. A child records no result that proves a
+parent's check: a child's pull request never makes a parent check's result current, and a child
+that carries part of a parent's requirement proves it with a check on the child's own
+Verification document whose `serves` names that requirement. Nothing in the tree builds on the parent's own merge, because that
 merge comes last: a child that waits for it waits forever, so work another child builds on is a
-first-wave child of its own. While the approved head does not carry those merges, or the tester's
-evidence of a criterion in another repository is older than the close of a child it needs, leave
+first-wave child of its own. While the approved head does not carry those merges, or the result of
+a check in another repository is older than the close of a child it needs, leave
 the issue in `accepting` until each of those children has closed (`child-closed`) or been parked
 for good (`child-status`). Move a parked child's criterion to other work first; never downgrade
 it. Then,
 in one turn:
 
 1. `envoy_publish` to the tester's role topic: "The next round of <KEY> is its last round: a full
-   test round of every acceptance criterion, not the forward-merge re-check." The backward move's
+   test round of every check of the issue, not the forward-merge re-check." The backward move's
    reason reaches only the implementer.
 2. `request_backward_move` to `implementing`, with the reason "Last round: merge the default
    branch your addressing line names into the branch, push, end your forward-merge comment with
@@ -82,8 +86,8 @@ A criterion proven on a deployed system is proven there after that child's deplo
 repository's deploy skill says.
 
 If the pull request merged before its last round, it can carry no new head, so move nothing back.
-Once those children have closed, have a fresh `task` subagent prove each criterion on the default
-branch, post that evidence in the acceptance comment, then `sign_off`.
+Once those children have closed, have a fresh `task` subagent run each check on the default
+branch, record each result, post them in the acceptance comment, then `sign_off`.
 
 ## The order after your acceptance
 
@@ -92,13 +96,13 @@ The daemon keeps this order from its fixed table; you start none of its steps:
 1. The tester's last result is green and the reviewer approves the head.
 2. The reviewer's approval of the head by SHA moves the issue to `accepting`; your `sign_off` moves
    it to `retro`.
-3. Retro commits its learnings under `docs/solutions/` on top of the approved head, when it has
-   any. Those commits do not void the approval and never return the tree to the tester or
-   reviewer. No merge carries a handoff onto the default branch, since no commit carries one.
+3. Retro records what the work taught as a `dispatch comment` on the issue and brings the PR body
+   up to date. It commits nothing, so the approved head is the head READY names. No merge carries
+   a handoff onto the default branch, since no commit carries one.
 4. The merger quotes what sits above the approved head
    (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
-   with its completion. The daemon refuses a head carrying anything above the approved head but
-   retro's commits and the handoff import's removal of `.legion/` files
+   with its completion. The daemon refuses a head carrying anything above the approved head but a
+   commit that changes only `docs/solutions/` and the handoff import's removal of `.legion/` files
    (`READY_UNREVIEWED_CHANGE`). It
    posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
    Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
@@ -126,8 +130,8 @@ What returns the tree to review is a changed diff: a commit above the approved h
 anything outside `docs/solutions/`, other than the handoff import's removal of `.legion/` files, or
 a conflict-resolution merge whose fingerprint (the unchanged-diff check,
 `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's.
-Retro's commits and a merge forced by a GitHub-reported conflict whose fingerprint is unchanged do
-not.
+A merge forced by a GitHub-reported conflict whose fingerprint is unchanged does
+not, and neither does a commit that changes only `docs/solutions/`.
 
 Make a conflict-resolution merge only when GitHub reports `CONFLICTING`
 (`gh pr view <n> --json mergeable,mergeStateStatus`). Outside `awaiting_merge` the daemon records

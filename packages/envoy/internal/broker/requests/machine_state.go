@@ -2,7 +2,8 @@
 // Package requests is the broker's state machine for agent_secret credential requests. A request
 // row freezes, at creation, the enrollment, the resource set with each name's decision and the
 // secret it reads, the allowed approver, the policy version and the lifetime its request object
-// signed, if any: a grant lasts that long, or until its session ends when the request names none.
+// signed, else the 12-hour default (defaultLifetime): a grant lasts that long, or until its session
+// ends when the request names none and every name is tagged default-grant=session.
 // Its only transitions are pending -> granted | denied | cancelled | expired; each is an UPDATE
 // guarded by state='pending' inside one transaction that also writes the audit row, so a duplicate
 // or late decision changes nothing. A request that needs approval also freezes an append-only
@@ -121,8 +122,8 @@ type SecretDecision struct {
 // credential-request record names (a person's canonical login, or record.AnyoneApprover), read
 // from the record rather than the current policy, since the record is what the approver's list
 // shows; it is nil when the request has no record, because the policy decided it at once.
-// LifetimeSeconds is the lifetime its signed request object named, the one its grant lasts; nil
-// when it named none, and its grant lasts until its session ends.
+// LifetimeSeconds is the lifetime its grant lasts: the one its signed request object named, else
+// the 12-hour default; nil when it named none and every name is tagged default-grant=session.
 type Request struct {
 	ID              string           `json:"request_id"`
 	State           string           `json:"state"`
@@ -328,11 +329,11 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	lifetime := obj.LifetimeSeconds
 	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
 	if err != nil {
 		return Request{}, err
 	}
+	lifetime := defaultLifetime(set, names, obj.LifetimeSeconds)
 	for _, name := range names {
 		if limit, over := overMaxGrant(set, name, lifetime); over {
 			return Request{}, fmt.Errorf("%w: %s allows at most %s; ask with agent-secrets --ttl %s", ErrGrantRequiresLifetime, name, limit, limit)
@@ -369,7 +370,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			return Request{}, err
 		}
 		if pending.ID != "" {
-			if slices.Equal(pending.Names, sorted) && pending.joins(lifetime) {
+			if slices.Equal(pending.Names, sorted) && (pending.joins(lifetime) || (obj.LifetimeSeconds == nil && pending.Lifetime == nil)) {
 				if err := tx.Commit(ctx); err != nil {
 					return Request{}, err
 				}
@@ -437,6 +438,31 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 		set = m.Policy.Get()
 	}
 	return set, nil
+}
+
+// DefaultGrantLifetime is how long a grant lasts when its request names no lifetime, unless every
+// name it grants carries default-grant=session (policy.TagDefaultGrant).
+const DefaultGrantLifetime = 12 * time.Hour
+
+// defaultLifetime is the lifetime a request's grant lasts: the one it signed, else
+// DefaultGrantLifetime, else nil (until its session ends) when every name opts out with
+// default-grant=session. A name the set does not serve (a malformed tag among them) keeps the
+// 12-hour default, so it never yields a session-long grant.
+func defaultLifetime(set *policy.Set, names []string, signed *int) *int {
+	if signed != nil {
+		return signed
+	}
+	for _, name := range names {
+		if secret, ok := set.Secrets[name]; !ok || !secret.SessionDefault {
+			seconds := int(DefaultGrantLifetime / time.Second)
+			return &seconds
+		}
+	}
+	if len(names) == 0 {
+		seconds := int(DefaultGrantLifetime / time.Second)
+		return &seconds
+	}
+	return nil
 }
 
 // overMaxGrant reports whether a request signing lifetime (nil: until its session ends) asks for
@@ -690,12 +716,27 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
+	// A record that names no lifetime gets the default the current policy gives its names: a
+	// request pending from before the 12-hour default, or one whose names were all
+	// default-grant=session when it was made, is held to the policy as it stands at approval.
+	lifetime := parsed.LifetimeSeconds
+	if approve && lifetime == nil {
+		requested, err := requestedSecrets(ctx, tx, requestID)
+		if err != nil {
+			return Decision{}, err
+		}
+		names := make([]string, len(requested))
+		for i, g := range requested {
+			names[i] = g.name
+		}
+		lifetime = defaultLifetime(m.Policy.Get(), names, nil)
+	}
 	if approve {
 		requester, err := m.requester(ctx, tx, enr)
 		if err != nil {
 			return Decision{}, err
 		}
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, parsed.LifetimeSeconds); err != nil {
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, lifetime); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -725,8 +766,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 			detail = "the requesting enrollment is no longer live"
 		}
 	}
-	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4 where id=$1 and state='pending'`,
-		requestID, next, login, nullable(detail)); err != nil {
+	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4,
+		lifetime_seconds = case when $2 = 'granted' then $5::int else lifetime_seconds end where id=$1 and state='pending'`,
+		requestID, next, login, nullable(detail), lifetime); err != nil {
 		return Decision{}, err
 	}
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor, detail) values ($1,$2,$3,$4,$5)`,
@@ -735,8 +777,8 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var grantID string
 	if next == "granted" {
-		// The grant lasts the lifetime the approved record names, the text its approver decided.
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, parsed.LifetimeSeconds); err != nil {
+		// The grant lasts the lifetime the approved record names, or the default above.
+		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, lifetime); err != nil {
 			return Decision{}, err
 		}
 	}

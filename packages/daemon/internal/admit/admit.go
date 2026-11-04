@@ -1090,7 +1090,14 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // (workflow's ReconcileAwaiting), every issue that no longer needs its slot gives it back
 // (releaseSlots), and every root left in the workflow that no slot can ever reach leaves it
 // (releaseUnslotted), so each pass of admission — a live fact, the boot read, a release, a tick
-// — repairs that state rather than keeping it. An admitted root's architect start is queued
+// — repairs that state rather than keeping it. The pass stops at the first candidate either hold
+// holds: one a.pending still names, since the Dispatch consumer has not yet reached the stream
+// position Reconcile captured when it deferred that key, or one the boot's catch-up still holds
+// (catchingUpFor). It stops rather than passing over it because the cap counts issues, so every
+// candidate behind the held one competes for the same slots, and a slot is never taken back: a
+// skip would invert Dispatch's rank order for good. A pass after the hold's release fills the
+// free slots in line order. release, not promote, is what clears pending — it empties the whole
+// set at once, so this need only check membership. An admitted root's architect start is queued
 // behind a row creating its issue branch (record.IssueBranch), which the start waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)

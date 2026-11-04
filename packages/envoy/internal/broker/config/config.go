@@ -1,7 +1,7 @@
 // packages/envoy/internal/broker/config/config.go
 // Package config reads the broker's BROKER_* environment. A missing required variable, an
-// unreadable or empty _FILE, a value out of range or of the wrong form, or a removed variable
-// refuses to start naming the variable.
+// unreadable or empty startup credential file, a value out of range or of the wrong form, or a
+// removed variable refuses to start naming the variable.
 //
 // Each Config field's doc comment opens with the variables it reads and a colon; the broker's
 // generated configuration reference (cmd/broker-refgen) is built from those comments
@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -125,6 +126,21 @@ type Config struct {
 	// with automatic replication takes a global key). A secret under the prefix encrypted with any
 	// other key, the provider's default one included, is refused.
 	SecretsKMSKey string
+	// BROKER_AZURE_TOKEN_FILE: the path of the broker pod's projected ServiceAccount token for
+	// azure-login releases, default /var/run/secrets/azure/tokens/azure-identity-token. Read only
+	// on release, not at boot, and read anew each time so the rotated token is used. The token's
+	// exp claim supplies the released expires_at; an unreadable, malformed or expired token
+	// refuses that release. Mount the projection read-only in the broker container alone, with
+	// audience api://AzureADTokenExchange and a one-hour lifetime. Only one Entra identity may
+	// trust this ServiceAccount subject: a released token can sign in to any identity that does.
+	AzureTokenFile string
+	// BROKER_AZURE_LOGIN_SECRET: the one agent-secret name allowed to release the broker's Azure
+	// projected token, for example AZURE_LOGIN. Empty (the default) disables azure-login
+	// releases. Must be an uppercase agent-secret name, not its store id or slug. That secret
+	// must be human tier in the policy snapshot checked for each release, with a person's
+	// approval recorded for that name in its grant. Another secret with kind=azure-login,
+	// the named secret retagged to agent tier, or an automatic grant releases no token.
+	AzureLoginSecret string
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
@@ -238,7 +254,12 @@ type Config struct {
 	// BROKER_LEASE_SECONDS: an enrollment's lease. A session renews it while it runs; one whose
 	// lease runs out is no longer enrolled and its calls are refused. Time while no broker was
 	// serving is not counted against it: a lease that ran out then stays live until a broker serves
-	// again, which gives it that time back. More than four and a half times BROKER_SWEEP_SECONDS.
+	// again, which gives it that time back. A gap of up to three BROKER_SWEEP_SECONDS still counts
+	// as a broker serving and is not given back, so a lease must outlive such a gap and the retries
+	// its renewer then takes to renew, counting each renewal the outage refuses as failing at
+	// whatever instant costs the renewer most, up to the 30-second client timeout: 91 s at a
+	// sweep of 1 or 5 seconds, 105 s at 10, 225 s at 30 and 360 s at 60. The broker refuses a
+	// shorter pair at boot and names the shortest lease that survives that sweep.
 	LeaseSeconds int
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
@@ -256,7 +277,8 @@ type Config struct {
 	// the pending requests and machine logins nobody decided in time. It is also how often a serving
 	// broker records that it serves: a gap of more than three sweeps between two such records is
 	// time no broker was serving, which the broker gives back to every lease still running when the
-	// gap began.
+	// gap began. A shorter gap is given back to nobody, so a long sweep demands a long
+	// BROKER_LEASE_SECONDS.
 	SweepSeconds int
 	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
 	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
@@ -292,10 +314,6 @@ const (
 // them names them in this order.
 var SignInSettings = []string{signInIssuerSetting, signInClientIDSetting, signInClientSecretSetting, signInDomainSetting}
 
-// NotServingSweeps is how many sweeps a gap between two serving records may last and still count
-// as a broker serving; a longer gap is time no broker was serving.
-const NotServingSweeps = 3
-
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
 const noUIToken = "the broker's approval routes take the calling service's own Kubernetes ServiceAccount token, verified against BROKER_K8S_OIDC_ISSUER, so list that account in BROKER_API_ACCOUNTS instead of sharing a bearer with Dispatch's server"
@@ -312,9 +330,10 @@ const noDatabasePassword = "the broker substitutes no password into BROKER_DATAB
 // and its tier.
 const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
 
-// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses a shorter lifetime, or
-// its grant lasts until the requesting session ends.
-const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
+// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses its lifetime with --ttl;
+// with none its grant lasts 12 hours, or until the requesting session ends when every requested
+// secret carries default-grant=session.
+const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts 12 hours, or until the requesting session ends for a secret tagged default-grant=session"
 
 // noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
 const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
@@ -712,11 +731,18 @@ func Load(getenv func(string) string) (Config, error) {
 		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
+		AzureTokenFile:     orDefault(getenv("BROKER_AZURE_TOKEN_FILE"), secrets.DefaultAzureTokenFile),
+		AzureLoginSecret:   getenv("BROKER_AZURE_LOGIN_SECRET"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
 		GoogleOIDCAudience: strings.TrimSpace(getenv("BROKER_GOOGLE_OIDC_AUDIENCE")),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
+	}
+	if cfg.AzureLoginSecret != "" {
+		if _, err := policy.NameToSlug(cfg.AzureLoginSecret); err != nil {
+			return Config{}, fmt.Errorf("BROKER_AZURE_LOGIN_SECRET: %w", err)
+		}
 	}
 	if cfg.SecretsStore != secrets.StoreAWS && cfg.SecretsStore != secrets.StoreGCP {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_STORE must be %s or %s, got %q", secrets.StoreAWS, secrets.StoreGCP, cfg.SecretsStore)
@@ -915,12 +941,19 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.SignIn, err = parseSignIn(getenv, time.Duration(sessionSeconds)*time.Second); err != nil {
 		return Config{}, err
 	}
-	// A live session renews with at least two thirds of its lease left, and a gap of up to
-	// NotServingSweeps sweeps reads as a broker still serving, so a lease that ran out inside such a
-	// gap would be ended rather than given back. That gap must fall short of two thirds of a lease.
-	if 2*cfg.LeaseSeconds <= 3*NotServingSweeps*cfg.SweepSeconds {
-		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) must be more than four and a half times BROKER_SWEEP_SECONDS (%d): a live session holds at least two thirds of its lease, and the gap the broker tolerates before giving back the time no broker was serving is three sweeps",
-			cfg.LeaseSeconds, cfg.SweepSeconds)
+	// A gap of up to leasetime.NotServingSweeps sweeps still reads as a broker serving, so none
+	// of it is given back and a lease that ran out inside it is simply over. Surviving one is
+	// not one wait but the whole retry schedule of whichever renewer holds the lease, each
+	// renewal the outage refuses failing at whatever instant from at once to the client timeout
+	// costs the renewer most, which leasetime walks for both of them.
+	//
+	// This refuses pairs an older broker booted: the rule it replaced counted only two thirds
+	// of the lease, so a deployment whose BROKER_LEASE_SECONDS is below the floor this prints
+	// has to raise it before the broker rolls, which operate.md says too.
+	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
+	if model := leasetime.Production(); !model.Survives(lease, sweep) {
+		return Config{}, fmt.Errorf("BROKER_LEASE_SECONDS (%d) is too short for BROKER_SWEEP_SECONDS (%d): a session must outlive a gap of %d s that still counts as a broker serving and the time its renewer then takes to renew. The shortest lease that survives both renewers at this sweep is %d s.",
+			cfg.LeaseSeconds, cfg.SweepSeconds, leasetime.NotServingSweeps*cfg.SweepSeconds, int(model.Shortest(sweep)/time.Second))
 	}
 	return cfg, nil
 }

@@ -51,6 +51,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -110,6 +111,7 @@ type mergedRootWaitsLive struct {
 // seedArcTwo writes — the root in awaiting_merge with its child implementing beneath it — and
 // writing it is the only way a live run reaches the wait at all.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newMergedRootWaitsLive(t)
 	r.step("step1-the-sign-off-is-refused-while-the-child-is-in-the-workflow", r.signOffRefused)
 	r.step("step2-the-child-leaves-and-the-sign-off-is-accepted", r.acceptanceAccepted)

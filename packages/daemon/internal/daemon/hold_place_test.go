@@ -45,21 +45,24 @@ func waitingLine(t *testing.T, pool *pgxpool.Pool) []string {
 	return line
 }
 
-// dispatch://INFRA-1067, on the daemon's own runtime. A hold says the pass does not yet know
-// enough to decide the candidate it stops at, so the pass breaks there and nothing behind that
-// candidate takes a slot, whatever tree it belongs to; the held candidate keeps its place, and
-// its own release is what admits it. internal/admit's
-// TestAHeldRootKeepsItsPlaceAndNothingBehindItTakesTheSlot proves the rule over the admission
-// pass; this proves that the daemon's boot path drives that rule end to end, read through the
-// lines the daemon logs as it takes a slot.
+// dispatch://INFRA-1067's rule on the daemon's own runtime, for the boot catch-up's hold.
+// TestAHeldRootKeepsItsPlaceOnTheRuntimeUntilItsOwnReleaseAdmitsIt, in hold_release_test.go,
+// proves the same rule there for the Dispatch consumer's hold, which a quiet consumer releases;
+// this one is the other hold the boot places, which only the catch-up releases.
 //
-// The hold here is the boot catch-up's, which is the daemon's own: the boot holds every root its
-// catch-up will read before its first admission pass (holdForCatchUp), and the catch-up releases
-// each root in the same fact that decides it (finishCatchUp, intake.CatchUpApplied). The line is
-// an answered root whose architect has still to write its spec, which takes a slot, and behind it
-// a root that never ran. With one slot between them, a pass that passed the held root over would
-// hand the root behind it a slot that is never taken back.
-func TestAHeldRootKeepsItsPlaceOnTheRuntimeUntilItsOwnReleaseAdmitsIt(t *testing.T) {
+// A hold says the pass does not yet know enough to decide the candidate it stops at, so the pass
+// breaks there and nothing behind that candidate takes a slot, whatever tree it belongs to; the
+// held candidate keeps its place, and its own release is what admits it. internal/admit proves
+// the rule over the admission pass; this proves that the daemon's boot path drives it end to
+// end, read through the lines the daemon logs as it takes a slot.
+//
+// The boot holds every root its catch-up will read before its first admission pass
+// (holdForCatchUp), and the catch-up releases each root in the same fact that decides it
+// (finishCatchUp, intake.CatchUpApplied). The line is an answered root whose architect has still
+// to write its spec, which takes a slot, and behind it a root that never ran. With one slot
+// between them, a pass that passed the held root over would hand the root behind it a slot that
+// is never taken back.
+func TestTheBootCatchUpHoldKeepsItsRootsPlaceOnTheRuntime(t *testing.T) {
 	answered := catchUpClock().Add(-time.Hour)
 	client := &awaitingDispatch{}
 	var logs syncBuffer

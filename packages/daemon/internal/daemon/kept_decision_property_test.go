@@ -738,6 +738,13 @@ type keptRun struct {
 	closed   map[uint64]bool
 	publishd int
 	counts   keptCounts
+	// seekHeldHandOver makes the drive take the hand-over inside a held task
+	// (handOverInsideAHeldTask) whenever it is enabled while that task names kept decisions, until
+	// one has counted (keptCounts.handedBeforeConfirm), rather than leave it to the generator's pick
+	// among the enabled steps. The seeds that test that window then reach it on every schedule that
+	// enables it, not only on those where the pick falls on it
+	// (TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild).
+	seekHeldHandOver bool
 }
 
 // A person's decision on a tree nobody in it can hear reaches an architect of that tree exactly
@@ -1183,7 +1190,11 @@ func (r *keptRun) enabled() []func() {
 		}
 	}
 	if len(overs) > 0 && r.awaitingConfirmation(r.root) {
-		ops = append(ops, func() { r.handOverInsideAHeldTask(overs[r.rng.IntN(len(overs))]) })
+		handOver := func() { r.handOverInsideAHeldTask(overs[r.rng.IntN(len(overs))]) }
+		if r.seekHeldHandOver && r.counts.handedBeforeConfirm == 0 && r.namesKeptDecisions(r.root) {
+			return []func(){handOver}
+		}
+		ops = append(ops, handOver)
 	}
 	return ops
 }

@@ -46,10 +46,16 @@ func reachConsumer(t *testing.T, pool *pgxpool.Pool, admission *Admission, event
 	}
 }
 
-// dispatch://INFRA-1067. A hold says the pass does not yet know enough to decide the candidate it
-// stops at, so the pass breaks there and nothing behind that candidate takes a slot — whatever
-// tree the candidate belongs to, and whatever tree the candidates behind it belong to. The held
-// candidate keeps its place in the line, and its own release is what admits it.
+// dispatch://INFRA-1067's rule, read where only the issue-level cap can put it: the candidate
+// behind the held one is a child of another tree. TestAHeldRootKeepsItsPlaceAndNothingBehindIt
+// TakesTheSlot proves the rule over two roots, which is the case that existed before a child
+// could hold a slot; this one proves that the stop is positional over the whole line and not
+// bounded by the held candidate's own tree.
+//
+// A hold says the pass does not yet know enough to decide the candidate it stops at, so the pass
+// breaks there and nothing behind that candidate takes a slot — whatever tree the candidate
+// belongs to, and whatever tree the candidates behind it belong to. The held candidate keeps its
+// place in the line, and its own release is what admits it.
 //
 // That is what separates a hold from a decided skip. A skip — an answered root that may not
 // resume, a root a Dispatch link holds, a tree whose cleanup is reserved, a tree another
@@ -63,7 +69,7 @@ func reachConsumer(t *testing.T, pool *pgxpool.Pool, admission *Admission, event
 // release's own promotion pass runs with respectHolds false, which makes the predicate the boot
 // catch-up's hold alone. So the Dispatch consumer catching up bypasses its own hold and never
 // the catch-up's, and a candidate under both is still held after the first release.
-func TestAHeldRootKeepsItsPlaceAndNothingBehindItTakesTheSlot(t *testing.T) {
+func TestAHeldCandidateStopsTheLineForAChildOfAnotherTree(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// hold puts LEGION-9 under the case's hold, before the first pass.

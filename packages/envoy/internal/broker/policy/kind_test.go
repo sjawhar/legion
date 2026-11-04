@@ -24,7 +24,8 @@ func TestKindSecretsAreServed(t *testing.T) {
 	githubApp := kindSecret("GITHUB_APP_KEY", policy.KindGitHubApp, "github-app-value")
 	googleLogin := kindSecret("GOOGLE_LOGIN_KEY", policy.KindGoogleLogin, "google-login-value")
 	googleLogin.Tags[policy.TagMaxGrant] = "1h"
-	store := secrets.NewLocal(githubApp, googleLogin)
+	azureLogin := kindSecret("AZURE_LOGIN_KEY", "azure-login", `{"tenant_id":"tenant","client_id":"client"}`)
+	store := secrets.NewLocal(githubApp, googleLogin, azureLogin)
 
 	set, err := policytest.Loader(store).Load(context.Background())
 	if err != nil {
@@ -34,6 +35,7 @@ func TestKindSecretsAreServed(t *testing.T) {
 	for name, kind := range map[string]string{
 		"GITHUB_APP_KEY":   policy.KindGitHubApp,
 		"GOOGLE_LOGIN_KEY": policy.KindGoogleLogin,
+		"AZURE_LOGIN_KEY":  "azure-login",
 	} {
 		secret, ok := set.Secrets[name]
 		if !ok {
@@ -369,5 +371,25 @@ func TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere(t *testing.T) {
 		if guarded.Secrets["GUARDED_KEY"] != bare.Secrets["GUARDED_KEY"] || guarded.Version != bare.Version {
 			t.Fatalf("%s: the rollback guard changed what this broker serves: %+v against %+v", kind, guarded.Secrets["GUARDED_KEY"], bare.Secrets["GUARDED_KEY"])
 		}
+	}
+}
+
+// TestDefaultGrantTag: default-grant=session is served as SessionDefault; any other value is
+// refused default-grant-malformed.
+func TestDefaultGrantTag(t *testing.T) {
+	logged := policytest.CaptureLog(t)
+	good := kindSecret("GOOD_KEY", policy.KindGoogleLogin, "v")
+	good.Tags[policy.TagDefaultGrant] = policy.DefaultGrantSession
+	bad := kindSecret("BAD_KEY", policy.KindGoogleLogin, "v")
+	bad.Tags[policy.TagDefaultGrant] = "forever"
+	set, err := policytest.Loader(secrets.NewLocal(good, bad)).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.Secrets["GOOD_KEY"].SessionDefault {
+		t.Fatal("GOOD_KEY not SessionDefault")
+	}
+	if _, ok := set.Secrets["BAD_KEY"]; ok || !strings.Contains(logged.String(), policy.ReasonDefaultGrantMalformed) {
+		t.Fatalf("BAD_KEY served or not logged: %s", logged.String())
 	}
 }

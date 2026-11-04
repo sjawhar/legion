@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/buildversion"
 	"github.com/sjawhar/envoy/internal/redact"
 )
@@ -143,12 +144,15 @@ func serve(cfg config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
+		// The two waits the broker's lease bound counts this renewer by, read from the one
+		// package that holds them (internal/broker/leasetime): the whole-call timeout a
+		// renewal an outage black-holes costs, and the floor under the renew cadence.
 		Broker: &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, MachineFile: cfg.MachineFile,
-			HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
+			HTTP: &http.Client{Timeout: leasetime.RenewClientTimeout}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
-		MinRenew: 30 * time.Second,
+		MinRenew: leasetime.HelperMinRenew,
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()

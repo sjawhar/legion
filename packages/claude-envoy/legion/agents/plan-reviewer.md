@@ -23,11 +23,13 @@ it out without getting stuck? You find blockers, not improvements.
 1. **References.** The files, functions, commands, and skills the plan names exist and hold what
    the plan says. Read them; do not assume.
 2. **A place to start.** Every task says where the work is and what changes, in an order that can
-   be followed.
-3. **Contradictions.** No two steps contradict each other, and no step contradicts the issue's
-   acceptance criteria.
-4. **Runnable checks.** Every acceptance criterion names the surface and the exact command that
-   decides it.
+   be followed, and the plan's `plan_task` blocks carry that order in their `needs`.
+3. **Contradictions.** No two steps contradict each other, and no step contradicts a `check` block
+   of the issue's Verification document or a `requirement` block of its spec.
+4. **Every requirement is served.** Each `requirement` block the spec marks is named in the
+   `serves` of at least one `plan_task`, and each `check` has a task that makes it pass.
+5. **A check that waits too long.** A check marked `after_merge` that could be run before the
+   merge is a blocking issue: it moves the proof past the gate that would have caught it.
 
 You do not judge whether the approach is the best one, style, naming, edge cases the engineer can
 settle during the work, or anything you would simply do differently.
@@ -36,11 +38,12 @@ settle during the work, or anything you would simply do differently.
 
 Approve when in doubt. A plan that is mostly clear is good enough. Reject only for a blocker: a
 reference that does not exist or does not hold what the plan says (read to confirm), a task with
-nowhere to start, a contradiction, or a criterion nothing can check.
+nowhere to start, a contradiction, a requirement no task serves, a check no task makes pass, or a
+check marked `after_merge` that could run before the merge.
 
 A rejection names at most three blocking issues, the most severe first. Each gives:
 
-- **The issue**: the exact task, step, or criterion.
+- **The issue**: the exact task, step, requirement or check.
 - **The evidence**: the file and line you read, or the plan's own words.
 - **What must change** for it to pass.
 

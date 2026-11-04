@@ -1,7 +1,7 @@
 // Package rescuetest builds an issue pod's disk for the push check's tests: a bare repository
 // standing in for GitHub, and on the disk a jj clone of it with the issue's jj workspace, laid out
 // as workspace.Location lays a pod's out. Every command is the real git and jj from PATH, under
-// an environment that reads no configuration of whoever runs the tests.
+// fixtureenv.Isolated: no workspace, configuration, remote or credential of whoever runs the tests.
 package rescuetest
 
 import (
@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/rescue"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // Owner and Repo are the repository the disk's clone is of.
@@ -41,11 +43,18 @@ type Disk struct {
 	Base string
 	// Env is what every command of the disk runs in, and what the push check runs in.
 	Env []string
+	// Provisioned is when the pod was made: New takes it before anything else, and records it as
+	// the workspace's creation in the workspace's .jj (workspace.RecordCreated), which the
+	// launcher's resume check reads. RunBefore dates a commit an hour before it.
+	Provisioned time.Time
 }
 
 // New is a disk whose remote holds one commit on main and on the issue's branch, and whose
-// workspace stands on that commit with nothing in it the remote lacks.
-func New(t testing.TB, issue string) *Disk {
+// workspace stands on that commit with nothing in it the remote lacks. Each of before runs once the
+// remote holds that commit and before the pod's clone is made, so what it pushes to the remote the
+// clone holds from the start; the clone records what it held then, as provisioning records it
+// (workspace.RecordHeld).
+func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
 	t.Helper()
 	for _, tool := range []string{"git", "jj"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -63,10 +72,11 @@ func New(t testing.TB, issue string) *Disk {
 		StateDir:  filepath.Join(root, "legion"),
 		Issue:     issue,
 		Branch:    "legion/" + issue,
-		Env:       Environment(home),
+		Env:       fixtureenv.Isolated(home),
 		Clone:     filepath.Join(root, "legion", "repos", "github.com", Owner, Repo),
 		Workspace: filepath.Join(root, "legion", "workspaces", Owner, Repo, strings.ToLower(issue)),
 	}
+	d.Provisioned = time.Now()
 	seed := filepath.Join(root, "seed")
 	d.Run(root, "git", "init", "--quiet", "--bare", "--initial-branch=main", d.Remote)
 	d.Run(root, "git", "init", "--quiet", "--initial-branch=main", seed)
@@ -75,6 +85,9 @@ func New(t testing.TB, issue string) *Disk {
 	d.Run(seed, "git", "commit", "--quiet", "-m", "base")
 	d.Run(seed, "git", "push", "--quiet", d.Remote, "main", "main:refs/heads/"+d.Branch)
 	d.Base = d.Run(seed, "git", "rev-parse", "HEAD")
+	for _, seedOrigin := range before {
+		seedOrigin(d)
+	}
 	if err := os.MkdirAll(filepath.Dir(d.Clone), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -82,44 +95,38 @@ func New(t testing.TB, issue string) *Disk {
 		t.Fatal(err)
 	}
 	d.Run(root, "jj", "git", "clone", "--colocate", d.Remote, d.Clone)
+	if err := workspace.RecordHeld(context.Background(), workspace.NewRunner(time.Minute, d.tools()), d.Clone); err != nil {
+		t.Fatal(err)
+	}
 	d.Run(d.Clone, "jj", "workspace", "add", "--name", strings.ToLower(issue), d.Workspace)
+	if err := workspace.RecordCreated(d.Workspace, d.Provisioned); err != nil {
+		t.Fatal(err)
+	}
 	d.JJ("bookmark", "track", d.Branch, "--remote", "origin")
 	return d
-}
-
-// Environment is the environment a disk's commands run in: the process's own without any git or
-// jj configuration or identity it carries — a Legion pod hands every process a GIT_CONFIG_*
-// block of its own — and with a home, an empty user configuration and an identity of the test's.
-//
-// It drops every LEGION_ variable too, and that is not tidiness: the check under test reads
-// LEGION_WORKSPACE out of this environment and rescues the whole disk that workspace sits on
-// (rescue.StateDirOf). Run inside a Legion pod, a fixture that carried the pod's own
-// LEGION_WORKSPACE would push the live issue workspace's unpushed commits to the real
-// repository under the fixture's rescue branch name, and a case that means to give the shim no
-// workspace at all would instead give it the pod's.
-func Environment(home string) []string {
-	env := slices.DeleteFunc(os.Environ(), func(entry string) bool {
-		key, _, _ := strings.Cut(entry, "=")
-		return strings.HasPrefix(key, "GIT_") || strings.HasPrefix(key, "JJ_") || strings.HasPrefix(key, "LEGION_") ||
-			key == "HOME" || key == "XDG_CONFIG_HOME"
-	})
-	return append(env,
-		"HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
-		"GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=legion-test@example.invalid",
-		"GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=legion-test@example.invalid",
-		"JJ_CONFIG="+filepath.Join(home, "no-jj-config.toml"),
-		"JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid",
-	)
 }
 
 // Run runs argv in dir under the disk's environment and returns its trimmed output, failing the
 // test when it fails.
 func (d *Disk) Run(dir string, argv ...string) string {
 	d.t.Helper()
+	return d.run(dir, nil, argv...)
+}
+
+// RunBefore is Run for a commit someone made before the pod provisioned the workspace: git's
+// author and committer dates, and jj's (JJ_TIMESTAMP), are an hour before Provisioned, as a commit
+// the clone holds from a fetch of something older than the pod is.
+func (d *Disk) RunBefore(dir string, argv ...string) string {
+	d.t.Helper()
+	before := d.Provisioned.Add(-time.Hour).Format(time.RFC3339)
+	return d.run(dir, []string{"GIT_AUTHOR_DATE=" + before, "GIT_COMMITTER_DATE=" + before, "JJ_TIMESTAMP=" + before}, argv...)
+}
+
+func (d *Disk) run(dir string, env []string, argv ...string) string {
+	d.t.Helper()
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = d.Env
+	cmd.Env = append(slices.Clone(d.Env), env...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		d.t.Fatalf("%s (in %s): %v\n%s", strings.Join(argv, " "), dir, err, out)
@@ -185,4 +192,18 @@ func (d *Disk) Check(ctx context.Context, prefix string) []shimwire.RescueWorksp
 		StateDir: d.StateDir, Branch: prefix, Env: d.Env,
 		WorkspaceTimeout: time.Minute, Deadline: time.Now().Add(2 * time.Minute),
 	})
+}
+
+// tools is the git and jj on PATH, as boot resolves them for provisioning's runner.
+func (d *Disk) tools() map[string]string {
+	d.t.Helper()
+	tools := map[string]string{}
+	for _, tool := range []string{"git", "jj"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			d.t.Fatalf("the push check's tests drive a real %s: %v", tool, err)
+		}
+		tools[tool] = path
+	}
+	return tools
 }

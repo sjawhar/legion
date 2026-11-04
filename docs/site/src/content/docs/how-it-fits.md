@@ -110,7 +110,7 @@ accepts only from its own origin. No route Dispatch or any other service calls d
 request. A machine login, labelled as one, is approved in Dispatch by typing the code the machine
 shows, and Dispatch relays that decision, and a person's revoke of a grant or a machine login, under
 the signed-in person's identity. The broker holds no Dispatch credential: Dispatch reads the pending
-requests from the broker. A grant lasts until its session ends, or for the shorter lifetime its request named,
+requests from the broker. A grant lasts the lifetime its request named, else 12 hours (until its session ends for secrets tagged `default-grant=session`),
 and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
 environment rather than printing it. People create and change the secrets themselves, in the
 broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in, with
