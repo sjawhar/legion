@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FocusEvent,
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
@@ -602,6 +610,12 @@ export interface InboxProps {
    *  `READING_PANE_QUERY` (1280 px). False keeps the card in the row, no selection and nothing
    *  written to `?item=`, at every width, which is what the drawer is. */
   pane?: boolean;
+  /** The box the host scrolls these rows in, where that is neither the window nor the list's
+   *  own column: the drawer scrolls them in its `aside`, so the viewport anchor must read and
+   *  move that element's `scrollTop` - `window.scrollBy` moves nothing there, and the row the
+   *  reader's hand is on jumps by the height of a row removed above it. Ignored while the
+   *  reading pane shows, where the list column is the box that scrolls. */
+  scroller?: RefObject<HTMLElement | null>;
 }
 
 export function Inbox({
@@ -609,6 +623,7 @@ export function Inbox({
   keymapScope = "inbox",
   onFilterChange,
   pane = true,
+  scroller,
 }: InboxProps = {}): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
@@ -1406,7 +1421,8 @@ export function Inbox({
   const list = (
     // With the reading column beside it the list scrolls in itself rather than in the window,
     // so the two columns move independently; the anchor is given that same box, so a refetch
-    // keeps the reader's row where it was in it.
+    // keeps the reader's row where it was in it. Without the pane the rows scroll in whatever
+    // the host gives (the drawer's own `aside`), and in the window when it gives nothing.
     <div
       className={paneShown ? "min-w-0 flex-1 overflow-y-auto pr-1" : undefined}
       data-testid="inbox-list"
@@ -1418,7 +1434,7 @@ export function Inbox({
         item={ROW_ATTRIBUTE}
         ref={viewport}
         rootRef={listRef}
-        scroller={paneShown ? listScroller : undefined}
+        scroller={paneShown ? listScroller : scroller}
       >
         <ul className="space-y-3">
           {drawn.flatMap(({ band, rows: visible }) =>

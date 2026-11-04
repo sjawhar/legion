@@ -25,8 +25,12 @@ import { Inbox } from "./Inbox";
  * consults, instead of the standalone page's `inbox` scope, which a dialog's keydown handling
  * never reaches. `pane={false}` is the third: a peek is a strip beside the page it covers, not
  * a two-column reader, so it keeps the card in the row at every width - the Inbox the page
- * itself shows below 1280 px. What the reader's browser keeps - the thread order, and which
- * bands they folded - is theirs rather than the address's, so the drawer and the page agree.
+ * itself shows below 1280 px. The rows scroll in this `aside` rather than in the window, so it
+ * is also the box the Inbox's viewport anchor is given (`scroller`): without it the anchor
+ * compensates a removed row with `window.scrollBy`, which moves nothing here, and the row the
+ * reader's hand is on jumps by a card's height. What the reader's browser keeps - the thread
+ * order, and which bands they folded - is theirs rather than the address's, so the drawer and
+ * the page agree.
  */
 export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -61,7 +65,13 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox filter={filter} keymapScope={DIALOG_SCOPE} onFilterChange={setFilter} pane={false} />
+        <Inbox
+          filter={filter}
+          keymapScope={DIALOG_SCOPE}
+          onFilterChange={setFilter}
+          pane={false}
+          scroller={dialog.containerRef}
+        />
       </aside>
     </>
   );
