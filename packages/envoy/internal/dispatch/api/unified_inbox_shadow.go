@@ -43,7 +43,7 @@ type inboxShadowReport struct {
 	CompleteZeroDays int               `json:"complete_zero_days"`
 }
 
-type inboxMembership map[[2]string]struct{}
+type inboxMembership map[[3]string]struct{}
 
 func readInboxMembership(ctx context.Context, q queryer, sql string, actorID string) (inboxMembership, error) {
 	rows, err := q.Query(ctx, sql, unreadDirectRepliesArgs(actorID, nil)...)
@@ -53,11 +53,11 @@ func readInboxMembership(ctx context.Context, q queryer, sql string, actorID str
 	defer rows.Close()
 	items := inboxMembership{}
 	for rows.Next() {
-		var cause, id string
-		if err := rows.Scan(&cause, &id); err != nil {
+		var cause, kind, id string
+		if err := rows.Scan(&cause, &kind, &id); err != nil {
 			return nil, err
 		}
-		items[[2]string{cause, id}] = struct{}{}
+		items[[3]string{cause, kind, id}] = struct{}{}
 	}
 	return items, rows.Err()
 }
@@ -140,7 +140,7 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
 			want, readErr := readInboxMembership(ctx, tx, legacyInboxMembershipQuery, raw)
 			var got inboxMembership
 			if readErr == nil {
-				got, readErr = readInboxMembership(ctx, tx, unifiedInboxCandidates+` select cause,id::text from delivered`, raw)
+				got, readErr = readInboxMembership(ctx, tx, unifiedInboxCandidates+` select cause,kind,id::text from delivered`, raw)
 			}
 			if readErr != nil {
 				if _, err := tx.Exec(ctx, `rollback to savepoint inbox_person`); err != nil {
@@ -162,8 +162,7 @@ func observeInboxShadow(ctx context.Context, pool *store.Pool, safe int64) error
 			err := tx.QueryRow(ctx, unifiedInboxCandidates+` select count(*) from (
     select distinct g.from_kind,g.from_id from `+refs.AllEdgesSQL+` g
     where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
-      and g.from_kind in ('comment','message','block')
-      and (g.from_kind<>'message' or exists(select 1 from messages m where m.id::text=g.from_id and m.issue_key is not null))
+      and `+inboxMentionVisibleSQL+`
       and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
    ) expansions`, p.login, p.login, nil).Scan(&count)
 			if err != nil {
@@ -202,8 +201,7 @@ func saveInboxShadow(ctx context.Context, tx pgx.Tx, now time.Time, safe int64, 
  max_gap_seconds=greatest(inbox_shadow_days.max_gap_seconds,extract(epoch from excluded.last_checked-inbox_shadow_days.last_checked)),
  last_checked=excluded.last_checked,samples=inbox_shadow_days.samples+1,
  mismatched=inbox_shadow_days.mismatched+excluded.mismatched,errors=inbox_shadow_days.errors+excluded.errors,
- missing=(select coalesce(jsonb_object_agg(k,n),'{}') from (select key k,sum(value::bigint) n from jsonb_each_text(inbox_shadow_days.missing || '{}'::jsonb) group by key) counts)
-   || (select coalesce(jsonb_object_agg(key,coalesce((inbox_shadow_days.missing->>key)::bigint,0)+value::bigint),'{}') from jsonb_each_text(excluded.missing)),
+ missing=inbox_shadow_days.missing || (select coalesce(jsonb_object_agg(key,coalesce((inbox_shadow_days.missing->>key)::bigint,0)+value::bigint),'{}') from jsonb_each_text(excluded.missing)),
  unexpected=inbox_shadow_days.unexpected || (select coalesce(jsonb_object_agg(key,coalesce((inbox_shadow_days.unexpected->>key)::bigint,0)+value::bigint),'{}') from jsonb_each_text(excluded.unexpected)),
  expansions=excluded.expansions`, user.Person, now, user.Mismatched, user.Errors, missing, unexpected, expansions)
 	return err

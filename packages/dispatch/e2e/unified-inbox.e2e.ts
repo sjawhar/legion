@@ -20,6 +20,8 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    if (testInfo.project.name === "chromium")
+      await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
     await page.getByRole("link", { name: "Inbox comparison" }).click();
@@ -29,6 +31,15 @@ test("the shadow page checks coverage and the unified inbox is opt-in @phone", a
     await expect(page.getByTestId("inbox-shadow-mismatches")).toHaveText("0 differences");
     await expect(page.getByText("All active people checked", { exact: true })).toBeVisible();
     await expect(page.getByText("Not ready to replace your inbox", { exact: true })).toBeVisible();
+    const geometry = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      pageWidth: document.documentElement.scrollWidth,
+      pageHeight: document.body.scrollHeight,
+    }));
+    console.log(`Inbox comparison first screen: ${JSON.stringify(geometry)}`);
+    expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.width);
+    expect(geometry.pageHeight).toBeLessThanOrEqual(geometry.height);
     await page.screenshot({ path: testInfo.outputPath("inbox-shadow.png"), fullPage: true });
     await page.getByRole("link", { name: "Try unified inbox" }).click();
     await expect(page.getByRole("heading", { name: "Unified inbox · preview" })).toBeVisible();

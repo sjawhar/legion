@@ -47,7 +47,7 @@ export function InboxShadowPage(): ReactNode {
           Comparison unavailable: {shadow.error.message}
         </p>
       ) : null}
-      {shadow.data ? (
+      {shadow.data && !shadow.isError ? (
         <>
           <p
             className={`mt-3 text-3xl font-semibold ${shadow.data.mismatched || shadow.data.errors || shadow.data.uncovered_users ? dangerText : ""}`}

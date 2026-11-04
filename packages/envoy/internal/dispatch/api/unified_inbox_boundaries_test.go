@@ -15,6 +15,11 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
  ('CORE-1','CORE',1,'Graph','{"kind":"user","id":"alice"}','alice','U');
  insert into artifacts(id,project_key,slug,name,kind,created_by) values
  ('00000000-0000-0000-0000-000000000100','CORE','notes','notes.md','doc','{"kind":"user","id":"bob"}');
+ insert into artifacts(id,issue_key,project_key,slug,name,kind,is_primary,created_by) values
+ ('00000000-0000-0000-0000-000000000200','CORE-1','CORE','spec','spec.md','doc',true,'{"kind":"user","id":"bob"}');
+ insert into document_blocks(artifact_id,block_id,node_id,type,text_sha256,excerpt,changed_version,changed_at) values
+ ('00000000-0000-0000-0000-000000000100','part:one','CORE/artifact/notes#part:one','paragraph',repeat('a',64),'Project mention',1,now()),
+ ('00000000-0000-0000-0000-000000000200','part:one','CORE-1/spec#part:one','paragraph',repeat('b',64),'Primary mention',1,now());
  insert into asks(id,artifact_id,author,question,state,answer,created_at) values
  ('00000000-0000-0000-0000-000000000101','00000000-0000-0000-0000-000000000100','{"kind":"user","id":"alice"}','Document question','answered',jsonb_build_object('user','bob','selected',jsonb_build_array('Ship'),'text','Agreed','at',now()-interval '9 minutes'),now()-interval '10 minutes');
  insert into asks(id,issue_key,author,question,created_at) values
@@ -27,7 +32,9 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
  ('00000000-0000-0000-0000-000000000105','{"kind":"user","id":"bob"}','Private direct mention','session:other');
  insert into refs(from_kind,from_id,kind,to_kind,to_id,created_at) values
  ('message','00000000-0000-0000-0000-000000000104','mentions','person','alice',now()),
- ('message','00000000-0000-0000-0000-000000000105','mentions','person','alice',now());
+ ('message','00000000-0000-0000-0000-000000000105','mentions','person','alice',now()),
+ ('block','CORE/artifact/notes#part:one','mentions','person','alice',now()),
+ ('block','CORE-1/spec#part:one','mentions','person','alice',now());
  `); err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +66,22 @@ func TestUnifiedInboxDocumentAnswerOverlapAndMentionExpansion(t *testing.T) {
 		t.Fatal("document answer dropped")
 	}
 	expanded := read("/api/v1/me/inbox?mentions=true")
-	if expanded.Total != 2 || len(expanded.Expansions) != 1 || expanded.Expansions[0].ID != "00000000-0000-0000-0000-000000000104" {
+	if expanded.Total != 2 || len(expanded.Expansions) != 3 {
 		t.Fatalf("expansion/privacy=%+v", expanded)
+	}
+	wantLinks := map[string]string{
+		"00000000-0000-0000-0000-000000000104": "/issues/CORE-1/messages/00000000-0000-0000-0000-000000000104",
+		"CORE/artifact/notes#part:one":         "/projects/CORE/documents/notes#b-part%3Aone",
+		"CORE-1/spec#part:one":                 "/issues/CORE-1/spec#b-part%3Aone",
+	}
+	for _, row := range expanded.Expansions {
+		if wantLinks[row.ID] != row.Href {
+			t.Fatalf("mention deep link=%+v", row)
+		}
+		delete(wantLinks, row.ID)
+	}
+	if len(wantLinks) != 0 {
+		t.Fatalf("missing mention nodes=%v", wantLinks)
 	}
 	empty := read("/api/v1/me/inbox?limit=1&offset=10")
 	if empty.Total != 2 || len(empty.Rows) != 0 {

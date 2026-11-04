@@ -122,7 +122,7 @@ func readInboxMentions(ctx context.Context, q queryer, actorID string, limit, of
   select g.from_kind, g.from_id, max(g.created_at) as created_at
   from `+refs.AllEdgesSQL+` g
   where g.kind='mentions' and g.to_kind='person' and g.to_id=$1
-    and g.from_kind in ('comment','message','block')
+    and `+inboxMentionVisibleSQL+`
     and not exists(select 1 from delivered d where d.kind=g.from_kind and d.id::text=g.from_id)
   group by g.from_kind,g.from_id
   order by max(g.created_at) desc, g.from_kind, g.from_id limit $4 offset $5

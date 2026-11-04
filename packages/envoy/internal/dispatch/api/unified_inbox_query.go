@@ -61,14 +61,29 @@ const unifiedInboxQuery = unifiedInboxCandidates + `,
 // The reference uses the existing route predicates and direct-reply definition,
 // not delivered or the new view. Compare membership before pagination.
 const legacyInboxMembershipQuery = `with recursive ` + unreadDirectRepliesCTE + `
- select 'ask'::text, a.id::text from asks a join issues i on i.key = a.issue_key
+ select 'ask'::text, 'ask'::text, a.id::text from asks a join issues i on i.key = a.issue_key
  where a.state = 'open' and i.closed_at is null and i.assignee = $1
  union all
- select 'thread_reply', u.last_reply_id::text
+ select 'thread_reply', case when u.kind='message' then 'message'
+   when u.kind='ask' and u.last_reply_id=u.thread_id then 'ask' else 'comment' end, u.last_reply_id::text
  from user_threads u
  left join asks a on u.kind = 'ask' and a.id = u.thread_id
  left join issues ai on u.kind = 'ask' and ai.key = u.issue_key
  where u.login = $1 and u.unread
    and not coalesce(a.state = 'open' and (u.issue_key is null or ai.closed_at is null), false)
  union all
- select 'direct_reply', reply_id::text from unread_direct_replies`
+ select 'direct_reply', 'message', reply_id::text from unread_direct_replies`
+
+// inboxMentionVisibleSQL is the closed source visibility predicate shared by
+// expansion pages and counts. Apply it before LIMIT: private or deleted nodes
+// must not consume a page and hide older public mentions.
+const inboxMentionVisibleSQL = `(
+ (g.from_kind='comment' and exists(
+   select 1 from comments visible left join artifacts owner on owner.id=visible.artifact_id
+   where visible.id::text=g.from_id and (visible.issue_key is not null or owner.project_key is not null)))
+ or (g.from_kind='message' and exists(
+   select 1 from messages visible where visible.id::text=g.from_id and visible.issue_key is not null))
+ or (g.from_kind='block' and exists(
+   select 1 from document_blocks visible join artifacts owner on owner.id=visible.artifact_id
+   where visible.node_id=g.from_id and (owner.issue_key is not null or owner.project_key is not null)))
+)`
