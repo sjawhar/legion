@@ -40,9 +40,9 @@ name: CI
 # left a whole entry, up to a gigabyte, per change for seven days. Only a run off main falls back,
 # when the exact key misses, to the family's newest entry by its prefix; a run on main restores by
 # the exact key only, so the entry it saves after a Go bump holds nothing the older Go built. Each
-# family is saved with actions/cache/save as the last step of a job that runs on main, and only on a
-# push to main whose job succeeded and whose restore missed the exact key. setup-bun reads and
-# writes its cache only on main (.github/actions/setup-bun).
+# family is saved with actions/cache/save as the last step before the ci-ok report of a job that
+# runs on main, and only on a push to main whose job succeeded and whose restore missed the exact
+# key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -1479,8 +1479,8 @@ jobs:
       # evicted, and refreshed only when Go is bumped. Keyed on the go.sum files it would leave a
       # 2.2 GB entry per key change; keyed on the Go version, a go.sum change only downloads the
       # changed modules and rebuilds the changed packages, since Go's build cache is
-      # content-addressed. Restored and saved only when the notices step runs; saved by this job's
-      # last step.
+      # content-addressed. Restored and saved only when the notices step runs; saved by the last step
+      # before this job's ci-ok report.
       - id: go-cache
         if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
