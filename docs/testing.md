@@ -25,6 +25,47 @@ the limit, as on a dev box whose `TMPDIR` is on a data disk.
   TMPDIR="$L" GOTMPDIR="$L" go test ./<package>/... -count=1
   ```
 
+## A test that calls `t.Parallel()`
+
+The tests of a Go package run one at a time unless they call `t.Parallel()`, and most of this
+repository's do call it: `packages/envoy` alone has about 3,700 such calls, which is what keeps
+CI's `envoy-go` job inside its limit (dispatch://INFRA-1075).
+A test may call it only when it reads and writes nothing the whole process shares.
+
+Three kinds of test must not, and each of them has already been found by the failure of a
+different test rather than of itself:
+
+- **One that swaps process-wide state**:
+  `t.Setenv`, `t.Chdir`, `slog.SetDefault` or `internal/logtest`'s capture,
+  `pmdoc.SetBlockIDGenerator`, `pmdoctest.UseBlockSchema`, or a package-level `var` a test
+  assigns.
+
+  The victim is whatever ran beside it: a parse against another test's block schema, a log line
+  another test was counting, a query through another test's SQL.
+
+- **One that measures the process**:
+  `runtime.ReadMemStats`, a goroutine dump, a CPU window (`internal/cputest`), or a bound on how
+  long something took.
+
+  Every other parallel test's allocations, goroutines and CPU count against it.
+
+- **One that shares a database, a NATS subject, a stream or a durable name with another test.**
+
+  `internal/dispatch/store/storetest` and `internal/broker/store/storetest` give each test a
+  database of its own, so this is about what a test names for itself.
+
+Find them through the helpers, not line by line:
+every one of those found so far reached its swap through a helper two or three calls away, and a
+file-by-file read missed them.
+Where a test stays serial, say in a comment beside it which of the three it is, so the next pass
+over the package does not undo it.
+
+Prefer the cause to the exclusion.
+A package-level `var` a test assigns becomes a field of the thing under test, defaulted from the
+constant it replaces, which the test then sets on its own instance;
+that is how `internal/dispatch/docs`'s drain budget and room cap, `internal/bus`'s drain-hook
+reserve and `cmd/listener`'s retry delays stopped forbidding parallelism.
+
 ## Go's package deadline
 
 `go test` panics a package that runs longer than ten minutes (`panic: test timed out after 10m0s`),

@@ -339,12 +339,11 @@ UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 mkdir -p "$RUNNER_TEMP/go-test-json"
 s=0
-go test -json -count=1 -timeout 20m ./internal/dispatch/api > "$RUNNER_TEMP/go-test-json/unit-api.json" || s=$?
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit-rest.json" || s=$?
+go list ./... | grep -v '/integration' | xargs go test -json -count=1 -p 8 -timeout 20m > "$RUNNER_TEMP/go-test-json/unit.json" || s=$?
 if [ "$s" -eq 0 ]; then
-  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+  jq -rj 'select(.Action == "build-output" or (.Action == "output" and .Test == null)) | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
 else
-  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit-api.json" "$RUNNER_TEMP/go-test-json/unit-rest.json"
+  jq -rj 'select(.Action == "build-output" or .Action == "output") | .Output' "$RUNNER_TEMP/go-test-json/unit.json"
 fi
 exit $s"""
 NATSLIVE_STEP = "Test the container-backed NATS matrix (natslive)"
@@ -668,11 +667,9 @@ GATES = [
         # to the log, so none of them is in the simple form: -json is not a flag the check
         # reduces and a redirect is not in that form either (dispatch://INFRA-1075).
         #
-        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
-        # on the service's one checkpointer beside the other package binaries), then ./... but it
-        # and internal/integration, which the integration step tests: counted as all of ./....
+        # One call over every package but internal/integration, which the integration step tests:
+        # counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         pinned_step("envoy-go", NATSLIVE_STEP, ENVOY, NATSLIVE_SCRIPT, [
