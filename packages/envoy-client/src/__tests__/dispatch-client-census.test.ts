@@ -91,6 +91,8 @@ const CALLS: Record<ClientMethod, (client: DispatchClient) => Promise<unknown>> 
   projectArtifactBlocks: (client) => client.projectArtifactBlocks("DSP", "notes-md"),
   docEdit: (client) =>
     client.docEdit("artifact-1", { ops: [{ op: "delete", find: "old" }], actor } as never),
+  interpret: (client) =>
+    client.interpret("artifact-1", { decision: "choice", body: "The agent's reading.", actor }),
   nameArtifactVersion: (client) =>
     client.nameArtifactVersion("artifact-1", { name: "v1", actor } as never),
   getArtifactEvents: (client) => client.getArtifactEvents("artifact-1"),

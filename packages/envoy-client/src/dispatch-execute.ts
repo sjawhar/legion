@@ -4554,6 +4554,27 @@ export async function executeDispatchTool(
         },
       };
     }
+    case "dispatch_interpret": {
+      const ref = ownerArguments.ref;
+      if (ref?.version !== undefined || (ref?.kind !== "spec" && ref?.kind !== "artifact")) {
+        throw new Error(
+          "interpret requires a live issue document ref, without a version or block fragment"
+        );
+      }
+      const resolved = await resolveDocument(
+        documentOwner(),
+        ref.kind === "spec" ? "spec" : ref.id
+      );
+      const item = await client.interpret(resolved.artifact.id, {
+        decision: stringArg(args, "decision"),
+        body: stringArg(args, "body"),
+        actor,
+      });
+      return {
+        text: `Interpretation by ${actor.id}: ${item.ref}`,
+        details: { interpretation: item },
+      };
+    }
     case "dispatch_doc_edit": {
       const resolved = await resolveDocument(documentOwner(), optionalString(args, "artifact"));
       const ops = args.ops as EditOp[];

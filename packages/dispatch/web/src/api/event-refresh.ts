@@ -728,6 +728,10 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     targets.push({ exact: true, queryKey: ["decisions", key] });
     return targets;
   }
+  if (event.type === "interpretation.added") {
+    targets.push({ exact: true, queryKey: ["interpretations", key] });
+    return targets;
+  }
 
   if (
     event.type === "issue.created" ||
@@ -762,7 +766,8 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       // version of the Verification document moves which checks there are: the two reads hang
       // under the issue's key but are named here, since every issue target is `exact`.
       { exact: true, queryKey: ["issue", key, "coverage"] },
-      { exact: true, queryKey: ["issue", key, "results"] }
+      { exact: true, queryKey: ["issue", key, "results"] },
+      { exact: true, queryKey: ["interpretations", key] }
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });

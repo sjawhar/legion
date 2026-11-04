@@ -46,11 +46,10 @@ func useTestBlockSchema(t testing.TB, value BlockSchema) {
 
 // A block[] attribute's name is the kind of the links it makes, so it is one `?kind=` can name and
 // never a structural edge kind; its targets are types whose blocks the link graph holds; only it
-// carries targets. The shipped schema declares two: a plan task's serves and needs, the first of
-// which a check shares.
+// carries targets. The shipped schema also declares decision provenance and interpretation links.
 func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
-	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
-		t.Fatalf("the shipped schema's link kinds = %v, want decided_by, from_ask, needs, serves and shaped", kinds)
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "interprets", "needs", "serves", "shaped"}) {
+		t.Fatalf("the shipped schema's link kinds = %v, want decided_by, from_ask, interprets, needs, serves and shaped", kinds)
 	}
 	if err := validateBlockSchema(blockPointerTestSchema(nil)); err != nil {
 		t.Fatalf("validate the test schema: %v", err)
@@ -90,7 +89,7 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 		{Name: "note", BlockAttributeSchema: BlockAttributeSchema{Kind: BlockAttributeString}},
 	}})
 	useTestBlockSchema(t, twice)
-	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "interprets", "needs", "serves", "shaped"}) {
 		t.Fatalf("link kinds of the types declaring serves = %v, want each relation once", kinds)
 	}
 	var served BlockSchema

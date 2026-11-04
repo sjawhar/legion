@@ -105,7 +105,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 159
+	const registeredRoutes = 161
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -174,9 +174,9 @@ func routeProbeBody(route apiRoute) string {
 }
 
 // authRefusal reports whether a response is the server turning the caller away for who they
-// are: 401, or a 403 whose code names the caller kind (HANDOFF_FORBIDDEN is a cookie caller on
-// the bearer-only handoff write). Other 4xx/5xx are the handler proceeding past the gate on
-// placeholder input.
+// are: 401, or a 403 whose code names the caller kind (HANDOFF_FORBIDDEN and
+// INTERPRETATION_FORBIDDEN are a cookie caller on a bearer-only handoff or interpretation write).
+// Other 4xx/5xx are the handler proceeding past the gate on placeholder input.
 func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 	switch response.Code {
 	case http.StatusUnauthorized:
@@ -186,7 +186,7 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal(response.Body.Bytes(), &body)
-		if body.Code == "HUMAN_ONLY" || body.Code == "REPLY_FORBIDDEN" || body.Code == "ACCEPT_FORBIDDEN" || body.Code == "HANDOFF_FORBIDDEN" {
+		if body.Code == "HUMAN_ONLY" || body.Code == "REPLY_FORBIDDEN" || body.Code == "ACCEPT_FORBIDDEN" || body.Code == "HANDOFF_FORBIDDEN" || body.Code == "INTERPRETATION_FORBIDDEN" {
 			return true, "403 " + body.Code
 		}
 	}

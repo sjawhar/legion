@@ -94,6 +94,11 @@ const validCalls = {
     replace_with: "new wording",
   },
   dispatch_message: { issue: "DSP-1", body: "Implementation started." },
+  dispatch_interpret: {
+    ref: "dispatch://DSP-1/spec",
+    decision: "choice",
+    body: "My interpretation.",
+  },
   dispatch_doc_edit: {
     issue: "DSP-1",
     artifact: "spec",
@@ -178,6 +183,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_comment",
       "dispatch_suggest",
       "dispatch_message",
+      "dispatch_interpret",
       "dispatch_doc_edit",
       "dispatch_doc_read",
       "dispatch_request_approval",

@@ -116,6 +116,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/approval-requests":          scopeProject,
 	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
+	"POST /api/v1/artifacts/{id}/interpretations":            scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
 
 	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
@@ -298,6 +299,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/issues/{key}/asks", authAny, "List an issue's asks, each with its newest reply; ?state= filters, and ?thread=1 adds each ask's thread (replies, rewordings, answers, followers, claimant, route, route_holder).", s.listIssueAsks},
 		{http.MethodGet, "/api/v1/issues/{key}/decisions", authAny, "The issue's document decision and ask nodes: {document, open_questions, decisions}. Open questions come first; a person's decision is the actual answered ask, verbatim. Agent choices retain Keep's text_sha256 and 409 DECISION_CHANGED guard. shaped relations link spec blocks by identity. ?artifact=<id>&version=N reads that issue document's historical shaped passages in the existing pin shape.", s.getIssueDecisions},
 		{http.MethodGet, "/api/v1/issues/{key}/decisions-shadow", authAny, "Read-only equality census of the issue's typed source nodes against its decision graph projection: source_count, node_count, differences, missing and extra. Follows no edge outside this issue's documents.", s.getIssueDecisionShadow},
+		{http.MethodGet, "/api/v1/issues/{key}/interpretations", authAny, "An issue's interpretation nodes, linked to their decision in the same document. Authors come from server-recorded events; handmade nodes return author:null.", s.getIssueInterpretations},
 		{http.MethodGet, "/api/v1/asks/open", authAny, "Open asks in one scope, with counts: ?author_session= for one session's own, or ?project= for every open ask on a project's issues and documents; exactly one is required.", s.listOpenAsks},
 		{http.MethodGet, "/api/v1/asks/{id}", authAny, "Read one ask with its replies, edit history, answers and followers, plus claimant (the session holding its issue's claim) and route (its issue's route), whom a person's answer and replies also reach, and route_holder (the live session that route reaches now: the session itself or the role's holder); each is null when absent, route_holder also when nobody holds the route or the Envoy listener did not answer, and all are null on a project document's ask.", s.getAsk},
 		{http.MethodGet, "/api/v1/asks/{id}/followers", authAny, "List the sessions an ask's answer and replies reach.", s.listAskFollowers},
@@ -338,6 +340,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}", authAny, "One named or settled document version.", s.getArtifactVersion},
 		{http.MethodPost, "/api/v1/artifacts/{id}/versions", authAny, "Name the current document version.", s.createNamedVersion},
 		{http.MethodPost, "/api/v1/artifacts/{id}/edits", authAny, "Apply quote-anchored edit ops with an optional optimistic-concurrency precondition.", s.editArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/interpretations", authBearer, "Add an agent's interpretation to a decision block: {decision: block id, body: paragraphs, actor}. Uses the document edit path; records the session author in the same transaction.", s.createInterpretation},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts/{slug}", authAny, "Read an issue document by slug or unambiguous filename.", s.getArtifact},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts/{slug}/text", authAny, "An issue document's canonical markdown and whole-document token, by slug or unambiguous filename.", s.getArtifactText},
 		{http.MethodGet, "/api/v1/issues/{key}/artifacts/{slug}/blocks", authAny, "An issue document's blocks and tokens, by slug or unambiguous filename.", s.getArtifactBlocks},

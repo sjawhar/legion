@@ -25,6 +25,7 @@ const knownEventTypes: Record<EventType, true> = {
   "user_agent_state.updated": true,
   "user_thread_state.updated": true,
   "decision.kept": true,
+  "interpretation.added": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,

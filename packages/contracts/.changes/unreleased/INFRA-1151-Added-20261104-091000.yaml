@@ -1,0 +1,4 @@
+kind: Added
+body: Interpretation response type, interpretation.added audit event, and dispatch_interpret command schema. An interpretation has a same-document decision reference and a nullable server-recorded author.
+custom:
+  Issue: INFRA-1151

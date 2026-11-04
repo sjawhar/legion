@@ -67,6 +67,7 @@ import type {
   Handoff,
   HandoffSummary,
   InboxRow,
+  Interpretation,
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
@@ -1308,6 +1309,10 @@ export class DispatchApiClient {
         ? ""
         : `?${new URLSearchParams({ artifact: at.artifact, version: String(at.version) })}`;
     return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions${query}`);
+  }
+
+  getIssueInterpretations(key: string): Promise<Interpretation[]> {
+    return this.json<Interpretation[]>(`/api/v1/issues/${pathSegment(key)}/interpretations`);
   }
 
   /** Record that the caller agrees with the decision that heading block opens, as the text they

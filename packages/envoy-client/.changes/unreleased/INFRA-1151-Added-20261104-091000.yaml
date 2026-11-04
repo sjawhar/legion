@@ -1,0 +1,4 @@
+kind: Added
+body: dispatch interpret --ref dispatch://KEY/spec --decision <block-id> --body "My reading" writes an interpretation through the server's document path, attributed to the calling agent session. Requires a server supporting interpretation blocks.
+custom:
+  Issue: INFRA-1151

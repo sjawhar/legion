@@ -150,6 +150,7 @@ export type {
   HandoffSummary,
   InboxDocument,
   InboxRow,
+  Interpretation,
   Issue,
   IssueAskRow,
   IssueAskThreadRow,

@@ -1076,6 +1076,19 @@ test("a document version refreshes the issue's coverage and its recorded results
   expect(keys).toContain(JSON.stringify(["issue", "CORE-1", "results"]));
 });
 
+test.each([
+  "artifact.created",
+  "artifact.version",
+  "interpretation.added",
+] as const)("%s refreshes only its issue's interpretation projection", (type) => {
+  const incoming = eventsByType[type];
+  const keys = eventRefreshTargets(incoming, "alice").map((target) =>
+    JSON.stringify(target.queryKey)
+  );
+  expect(keys).toContain(JSON.stringify(["interpretations", "CORE-1"]));
+  expect(keys).not.toContain(JSON.stringify(["interpretations", "CORE-9"]));
+});
+
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here
  *  until it has a row. */
 const eventsByType: Record<EventType, Event> = {
@@ -1121,6 +1134,11 @@ const eventsByType: Record<EventType, Event> = {
   "handoff.recorded": event("handoff.recorded", {
     handoff_id: "handoff-1",
     phase: "implement",
+    version: 2,
+  }),
+  "interpretation.added": event("interpretation.added", {
+    artifact_id: "artifact-3",
+    block_id: "reading",
     version: 2,
   }),
   "issue.claimed": event("issue.claimed", { key: "CORE-1" }),

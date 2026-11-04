@@ -356,6 +356,7 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 		"callout":             {repeated(":::callout{}\n:::\n\n"), repeated(":::callout{}\na\n:::\n\n")},
 		"ask":                 {numbered(":::ask{#ask-%d}\n:::\n\n"), numbered(":::ask{#ask-%d}\nq\n:::\n\n")},
 		"decision":            {repeated(":::decision{}\n:::\n\n"), repeated(":::decision{}\nd\n:::\n\n")},
+		"interpretation":      {repeated(":::interpretation{}\n:::\n\n"), repeated(":::interpretation{}\ni\n:::\n\n")},
 		"requirement":         {repeated(":::requirement{}\n:::\n\n"), repeated(":::requirement{}\nr\n:::\n\n")},
 		"plan_task":           {repeated(":::plan_task{}\n:::\n\n"), repeated(":::plan_task{}\nt\n:::\n\n")},
 		"check":               {repeated(":::check{}\n:::\n\n"), repeated(":::check{}\nc\n:::\n\n")},

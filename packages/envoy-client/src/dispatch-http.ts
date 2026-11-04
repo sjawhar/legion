@@ -35,6 +35,7 @@ import type {
   GraphReferences,
   Handoff,
   HandoffSummary,
+  Interpretation,
   Issue,
   IssueCheckResults,
   IssueCoverage,
@@ -1433,6 +1434,13 @@ export class DispatchClient {
       undefined,
       key
     );
+  }
+
+  async interpret(
+    id: string,
+    input: { decision: string; body: string; actor: Actor }
+  ): Promise<Interpretation> {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "interpretations"], input);
   }
 
   async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {

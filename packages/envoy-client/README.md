@@ -467,6 +467,16 @@ them, covers the issue; with Envoy off or no answer from the listener it names n
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
 
+`dispatch interpret --ref dispatch://KEY/spec --decision <block-id> --body "My reading"`
+adds the agent's interpretation of a decision or ask block in that document.
+The document holds one `interpretation` block with a same-document `interprets` pointer;
+the Decisions tab shows it beneath the decision, labelled with the session that wrote it.
+The server records that author in the write's audit event, not a caller-supplied block attribute.
+Hand-made interpretation blocks have no recorded author and say **author not recorded**.
+Interpretations contain Markdown paragraphs and never count as decisions or change a decision's Keep token.
+The command needs a server supporting schema version 4 interpretation blocks;
+older builds refuse unknown block types with `409 DOC_SCHEMA`, and have no interpretation write route.
+
 Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file
 call goes through, mints a `crypto.randomUUID()` `Idempotency-Key` per `POST` and `PATCH` call and
 sends it on every attempt of that call, so Dispatch runs the write once however many attempts
@@ -667,7 +677,7 @@ prints its URL, for proving what a command shows when a gateway, not Dispatch, a
 
 ## Command specs
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-five
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the
 Dispatch specs behind the `dispatch` command: each one's name, description, field schemas
 and example. `dispatch-command.ts` derives the command and its flags from them, and no host
 adds aliases or descriptions of its own.

@@ -528,7 +528,7 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 		{
 			name:     "unknown type",
 			markdown: ":::unknown{#block-1}\nBody.\n:::\n",
-			want:     `unknown typed block "unknown" (known types: ask, callout, check, decision, plan_task, requirement)`,
+			want:     `unknown typed block "unknown" (known types: ask, callout, check, decision, interpretation, plan_task, requirement)`,
 		},
 		{
 			name:     "invalid enum",

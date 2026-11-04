@@ -84,6 +84,18 @@
       }
     },
     {
+      "name": "interpretation",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {
+        "interprets": {
+          "kind": "block[]",
+          "targets": ["decision", "ask"],
+          "scope": "document"
+        }
+      }
+    },
+    {
       "name": "requirement",
       "content": "paragraph+",
       "render": "host",

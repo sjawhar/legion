@@ -1,0 +1,4 @@
+kind: Added
+body: Agent interpretation nodes point to decision or ask blocks in the same document. Named interpretation routes use the existing document edit/version path and read authors from the server's audit events; hand-made blocks return an unrecorded author. Decisions JSON and the graph_edges view definition stay unchanged. The dashboard's Decisions tab shows each interpretation beneath its decision with its recorded session author, or author not recorded for a hand-made block, and never counts one as a decision. Schema-v4 interpretation blocks are unknown to older builds, which refuse them with 409 DOC_SCHEMA.
+custom:
+  Issue: INFRA-1151

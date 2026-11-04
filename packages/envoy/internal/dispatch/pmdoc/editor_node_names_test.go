@@ -18,12 +18,13 @@ var editorNodeNamesJSON []byte
 // with why. A typed block is declared by schema/blocks.json, so the editor carries a node for it
 // while nodeTypes does not: validateNode accepts it through IsTypedBlock instead.
 var editorNodeDifferences = map[string]string{
-	"ask":         "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"callout":     "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"check":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"decision":    "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"plan_task":   "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
-	"requirement": "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"ask":            "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"callout":        "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"check":          "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"decision":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"interpretation": "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"plan_task":      "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"requirement":    "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 }
 
 // editorMarkDifferences are the mark names the editor's schema and markTypes do not share. There

@@ -1074,6 +1074,34 @@ export const dispatchToolSpecs = [
     validation: messageValidation,
   },
   {
+    name: "dispatch_interpret",
+    example: {
+      ref: "dispatch://DSP-1/spec",
+      decision: "choice",
+      body: "This means we keep the original name.",
+    },
+    description:
+      "Add your interpretation under a decision on the Decisions tab. The document holds an interpretation node with a typed interprets edge; Dispatch records your session as its author, never as the person who made the decision. Requires a deployed server supporting interpretation blocks; older builds refuse unknown blocks with 409 DOC_SCHEMA.",
+    arguments: (z) => ({
+      ref: z.string().describe("Live dispatch:// issue document reference."),
+      issue: z
+        .string()
+        .describe("Issue key resolved from ref; must name that same issue.")
+        .optional(),
+      project: z
+        .string()
+        .describe("Project resolved from ref; interpretations require an issue document.")
+        .optional(),
+      artifact: z
+        .string()
+        .describe("Document id or slug resolved from ref; must name that same document.")
+        .optional(),
+      decision: z.string().describe("Decision or ask block id from doc-read --blocks."),
+      body: z.string().describe("Your interpretation, as Markdown paragraphs."),
+    }),
+    validation: documentOwnerValidation(true),
+  },
+  {
     name: "dispatch_doc_edit",
     example: {
       issue: "DSP-1",

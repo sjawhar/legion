@@ -71,6 +71,8 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
       return "read a thread";
     case "decision.kept":
       return "kept a decision";
+    case "interpretation.added":
+      return "added an agent interpretation";
     case "issue.created":
       return "created the issue";
     case "issue.updated":

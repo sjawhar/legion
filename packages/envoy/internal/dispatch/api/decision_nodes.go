@@ -232,6 +232,16 @@ func decisionNodeText(markdown string) string {
 		return strings.TrimSpace(markdown)
 	}
 	node := tree.Children[0]
+	pmdoc.Walk(node, func(child *pmdoc.Node) bool {
+		kept := child.Children[:0]
+		for _, descendant := range child.Children {
+			if descendant.Type != "interpretation" {
+				kept = append(kept, descendant)
+			}
+		}
+		child.Children = kept
+		return true
+	})
 	body, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: node.Children})
 	if err != nil {
 		return strings.TrimSpace(markdown)

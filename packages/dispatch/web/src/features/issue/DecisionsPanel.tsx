@@ -1,3 +1,4 @@
+import { formatBlockReference } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
@@ -204,6 +205,43 @@ function decisionDocument(
   );
 }
 
+function Interpretations({
+  issueKey,
+  decisionRef,
+}: {
+  issueKey: string;
+  decisionRef: string;
+}): ReactNode {
+  const read = useQuery({
+    queryFn: () => api.getIssueInterpretations(issueKey),
+    queryKey: ["interpretations", issueKey],
+  });
+  if (read.isPending) return <LoadingSkeleton label="Interpretations loading" />;
+  if (read.isError) {
+    return (
+      <QueryError
+        message="Could not load interpretations."
+        onRetry={() => void read.refetch()}
+        retrying={read.isFetching}
+      />
+    );
+  }
+  const items = read.data.filter((item) => item.decision_ref === decisionRef);
+  if (items.length === 0) return null;
+  return (
+    <ul aria-label="Agent interpretations" className="space-y-2 border-l-2 pl-3">
+      {items.map((item) => (
+        <li data-testid="decision-interpretation" key={item.ref}>
+          <p className={`break-words text-xs ${textSecondaryOnSurface}`}>
+            Agent interpretation — {item.author?.id ?? "author not recorded"}
+          </p>
+          <MarkdownBody markdown={item.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function DecisionCard({
   actions,
   decision,
@@ -259,6 +297,7 @@ function DecisionCard({
         </Link>
       ))}
       <ShapedLinks issueKey={issueKey} links={decision.links} spec={spec} />
+      <Interpretations decisionRef={decision.ref} issueKey={issueKey} />
       {actions}
     </li>
   );
@@ -379,6 +418,16 @@ function OpenQuestion({
       <Link className={`text-sm ${linkText} ${linkHoverText}`} to={path}>
         {ask.question}
       </Link>
+      {ask.block_id && ask.block_artifact ? (
+        <Interpretations
+          issueKey={issueKey}
+          decisionRef={formatBlockReference({
+            issue: issueKey,
+            document: ask.block_artifact.primary ? "spec" : ask.block_artifact.slug,
+            block: ask.block_id,
+          })}
+        />
+      ) : null}
     </li>
   );
 }

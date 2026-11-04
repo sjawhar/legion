@@ -2406,6 +2406,16 @@ export interface Decision {
   readonly waiting_review: boolean;
 }
 
+// An agent's reading of a decision. Content and its interprets edge come from the document;
+// author comes only from the server's interpretation.added event, never from block attributes.
+export interface Interpretation {
+  readonly block_id: string;
+  readonly decision_ref: string;
+  readonly ref: string;
+  readonly text: string;
+  readonly author: Actor | null;
+}
+
 // IssueDecisions is GET /api/v1/issues/{key}/decisions: open document asks oldest first and
 // typed decisions in document order, primary document first. document is the first document
 // holding a decision, or null; each decision's ref names its own source node.
@@ -2872,6 +2882,14 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "decision.kept";
       readonly payload: DecisionKeptEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "interpretation.added";
+      readonly payload: {
+        readonly artifact_id: string;
+        readonly block_id: string;
+        readonly version: number;
+      };
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })

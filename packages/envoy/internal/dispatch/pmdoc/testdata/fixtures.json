@@ -27632,6 +27632,62 @@
     "rendered_by_milkdown": "around `x` and all-space `   `.\n"
   },
   {
+    "name": "interpretation",
+    "markdown": ":::decision{#choice title=\"Keep the name\"}\nKeep the original name.\n:::\n\n:::interpretation{#reading interprets=\"dispatch://CORE-1/spec#b-choice\"}\nThe agent understands this to mean the existing name stays in every visible label.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "decision",
+          "attrs": {
+            "title": "Keep the name",
+            "replaced": false,
+            "blockId": "choice"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Keep the original name."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "interpretation",
+          "attrs": {
+            "interprets": [
+              "dispatch://CORE-1/spec#b-choice"
+            ],
+            "blockId": "reading"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The agent understands this to mean the existing name stays in every visible label."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwhkZWNpc2lvbgcAAQADCXBhcmFncmFwaAcAAQEGBAABAhdLZWVwIHRoZSBvcmlnaW5hbCBuYW1lLigAAQEHYmxvY2tJZAF3CGItMDAwMDAxKAABAAV0aXRsZQF3DUtlZXAgdGhlIG5hbWUoAAEACHJlcGxhY2VkAXkoAAEABnNoYXBlZAF/KAABAAhmcm9tX2FzawF/KAABAApkZWNpZGVkX2J5AX8oAAEAB2Jsb2NrSWQBdwZjaG9pY2WHAQADDmludGVycHJldGF0aW9uBwABIQMJcGFyYWdyYXBoBwABIgYEAAEjUlRoZSBhZ2VudCB1bmRlcnN0YW5kcyB0aGlzIHRvIG1lYW4gdGhlIGV4aXN0aW5nIG5hbWUgc3RheXMgaW4gZXZlcnkgdmlzaWJsZSBsYWJlbC4oAAEiB2Jsb2NrSWQBdwhiLTAwMDAwMigAASEKaW50ZXJwcmV0cwF1AXcfZGlzcGF0Y2g6Ly9DT1JFLTEvc3BlYyNiLWNob2ljZSgAASEHYmxvY2tJZAF3B3JlYWRpbmcA",
+    "rendered_by_milkdown": ":::decision{#choice title=\"Keep the name\" replaced=\"false\"}\nKeep the original name.\n:::\n\n:::interpretation{#reading interprets=\"dispatch://CORE-1/spec#b-choice\"}\nThe agent understands this to mean the existing name stays in every visible label.\n:::\n"
+  },
+  {
     "name": "item-callouts-holding-an-unclosed-fence-before-a-lazy-line",
     "markdown": "Callouts in list items, each holding an unclosed fence and a blank line, before a line the item does not reach.\n\nNext.\n\n1. x\n   :::callout{#lf1 kind=\"note\" title=\"T\"}\n   ```\n\ny\n\nNext.\n\n> 1. x\n>    :::callout{#lf2 kind=\"note\" title=\"T\"}\n>    ~~~\n>\n> y\n",
     "pm_json": {
