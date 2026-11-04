@@ -549,9 +549,9 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		// for an anchored comment or ask.
 		case len(parts) == 3 && parts[2] == "spec":
 			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query, "v", value)
-    // The Decisions graph view names the issue, not a second document.
-    case len(parts) == 3 && parts[2] == "decisions":
-      return Ref{Kind: "issue", IssueKey: key, ID: key}, true
+		// The Decisions graph view names the issue, not a second document.
+		case len(parts) == 3 && parts[2] == "decisions":
+			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
 		case len(parts) == 4 && parts[2] == "artifacts":
 			slug, err := url.PathUnescape(parts[3])
 			if err != nil || !artifactSlugPattern.MatchString(slug) {

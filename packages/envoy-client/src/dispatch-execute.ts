@@ -1145,7 +1145,7 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, the Decisions page (which names the issue's decisions.md), project document pages (with
+ * pages, the Decisions graph view (which names its issue), project document pages (with
  * their ?ask= / ?comment= deep links, which name the item whatever the fragment), the
  * `#b-<block id>` of a live document page or of an issue ask's, comment's or message's page,
  * which names that block, and the page of an upload an agent's conversation owns

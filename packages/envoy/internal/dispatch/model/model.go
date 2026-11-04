@@ -2043,12 +2043,8 @@ type BlockLinks struct {
 	Links []BlockLink `json:"links"`
 }
 
-// DecisionKeep is one person's agreement with a decision: the decision's heading block, the sum
-// of its whole text when they pressed Keep, the version it then stood at, and who did when. The
-// sum, not the version, is what tells a kept decision from one waiting for review again: a
-// decision's ChangedVersion is the greatest of the blocks it holds now, so it does not move when
-// a block is removed from the decision or moved into or out of it, where the text changes and
-// every remaining block keeps its version.
+// DecisionKeep records a person's agreement with a decision node at the sum of its served
+// text. The sum, not the node's version alone, determines whether it needs review again.
 type DecisionKeep struct {
 	ArtifactID     string    `json:"artifact_id"`
 	BlockID        string    `json:"block_id"`
@@ -2060,10 +2056,9 @@ type DecisionKeep struct {
 	TextSHA256 string `json:"-"`
 }
 
-// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
-// decision's own block that holds it, the spec block it names, when and in which version of
-// decisions.md the link was first written, and whether the spec block is out of date - the
-// decision changed after it first linked that block, and that block has not changed since.
+// DecisionLink is a shaped relation from a decision node to a block of the issue's spec,
+// dated in the source document. Stale means the decision changed after writing the relation
+// and the passage has not caught up. To.Pin retains the version-bound passage text.
 type DecisionLink struct {
 	FromBlock      string    `json:"from_block"`
 	To             GraphNode `json:"to"`
@@ -2072,13 +2067,9 @@ type DecisionLink struct {
 	Stale          bool      `json:"stale"`
 }
 
-// Decision is one decision of an issue's decisions.md: its heading block and every block after
-// it up to the next heading of its level or higher. Kind is "person" when its blocks mention an
-// ask (a person's decision links the answered ask) and "agent" otherwise; Unsure is set by a
-// paragraph that starts "Unsure:"; Replaced is set by sitting under the section headed exactly
-// "## Replaced". ChangedVersion and ChangedAt are the greatest of its blocks'. TextSHA256 is the
-// sum of Text, which a Keep carries back to say which text it agreed with. WaitingReview is an
-// agent's decision, not replaced, whose text nobody has kept as it stands.
+// Decision is an actual typed node of an issue document. A person's decision is its answered
+// ask, read verbatim; an agent's is a decision block. ChangedVersion/ChangedAt belong to this
+// stable block. Keep carries TextSHA256, the sum of Text; WaitingReview compares that sum.
 type Decision struct {
 	BlockID        string         `json:"block_id"`
 	Heading        string         `json:"heading"`

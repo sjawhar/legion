@@ -24,10 +24,16 @@ test("Decisions is first and reads a person's answer from the spec's own ask", a
   if (ask === undefined) throw new Error("The spec's ask was not indexed");
   await answerAsk(ask.id, { expected_edited_at: ask.edited_at, selected: ["Keep"], text: ANSWER });
   await page.goto(`/issues/${issue.key}/decisions`);
-  await expect(page.getByRole("tablist", { name: "Issue detail" }).getByRole("tab").first()).toHaveText("Decisions");
+  await expect(
+    page.getByRole("tablist", { name: "Issue detail" }).getByRole("tab").first()
+  ).toHaveText("Decisions");
   const decisions = page.getByRole("region", { name: "Your decisions" });
   await expect(decisions.getByText(QUESTION, { exact: true })).toBeVisible();
-  await expect.poll(async () => (await decisions.getByTestId("decision-answer").textContent())?.endsWith(ANSWER)).toBe(true);
+  await expect
+    .poll(async () =>
+      (await decisions.getByTestId("decision-answer").textContent())?.endsWith(ANSWER)
+    )
+    .toBe(true);
   await expect(decisions.getByTestId("decision-answer")).toContainText("Selected: Keep");
 
   // An unrelated spec version does not hide the decision or rewrite the person's answer.
@@ -35,5 +41,9 @@ test("Decisions is first and reads a person's answer from the spec's own ask", a
     ops: [{ op: "replace", find: "The name stays.", with: "The name still stays." }],
   });
   await page.reload();
-  await expect.poll(async () => (await decisions.getByTestId("decision-answer").textContent())?.endsWith(ANSWER)).toBe(true);
+  await expect
+    .poll(async () =>
+      (await decisions.getByTestId("decision-answer").textContent())?.endsWith(ANSWER)
+    )
+    .toBe(true);
 });

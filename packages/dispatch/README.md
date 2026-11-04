@@ -251,7 +251,7 @@ failure prints `FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
   line, and every other section runs.
 
 It writes two issues in `PROJECT`: the first holds the spec, comments, messages and the documents
-`cites.md`, `decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
+`cites.md`, `choices.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an
 ask the script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
 uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
 fails. Against `bun run dispatch:local`:

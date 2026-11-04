@@ -1715,6 +1715,29 @@ Migrations `0130`-`0134` (Database migrations above) add what the facts read:
 the version current when an unanchored comment or ask is written on a document, recorded at insert and filled for the rows already stored, and `component_facts`, which every import keeps.
 `dispatch read` prints the facts of the node it reads on a `Node:` line, before `Referenced by:`.
 
+## Converting legacy decisions
+
+`envoy-dispatch convert-decisions` reads `DATABASE_URL` and reports every legacy `decisions.md` source, which records become native decision blocks in its issue's spec, which citation-only restatements can be dropped in favour of the actual ask, and which answered asks can be restored to the spec.
+The default writes nothing and applies no schema migration.
+Review the report, then run the same command with `--apply` after the decision-aware build is deployed and no old build is serving:
+
+```sh
+DATABASE_URL=postgres://... envoy-dispatch convert-decisions
+DATABASE_URL=postgres://... envoy-dispatch convert-decisions --apply
+```
+
+Each issue is converted in one document-service transaction.
+The conversion keeps the original ask rows and their answers; it does not create copied decisions for a person's words.
+Narrative that merely cites an ask but may contain independent reasoning is retained as an agent record and flagged for attribution review rather than silently discarded.
+A source with open comments or asks is left untouched, with those conversation ids listed.
+Retired sources become `decision-history-<uuid>.md`, whose current body links to the spec; their earlier versions, reviews and resolved conversations remain readable.
+This leaves one retired history document per converted source, and another run appends no duplicate node.
+Answered asks can be restored when their original rows and spec block history remain; deleted ask rows and removals predating that history cannot be detected automatically.
+
+Old builds refuse decision blocks.
+The schema-version bump makes already-open editors read-only until reload, and rolling back does not convert the stored nodes back to the old schema.
+After conversion, `GET /api/v1/issues/{key}/decisions-shadow` compares source and graph node counts; `differences` must be zero before the issue's Decisions view is treated as verified.
+
 ## Search
 
 Migration 0010 added stored generated `search` columns.

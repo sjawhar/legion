@@ -56,9 +56,9 @@ test("a block of another document citing a block shows as that document's row, l
   const paragraph = `Decided: dispatch://${issue.key}/artifact/plan-md#b-${cited} holds.`;
   const decisions = await createIssueArtifact(issue.key, {
     content: `Context.\n\n${paragraph}\n`,
-    name: "decisions.md",
+    name: "choices.md",
   });
-  expect(decisions.artifact.slug).toBe("decisions-md");
+  expect(decisions.artifact.slug).toBe("choices-md");
   const citing = await blockId(decisions.artifact.id, paragraph);
 
   await page.goto(`/issues/${issue.key}/artifacts/plan-md`);
@@ -66,7 +66,7 @@ test("a block of another document citing a block shows as that document's row, l
   // One row: the citing paragraph, shown as the document holding it and linked to that block.
   await expect(references.getByRole("link", { name: `Artifact · ${issue.key}` })).toHaveAttribute(
     "href",
-    `/issues/${issue.key}/artifacts/decisions-md#b-${citing}`
+    `/issues/${issue.key}/artifacts/choices-md#b-${citing}`
   );
   await expect(references.getByText(paragraph, { exact: true })).toBeVisible();
   await expect(references.getByRole("heading")).toHaveText("Referenced by (1)");

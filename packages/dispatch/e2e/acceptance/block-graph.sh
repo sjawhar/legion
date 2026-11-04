@@ -426,22 +426,22 @@ grep -q "^Removed in version $removed_in" "$work/out" ||
   fail A2/A15 "dispatch read --ref X@vN prints Removed in version" "$(<"$work/out")"
 pass A2/A15 "dispatch read --ref X@vN prints Removed in version $removed_in"
 
-# A4: decisions.md's two blocks cite two spec blocks; one spec block cites decisions.md's first
+# A4: choices.md's two blocks cite two spec blocks; one spec block cites choices.md's first
 # block. block-links lists exactly those links, each in its own direction.
-decisions_slug_ref="dispatch://$key/artifact/decisions-md"
+decisions_slug_ref="dispatch://$key/artifact/choices-md"
 printf '%s\n\n%s\n' \
   "$(callout first_call "We hold the line: $(block_ref "$spec" hold_line)")" \
   "$(callout second_call "We take the third way: $(block_ref "$spec" third_way)")" \
-  >"$work/decisions.md"
-upload A4 decisions.md "$work/decisions.md"
+  >"$work/choices.md"
+upload A4 choices.md "$work/choices.md"
 decisions="$doc_ref"
 decisions_id="$doc_id"
-[[ "$decisions" == "$decisions_slug_ref" ]] || fail A4 "decisions.md's reference" "got $decisions"
-doc_edit A4 "cite decisions.md's first block from the spec" spec \
+[[ "$decisions" == "$decisions_slug_ref" ]] || fail A4 "choices.md's reference" "got $decisions"
+doc_edit A4 "cite choices.md's first block from the spec" spec \
   "$(jq -cn --arg with "A third way stays open: $(block_ref "$decisions" first_call)" \
     '[{op: "replace", find: "A third way stays open.", with: $with}]')"
 
-block_ids A4 decisions-md
+block_ids A4 choices-md
 id_for A4 "We hold the line: $(block_ref "$spec" hold_line)"
 hold_from="$block_id"
 id_for A4 "We take the third way: $(block_ref "$spec" third_way)"
@@ -451,13 +451,13 @@ id_for A4 "A third way stays open: $(block_ref "$decisions" first_call)"
 back_from="$block_id"
 
 get "/api/v1/block-links?from=$(q "$decisions")&to=$(q "$spec")"
-want_status 200 A4 "block-links decisions.md -> spec answers"
-expect A4 "block-links decisions.md -> spec has exactly the two links" \
+want_status 200 A4 "block-links choices.md -> spec answers"
+expect A4 "block-links choices.md -> spec has exactly the two links" \
   "$(jq -cn --arg a "$hold_from" --arg b "$third_from" '[[$a,"hold_line"],[$b,"third_way"]] | sort')" \
   '[.links[] | [.from.block_id, .to.block_id]] | sort'
 get "/api/v1/block-links?from=$(q "$spec")&to=$(q "$decisions")"
-want_status 200 A4 "block-links spec -> decisions.md answers"
-expect A4 "block-links spec -> decisions.md has exactly the one link" \
+want_status 200 A4 "block-links spec -> choices.md answers"
+expect A4 "block-links spec -> choices.md has exactly the one link" \
   "$(jq -cn --arg a "$back_from" '[[$a,"first_call"]]')" \
   '[.links[] | [.from.block_id, .to.block_id]] | sort'
 
@@ -503,7 +503,7 @@ expect A5 "after Q's edit Q alone moves to $q_version" \
 
 # R6/A10: every block of each document is part of it, and nothing else is.
 for document in "spec $spec $spec_id" "cites.md $cites $cites_id" \
-  "decisions.md $decisions $decisions_id" "changes.md $changes $changes_id"; do
+  "choices.md $decisions $decisions_id" "changes.md $changes $changes_id"; do
   read -r name ref id <<<"$document"
   get "/api/v1/artifacts/$id/blocks"
   want_status 200 R6/A10 "read $name's blocks"
@@ -707,8 +707,8 @@ spec_node="$node"
 node_of R12 "$(block_ref "$spec" hold_line)"
 hold_node="$node"
 get "/api/v1/block-links?from=$(q "$decisions")&to=$(q "$spec")"
-want_status 200 R12 "block-links decisions.md -> spec answers"
-expect R12 "block-links' from is decisions.md as its own reference reads it" "$decisions_node" \
+want_status 200 R12 "block-links choices.md -> spec answers"
+expect R12 "block-links' from is choices.md as its own reference reads it" "$decisions_node" \
   "$defs .from | same"
 expect R12 "block-links' to is the spec as its own reference reads it" "$spec_node" \
   "$defs .to | same"
@@ -824,10 +824,10 @@ node_line R12 "dispatch read --issue $child prints its facts" \
   "Node: issue $child_ref · made by session $session" " · changed by session $session" \
   " · part of dispatch://$key"
 
-# The older references route keeps decisions.md, which cites only blocks of the spec, as a source.
+# The older references route keeps choices.md, which cites only blocks of the spec, as a source.
 get "/api/v1/artifacts/$spec_id/references"
 want_status 200 older-route "GET /artifacts/<spec>/references answers"
-expect older-route "referenced_by keeps decisions.md" 1 \
+expect older-route "referenced_by keeps choices.md" 1 \
   --arg d "$decisions_id" '[.referenced_by[] | select(.kind == "artifact" and .id == $d)] | length'
 
 # A7: a reply names the block it answers. A comment reply through `--reply-to <comment>#b-b2` is a

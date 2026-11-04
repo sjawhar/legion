@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-  "strconv"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,26 +21,40 @@ type issueDecisions struct {
 	Decisions     []model.Decision `json:"decisions"`
 }
 
-
 func (s *server) getIssueDecisions(w http.ResponseWriter, r *http.Request) {
-  if !s.requireAuthenticated(w, r) { return }
-  answer, err := s.issueDecisionNodes(r.Context(), r.PathValue("key"))
-  if err != nil { s.writeHandlerError(w, err); return }
-  version := 0
-  if raw := r.URL.Query().Get("version"); raw != "" {
-    version, err = strconv.Atoi(raw)
-    if err != nil || version < 1 { writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version must be positive"); return }
-  }
-  artifactID := r.URL.Query().Get("artifact")
-  if version > 0 {
-    document, loadErr := s.loadArtifact(r.Context(), s.deps.Store.Pool, artifactID)
-    if loadErr != nil { s.writeHandlerError(w, loadErr); return }
-    if document.IssueKey == nil || *document.IssueKey != r.PathValue("key") {
-      writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, "the document is not on this issue"); return
-    }
-  }
-  if err = s.pinDecisionPassages(r.Context(), answer.Decisions, artifactID, version); err != nil { s.writeHandlerError(w, err); return }
-  WriteJSON(w, http.StatusOK, answer)
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	answer, err := s.issueDecisionNodes(r.Context(), r.PathValue("key"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	version := 0
+	if raw := r.URL.Query().Get("version"); raw != "" {
+		version, err = strconv.Atoi(raw)
+		if err != nil || version < 1 {
+			writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version must be positive")
+			return
+		}
+	}
+	artifactID := r.URL.Query().Get("artifact")
+	if version > 0 {
+		document, loadErr := s.loadArtifact(r.Context(), s.deps.Store.Pool, artifactID)
+		if loadErr != nil {
+			s.writeHandlerError(w, loadErr)
+			return
+		}
+		if document.IssueKey == nil || *document.IssueKey != r.PathValue("key") {
+			writeError(w, "TARGET_NOT_FOUND", http.StatusNotFound, "the document is not on this issue")
+			return
+		}
+	}
+	if err = s.pinDecisionPassages(r.Context(), answer.Decisions, artifactID, version); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, answer)
 }
 
 // artifactReference is a document's own dispatch:// address.
@@ -126,7 +140,6 @@ func sliceMarkdown(markdown string, from, to int) string {
 	}
 	return markdown[from:to]
 }
-
 
 // decisionKeeps is every decision of the document a person has kept, by heading block.
 func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[string]model.DecisionKeep, error) {
@@ -229,16 +242,20 @@ func (s *server) keepDecision(w http.ResponseWriter, r *http.Request) {
 // keptDecision resolves the actual decision node in any document of its issue. An ask is
 // answered through its own answer route; Keep is only for an agent's current choice.
 func (s *server) keptDecision(ctx context.Context, document model.Artifact, blockID string) (model.Decision, error) {
-  notFound := errorf(http.StatusNotFound, "TARGET_NOT_FOUND", "no decision %q in %s", blockID, document.Name)
-  if document.IssueKey == nil { return model.Decision{}, notFound }
-  decisions, err := s.readDecisions(ctx, document, artifactReference(document), "")
-  if err != nil { return model.Decision{}, err }
-  for _, decision := range decisions {
-    if decision.BlockID == blockID && decision.Kind == "agent" && !decision.Replaced {
-      return decision, nil
-    }
-  }
-  return model.Decision{}, notFound
+	notFound := errorf(http.StatusNotFound, "TARGET_NOT_FOUND", "no decision %q in %s", blockID, document.Name)
+	if document.IssueKey == nil {
+		return model.Decision{}, notFound
+	}
+	decisions, err := s.readDecisions(ctx, document, artifactReference(document), "")
+	if err != nil {
+		return model.Decision{}, err
+	}
+	for _, decision := range decisions {
+		if decision.BlockID == blockID && decision.Kind == "agent" && !decision.Replaced {
+			return decision, nil
+		}
+	}
+	return model.Decision{}, notFound
 }
 
 // getDocumentRead is GET /api/v1/me/documents/{id}/read: the caller's last read version of the

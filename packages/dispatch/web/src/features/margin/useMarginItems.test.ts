@@ -719,7 +719,7 @@ function decisionOf(
     kept: null,
     kind: "agent",
     links,
-    ref: `dispatch://CORE-1/artifact/decisions-md#b-${blockId}`,
+    ref: `dispatch://CORE-1/spec#b-${blockId}`,
     replaced,
     text: "We decided.",
     text_sha256: `sum-${blockId}`,
@@ -742,7 +742,7 @@ const issueDecisions: IssueDecisions = {
     // A spec block the document has not placed yet: after every placed one.
     decisionOf("d-4", [decisionLink("d-4", "p-c")]),
   ],
-  document: "dispatch://CORE-1/artifact/decisions-md",
+  document: "dispatch://CORE-1/spec",
   open_questions: [],
 };
 

@@ -1299,8 +1299,14 @@ export class DispatchApiClient {
   }
 
   /** Decision/ask nodes in the issue's documents, with their shaped spec passages. */
-  getIssueDecisions(key: string, at?: { artifact: string; version: number }): Promise<IssueDecisions> {
-    const query = at === undefined ? "" : `?${new URLSearchParams({ artifact: at.artifact, version: String(at.version) })}`;
+  getIssueDecisions(
+    key: string,
+    at?: { artifact: string; version: number }
+  ): Promise<IssueDecisions> {
+    const query =
+      at === undefined
+        ? ""
+        : `?${new URLSearchParams({ artifact: at.artifact, version: String(at.version) })}`;
     return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions${query}`);
   }
 

@@ -128,7 +128,7 @@ function ChangeComposer({
   const send = useKeyedWrite({
     inline: true,
     label: () => `Change to ${decision.heading}`,
-    // The decisions document belongs to an issue, and a comment on an issue's document is the
+    // The decision node's document belongs to an issue, and a comment on that document is the
     // issue's own write: the artifact route refuses it, naming the issue route (`send-request.ts`
     // follows the same rule for a thread's replies).
     write: (input: { body: string; quote: string }, bounds) =>
@@ -190,11 +190,18 @@ function ChangeComposer({
   );
 }
 
-function decisionDocument(artifacts: readonly Artifact[], decision: Decision): Artifact | undefined {
+function decisionDocument(
+  artifacts: readonly Artifact[],
+  decision: Decision
+): Artifact | undefined {
   const route = parseDispatchReference(decision.ref);
-  return artifacts.find((artifact) => artifact.kind === "doc" && (
-    route?.kind === "spec" ? artifact.primary : route?.kind === "artifact" && artifact.slug === route.slug
-  ));
+  return artifacts.find(
+    (artifact) =>
+      artifact.kind === "doc" &&
+      (route?.kind === "spec"
+        ? artifact.primary
+        : route?.kind === "artifact" && artifact.slug === route.slug)
+  );
 }
 
 function DecisionCard({
@@ -208,23 +215,38 @@ function DecisionCard({
   issueKey: string;
   spec: Artifact | undefined;
 }): ReactNode {
+  const closedQuestion = decision.replaced && decision.asks.length > 0;
   return (
     <li className={`space-y-2 rounded-lg border p-3 ${card}`} data-decision={decision.block_id}>
       <h3 className={`text-[15px] font-medium ${textPrimaryOnSurface}`}>{decision.heading}</h3>
-      <p className={`text-xs ${textSecondaryOnSurface}`}>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</p>
-      {decision.kind === "person" ? <div className="whitespace-pre-wrap" data-testid="decision-answer">{decision.text.startsWith(decision.heading) ? decision.text.slice(decision.heading.length).replace(/^\n\n/u, "") : decision.text}</div> : decisionParagraphs(decision.text).map((paragraph, index) =>
-        paragraph.unsure ? (
-          <div
-            className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
-            data-testid="decision-unsure"
+      <p className={`text-xs ${textSecondaryOnSurface}`}>
+        {closedQuestion
+          ? "Closed question"
+          : decision.kind === "person"
+            ? "A person's decision"
+            : "Agent's decision"}
+      </p>
+      {decision.kind === "person" || closedQuestion ? (
+        <div className="whitespace-pre-wrap" data-testid="decision-answer">
+          {decision.text.startsWith(decision.heading)
+            ? decision.text.slice(decision.heading.length).replace(/^\n\n/u, "")
+            : decision.text}
+        </div>
+      ) : (
+        decisionParagraphs(decision.text).map((paragraph, index) =>
+          paragraph.unsure ? (
+            <div
+              className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
+              data-testid="decision-unsure"
+              // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
+              key={index}
+            >
+              <MarkdownBody markdown={paragraph.markdown} />
+            </div>
+          ) : (
             // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
-            key={index}
-          >
-            <MarkdownBody markdown={paragraph.markdown} />
-          </div>
-        ) : (
-          // biome-ignore lint/suspicious/noArrayIndexKey: paragraphs have no id of their own
-          <MarkdownBody key={index} markdown={paragraph.markdown} />
+            <MarkdownBody key={index} markdown={paragraph.markdown} />
+          )
         )
       )}
       {decision.asks.map((ask) => (
@@ -400,7 +422,11 @@ export function DecisionsPanel({
   const replaced = decisions.filter((decision) => decision.replaced);
   return (
     <div className="space-y-4">
-      {decisions.length === 0 && questions.length === 0 ? <p className={`text-sm ${textMutedOnSurface}`}>No decision nodes in this issue's documents.</p> : null}
+      {decisions.length === 0 && questions.length === 0 ? (
+        <p className={`text-sm ${textMutedOnSurface}`}>
+          No decision nodes in this issue's documents.
+        </p>
+      ) : null}
       <Section empty="No open questions." title="Open questions">
         {questions.map((ask) => (
           <OpenQuestion ask={ask} issueKey={issueKey} key={ask.id} spec={spec} />
@@ -420,22 +446,12 @@ export function DecisionsPanel({
       </Section>
       <Section empty="No decisions of yours." title="Your decisions">
         {mine.map((decision) => (
-          <DecisionCard
-            decision={decision}
-            issueKey={issueKey}
-            key={decision.ref}
-            spec={spec}
-          />
+          <DecisionCard decision={decision} issueKey={issueKey} key={decision.ref} spec={spec} />
         ))}
       </Section>
       <Section empty="No replaced decisions." title="Replaced">
         {replaced.map((decision) => (
-          <DecisionCard
-            decision={decision}
-            issueKey={issueKey}
-            key={decision.ref}
-            spec={spec}
-          />
+          <DecisionCard decision={decision} issueKey={issueKey} key={decision.ref} spec={spec} />
         ))}
       </Section>
     </div>

@@ -37,7 +37,13 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
 
   const reference = `dispatch://${issue.key}/spec`;
   await editArtifact(spec.id, {
-    ops: [{ op: "insert", after: "end", markdown: `:::decision{#notice-storage title="${DECISION}" shaped="${reference}#b-${stored} ${reference}#b-${newest}"}\n${REASON}\n:::\n` }],
+    ops: [
+      {
+        op: "insert",
+        after: "end",
+        markdown: `:::decision{#notice-storage title="${DECISION}" shaped="${reference}#b-${stored} ${reference}#b-${newest}"}\n${REASON}\n:::\n`,
+      },
+    ],
   });
   const decisions = spec;
   expect((await getArtifact(spec.id)).versions).toHaveLength(specVersions + 1);

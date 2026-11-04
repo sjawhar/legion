@@ -60,7 +60,7 @@ const decisions: IssueDecisions = {
           to: { block_id: "p-plan", id: "CORE-1/spec#p-plan", kind: "block" },
         },
       ],
-      ref: "dispatch://CORE-1/artifact/decisions-md#b-d-1",
+      ref: "dispatch://CORE-1/spec#b-d-1",
       replaced: false,
       text: "Ship it in two steps.",
       text_sha256: "sum-d-1",
@@ -68,7 +68,7 @@ const decisions: IssueDecisions = {
       waiting_review: true,
     },
   ],
-  document: "dispatch://CORE-1/artifact/decisions-md",
+  document: "dispatch://CORE-1/spec",
   open_questions: [],
 };
 

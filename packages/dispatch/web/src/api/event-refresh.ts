@@ -766,10 +766,8 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     );
     if (event.type === "artifact.version") {
       targets.push({ queryKey: ["artifact", event.payload.artifact_id] });
-      // The Decisions view reads two of the issue's documents - its decisions.md for the
-      // decisions and its spec for each link's target - and the event names its document by
-      // name alone, which does not say which the spec is, so every version of the issue
-      // refreshes it. The query exists only while that tab is open.
+      // Decisions can be nodes in any document of this issue. Each document version may
+      // change a choice, an ask answer, or a shaped passage; refresh the shared graph view.
       targets.push({ exact: true, queryKey: ["decisions", key] });
     } else {
       // An uploaded document is an `attached_to` edge into its issue.

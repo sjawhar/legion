@@ -2362,12 +2362,9 @@ export interface BlockLinks {
   readonly links: BlockLink[];
 }
 
-// DecisionKeep is one person's agreement with a decision: the decision's heading block, the
-// version its text stood at when they pressed Keep, and who did when. What tells a kept decision
-// from one waiting for review again is the sum of its text, which the server records beside the
-// row and serves as `waiting_review`: a decision's `changed_version` is the greatest of the
-// blocks it holds now, so it does not move when a block is removed from the decision or moved
-// into or out of it.
+// DecisionKeep is the latest person's agreement with a decision node at the SHA-256 of its
+// served text. The row retains that node's version and reviewer; waiting_review compares the
+// text sum, never the version alone.
 export interface DecisionKeep {
   readonly artifact_id: string;
   readonly block_id: string;
@@ -2376,10 +2373,9 @@ export interface DecisionKeep {
   readonly kept_at: string;
 }
 
-// DecisionLink is one link from a block of a decision to a block of the issue's spec: the
-// decision's own block that holds it, the spec block it names, when and in which version of
-// decisions.md the link was first written, and whether that spec block is out of date - the
-// decision changed after it first linked the block, and the block has not changed since.
+// DecisionLink is a shaped relation from a decision node to a block of the issue's spec,
+// dated in the source document. stale means the decision changed after writing the relation
+// and the passage has not caught up. to.pin retains the passage's version-bound words.
 export interface DecisionLink {
   readonly from_block: string;
   readonly to: GraphNode;
@@ -2388,14 +2384,11 @@ export interface DecisionLink {
   readonly stale: boolean;
 }
 
-// Decision is one decision of an issue's `decisions.md`: its heading block and every block after
-// it up to the next heading of its level or higher. `kind` is "person" when its blocks mention an
-// ask (a person's decision links the answered ask) and "agent" otherwise; `unsure` is set by a
-// paragraph that starts `Unsure:`; `replaced` by sitting under the section headed exactly
-// `## Replaced`. `changed_version` and `changed_at` are the greatest of its blocks'.
-// `text_sha256` is the sum of `text`, which Keep carries back to say which text it agreed with.
-// `waiting_review` is an agent's decision, not replaced, whose text nobody has kept as it
-// stands.
+// Decision is an actual typed node in an issue document. kind person is an answered ask,
+// with its own question/options/selected answer and answer text verbatim; kind agent is a
+// decision block, never a person's answer inferred from a prose citation. replaced is the
+// node's attribute; unsure comes from an Unsure: paragraph. changed_version/changed_at belong
+// to this stable block; text_sha256 is the SHA-256 of text that Keep carries back.
 export interface Decision {
   readonly block_id: string;
   readonly heading: string;
@@ -2413,9 +2406,9 @@ export interface Decision {
   readonly waiting_review: boolean;
 }
 
-// IssueDecisions is GET /api/v1/issues/{key}/decisions: the issue's decisions document, the open
-// questions its spec still holds (oldest first) and each decision of that document in document
-// order. `document` is null, with no decisions, when the issue has no `decisions.md`.
+// IssueDecisions is GET /api/v1/issues/{key}/decisions: open document asks oldest first and
+// typed decisions in document order, primary document first. document is the first document
+// holding a decision, or null; each decision's ref names its own source node.
 export interface IssueDecisions {
   readonly document: string | null;
   readonly open_questions: IssueAskRow[];

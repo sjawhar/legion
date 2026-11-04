@@ -49,8 +49,8 @@ func useTestBlockSchema(t testing.TB, value BlockSchema) {
 // carries targets. The shipped schema declares two: a plan task's serves and needs, the first of
 // which a check shares.
 func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
-  if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
-    t.Fatalf("the shipped schema's link kinds = %v, want decided_by, from_ask, needs, serves and shaped", kinds)
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
+		t.Fatalf("the shipped schema's link kinds = %v, want decided_by, from_ask, needs, serves and shaped", kinds)
 	}
 	if err := validateBlockSchema(blockPointerTestSchema(nil)); err != nil {
 		t.Fatalf("validate the test schema: %v", err)
@@ -90,8 +90,8 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 		{Name: "note", BlockAttributeSchema: BlockAttributeSchema{Kind: BlockAttributeString}},
 	}})
 	useTestBlockSchema(t, twice)
-  if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
-    t.Fatalf("link kinds of the types declaring serves = %v, want each relation once", kinds)
+	if kinds := LinkKinds(); !slices.Equal(kinds, []string{"decided_by", "from_ask", "needs", "serves", "shaped"}) {
+		t.Fatalf("link kinds of the types declaring serves = %v, want each relation once", kinds)
 	}
 	var served BlockSchema
 	if err := json.Unmarshal(SchemaJSON(), &served); err != nil || len(served.Types) != len(twice.Types) {
@@ -416,12 +416,20 @@ func TestCheckBlockPointersRefusesATargetItMayNotName(t *testing.T) {
 }
 
 func TestDecisionRelationsAndAnsweredAsksUseCanonicalPersonNodes(t *testing.T) {
- tree,err:=ParseRendering(":::decision{#d1 title=\"Choose\" shaped=\"dispatch://CORE-1/spec#b-p1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nReason.\n:::\n\n:::ask{#q1 state=\"answered\" answered_by=\" ALICE \"}\nQuestion?\n:::\n")
- if err!=nil{t.Fatal(err)}
- pointers:=BlockPointers(tree)
- got:=map[string]string{}
- for _,pointer:=range pointers{got[pointer.Block+"/"+pointer.Attribute]=pointer.Target.Kind+":"+text.TargetID(pointer.Target)}
- want:=map[string]string{"d1/shaped":"block:CORE-1/spec#p1","d1/from_ask":"ask:a1","d1/decided_by":"person:alice","q1/decided_by":"person:alice"}
- if !reflect.DeepEqual(got,want){t.Fatalf("derived relations=%v want %v",got,want)}
- if _,err:=Parse(":::decision{#d1 decided_by=\"Alice\"}\nReason.\n:::\n");err==nil{t.Fatal("noncanonical person login accepted")}
+	tree, err := ParseRendering(":::decision{#d1 title=\"Choose\" shaped=\"dispatch://CORE-1/spec#b-p1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nReason.\n:::\n\n:::ask{#q1 state=\"answered\" answered_by=\" ALICE \"}\nQuestion?\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointers := BlockPointers(tree)
+	got := map[string]string{}
+	for _, pointer := range pointers {
+		got[pointer.Block+"/"+pointer.Attribute] = pointer.Target.Kind + ":" + text.TargetID(pointer.Target)
+	}
+	want := map[string]string{"d1/shaped": "block:CORE-1/spec#p1", "d1/from_ask": "ask:a1", "d1/decided_by": "person:alice", "q1/decided_by": "person:alice"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("derived relations=%v want %v", got, want)
+	}
+	if _, err := Parse(":::decision{#d1 decided_by=\"Alice\"}\nReason.\n:::\n"); err == nil {
+		t.Fatal("noncanonical person login accepted")
+	}
 }

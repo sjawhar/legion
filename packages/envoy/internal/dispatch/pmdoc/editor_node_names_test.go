@@ -21,6 +21,7 @@ var editorNodeDifferences = map[string]string{
 	"ask":         "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"callout":     "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"check":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"decision":    "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"plan_task":   "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"requirement": "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 }

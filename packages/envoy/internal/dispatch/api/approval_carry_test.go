@@ -986,7 +986,7 @@ func TestACopiedBlockPlantedSinceHisApprovalDoesNotCarry(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "TEST", "Planted copy", "Context\n")
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
 	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
-		"actor": sessionActor(), "name": "decisions.md", "content": "Decisions\n\n" + waveAsk,
+		"actor": sessionActor(), "name": "choices.md", "content": "Choices\n\n" + waveAsk,
 	})
 	if uploaded.Code != http.StatusCreated {
 		t.Fatalf("upload the other document: status=%d body=%s", uploaded.Code, uploaded.Body.String())

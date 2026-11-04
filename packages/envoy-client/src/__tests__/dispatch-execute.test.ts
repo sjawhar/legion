@@ -12128,9 +12128,7 @@ describe("executeDispatchTool", () => {
   test("maps the SPA's decisions page to its issue", () => {
     const server = "http://dispatch.test";
     for (const page of ["/issues/DSP-42/decisions", "/issues/DSP-42/decisions#b-ship-it"]) {
-      expect(dispatchRefFromUrl(`${server}${page}`, server)).toBe(
-        "dispatch://DSP-42"
-      );
+      expect(dispatchRefFromUrl(`${server}${page}`, server)).toBe("dispatch://DSP-42");
     }
   });
 

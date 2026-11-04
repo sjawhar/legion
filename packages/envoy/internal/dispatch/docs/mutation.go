@@ -597,8 +597,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	if _, joined := txFromContext(ctx); !joined {
 		return "", errUnjoined
 	}
-  protected, protectionErr := s.agentAnsweredDecisions(ctx, artifactID, actor)
-  if protectionErr != nil { return "", protectionErr }
 	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		return "", err
@@ -646,7 +644,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-    if err := refuseLostAnsweredDecisions(protected, current, target); err != nil { return err }
 		if canonical, err = renderTree(target); err != nil {
 			return err
 		}
@@ -1402,8 +1399,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
 		return EditOutcome{}, err
 	}
-  protected, protectionErr := s.agentAnsweredDecisions(ctx, artifactID, actor)
-  if protectionErr != nil { return EditOutcome{}, protectionErr }
 	if len(ops) == 0 {
 		// No operation to apply, so the document this check read is the document the caller's
 		// next edit meets: its token is that edit's precondition.
@@ -1476,7 +1471,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
 				return
 			}
-      if err := refuseLostAnsweredDecisions(protected, tree, next); err != nil { mutationErr = err; return }
 			var written pmdoc.ValidDocument
 			if outcome, written, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return

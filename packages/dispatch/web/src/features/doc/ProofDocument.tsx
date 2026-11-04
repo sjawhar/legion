@@ -370,14 +370,22 @@ export function ProofDocument({
   });
   const decisionView = useQuery({
     ...issueDecisionsQuery(owner.kind === "issue" ? owner.key : "", owner.kind === "issue"),
-    queryKey: version === undefined ? ["decisions", owner.kind === "issue" ? owner.key : ""] : ["decisions", owner.kind === "issue" ? owner.key : "", artifact.id, version],
-    queryFn: () => api.getIssueDecisions(owner.kind === "issue" ? owner.key : "", version === undefined ? undefined : { artifact: artifact.id, version }),
+    queryKey:
+      version === undefined
+        ? ["decisions", owner.kind === "issue" ? owner.key : ""]
+        : ["decisions", owner.kind === "issue" ? owner.key : "", artifact.id, version],
+    queryFn: () =>
+      api.getIssueDecisions(
+        owner.kind === "issue" ? owner.key : "",
+        version === undefined ? undefined : { artifact: artifact.id, version }
+      ),
   });
   const decisions = useMemo(() => decisionView.data?.decisions ?? [], [decisionView.data]);
   const decisionsRef = useRef(decisions);
   decisionsRef.current = decisions;
   useEffect(() => {
-    if (editorRef.current !== undefined) setDecisionNotes(editorRef.current.view, artifact.id, decisions);
+    if (editorRef.current !== undefined)
+      setDecisionNotes(editorRef.current.view, artifact.id, decisions);
   }, [artifact.id, decisions]);
   // The editor takes the marks when it binds, and every set after that, through its handle:
   // a class Dispatch wrote into the editor's DOM would be read back as an edit.
@@ -965,7 +973,13 @@ export function ProofDocument({
           {readLineText(specMarks.changed)}
         </p>
       )}
-      {decisionView.isError ? <QueryError message="Could not load the decisions that shaped this document." onRetry={() => void decisionView.refetch()} retrying={decisionView.isFetching} /> : null}
+      {decisionView.isError ? (
+        <QueryError
+          message="Could not load the decisions that shaped this document."
+          onRetry={() => void decisionView.refetch()}
+          retrying={decisionView.isFetching}
+        />
+      ) : null}
       {shownLoadError === undefined ||
       repairError !== undefined ||
       rebuildError !== undefined ? null : (

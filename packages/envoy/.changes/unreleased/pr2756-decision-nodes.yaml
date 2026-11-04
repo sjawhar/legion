@@ -1,0 +1,5 @@
+kind: Changed
+body: Read Decisions from native decision and ask nodes, preserve original answers and Keep receipts, and provide a dry-run-first conversion of separate decision documents into spec nodes.
+time: 2026-11-04T10:40:00Z
+custom:
+  Issue: pr2756

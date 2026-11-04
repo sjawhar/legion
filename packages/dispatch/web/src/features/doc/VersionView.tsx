@@ -1,5 +1,13 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
@@ -19,8 +27,8 @@ import { embedHighlight } from "./highlight";
 import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
-const NO_DECISIONS: readonly Decision[] = [];
 
+const NO_DECISIONS: readonly Decision[] = [];
 
 export interface VersionViewProps {
   artifactId: string;
@@ -54,9 +62,28 @@ export function VersionView({
   const editorRef = useRef<EditorHandle | undefined>(undefined);
   const decisionsRef = useRef(decisions);
   decisionsRef.current = decisions;
+  const [notesError, setNotesError] = useState<string>();
+  const renderDecisionNotes = useCallback(
+    (editor: EditorHandle, nodes: readonly Decision[]) => {
+      setDecisionNotes(editor.view, artifactId, nodes, true);
+      if (nodes.length === 0) return;
+      void warmMarkdownRenderer()
+        .then(() => {
+          if (editorRef.current === editor && decisionsRef.current === nodes) {
+            setDecisionNotes(editor.view, artifactId, nodes, true);
+            setNotesError(undefined);
+          }
+        })
+        .catch((error: unknown) => {
+          if (editorRef.current === editor && decisionsRef.current === nodes)
+            setNotesError(error instanceof Error ? error.message : String(error));
+        });
+    },
+    [artifactId]
+  );
   useEffect(() => {
-    if (editorRef.current !== undefined) setDecisionNotes(editorRef.current.view, artifactId, decisions, true);
-  }, [artifactId, decisions]);
+    if (editorRef.current !== undefined) renderDecisionNotes(editorRef.current, decisions);
+  }, [decisions, renderDecisionNotes]);
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
@@ -133,9 +160,7 @@ export function VersionView({
         highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
       editor.setMarkdown(embedded ?? markdown);
       editorRef.current = editor;
-      await warmMarkdownRenderer();
-      if (!mounted) return;
-      setDecisionNotes(editor.view, artifactId, decisionsRef.current, true);
+      renderDecisionNotes(editor, decisionsRef.current);
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);
@@ -175,6 +200,7 @@ export function VersionView({
     highlighted,
     markdown,
     queryClient,
+    renderDecisionNotes,
     userQuery.data,
   ]);
 
@@ -201,6 +227,9 @@ export function VersionView({
       ) : null}
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
+      )}
+      {notesError === undefined ? null : (
+        <p role="alert">Could not load historical decision relationships: {notesError}</p>
       )}
       <article aria-label="Document" className="dispatch-doc" data-read-only="true">
         <div ref={root} />

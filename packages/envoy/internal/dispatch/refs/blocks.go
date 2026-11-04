@@ -487,7 +487,7 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 // the write's transaction.
 func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
 	var writing pmdoc.BlockWriting
-  var primary bool
+	var primary bool
 	if err := q.QueryRow(ctx, `
     select coalesce(ref_key, ''), coalesce(issue_key, ''), is_primary from artifacts where id = $1
   `, artifactID).Scan(&writing.Document, &writing.Issue, &primary); err != nil {
@@ -506,7 +506,7 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 		if document, _, _ := strings.Cut(nodeID, "#"); document != writing.Document {
 			elsewhere = append(elsewhere, nodeID)
 		} else if typ, ok := own[target.Block]; ok {
-      found[nodeID] = pmdoc.BlockTarget{Types: []string{typ}, Document: writing.Document, Issue: writing.Issue, Primary:primary}
+			found[nodeID] = pmdoc.BlockTarget{Types: []string{typ}, Document: writing.Document, Issue: writing.Issue, Primary: primary}
 		}
 	}
 	if len(elsewhere) == 0 {
@@ -523,14 +523,14 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 	defer rows.Close()
 	for rows.Next() {
 		var nodeID, typ, document, issue string
-    var primary bool
-    if err := rows.Scan(&nodeID, &typ, &document, &issue, &primary); err != nil {
+		var primary bool
+		if err := rows.Scan(&nodeID, &typ, &document, &issue, &primary); err != nil {
 			return pmdoc.BlockWriting{}, nil, fmt.Errorf("scan a block %s points at: %w", artifactID, err)
 		}
 		target := found[nodeID]
 		target.Types = append(target.Types, typ)
 		target.Document, target.Issue = document, issue
-    target.Primary = primary
+		target.Primary = primary
 		found[nodeID] = target
 	}
 	if err := rows.Err(); err != nil {

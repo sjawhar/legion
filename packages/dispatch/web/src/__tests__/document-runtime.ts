@@ -74,12 +74,13 @@ const blockSchema = {
   ],
   version: 1,
 };
-const editorSchema = new Schema({ nodes: {
-  doc: { content: "paragraph+" },
-  paragraph: { content: "text*", attrs: { blockId: { default: null } } },
-  text: {},
-} });
-
+const editorSchema = new Schema({
+  nodes: {
+    doc: { content: "paragraph+" },
+    paragraph: { content: "text*", attrs: { blockId: { default: null } } },
+    text: {},
+  },
+});
 
 export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
@@ -124,7 +125,11 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
-    let state = EditorState.create({ doc: editorSchema.node("doc", null, [editorSchema.node("paragraph", null, editorSchema.text(seed.text || "The document"))]) });
+    let state = EditorState.create({
+      doc: editorSchema.node("doc", null, [
+        editorSchema.node("paragraph", null, editorSchema.text(seed.text || "The document")),
+      ]),
+    });
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
@@ -169,7 +174,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         editor.readOnly = readOnly;
       },
       view: {
-        dispatch(tr: Transaction) { state = state.apply(tr); },
+        dispatch(tr: Transaction) {
+          state = state.apply(tr);
+        },
         dom: root,
         get editable() {
           return !editor.readOnly;
@@ -181,11 +188,17 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         },
         get state() {
           if (state.selection.empty !== editor.selectionEmpty) {
-            state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, 1, editor.selectionEmpty ? 1 : 2)));
+            state = state.apply(
+              state.tr.setSelection(
+                TextSelection.create(state.doc, 1, editor.selectionEmpty ? 1 : 2)
+              )
+            );
           }
           return state;
         },
-        updateState(next: EditorState) { state = next; },
+        updateState(next: EditorState) {
+          state = next;
+        },
       },
     } as unknown as EditorHandle;
     editors.push(editor);

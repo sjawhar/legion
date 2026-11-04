@@ -1,0 +1,5 @@
+kind: Changed
+body: Report the owning issue when reading native Decisions and keep decision records on their original spec nodes.
+time: 2026-11-04T10:40:00Z
+custom:
+  Issue: pr2756

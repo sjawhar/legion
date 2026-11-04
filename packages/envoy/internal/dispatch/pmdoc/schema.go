@@ -54,7 +54,7 @@ func installSchema(value BlockSchema) {
 		schemaTypes[typ.Name] = typ
 		var names []string
 		for _, attr := range typ.Attributes {
-      if attr.Kind == BlockAttributeBlockList || attr.Kind == BlockAttributeAsk || attr.Kind == BlockAttributePerson {
+			if attr.Kind == BlockAttributeBlockList || attr.Kind == BlockAttributeAsk || attr.Kind == BlockAttributePerson {
 				kinds[attr.Name] = struct{}{}
 				names = append(names, attr.Name)
 			}
@@ -220,24 +220,24 @@ var linkKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 func validateAttributeSchema(typeName, name string, attr BlockAttributeSchema) error {
 	switch attr.Kind {
 	case BlockAttributeString, BlockAttributeBool, BlockAttributeEnum, BlockAttributeStringList,
-    BlockAttributeBlockList, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
+		BlockAttributeBlockList, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
 	default:
 		return fmt.Errorf("type %q attribute %q has unknown kind %q", typeName, name, attr.Kind)
 	}
-  if attr.Kind == BlockAttributeBlockList || attr.Kind == BlockAttributeAsk || attr.Kind == BlockAttributePerson {
+	if attr.Kind == BlockAttributeBlockList || attr.Kind == BlockAttributeAsk || attr.Kind == BlockAttributePerson {
 		if !linkKindPattern.MatchString(name) {
-      return fmt.Errorf("type %q attribute %q is a %s attribute, whose name is the kind of the links it makes and must match %s", typeName, name, attr.Kind, linkKindPattern)
+			return fmt.Errorf("type %q attribute %q is a %s attribute, whose name is the kind of the links it makes and must match %s", typeName, name, attr.Kind, linkKindPattern)
 		}
 		if slices.Contains(model.GraphEdgeKinds, name) {
-      return fmt.Errorf("type %q attribute %q is a %s attribute named after a structural edge kind (%s)", typeName, name, attr.Kind, strings.Join(model.GraphEdgeKinds, ", "))
+			return fmt.Errorf("type %q attribute %q is a %s attribute named after a structural edge kind (%s)", typeName, name, attr.Kind, strings.Join(model.GraphEdgeKinds, ", "))
 		}
-  }
-  if attr.Kind != BlockAttributeBlockList && attr.Targets != nil {
+	}
+	if attr.Kind != BlockAttributeBlockList && attr.Targets != nil {
 		return fmt.Errorf("type %q attribute %q has targets, which only a block[] attribute may carry", typeName, name)
 	}
-  if attr.Scope != "" && (attr.Kind != BlockAttributeBlockList || attr.Scope != BlockAttributeScopeDocument && attr.Scope != BlockAttributeScopeSpec) {
-    return fmt.Errorf("type %q attribute %q has unsupported pointer scope %q",typeName,name,attr.Scope)
-  }
+	if attr.Scope != "" && (attr.Kind != BlockAttributeBlockList || attr.Scope != BlockAttributeScopeDocument && attr.Scope != BlockAttributeScopeSpec) {
+		return fmt.Errorf("type %q attribute %q has unsupported pointer scope %q", typeName, name, attr.Scope)
+	}
 	if attr.Kind == BlockAttributeEnum {
 		if len(attr.Choices) == 0 {
 			return fmt.Errorf("type %q attribute %q enum has no choices", typeName, name)
@@ -270,18 +270,20 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		if _, ok := value.(string); !ok {
 			return fmt.Errorf("must be a string, got %T", value)
 		}
-  case BlockAttributeAsk:
-    raw, ok := value.(string)
-    if !ok { return fmt.Errorf("must be an ask reference") }
-    ref, valid := text.ParseRef(raw, "")
-    if !valid || ref.Kind != "ask" || !strings.HasPrefix(raw, "dispatch://") {
-      return fmt.Errorf("must be an ask reference, got %q", raw)
-    }
-  case BlockAttributePerson:
-    login, ok := value.(string)
-    if !ok || !text.IsSessionID(login) || login != model.CanonicalLogin(login) {
-      return fmt.Errorf("must be a canonical person login")
-    }
+	case BlockAttributeAsk:
+		raw, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("must be an ask reference")
+		}
+		ref, valid := text.ParseRef(raw, "")
+		if !valid || ref.Kind != "ask" || !strings.HasPrefix(raw, "dispatch://") {
+			return fmt.Errorf("must be an ask reference, got %q", raw)
+		}
+	case BlockAttributePerson:
+		login, ok := value.(string)
+		if !ok || !text.IsSessionID(login) || login != model.CanonicalLogin(login) {
+			return fmt.Errorf("must be a canonical person login")
+		}
 	case BlockAttributeTimestamp:
 		text, ok := value.(string)
 		if !ok {
@@ -388,7 +390,7 @@ func parseTypedAttributeValue(attr BlockAttributeSchema, raw any) (any, error) {
 		return nil, fmt.Errorf("must be encoded as a string, got %T", raw)
 	}
 	switch attr.Kind {
-  case BlockAttributeString, BlockAttributeEnum, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
+	case BlockAttributeString, BlockAttributeEnum, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
 		if err := validateAttributeValue(attr, text); err != nil {
 			return nil, err
 		}
@@ -498,7 +500,7 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, []model.BlockA
 // quoting; it refuses a value whose kind is not the one the type declares.
 func encodeTypedAttribute(blockType, name string, definition BlockAttributeSchema, value any) (string, error) {
 	switch definition.Kind {
-  case BlockAttributeString, BlockAttributeEnum, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
+	case BlockAttributeString, BlockAttributeEnum, BlockAttributeAsk, BlockAttributePerson, BlockAttributeActor, BlockAttributeTimestamp:
 		text, ok := value.(string)
 		if !ok {
 			return "", fmt.Errorf("%w: typed block %q attribute %q must be a string", ErrSchema, blockType, name)
