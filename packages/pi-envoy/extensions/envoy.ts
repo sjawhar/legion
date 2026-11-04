@@ -45,7 +45,7 @@ import {
   readArrivals,
   renderInbound,
   senderLabel,
-  withWholeEventBody,
+  wholeCarriedBody,
 } from "@legion/envoy-client/delivery";
 import { commandName } from "@legion/envoy-client/dispatch-command";
 import {
@@ -1484,18 +1484,20 @@ export default function envoyExtension(pi: PiApi): void {
       claim.settle();
       return;
     }
-    // A body is bounded block by block, so one event can carry its first part alone. The agent
-    // is prompted with the whole body the comment or message route answers, read through this
-    // session's own Dispatch; with no Dispatch configured, or a read that fails, it keeps the
-    // part the event carried and the note that says it is a part. This runs after the receipt
-    // and after every drop above, so no acknowledgement waits on it and no frame nobody sees
-    // costs a read.
-    const whole = await withWholeEventBody(
-      raw,
-      () => timedDispatchClient(WHOLE_BODY_TIMEOUT_MS),
-      sessionID
-    );
-    if (whole !== raw) rendered = renderInbound(whole, sessionID, subject);
+    // A body is bounded block by block, so one event can carry its first part alone, and an
+    // event the bus refused carries none of it (`cutItem`). The agent is prompted with the
+    // whole body the comment or message route answers, read through this session's own
+    // Dispatch; with no Dispatch configured, or a read that fails, it keeps what the event
+    // carried and the note that says so. This runs after the receipt and after every drop
+    // above, so no acknowledgement waits on it and no frame nobody sees costs a read.
+    if (rendered.cutItem !== undefined) {
+      const dispatch = timedDispatchClient(WHOLE_BODY_TIMEOUT_MS);
+      const body =
+        dispatch === undefined
+          ? undefined
+          : await wholeCarriedBody(dispatch, rendered.cutItem, sessionID);
+      if (body !== undefined) rendered = renderInbound(raw, sessionID, subject, body);
+    }
     const envelope = rendered.envelope;
     if (envelope !== undefined) noteInbox(envelope);
     // The session the frame is delivered in, whose transcript records what became of it.

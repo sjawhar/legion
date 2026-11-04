@@ -8,7 +8,7 @@ import { eventDescription } from "../issue/event-description";
 import { AgentParts, AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildReferencePath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
@@ -80,6 +80,33 @@ function AskEventBody({
   );
 }
 
+/** The event of a comment or message whose body the reader may have only part of. */
+type BodyEvent = Extract<
+  Event,
+  { type: "comment.answered" | "comment.created" | "message.answered" | "message.created" }
+>;
+
+/** The page that reads the whole body of the item an event carried the first part of: the item's
+ *  own page under its issue, and for a comment on a project document, which belongs to no issue,
+ *  that document with the comment in view (`itemRoute`), the address every other link to one
+ *  uses. Undefined where no page names it: an agent's direct message, which belongs to no issue
+ *  either, and a document comment whose event was written before the payload named its
+ *  document. */
+function wholeItemPath(event: BodyEvent): string | undefined {
+  if (event.issue_key !== null) {
+    return buildIssuePath({
+      id: event.payload.id,
+      key: event.issue_key,
+      kind: event.type.startsWith("message.") ? "message" : "comment",
+    });
+  }
+  if (event.type !== "comment.created" && event.type !== "comment.answered") return undefined;
+  const { artifact_slug: slug, project_key: project } = event.payload;
+  if (project === undefined || slug === undefined) return undefined;
+  const route = itemRoute("comment", { id: event.payload.id, issue_key: null }, { project, slug });
+  return route === undefined ? undefined : buildReferencePath(route);
+}
+
 export function EventBody({
   event,
   onRendered,
@@ -98,16 +125,9 @@ export function EventBody({
   ) {
     const message = event.type.startsWith("message.");
     // A body is bounded block by block, so one event carries its first part alone and says so
-    // (`body_truncated`). The reader is given the text the event holds and the item's own page,
-    // which reads the stored body whole.
-    const whole =
-      event.payload.body_truncated === true && event.issue_key !== null
-        ? buildIssuePath({
-            id: event.payload.id,
-            key: event.issue_key,
-            kind: message ? "message" : "comment",
-          })
-        : undefined;
+    // (`body_truncated`). The reader is given the text the event holds and the page that reads
+    // the stored body whole.
+    const whole = event.payload.body_truncated === true ? wholeItemPath(event) : undefined;
     return (
       <>
         <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />

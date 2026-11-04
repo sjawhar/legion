@@ -114,7 +114,7 @@ function RequestChangesDialog({
   saving,
 }: {
   /** What the server answered the last request with, or null while none was refused. */
-  error: unknown;
+  error: Error | null;
   onClose: () => void;
   onSubmit: (reason: string) => void;
   saving: boolean;

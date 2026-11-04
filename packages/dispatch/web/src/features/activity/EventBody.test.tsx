@@ -295,3 +295,52 @@ test("EventBody links to the whole comment when a comment event carried its body
     view.unmount();
   }
 });
+
+// A comment on a project document belongs to no issue: its link opens the document with the
+// comment in view, the address every other in-app link to one uses.
+test("EventBody links a cut comment on a project document through that document", async () => {
+  const cut: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-10T00:00:00Z",
+    id: 3,
+    issue_key: null,
+    notify: true,
+    payload: {
+      anchor: null,
+      artifact_id: "artifact-1",
+      artifact_name: "runbook.md",
+      artifact_slug: "runbook",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "The first paragraph.",
+      body_truncated: true,
+      created_at: "2026-09-10T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-2",
+      issue_key: null,
+      mentions: [],
+      project_key: "CORE",
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 3,
+    type: "comment.created",
+  };
+  const view = render(<EventBody event={cut} />, {
+    wrapper: ({ children }) => <MemoryRouter>{children}</MemoryRouter>,
+  });
+
+  try {
+    expect(await screen.findByText("The first paragraph.")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Read the whole comment" }).getAttribute("href")).toBe(
+      "/projects/CORE/documents/runbook?comment=comment-2"
+    );
+  } finally {
+    view.unmount();
+  }
+});

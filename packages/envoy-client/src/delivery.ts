@@ -466,6 +466,10 @@ export type RenderInboundResult = {
   /** The Dispatch addresses of the pictures the delivered message, comment, ask question, answer
    *  or resolution reason embeds, in writing order; absent when it embeds none. */
   readonly pictures?: readonly string[];
+  /** The comment or message whose body this event carried only in part, or not at all: the item
+   *  a host reads whole (`wholeCarriedBody`) before it renders the frame again with that body.
+   *  Absent when the event carried the body whole, and from a render given that body. */
+  readonly cutItem?: CarriedItem;
 };
 
 /** The pictures the text a Dispatch event brings embeds: a message's or comment's body, an opened
@@ -525,10 +529,14 @@ export function carriedItem(
   return { resource, id, issueKey: event.issue_key };
 }
 
-/** Whether an event payload says the body on it is the item's first part only
- *  (`CarriedBodyPayload.body_truncated` in `@legion/contracts`). */
+/** Whether an event payload says the body on it is not the item's body whole: the first part of
+ *  it (`CarriedBodyPayload.body_truncated` in `@legion/contracts`), or none of it, because the
+ *  bus refused the event and the outbox published a stand-in with its long fields dropped
+ *  (`payload_omitted`). Either way the item itself answers the rest. */
 export function bodyWasCut(payload: unknown): boolean {
-  return isObject(payload) && payload["body_truncated"] === true;
+  return (
+    isObject(payload) && (payload["body_truncated"] === true || payload["payload_omitted"] === true)
+  );
 }
 
 /** The Dispatch route that answers the whole item an event names. */
@@ -536,15 +544,17 @@ function wholeItemRoute(item: CarriedItem): string {
   return `GET /api/v1/${item.resource === "comment" ? "comments" : "messages"}/${item.id}`;
 }
 
-/** The note a reader is given when an event carries only the first part of an item's body,
- *  naming the route that answers the item whole. Undefined when the event says nothing was
- *  cut. */
+/** The note a reader is given when an event carries less than the item's body - its first part,
+ *  or nothing of it - naming the route that answers the item whole. Undefined when the event
+ *  carries the body whole. */
 function carriedBodyNote(event: DispatchEvent): string | undefined {
   if (!bodyWasCut(event.payload)) return undefined;
+  const what =
+    isObject(event.payload) && event.payload["payload_omitted"] === true
+      ? "this event carries no body: it was too large for the bus"
+      : "the body is its first part only";
   const item = carriedItem(event);
-  return item === undefined
-    ? "the body is its first part only"
-    : `the body is its first part only; read it whole with ${wholeItemRoute(item)}`;
+  return item === undefined ? what : `${what}; read it whole with ${wholeItemRoute(item)}`;
 }
 
 /** The whole body of a comment or message, read from the server. Undefined when the read fails
@@ -573,59 +583,6 @@ export async function wholeCarriedBody(
   } catch {
     return undefined;
   }
-}
-
-/** `raw`, one inbound envelope's JSON, with the first part of a body the Dispatch event it
- *  carries replaced by the whole body the server answers, and the `body_truncated` that said so
- *  dropped. A body is bounded block by block, so one can be far longer than an event carries
- *  (`CarriedBodyPayload` in `@legion/contracts`), and a host that prompts its agent with the
- *  event alone would hand it a body that stops mid-thought.
- *
- *  `raw` comes back unchanged when nothing was cut, when the host has no Dispatch client, and
- *  when the read fails: the agent is then handed the part the event carried, with the note that
- *  says it is a part. */
-export async function withWholeEventBody(
-  raw: string,
-  dispatchClient: () => DispatchClient | undefined,
-  session?: string
-): Promise<string> {
-  // The server writes the key literally, so a frame whose text does not hold it carries no cut
-  // body and needs no parsing.
-  if (!raw.includes("body_truncated")) return raw;
-  let envelope: unknown;
-  try {
-    envelope = JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-  if (!isObject(envelope) || typeof envelope["payload"] !== "string") return raw;
-  let frame: unknown;
-  try {
-    frame = JSON.parse(envelope["payload"]);
-  } catch {
-    return raw;
-  }
-  if (!isObject(frame)) return raw;
-  // A mention delivery frame wraps the event; every other Dispatch envelope carries it flat.
-  const event = isObject(frame["event"]) ? frame["event"] : frame;
-  const payload = event["payload"];
-  if (!isObject(payload) || !bodyWasCut(payload)) return raw;
-  const type = event["type"];
-  if (typeof type !== "string") return raw;
-  const key = event["issue_key"];
-  const issueKey = typeof key === "string" ? key : null;
-  const item = carriedItem({ type, issue_key: issueKey, payload });
-  if (item === undefined) return raw;
-  const client = dispatchClient();
-  if (client === undefined) return raw;
-  const body = await wholeCarriedBody(client, item, session);
-  if (body === undefined) return raw;
-  const { body_truncated: _cut, ...carried } = payload;
-  const whole = { ...event, payload: { ...carried, body } };
-  return JSON.stringify({
-    ...envelope,
-    payload: JSON.stringify(isObject(frame["event"]) ? { ...frame, event: whole } : whole),
-  });
 }
 
 export function senderLabel(envelope: DeliveryEnvelope): string {
@@ -934,7 +891,19 @@ function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null;
 }
 
-function parseDispatchFrame(rawPayload: string): DispatchFrame {
+/** `event` with the whole body of the item it carried only the first part of, or none of: the
+ *  body the server answered, and neither flag that said the body on the event was not the
+ *  item's own (`bodyWasCut`). The event is left as it arrived when the caller read no body. */
+function withWholeBody(event: DispatchEvent, body: string | undefined): DispatchEvent {
+  if (body === undefined || !isObject(event.payload) || !bodyWasCut(event.payload)) return event;
+  const { body_truncated: _cut, payload_omitted: _omitted, ...carried } = event.payload;
+  return { ...event, payload: { ...carried, body } };
+}
+
+/** The frame one Dispatch envelope's payload carries. `wholeBody` is the body of the item the
+ *  event named as cut, read from the server since (`renderInbound`'s `cutItem`); the event then
+ *  reads as though it had carried that body whole. */
+function parseDispatchFrame(rawPayload: string, wholeBody?: string): DispatchFrame {
   let value: unknown;
   try {
     value = JSON.parse(rawPayload);
@@ -952,7 +921,7 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
         readonly event: DispatchEvent & { readonly notify?: unknown; readonly quiet?: unknown };
       };
       return {
-        event: targeted.data.event,
+        event: withWholeBody(targeted.data.event, wholeBody),
         notify: wireFrame.event.notify,
         quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery,
@@ -989,7 +958,7 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
     readonly quiet?: unknown;
   };
   return {
-    event: parsed.data,
+    event: withWholeBody(parsed.data, wholeBody),
     notify: wireEvent.notify,
     quiet: wireEvent.quiet,
     delivery: undefined,
@@ -1001,10 +970,16 @@ export function inboundTimestamp(milliseconds: number | undefined): string {
   return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString().replace(".000Z", "Z");
 }
 
+/** One inbound envelope's JSON as a card for the agent, with what the host does with it. A body
+ *  is bounded block by block, so one event can carry its first part alone, or none of it, and
+ *  the result names that item as `cutItem`: a host that reads it whole
+ *  (`wholeCarriedBody`) renders again with the body in `wholeBody`, and the card then holds the
+ *  body the comment or message route answers rather than one that stops mid-thought. */
 export function renderInbound(
   raw: string,
   sessionID: string,
-  subject?: string
+  subject?: string,
+  wholeBody?: string
 ): RenderInboundResult {
   let value: unknown;
   try {
@@ -1044,9 +1019,11 @@ export function renderInbound(
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
   let pictures: string[] = [];
-  // The note a cut body earns on the rendered record (carriedBodyNote); undefined when nothing
-  // was cut.
+  // The note a cut body earns on the rendered record (carriedBodyNote), and the item whose
+  // whole body the host can read in its place; both undefined when the event carried the body
+  // whole, and after a render that was given that body (wholeBody).
   let bodyNote: string | undefined;
+  let cutItem: CarriedItem | undefined;
   let inReplyTo = envelope.in_reply_to;
   // On an ask event the payload is the ask itself, whose author is another follower's
   // session when this session merely replied; naming it is not a spoof to flag.
@@ -1059,7 +1036,7 @@ export function renderInbound(
     if (envelope.payload === undefined) {
       dispatchIssue = "payload";
     } else {
-      const frame = parseDispatchFrame(envelope.payload);
+      const frame = parseDispatchFrame(envelope.payload, wholeBody);
       if ("event" in frame) {
         // An owner topic carries every event of its issue, document or project, so a frame
         // carrying nothing to read is dropped here rather than shown or recorded. Dispatch
@@ -1202,6 +1179,7 @@ export function renderInbound(
         };
         dispatchActor = frame.event.actor;
         bodyNote = carriedBodyNote(frame.event);
+        if (bodyWasCut(frame.event.payload)) cutItem = carriedItem(frame.event);
         pictures = eventPictures(frame.event);
         if (frame.event.type === "artifact.human_edited") {
           const edit = ArtifactHumanEditedPayloadSchema.safeParse(frame.event.payload);
@@ -1315,5 +1293,6 @@ export function renderInbound(
     ...(rejectedDelivery === undefined ? {} : { rejectedDelivery }),
     ...(malformedDelivery ? { malformedDelivery: true as const } : {}),
     ...(pictures.length === 0 ? {} : { pictures }),
+    ...(cutItem === undefined ? {} : { cutItem }),
   };
 }
