@@ -763,6 +763,7 @@ func main() {
 	messagesReceived := met.NewCounter("envoy_messages_received_total", "Total messages received by the listener")
 	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
 	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
+	roleKeptExpired := met.NewCounter("envoy_role_kept_expired_total", "Kept role messages a claim's drain dropped unforwarded, the stream having held them longer than the keep window")
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
 	// The CI summary loop runs only beside the GitHub webhook route (Phase 6b2), so only a listener
 	// that mounts it carries the gauge the loop sets.
@@ -982,6 +983,7 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
+		roleKeptExpired:   roleKeptExpired,
 
 		unplaceableRetryWindow: unplaceableRetryWindow,
 		// One deferral set for the life of the process, shared by construction by the three
@@ -990,6 +992,12 @@ func main() {
 		// handler it replaces was holding rather than opening a second one beside it
 		// (unplaceableDeferrals, unplaceable_delivery.go).
 		deferredUnplaceable: newUnplaceableDeferrals(),
+		// One guard per role for the life of the process, held for a whole handover of that
+		// role's kept lane, so the handovers a claim, a keep and the sweep start never walk the
+		// lane together, and the sweep can tell a lane this listener is draining already
+		// (roleKeepGuards, role_keep.go). Every handler and route built from this one value
+		// shares it, as they share the deferral set above.
+		roleKeepDrains: newRoleKeepGuards(),
 	}
 	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each
 	// role message's holder and hands the forward over, and the forwards to one holder are
@@ -1118,6 +1126,15 @@ func main() {
 		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 	}
+
+	// Phase 6b0: Hand over the kept role lanes nothing is draining. A handover of a role's kept
+	// lane runs in a goroutine of the process that started it, and only a claim or a keep starts
+	// one, so a listener restarted or replaced mid-handover leaves the copies behind its cursor
+	// for a claim that seldom comes inside roleKeepWindow: a live holder claims no second time.
+	// This is the backstop over them, on the reapers' cadence and under their context, with a
+	// pass as the listener starts. It costs one stream read a pass while no role has a kept lane
+	// (startKeptRoleSweep, role_keep_sweep.go).
+	kvLoopsDone = append(kvLoopsDone, startKeptRoleSweep(kvLoopsCtx, deliveryConfig, 5*time.Minute))
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
 	// per dead session on a key that is never reused and which nothing else removes, so every

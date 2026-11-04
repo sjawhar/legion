@@ -69,11 +69,12 @@ It builds `cmd/listener` and a throwaway NATS server of its own
 submits signed public GitHub fixtures plus a three-paragraph direct agent
 message to a stand-in session that takes every delivery from its own NATS
 consumer. The driver asserts the one-warning response for a never-seen GitHub
-repository, refuses a registration naming a port, rejects an unheld role
-publish before proving the stand-in session can claim and receive that role,
-validates settled pull-request checks, lifecycle and comment topics, PR-less
-workflow and Actions-job behavior, obsolete-topic absence, and the
-direct-message summary/body contract `renderInbound` prints.
+repository, refuses a registration naming a port, keeps an unheld role's
+publish and hands it to the stand-in session that claims that role, refuses a
+`keep: false` publish to an unheld role, validates settled pull-request checks,
+lifecycle and comment topics, PR-less workflow and Actions-job behavior,
+obsolete-topic absence, and the direct-message summary/body contract
+`renderInbound` prints.
 
 The NATS server is a process of this checkout's own build, stopped on exit with
 the listener and the two fake clients.

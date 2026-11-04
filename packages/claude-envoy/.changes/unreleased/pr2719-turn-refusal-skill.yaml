@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-    The `dispatch` skill now says `--turn agent` needs `--reply-to-ask`: it marks a progress
-    note on an open ask's thread. It read as if `--turn agent` suited any comment, and the CLI
-    refuses `--turn` without `--reply-to-ask`.
-time: 2026-11-03T12:20:01.000000000Z
-custom:
-    Issue: pr2719
