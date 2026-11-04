@@ -428,6 +428,9 @@ test("the reviewer treats a result with no report as a failed run, not a verdict
   expect(mergeGate).toContain(
     "reading the diff yourself in the agent's place is the same thing wearing more work"
   );
+  expect(mergeGate).toContain(
+    "that half of the round has no review at all: say so to the architect, record no verdict for it, and do not fill the gap yourself"
+  );
 });
 
 // R6: a pipe's status is the last command's, so `$?` after `cmd | tail` reads the pager's

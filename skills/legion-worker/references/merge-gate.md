@@ -28,7 +28,10 @@ other change to the head voids it.
   record nothing from it until you have the findings text in front of you. Answering the rubric
   yourself from a bare verdict is how an unreviewed head gets an approval, and reading the diff
   yourself in the agent's place is the same thing wearing more work: you are the caller, not the
-  review, and a round recorded that way has one pair of eyes where the gate asks for three. The CI it reads is the head's own checks: no handoff is a
+  review, and a round recorded that way has one pair of eyes where the gate asks for three. When
+  you can do neither — the agent will not run again and its transcript holds no findings — that
+  half of the round has no review at all: say so to the architect, record no verdict for it, and
+  do not fill the gap yourself. The CI it reads is the head's own checks: no handoff is a
   commit, so every push to the branch is work whose head gets GitHub's workflow runs of its own.
   With `<o>/<r>`, `<n>`, `<base>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid`, two reads. The required set is the
