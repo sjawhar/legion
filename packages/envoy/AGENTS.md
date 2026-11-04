@@ -4466,10 +4466,21 @@ A grant ends for good when a release finds its secret's kind changed (a moved so
 a change reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
 `policy.Kinds`, `ValidKind`, `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES` separates its entries, a form an AWS tag value and a Secret Manager annotation both hold;
 a comma is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`) the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and `agent-secrets secret` create and retag all apply.
+The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential) and `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`).
+An Azure login stores only `{"tenant_id":"<tenant>","client_id":"<client>"}` and releases JSON with those ids, `federated_token` and `expires_at` (RFC3339 UTC from the JWT `exp`).
+`BROKER_AZURE_LOGIN_SECRET` selects the only agent-secret name allowed to release that token; unset (the default), every Azure login release is refused.
+`AzureLogin.Mint` also requires that secret to be human tier in the policy snapshot checked for the release, so retagging another secret to `azure-login`, or the configured secret to agent tier, cannot bypass approval.
+`Values` passes the checked snapshot's policy record into `release`, which derives `MintRequest.Name` from the granted name and `HumanTier` from that record's tier, never from the stored value or request body.
+Before reading or minting an Azure value, `release` requires that name's grant decision to be `approval`, never `automatic`, so an automatic service grant made before a retag to human tier still releases no token.
+`BROKER_AZURE_TOKEN_FILE` names the broker pod's projected ServiceAccount token, default `/var/run/secrets/azure/tokens/azure-identity-token`, read anew on every release, not at boot.
+An unreadable, malformed or expired token refuses that release as `ErrMintUpstream`; a malformed stored identity is `ErrMintStoredValue`, and neither error quotes token bytes, stored fields or file paths.
+The deployment mounts a read-only projection in the broker container alone, with audience `api://AzureADTokenExchange` and a one-hour lifetime, and only one Entra identity trusts the subject: the released token can sign in to every identity that trusts it.
+Entra verifies the token during the caller's exchange; the broker reads its own trusted mount to determine expiry, not to authenticate a caller.
+`agent-secrets secret` create and retag validation and help take their accepted kinds from `policy.Kinds`.
 A `github-app` secret whose `github-owners` names no account is refused `github-owners-missing`, and one whose list holds a comma `github-owners-malformed`.
 `Secret.MaxGrant` is a `time.Duration` (0:
 none) and `Secret.GitHubOwners` the lowercased, sorted, single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.
-`Values` takes one policy snapshot for its re-check and passes the same snapshot's owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an installation on an account they do not list, nor for a record with no positive installation id.
+`Values` takes one policy snapshot for its re-check and passes the same snapshot's name, tier and owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an installation on an account they do not list, nor for a record with no positive installation id.
 A release may narrow its GitHub App tokens (`secrets.GitHubNarrowing`, the `github_app` body of `POST /v1/grants/{id}/values`):
 the token of one listed account's installation alone, sent GitHub's `access_tokens` body naming repositories of that account, `contents: read`, `metadata: read` and `pull_requests: read`, or both, and nothing else, so a caller can only narrow.
 A body naming repositories alone names no permissions, and GitHub then gives the token every permission the App holds, its organization permissions among them: only `read_only` limits those.
