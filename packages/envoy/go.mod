@@ -136,9 +136,12 @@ require (
 
 // The sjawhar/ygo fork is upstream ygo v1.55.0, through upstream main 510c2cf5, plus fixes, each
 // carried until upstream ships it; its release notes list every member with its upstream pull
-// request. Thirteen wait in open upstream pull requests: a refused, cut-off or reordered update
-// leaves every copy holding the same document (#340, which replaces #334, #341, #344, #345, #352,
-// #356 and #357); peer memory is bounded and dead peers close - a per-peer write queue byte budget
+// request. Thirteen wait in open upstream pull requests: pre-integration refusals change nothing,
+// and a partly applied update relays the bytes the room integrated and parked (#340, which
+// replaces #334, #341, #344, #345, #352, #356 and #357); when a non-local transaction advances a
+// document's own client clock, the document takes a new client ID at commit, so rebuildFork
+// reads that ID again (#340, breaking);
+// peer memory is bounded and dead peers close - a per-peer write queue byte budget
 // (Server.PeerWriteQueueBytes, which the document service sets), a failed write or a server close
 // ends the peer and drops its unread input, a joining peer gets the room's state once, and a room
 // an Apply, a relay Inject or a join is inside is not closed under it, so CloseRoom answers
@@ -158,6 +161,6 @@ require (
 // does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the format
 // cleanup a remote apply runs, so a copy that replays the room's commit log (newDocumentCopy) and
 // a room loading its stored history (bootstrapLoadedState) make no commit the room never made
-// (#369). One is fork-only, with no upstream pull request yet: a per-apply scan budget stacked on
-// #333, which Dispatch does not set.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261102105534-b3b8308dee0e
+// (#369). Two await upstream pull requests: a per-apply scan budget stacked on #333, which
+// Dispatch does not set, and Doc.Clone, retained from v1.54.1-sami.4, which Dispatch does not call.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.1
