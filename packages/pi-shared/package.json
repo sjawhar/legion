@@ -77,6 +77,14 @@
       "types": "./src/provider-refusal.ts",
       "bun": "./src/provider-refusal.ts"
     },
+    "./fallback-cooldown": {
+      "types": "./src/fallback-cooldown.ts",
+      "bun": "./src/fallback-cooldown.ts"
+    },
+    "./fallback-chain": {
+      "types": "./src/fallback-chain.ts",
+      "bun": "./src/fallback-chain.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"
