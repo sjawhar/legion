@@ -147,6 +147,9 @@ const AnswersPage = lazy(() =>
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
 );
+const PersonPage = lazy(() =>
+  import("./features/people/PersonPage").then((module) => ({ default: module.PersonPage }))
+);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -794,6 +797,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
                 <Route element={<RepliesPage />} path={REPLIES_PATH} />
+                <Route element={<PersonPage />} path="/people/:login" />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />

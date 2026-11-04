@@ -15,6 +15,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 ## Layout
 
 - `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar, main-content, and margin shell. The sidebar provides Inbox, Pinned issues, Projects, Agents, Replies, Delivery, Pipeline, and Settings without loading the full issue list. The `/agents` route groups live sessions by Dispatch activity and freshness, with targeted exchanges and the shared Send/Aside/BTW composer. Issue pages have Spec, Conversation, Children, Artifacts, Activity, and Decisions tabs. The Decisions tab (`/issues/<key>/decisions`, chord `t d`, `features/issue/DecisionsPanel.tsx`) reads `GET /issues/{key}/decisions` under `["decisions", <key>]` and lists, in order, Open questions (each linking its ask block in the spec), Waiting for your review (each agent decision nobody has kept at its current version, with Keep, which calls the keep route, and Change, which opens a comment on `decisions.md` quoting the decision's first paragraph), Your decisions (each linking its ask) and Replaced; each decision shows its `Unsure:` paragraph in `decisionUnsureAccent` and links every spec block it shaped at `#b-<id>`. Its page is a view of the issue's `decisions.md`, so every reader of a dashboard URL (this SPA, `packages/envoy-client`, the server's `text`) reads `/issues/<key>/decisions` as `dispatch://<key>/artifact/decisions-md`. Issue margins show Comments (anchored threads beside the document, Proof's model) and Pinned; standalone project-document margins show Comments only. At `xl` the sidebar and margin are independently collapsible rails; compact widths use their respective sheets. A margin is a property of a document surface, so on a desktop route that has none - the Inbox, a project, Settings, Agents - `features/margin/Margin.tsx` renders nothing at all rather than a 384 px column holding a placeholder sentence; it keys on the route (an issue path, or a project-document path) rather than on `useMarginOwner`, whose document owner only resolves once the artifact query lands, and the reader's own collapse preference is untouched, so the margin returns as they left it on the next issue or document. The desktop sidebar is a `sticky top-0` viewport-tall flex column inside its full-height `<aside>`: the navigation stays reachable on a long issue, and the signed-in name and `Sign out` sit in an `mt-auto` footer beneath the links rather than above them, because identity is read once and the navigation on every visit. Per-user sidebar visibility, margin visibility, and margin width persist in browser storage.
+
+- `web/src/features/people/PersonPage.tsx` is `/people/<login>`, a paginated list of comments, messages and asks the person authored or their recorded session aliases received, from `GET /people/{login}/nodes` under `["person-nodes", login]`.
+  Each row shows Authored or Received, its first line, creation time and an Open link when it has a page; direct messages link to the session conversation and have no `dispatch://` reference.
+
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/lib/timestamps.ts`'s `compareTimestamps` is how the SPA orders two server timestamps.
   The server writes RFC 3339 with trailing fractional zeros dropped (`…00.12Z`, `…00.123456Z`), so
@@ -714,8 +718,10 @@ name alone and a screen reader hears the attribution once, all in one
 `<span data-agent-name=<id> data-agent-state=…>`. A name in the short form carries the full
 session id as that span's `title`: ids minted in the same minute share their first 8 characters.
 One resolver in the module (`resolveAgent`) gives the name and attribution to every drawn and
-spelled name there. A `user` or `system` actor renders its id as plain text, inside the host
-control for `kind="control"`, and reads no registry. A role address (`role:…`)
+spelled name there.
+A `user` actor links its id to `/people/<login>` by default; `kind="static"` keeps plain text and `kind="control"` leaves the host in charge of the control.
+A `system` actor stays plain text, and neither reads the registry.
+A role address (`role:…`)
 is an address, not an agent, and stays text. `className` lands on the outer span, which is always
 `min-w-0 [overflow-wrap:anywhere]`, so a name can never widen its host: in a flex row it shrinks
 below its text, and a long title with no space breaks mid-word rather than pushing a 390 px page

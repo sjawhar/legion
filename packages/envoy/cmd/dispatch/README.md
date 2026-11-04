@@ -1438,6 +1438,11 @@ A result for an `after_merge` or `default_branch` check is current only at such 
 A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
 A new table, as above; its census answers `0`.
 
+Migration `20261104074751_person_graph` creates the derived views `person_aliases` and `graph_person_edges`, without altering `graph_edges` or any table.
+The graph is both edge views together (`refs.AllEdgesSQL`), while old builds keep their existing results and query plans.
+The alias view uses `user_threads_login` for canonical person ids and stores no identity mapping of its own; session aliases require a stored actor's server-verified `owner`, and no record establishes a role alias.
+No row is scanned, rewritten or refused by the migration, no index is created, and its migration census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
 On success it backfills each artifact's project and generated `ref_key`.
@@ -1465,6 +1470,11 @@ as a Kubernetes Job from the new image, or by hand with the `kubectl run` recipe
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
 ```
+
+`envoy-dispatch census --deliveries` is a separate post-deploy read, not the migration census below.
+It compares the graph's `delivered_to` sets with recorded outbox topics and sent message/comment attempts for every comment, message and ask created in the last 30 days, including an empty recipient set.
+It prints JSON counts (`checked`, `by_kind`, `mismatched`, `missing` by source, `unexpected`), never message content, from one read-only repeatable-read snapshot, and never runs migrations.
+Exit `0` means a nonempty census with no mismatches, `1` means mismatches or no items to check, and `2` means the check could not run.
 
 The census is one `repeatable read, read only` transaction over the migrations this binary carries that the database has not applied:
 every migration whose version `schema_migrations` does not record, the rule the runner applies them by (a database without that table records none, so everything is pending).
@@ -2197,6 +2207,14 @@ Each item below names a path with its method and identity, then its purpose.
   Move the caller's read mark on one thread forward to `{read_through}`;
   it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`.
   Answers `204`, writing nothing for a thread the caller never wrote in.
+
+- `/api/v1/people/{login}/nodes?limit=&offset=` (GET; cookie or trusted header (human only))
+
+  List comments, messages and asks the person authored or their recorded session aliases received, through the complete derived graph, newest first by creation time, kind and id.
+  `limit` is 1–200 (default 50), `offset` is nonnegative, and the page is `{person, rows, total, limit, offset}`.
+  Each row has `kind`, `id`, `relations`, `title` (the first line), `created_at`, `ref` and `href`.
+  A direct message has no `ref`; its `href` opens the targeted session's conversation.
+  Bearers receive `403 HUMAN_ONLY`, like the existing agent-conversation list; an unknown person is `404 PERSON_NOT_FOUND`.
 
 - `/api/v1/agents` (GET; cookie, trusted header, or bearer)
 

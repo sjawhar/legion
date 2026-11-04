@@ -196,6 +196,8 @@ export type {
   MyRepliesResponse,
   MyReplyRow,
   OpenAskOwner,
+  PersonNode,
+  PersonNodes,
   ProgressCount,
   Project,
   ProjectDefaultAssignee,

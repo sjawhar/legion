@@ -5,7 +5,7 @@ import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-test("a person's graph lists authored and recorded received nodes @phone", async ({ browser }) => {
+test("a person's graph lists authored and recorded received nodes @phone", async ({ browser }, testInfo) => {
   await resetDatabase();
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Graph identities" });
@@ -47,9 +47,11 @@ test("a person's graph lists authored and recorded received nodes @phone", async
       "href",
       `/issues/${issue.key}/comments/${authored.id}`
     );
+    await page.screenshot({ path: testInfo.outputPath("person-nodes.png"), fullPage: true });
     await rows.nth(0).getByRole("link", { name: "Open" }).click();
     await expect(page).toHaveURL(`/issues/${issue.key}/comments/${received.id}`);
-    await expect(page.locator(`[data-turn="comment:${received.id}"]`)).toBeVisible();
+    const surface = testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : page;
+    await expect(surface.locator(`[data-turn="comment:${received.id}"]`)).toBeVisible();
   } finally {
     await alice.close();
   }

@@ -128,8 +128,9 @@ function AgentStateMark({
 }
 
 /**
- * An agent, as every place in the app shows one. A `user` or `system` actor is its id as plain
- * text (inside the host's control, for `kind="control"`) and reads no registry. A session
+ * An agent, as every place in the app shows one. A user links to their person page unless the
+ * host requests static text or its own control; a system actor is plain text. Neither reads
+ * the registry. A session
  * renders in one `<span data-agent-name data-agent-state>`: its state mark, its name, and its
  * attribution.
  */
@@ -146,6 +147,16 @@ export function AgentName(props: AgentNameProps): ReactNode {
   }
   const { actor } = props;
   if (actor.kind !== "session") {
+    if (actor.kind === "user" && (props.kind === undefined || props.kind === "link")) {
+      return (
+        <Link
+          className={`${LINK_CLASS} ${AGENT_SPAN_CLASS} ${props.className ?? ""}`}
+          to={`/people/${encodeURIComponent(actor.id)}`}
+        >
+          {actor.id}
+        </Link>
+      );
+    }
     const named = props.kind === "control" ? props.control(actor.id) : actor.id;
     return props.className === undefined ? named : <span className={props.className}>{named}</span>;
   }

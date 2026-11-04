@@ -2244,6 +2244,8 @@ export type GraphEdgeKind =
   | "part_of"
   | "depends_on"
   | "affects"
+  | "authored_by"
+  | "delivered_to"
   | (string & {});
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
@@ -2274,6 +2276,7 @@ export interface GraphNode {
     | "comment"
     | "message"
     | "session"
+    | "person"
     | "component";
   readonly id: string;
   readonly block_id?: string;
@@ -2340,6 +2343,26 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+/** One comment, message or ask a person authored or a recorded session alias received. */
+export interface PersonNode {
+  readonly kind: "comment" | "message" | "ask";
+  readonly id: string;
+  readonly relations: ("authored_by" | "delivered_to")[];
+  readonly title: string;
+  readonly created_at: string;
+  readonly ref: string | null;
+  readonly href: string | null;
+}
+
+/** GET /api/v1/people/{login}/nodes. Direct messages have no dispatch:// reference. */
+export interface PersonNodes {
+  readonly person: string;
+  readonly rows: PersonNode[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,

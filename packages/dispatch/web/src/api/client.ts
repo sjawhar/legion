@@ -85,6 +85,7 @@ import type {
   MessageRead,
   MyAnswersResponse,
   MyRepliesResponse,
+  PersonNodes,
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
@@ -1070,6 +1071,12 @@ export class DispatchApiClient {
    *  one page at a time. Human-only. */
   listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
+  }
+
+  listPersonNodes(login: string, page: { limit: number; offset: number }): Promise<PersonNodes> {
+    return this.json<PersonNodes>(
+      pathWithQuery(`/api/v1/people/${pathSegment(login)}/nodes`, page)
+    );
   }
 
   /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
