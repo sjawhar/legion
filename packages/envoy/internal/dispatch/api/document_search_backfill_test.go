@@ -76,11 +76,12 @@ func documentsWithMarkdown(t *testing.T, database *store.Store) int64 {
 	return documents
 }
 
-// countRows answers the one count statement asks of the test's database.
-func countRows(t *testing.T, database *store.Store, statement string) int64 {
+// countRows answers the one count statement asks of the test's database, with the arguments it
+// names.
+func countRows(t *testing.T, database *store.Store, statement string, args ...any) int64 {
 	t.Helper()
 	var count int64
-	if err := database.Pool.QueryRow(context.Background(), statement).Scan(&count); err != nil {
+	if err := database.Pool.QueryRow(context.Background(), statement, args...).Scan(&count); err != nil {
 		t.Fatalf("%s: %v", statement, err)
 	}
 	return count

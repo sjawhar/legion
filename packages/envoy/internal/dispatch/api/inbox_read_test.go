@@ -87,16 +87,6 @@ func markAllProjects(t *testing.T, database *store.Store) []string {
 	return projects
 }
 
-// countRows is one count over the database, for the rows a mark writes or leaves alone.
-func countRows(t *testing.T, database *store.Store, query string, args ...any) int {
-	t.Helper()
-	var count int
-	if err := database.Pool.QueryRow(context.Background(), query, args...).Scan(&count); err != nil {
-		t.Fatalf("count (%s): %v", query, err)
-	}
-	return count
-}
-
 // inboxReadSeed is the Inbox a mark-all works over: four unread Reply threads - two on one
 // project (the first at P0 on its own issue, the second at P1 on another), one on a second
 // project, one on a project document, which has no issue and so no priority - and one Agent
