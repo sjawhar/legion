@@ -656,6 +656,99 @@ func TestAnEarlierRoomsLateUnloadLeavesTheResidentRoomsBytesResident(t *testing.
 	}
 }
 
+// Two rooms of one document that have both left ygo's map can report their unloads in either
+// order, and an unload that has begun may wait while a later room of the document loads and
+// unloads in full. Whatever the order, each unload ends one of the loads counted under the name,
+// so once both have run no bytes of either are counted and the name holds no place.
+func TestUnloadsOfTwoRoomsInEitherOrderLeaveNoResidentBytes(t *testing.T) {
+	database := storetest.Open(t)
+	service, server := newTestServiceInstance(t, database)
+	artifactID := createDocuments(t, database, 1)[0]
+	admitSocket(t, server.URL, artifactID, "the socket that loads the first room").Close()
+
+	// The first room's unload begins, then waits inside it before it ends a load.
+	waiting := make(chan struct{})
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	letProceed := func() { proceedOnce.Do(func() { close(proceed) }) }
+	t.Cleanup(letProceed)
+	// Only the first unload waits; a sync.Once would make the second wait for the first as well.
+	var held atomic.Bool
+	service.beforeUnloadEndsLoad = func(room string) {
+		if room != artifactID || held.Swap(true) {
+			return
+		}
+		close(waiting)
+		<-proceed
+	}
+	// ygo calls the first room's unload only after a second room has loaded, and that unload then
+	// waits, as above, while the second room unloads in full. Every unload of the room reports
+	// itself once it has run.
+	entering := make(chan struct{})
+	enter := make(chan struct{})
+	var enterOnce sync.Once
+	letEnter := func() { enterOnce.Do(func() { close(enter) }) }
+	t.Cleanup(letEnter)
+	var entered atomic.Bool
+	unloaded := make(chan struct{}, 2)
+	unload := service.srv.OnUnloadDocument
+	service.srv.OnUnloadDocument = func(ctx context.Context, room string) {
+		if room == artifactID && !entered.Swap(true) {
+			close(entering)
+			<-enter
+		}
+		unload(ctx, room)
+		if room == artifactID {
+			unloaded <- struct{}{}
+		}
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
+	select {
+	case <-entering:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first room never reached its unload, so nothing here is tested")
+	}
+	second := admitSocket(t, server.URL, artifactID, "the socket that loads the second room")
+	letEnter()
+	select {
+	case <-waiting:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the first room never began its unload, so nothing here is tested")
+	}
+
+	// The second room takes a write, and unloads in full while the first unload waits. The
+	// first close holds the service's close gate for the room (roomServer.CloseRoom) until its
+	// unload returns, so the second room is closed by ygo's own CloseRoom, as ygo's idle sweep and
+	// a last browser's departure retire a room, taking no gate.
+	if _, err := joinedReplaceText(service, artifactID, "A write the second room takes.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write to the second room: %v", err)
+	}
+	_ = second.Close()
+	if err := service.srv.Server.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close the second room: %v", err)
+	}
+	select {
+	case <-unloaded:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the second room never reported its unload, so nothing here is tested")
+	}
+
+	letProceed()
+	if err := <-closed; err != nil {
+		t.Fatalf("close the first room: %v", err)
+	}
+	if got := service.residentBytes.Load(); got != 0 {
+		t.Errorf("the resident bytes once both rooms have unloaded = %d, want 0: a load whose bytes no unload took back stays counted for good", got)
+	}
+	service.roomSlots.mu.Lock()
+	slot := service.roomSlots.rooms[artifactID]
+	service.roomSlots.mu.Unlock()
+	if len(slot.loads) != 0 {
+		t.Errorf("the document still counts %d loads once both rooms have unloaded, want none", len(slot.loads))
+	}
+}
+
 // A cold socket that offers its read while the room's load is running - after the load has looked
 // for a preload (LoadDoc's takePreload) and before it records the room as loaded here
 // (onLoadDocument) - offers to a load that will never read it. The load takes that offer out as it

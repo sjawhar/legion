@@ -428,8 +428,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// (reserveRoom), from here until ygo's OnUnloadDocument (releaseUnloadedRoom), unless this
 	// load fails: ygo then drops the room with no OnUnloadDocument, so the load takes its own count
 	// back. The token the count answers with is this load's own: the bytes counted against it are
-	// taken back at the unload of this load, and of no other load of the name (residentLoad).
-	counted := s.roomLoaded(room, doc)
+	// taken back when an unload of the name ends it, or by this load's own failure (residentLoad).
+	counted := s.roomLoaded(room)
 	resident := false
 	defer func() {
 		if !resident {
@@ -512,8 +512,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	default:
 		askBlocks = askBlockIDs(rendered.tree)
 	}
-	// The history this load decoded counts as resident against this load's own token, so its
-	// unload takes those bytes back wherever the room's record has gone by then
+	// The history this load decoded counts as resident against this load's own token, so the
+	// unload that ends the token takes those bytes back wherever the room's record has gone by then
 	// (countResidentBytes).
 	s.countResidentBytes(counted, int64(size))
 	// The room this load publishes holds the state it takes from here until ygo retires it

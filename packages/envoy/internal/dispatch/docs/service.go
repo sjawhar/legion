@@ -300,6 +300,10 @@ type Service struct {
 	// to ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
 	// offered theirs, and to watch what becomes of each one's state.
 	afterSocketPreload func(room string, loaded *persistence.LoadResult)
+	// beforeUnloadEndsLoad runs in ygo's OnUnloadDocument (releaseUnloadedRoom) before the unload
+	// ends a load of the room. Nil outside tests; tests use it to hold one room's unload while a
+	// later room of the same name loads and unloads.
+	beforeUnloadEndsLoad func(room string)
 	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
 	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
 	// decodes a room's load makes and to see which state each decodes.
@@ -384,9 +388,10 @@ type Service struct {
 	connections   atomic.Int64
 	// residentBytes is the encoded bytes the loads ygo holds took, each load's own history and
 	// every update the room it left behind has committed since (residentLoad), for the room
-	// figures. Each load's bytes are counted against that load's token and taken back at that
-	// load's unload, so a room that loaded again before an earlier room of the same name reported
-	// its unload keeps its own (roomUnloaded).
+	// figures. Each load's bytes are counted against that load's token, and each unload of a name
+	// ends the name's oldest token, so a room that loaded again before an earlier room of the same
+	// name reported its unload keeps its own; two ended rooms that unload out of order each end
+	// the other's, and the total is exact once both have run (roomUnloaded).
 	residentBytes atomic.Int64
 	// appendFigures counts what the rooms' browser append transactions did (room_appends.go), for
 	// the room figures, as evictorQueries counts the stale-room evictor's reads of a document's
@@ -830,8 +835,8 @@ func (s *Service) ProcessID() string {
 //   - Pools, the room-appends and rooms pools' connection figures;
 //   - ReadCache, the cold reads' cache's weight, entries and budget; Preloads, the cold sockets'
 //     states waiting for their room's load; ResidentBytes, the encoded bytes the loads ygo holds
-//     took (each load's history and every update it committed since, taken back at that load's
-//     own unload);
+//     took (each load's history and every update it committed since, taken back when an unload
+//     of the name ends that load's token);
 //   - HeadTracker, whether the head tracker trusts itself and how many documents it holds;
 //     EvictorQueries, the stale-room evictor's reads of a document's head; SettlementWakeups,
 //     the wakes of the waits for a room's appends.

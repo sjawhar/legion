@@ -29,8 +29,8 @@ type roomInstance struct {
 	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
 	loadedHead int64
 	// resident is the token of the load this instance stands for, which the bytes of every update
-	// the instance commits count against (classifyDrained, queueUpdateClass), so that load's own
-	// unload takes them back (residentLoad). Set once, where the instance is kept (keepInstance).
+	// the instance commits count against (classifyDrained, queueUpdateClass), so the unload that
+	// ends the token takes them back (residentLoad). Set once, where the instance is kept (keepInstance).
 	resident *residentLoad
 }
 
