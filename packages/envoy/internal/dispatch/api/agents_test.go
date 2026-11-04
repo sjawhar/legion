@@ -163,7 +163,8 @@ func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 }
 
 // A bearer session needs to see who advertises which delivery modes before it targets a
-// message; the issue-less POST /agents/{session}/messages stays human-only.
+// message; the issue-less POST /agents/{session}/messages needs the person scope, which the
+// deployment's shared token does not hold.
 func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 	t.Parallel()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -188,8 +189,8 @@ func TestAgentsListsCapabilitiesForBearerCallers(t *testing.T) {
 		"body": "hi", "delivery": "btw",
 		"actor": map[string]string{"kind": "session", "id": "s2"},
 	})
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("issue-less targeted message by a bearer: status %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("issue-less targeted message by the shared token: status %d: %s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
 	}
 }
 

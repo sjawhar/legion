@@ -561,8 +561,8 @@ cat >"$bin/gh" <<'EOF'
 printf '%s\n' "$*" >>"$FAKE_DIR/gh.log"
 case $* in
   *contents/dispatch/main.go*) printf 'const (\n\tdatabaseVersion = "POSTGRES_%s"\n)\n' "${FAKE_PROD_MAJOR:-16}" ;;
-  *contents/dispatch/Pulumi.prod.yaml*) printf 'config:\n  example:listenerImage: ghcr.io/sjawhar/legion/envoy@sha256:%064d\n' 1 ;;
-  "api repos/sjawhar/legion/commits/"*)
+  *contents/dispatch/Pulumi.prod.yaml*) printf 'config:\n  example:listenerImage: ghcr.io/cybermonklabs/legion/envoy@sha256:%064d\n' 1 ;;
+  "api repos/cybermonklabs/legion/commits/"*)
     c=${2##*/}
     awk -v c="$c" '$1 == c { print $2 }' "$FAKE_DIR/parents"
     ;;
@@ -1059,8 +1059,8 @@ pass "up refuses a commit that is not 40 hex"
 reset_fake
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_none"
 ((RC != 0)) || fail "up accepted a commit with no image"
-grep -q "no image ghcr.io/sjawhar/legion/envoy:$commit_none" "$tmp/out" || fail "up's refusal does not name the commit"
-grep -q "newest first-parent ancestor on sjawhar/legion main that has one is $commit_ancestor" "$tmp/out" ||
+grep -q "no image ghcr.io/cybermonklabs/legion/envoy:$commit_none" "$tmp/out" || fail "up's refusal does not name the commit"
+grep -q "newest first-parent ancestor on cybermonklabs/legion main that has one is $commit_ancestor" "$tmp/out" ||
   fail "up's refusal does not name the newest first-parent ancestor with an image"
 no_create || fail "up created something before refusing a commit with no image"
 pass "up refuses a commit with no image, naming its newest first-parent ancestor with one, before creating anything"
@@ -1948,7 +1948,7 @@ pass "up stops after five quota races in a row on one manifest"
   NS=$ns
   digest=sha256:$(printf '%064d' 7)
   values=(NAMESPACE=loadtest RUN_ID=lt-20261028t120000-abcd STORAGE_CLASS=premium-rwo
-    "ENVOY_IMAGE=ghcr.io/sjawhar/legion/envoy@$digest" "LISTENER_IMAGE=ghcr.io/sjawhar/legion/envoy@$digest"
+    "ENVOY_IMAGE=ghcr.io/cybermonklabs/legion/envoy@$digest" "LISTENER_IMAGE=ghcr.io/cybermonklabs/legion/envoy@$digest"
     "PG_IMAGE=mirror.gcr.io/pgvector/pgvector@$digest" "SOCAT_IMAGE=mirror.gcr.io/alpine/socat@$digest"
     "RUNNER_IMAGE=mirror.gcr.io/library/debian@$digest")
   mapfile -t -O "${#values[@]}" values < <(pg_tier 16 60 | jq -r '"PG_TIER=\(.tier)", "PG_CPU=\(.cpu)", "PG_MEMORY=\(.memory)",

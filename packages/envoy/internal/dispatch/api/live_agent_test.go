@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 )
@@ -178,9 +179,10 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 	}
 }
 
-// A session's own conversation is for a person watching it: a bearer's socket is refused the view,
-// and a caller with no credential never gets a socket at all.
-func TestAgentStreamRefusesEveryCallerButAHuman(t *testing.T) {
+// A caller with no credential never gets a socket at all, so it never reaches the session it
+// asked about. What a credential that does resolve may watch is the scope it holds, which
+// TestAnAgentViewIsServedToThePersonScopeAndRefusedWithoutIt below decides.
+func TestAgentStreamRefusesAViewerWithNoCredential(t *testing.T) {
 	// No t.Parallel: this test reads the event log by id cursor, and the safe horizon it waits
 	// on is proven from pg_snapshot_xmin, the oldest transaction id running anywhere on the
 	// instance (internal/dispatch/events, horizon.go). Keeping only the tests that hold a
@@ -192,17 +194,53 @@ func TestAgentStreamRefusesEveryCallerButAHuman(t *testing.T) {
 	if status := rig.refused(t, nil); status != http.StatusUnauthorized {
 		t.Fatalf("an anonymous viewer's upgrade answered %d, want 401", status)
 	}
-	bearer := rig.dial(t, withBearer("agent-token"))
-	bearer.subscribeAgent(t, "agent", plannerSessionID)
-	bearer.refusal(t, agentFeedWait, "agent", "HUMAN_ONLY")
-	bearer.quiet(t, 300*time.Millisecond, "after the bearer's agent view was refused")
-	// A refused caller never reached the session: it was never told a viewer is attached, so
-	// the session it asked about stays silent.
 	if got := source.Watches(plannerSessionID); got != 0 {
 		t.Fatalf("a refused viewer armed the session %d times, want 0", got)
 	}
 	if got := source.Viewers(plannerSessionID); got != 0 {
 		t.Fatalf("a refused viewer holds %d subscriptions to the session's frames, want 0", got)
+	}
+}
+
+// What a socket may watch is what its credential holds, not whether it is a browser: a personal
+// token holding the person scope is served a session's conversation exactly as a person's cookie
+// is, and a credential that holds no scope — another personal token, the deployment's shared
+// token — is refused the view with the code the HTTP routes answer, OAUTH_SCOPE_REQUIRED, in a
+// frame naming the scope it lacks. /ws/live is one socket serving every view, so this check is
+// the view's own and not the route table's.
+func TestAnAgentViewIsServedToThePersonScopeAndRefusedWithoutIt(t *testing.T) {
+	source := agentstream.NewMemory()
+	source.SetReplay(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
+	rig := newLiveSocketRig(t, testServerOptions{agentStream: source}, nil)
+
+	holder := rig.dial(t, withBearer(personalTokenHolding(t, rig.database, model.ScopePerson)))
+	holder.subscribeAgent(t, "agent", plannerSessionID)
+	if data := holder.agentFrame(t, "agent", "responder"); data != `{"v":1,"responding":true}` {
+		t.Fatalf("the person-scoped token's first frame is %s, want the responder verdict", data)
+	}
+	if data := holder.agentFrame(t, "agent", "replay"); data != `{"v":1,"kind":"replay-body"}` {
+		t.Fatalf("the person-scoped token's second frame is %s, want the session's replay", data)
+	}
+
+	// Each refused caller asks after a second session, which no admitted viewer watches, so the
+	// relay's own count proves the refusal stopped before the session was reached.
+	for name, token := range map[string]string{
+		"a personal token holding no scope": personalTokenHolding(t, rig.database),
+		"the deployment's shared token":     "agent-token",
+	} {
+		client := rig.dial(t, withBearer(token))
+		client.subscribeAgent(t, "agent", reviewerSessionID)
+		refusal := client.refusal(t, agentFeedWait, "agent", codeScopeRequired)
+		if !strings.Contains(refusal.Message, model.ScopePerson) {
+			t.Fatalf("%s was refused %q, which does not name the %s scope", name, refusal.Message, model.ScopePerson)
+		}
+		client.quiet(t, 300*time.Millisecond, "after the agent view of "+name+" was refused")
+		if got := source.Watches(reviewerSessionID); got != 0 {
+			t.Fatalf("%s armed the session %d times, want 0", name, got)
+		}
+		if got := source.Viewers(reviewerSessionID); got != 0 {
+			t.Fatalf("%s holds %d subscriptions to the session's frames, want 0", name, got)
+		}
 	}
 }
 

@@ -249,6 +249,16 @@ func TestASessionFollowsAndUnfollowsOnlyItself(t *testing.T) {
 		t.Fatalf("bearer without a body: status=%d body=%s", noBody.Code, noBody.Body.String())
 	}
 
+	// The id the route records is the one bearerSessionActor answers, as sent, so an id with
+	// space around it names a writer that is not the path's session and is refused: nothing
+	// decides "this is my own session" from a trimmed copy of a value it then stores untrimmed.
+	padded := followerRequest(t, handler, http.MethodDelete, "/api/v1/asks/"+askID+"/followers/s1", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": " s1"},
+	})
+	if padded.Code != http.StatusForbidden || !strings.Contains(padded.Body.String(), `"code":"FOLLOWER_FORBIDDEN"`) {
+		t.Fatalf("a body naming %q on s1's row: status=%d body=%s", " s1", padded.Code, padded.Body.String())
+	}
+
 	removed := followerRequest(t, handler, http.MethodDelete, "/api/v1/asks/"+askID+"/followers/s1", map[string]any{
 		"actor": map[string]any{"kind": "session", "id": "s1"},
 	})

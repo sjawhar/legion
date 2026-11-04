@@ -45,6 +45,8 @@ func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
 	if issueResponse.Code != http.StatusCreated {
 		t.Fatalf("create issue: status=%d body=%s", issueResponse.Code, issueResponse.Body.String())
 	}
+	// The deployment's shared token holds no scope, so every token route refuses it by naming
+	// the one it needs; the person's own token is admitted below.
 	for _, test := range []struct {
 		name   string
 		method string
@@ -55,10 +57,10 @@ func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
 		{name: "mint", method: http.MethodPost, path: "/api/v1/me/agent-tokens", body: map[string]string{"name": "agent"}},
 		{name: "revoke", method: http.MethodDelete, path: "/api/v1/me/agent-tokens/00000000-0000-0000-0000-000000000000"},
 	} {
-		t.Run("agent cannot "+test.name, func(t *testing.T) {
+		t.Run("the shared token cannot "+test.name, func(t *testing.T) {
 			response := agentRequest(t, handler, test.method, test.path, test.body, "agent-token")
-			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-				t.Fatalf("%s agent token endpoint: status=%d body=%s", test.name, response.Code, response.Body.String())
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+				t.Fatalf("%s agent token endpoint: status=%d body=%s, want 403 %s", test.name, response.Code, response.Body.String(), codeScopeRequired)
 			}
 		})
 	}
@@ -135,6 +137,16 @@ func TestAgentTokensArePrivateRevocableAndAttributeSessionWrites(t *testing.T) {
 	used = decodeBody[[]agentTokenRow](t, usedTokens)
 	if len(used) != 1 || used[0].LastUsedAt == nil || !used[0].LastUsedAt.Equal(firstUsedAt) {
 		t.Fatalf("last_used_at updated more than once per minute: first=%s second=%v", firstUsedAt, used)
+	}
+
+	// A personal token holds both scopes by default, so Alice's own reads the list her browser
+	// reads rather than being turned away with the shared token.
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/me/agent-tokens", nil, minted.Token)
+	if own.Code != http.StatusOK {
+		t.Fatalf("list alice's tokens with her own token: status=%d body=%s", own.Code, own.Body.String())
+	}
+	if got := decodeBody[[]agentTokenRow](t, own); len(got) != 1 || got[0].ID != minted.ID {
+		t.Fatalf("alice's own token listed %#v, want the row her browser lists", got)
 	}
 
 	sharedAsk := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{

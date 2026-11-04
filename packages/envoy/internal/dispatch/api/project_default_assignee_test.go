@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type projectDefaultAssigneeRow struct {
@@ -132,21 +134,36 @@ func TestListProjectDefaultAssigneesOrdersByProjectKey(t *testing.T) {
 	}
 }
 
-// Both routes are human-only: a project's default names a person, and no agent session sets or
-// reads one.
-func TestProjectDefaultAssigneeRoutesRefuseAgentSessions(t *testing.T) {
+// Both routes need the person scope: a project's default names a person, so a credential the
+// deployment configured rather than a person is turned away, and a person's own token sets and
+// reads the default as their browser does.
+func TestProjectDefaultAssigneeRoutesNeedThePersonScope(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	createDefaultAssigneeProject(t, handler, "CORE", "Core")
 
 	listed := agentRequest(t, handler, http.MethodGet, "/api/v1/settings/project-default-assignees", nil, "agent-token")
-	if listed.Code != http.StatusForbidden || !strings.Contains(listed.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("agent lists defaults: status=%d body=%s", listed.Code, listed.Body.String())
+	if listed.Code != http.StatusForbidden || !strings.Contains(listed.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token lists defaults: status=%d body=%s, want 403 %s", listed.Code, listed.Body.String(), codeScopeRequired)
 	}
 	put := agentRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/default-assignee",
 		map[string]any{"assignee": "bob", "actor": sessionActor()}, "agent-token")
-	if put.Code != http.StatusForbidden || !strings.Contains(put.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("agent sets default: status=%d body=%s", put.Code, put.Body.String())
+	if put.Code != http.StatusForbidden || !strings.Contains(put.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token sets a default: status=%d body=%s, want 403 %s", put.Code, put.Body.String(), codeScopeRequired)
+	}
+
+	token := personalTokenHolding(t, database, model.ScopePerson)
+	if own := agentRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/default-assignee",
+		map[string]any{"assignee": "bob"}, token); own.Code != http.StatusOK {
+		t.Fatalf("a person's own token sets a default: status=%d body=%s", own.Code, own.Body.String())
+	}
+	read := agentRequest(t, handler, http.MethodGet, "/api/v1/settings/project-default-assignees", nil, token)
+	if read.Code != http.StatusOK {
+		t.Fatalf("a person's own token lists defaults: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if rows := decodeBody[[]projectDefaultAssigneeRow](t, read); len(rows) != 1 || rows[0].Project != "CORE" ||
+		rows[0].Assignee == nil || *rows[0].Assignee != "bob" {
+		t.Fatalf("a person's own token read %#v, want CORE defaulting to bob", rows)
 	}
 }
 

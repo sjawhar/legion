@@ -344,9 +344,11 @@ func TestKeepRecordsAgreementUntilTheDecisionChanges(t *testing.T) {
 		t.Fatalf("after a Keep of the text as it stands the decision = %#v, want it kept", now)
 	}
 
+	// A Keep is the person's own agreement, so the route needs the person scope: the deployment's
+	// shared token holds none and is refused, naming it.
 	bearer := sessionRequest(t, handler, http.MethodPost, keepPath, map[string]any{"actor": sessionActor()})
-	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), "HUMAN_ONLY") {
-		t.Fatalf("a bearer's keep: status=%d body=%s, want 403 HUMAN_ONLY", bearer.Code, bearer.Body.String())
+	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), codeScopeRequired) {
+		t.Fatalf("a bearer's keep: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
 	}
 
 	blocks := blockIDsByText(t, handler, fixture.decisions.ID)
@@ -503,8 +505,8 @@ func TestDocumentReadRecordsEachPersonsLastReadVersion(t *testing.T) {
 		{http.MethodPut, map[string]any{"version": 2, "actor": sessionActor()}},
 	} {
 		response := sessionRequest(t, handler, probe.method, path, probe.body)
-		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "HUMAN_ONLY") {
-			t.Fatalf("a bearer's %s: status=%d body=%s, want 403 HUMAN_ONLY", probe.method, response.Code, response.Body.String())
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), codeScopeRequired) {
+			t.Fatalf("a bearer's %s: status=%d body=%s, want 403 %s", probe.method, response.Code, response.Body.String(), codeScopeRequired)
 		}
 	}
 }

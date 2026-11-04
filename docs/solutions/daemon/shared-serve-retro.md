@@ -18,7 +18,7 @@ related_issues:
 # Shared Serve Refactor — Implementer Retro
 
 **Issue:** LEG-136
-**PR:** https://github.com/sjawhar/legion/pull/50
+**PR:** https://github.com/cybermonklabs/legion/pull/50
 
 ## What Was Hard
 

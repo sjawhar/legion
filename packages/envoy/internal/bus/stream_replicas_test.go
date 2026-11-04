@@ -286,10 +286,14 @@ func TestAStartGivesItsByteLimitToAStreamWithNone(t *testing.T) {
 // A full stream refuses a publish with ErrStreamFull, which is no ErrRefused, through Publish and
 // through a window's send, and keeps every message it stored before it filled: the same count,
 // first and last sequence, bytes and contents (single server, small limit).
+//
+// The byte limit is reserved on the whole server rather than on the test's account, so this test
+// takes a server of its own instead of the package's shared one (testnats.URL).
 func TestAFullStreamRefusesAPublishAndKeepsEveryStoredMessage(t *testing.T) {
 	t.Parallel()
 	const limit = 16 << 10
-	client, err := ConnectOwningStream([]string{testnats.URL(t)}, WithStreamMaxBytes(limit))
+	_, uri := testnats.Start(t)
+	client, err := ConnectOwningStream([]string{uri}, WithStreamMaxBytes(limit))
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}

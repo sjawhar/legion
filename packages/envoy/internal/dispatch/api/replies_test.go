@@ -216,7 +216,7 @@ func TestMyRepliesListsAnAnswerSomeoneElseGave(t *testing.T) {
 // rows to one owner.
 func TestMyRepliesListsDocumentAndMessageThreads(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Documents", "The quick brown fox.")
 	other := createAnswerListIssue(t, handler, "Other")
 	document := createProjectDocument(t, handler, "TEST", "Runbook", "# Runbook\n\nStep one.\n")
@@ -273,8 +273,19 @@ func TestMyRepliesListsDocumentAndMessageThreads(t *testing.T) {
 			t.Fatalf("%s: status=%d body=%s", query, response.Code, response.Body.String())
 		}
 	}
-	if bearer := sessionRequest(t, handler, http.MethodGet, "/api/v1/me/replies", nil); bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer: status=%d body=%s", bearer.Code, bearer.Body.String())
+	// The page is the calling person's own, so the deployment's shared token, which holds no
+	// scope, is turned away, and Alice's own token reads the three threads her browser reads.
+	if bearer := sessionRequest(t, handler, http.MethodGet, "/api/v1/me/replies", nil); bearer.Code != http.StatusForbidden ||
+		!strings.Contains(bearer.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's reply page: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/me/replies", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("Alice's own token reading her reply page: status=%d body=%s", own.Code, own.Body.String())
+	}
+	if read := decodeBody[model.MyRepliesResponse](t, own); read.Total != 3 {
+		t.Fatalf("Alice's own token read %d threads, want her three", read.Total)
 	}
 }
 

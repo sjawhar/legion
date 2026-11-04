@@ -725,7 +725,7 @@ func TestCreateMessageAuthenticatesBeforeReadingTheBody(t *testing.T) {
 	}
 }
 
-func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing.T) {
+func TestAgentTargetedMessagesNeedThePersonScopeAndKeepTheirOwnConversation(t *testing.T) {
 	t.Parallel()
 	sendStatus := http.StatusOK
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]}]`
@@ -750,12 +750,14 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	defer listener.Close()
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
-	nonHuman := bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+	// The deployment's shared token holds no scope, so it cannot open a conversation with a
+	// session; the person's own browser does it below.
+	scopeless := bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "Can I send this?", "delivery": "btw",
 		"actor": map[string]any{"kind": "session", "id": "s2"},
 	})
-	if nonHuman.Code != http.StatusForbidden || !strings.Contains(nonHuman.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("agent-authenticated creation: status=%d body=%s", nonHuman.Code, nonHuman.Body.String())
+	if scopeless.Code != http.StatusForbidden || !strings.Contains(scopeless.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's creation: status=%d body=%s, want 403 %s", scopeless.Code, scopeless.Body.String(), codeScopeRequired)
 	}
 
 	first := postAgentMessage(t, handler, "s1", map[string]any{

@@ -861,6 +861,14 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 
 // askServerAttributeNames are the attributes of an ask block the server keeps in agreement with
 // its ask row (setAskServerAttributes).
+//
+// These eight, and no ninth: an answer an agent made for its person names that agent in the
+// row's answer (model.AskAnswer.Act), and that agent is deliberately not written onto the block.
+// Every version stored before the act existed would fail blockAsItsRowHasIt against a ninth name
+// the writer now fills in, and the carry holds the approved version to exactly that test
+// (blockAsSettlementLeavesIt), so every document would silently stop carrying approvals. The
+// accepted consequence is that a decision block still reads `answered_by: <person>` with no agent
+// in it; the agent is shown by every reader of the act instead.
 var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid", "copied_from", "copied_from_document"}
 
 // askServerAttributes is setAskServerAttributes for ask as it stands now, leaving its answer out

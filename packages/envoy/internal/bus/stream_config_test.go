@@ -722,7 +722,22 @@ func TestEnsureStreamWithConfigLogsNoReconciliationWhenTheUpdateFails(t *testing
 // streamTestJetStream is a JetStream context in an account of the test's own, with no stream yet.
 func streamTestJetStream(t *testing.T) nats.JetStreamContext {
 	t.Helper()
-	conn := testnats.Connect(t, testnats.URL(t))
+	return jetStreamAt(t, testnats.URL(t))
+}
+
+// ownServerJetStream is streamTestJetStream on a NATS server of the test's own, for a test whose
+// stream carries a byte limit: a byte limit is reserved on the whole server rather than on the
+// account that holds the stream (testnats.URL).
+func ownServerJetStream(t *testing.T) nats.JetStreamContext {
+	t.Helper()
+	_, uri := testnats.Start(t)
+	return jetStreamAt(t, uri)
+}
+
+// jetStreamAt is a JetStream context on the server at uri, closed when the test ends.
+func jetStreamAt(t *testing.T, uri string) nats.JetStreamContext {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()
 	if err != nil {
@@ -767,8 +782,9 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 // settings the binary's configuration does not choose (here the message limits and a description;
 // in a cluster, the stream's placement) stay as deployed, and so do the ones it would only keep (a
 // byte limit, with no limit of its own set) or already matches (DiscardNew, the replicas).
+// The deployed byte limit is reserved on the whole server, so this test takes one of its own.
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
-	js := streamTestJetStream(t)
+	js := ownServerJetStream(t)
 	deployed := *streamCfg
 	deployed.Description = "deployed by operations"
 	deployed.MaxMsgs = 100_000

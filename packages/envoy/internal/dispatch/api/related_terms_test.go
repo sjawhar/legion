@@ -22,13 +22,11 @@ func relatedTermsServer(t *testing.T) (http.Handler, *store.Store, *server) {
 	return handler, database, served
 }
 
+// refreshTermStats refreshes the project's statistics and answers its item count, which is the
+// picker's N; refreshTermStatsPass answers the whole of what the pass did.
 func refreshTermStats(t *testing.T, database *store.Store, project string) int {
 	t.Helper()
-	items, err := refreshSearchTermStats(context.Background(), database.Pool, project)
-	if err != nil {
-		t.Fatalf("refresh %s's search term statistics: %v", project, err)
-	}
-	return items
+	return refreshTermStatsPass(t, database, project).Items
 }
 
 // awaitTermStatsRefresh waits for the refresh of project's statistics srv has running, if any,

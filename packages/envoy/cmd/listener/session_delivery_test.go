@@ -119,6 +119,16 @@ func (rig *sessionConsumerRig) filters(t *testing.T, sessionID string) []string 
 	return filters
 }
 
+// startSeq is the stream sequence sessionID's consumer was created at.
+func (rig *sessionConsumerRig) startSeq(t *testing.T, sessionID string) uint64 {
+	t.Helper()
+	info, err := rig.consumers.Info(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("read the consumer of %s: %v", sessionID, err)
+	}
+	return info.Config.OptStartSeq
+}
+
 // awaitPending waits until sessionID's consumer has want messages pending, and fails the test
 // when it does not within 2 s.
 func (rig *sessionConsumerRig) awaitPending(t *testing.T, sessionID string, want uint64) {
@@ -224,8 +234,8 @@ func TestSessionConsumerOverlappingFollowsAreAccepted(t *testing.T) {
 
 func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *testing.T) {
 	rig := newSessionConsumerRig(t)
-	// A resume point names a sequence the session wrote; 0 names none, so the first stream
-	// sequence goes to a message of another session's.
+	// A message of another session's takes the first stream sequence, so the resume point below
+	// names a positive sequence (a resume point at 0 has a test of its own).
 	rig.store(t, contracts.AgentSubject("ses_bystander"))
 	resumed := rig.store(t, contracts.AgentSubject("ses_resumed"))
 	foreign := rig.store(t, contracts.AgentSubject("ses_foreign"))
@@ -240,8 +250,81 @@ func TestSessionConsumerResumePointOfTheCurrentStreamSeedsTheNewConsumer(t *test
 	}
 	// The earlier message to the resumed session is pending: its consumer starts after the resume
 	// point. A resume point of another stream starts the consumer at the stream's end.
+	if start := rig.startSeq(t, "ses_resumed"); start != resumed {
+		t.Fatalf("the consumer of ses_resumed starts at %d, want %d, the sequence after its resume point", start, resumed)
+	}
+	if start := rig.startSeq(t, "ses_foreign"); start != foreign+1 {
+		t.Fatalf("the consumer of ses_foreign starts at %d, want %d, the stream's end", start, foreign+1)
+	}
 	rig.awaitPending(t, "ses_resumed", 1)
 	rig.awaitPending(t, "ses_foreign", 0)
+}
+
+// A resume point at 0 of the current stream is a session that holds nothing of the stream, such
+// as a cursor at 0 on a stream that was empty: its new consumer starts at sequence 1, and the
+// session receives every message stored for it before it registered, from the first, once and in
+// stream order.
+func TestSessionConsumerResumePointAtZeroOfTheCurrentStreamDeliversFromTheFirstSequence(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_resumed_at_zero"
+	agent := contracts.AgentSubject(sessionID)
+	var stored []contracts.Envelope
+	for want := uint64(1); want <= 3; want++ {
+		item, seq := rig.storeEvent(t, agent)
+		if seq != want {
+			t.Fatalf("the stream stored the session's message %d at sequence %d, want %d", want, seq, want)
+		}
+		stored = append(stored, item)
+	}
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+
+	answer := rig.subscribe(t, `{"session_id":"`+sessionID+`","self_subscribed":true,"topics":[],
+		"delivery":{"consumer":true,"epoch":"e","resume":{"stream_id":"`+rig.streamID(t)+`","seq":0}}}`)
+
+	if answer.Delivery == nil || answer.Delivery.Mode != "consumer" || answer.Delivery.Gap == nil || *answer.Delivery.Gap {
+		t.Fatalf("answer %s, want delivery mode consumer with gap false", answer.raw)
+	}
+	if start := rig.startSeq(t, sessionID); start != 1 {
+		t.Fatalf("the consumer of %s starts at %d, want 1, the sequence after its resume point at 0", sessionID, start)
+	}
+	if start := rig.entry(t, sessionID).ConsumerStart; start != 1 {
+		t.Fatalf("the session entry of %s records consumer start %d, want 1", sessionID, start)
+	}
+	frames := standIn.collect(t, len(stored), 5*time.Second)
+	requireFrames(t, frames, stored...)
+	if frames[0].seq != 1 {
+		t.Fatalf("the first frame carries stream sequence %d, want 1: %v", frames[0].seq, frameEvents(frames))
+	}
+	standIn.none(t, time.Second)
+}
+
+// A registration with no resume point it can use creates the session's consumer at the stream's
+// end, so a message stored for the session before it registered is in no consumer: one with no
+// resume point, one whose resume point carries no seq, and one whose resume point at 0 names
+// another stream.
+func TestSessionConsumerRegistrationWithoutAUsableResumePointStartsAtTheStreamsEnd(t *testing.T) {
+	rig := newSessionConsumerRig(t)
+	sessions := []struct{ sessionID, resume string }{
+		{"ses_no_resume", ``},
+		{"ses_resume_without_seq", `,"resume":{"stream_id":"` + rig.streamID(t) + `"}`},
+		{"ses_resume_of_another_stream", `,"resume":{"stream_id":"another-stream","seq":0}`},
+	}
+	var end uint64
+	for _, registration := range sessions {
+		end = rig.store(t, contracts.AgentSubject(registration.sessionID))
+	}
+
+	for _, registration := range sessions {
+		answer := rig.subscribe(t, `{"session_id":"`+registration.sessionID+`","self_subscribed":true,"topics":[],
+			"delivery":{"consumer":true,"epoch":"e"`+registration.resume+`}}`)
+		if answer.Delivery == nil || answer.Delivery.Mode != "consumer" {
+			t.Fatalf("answer %s, want delivery mode consumer", answer.raw)
+		}
+		if start := rig.startSeq(t, registration.sessionID); start != end+1 {
+			t.Fatalf("the consumer of %s starts at %d, want %d, the stream's end", registration.sessionID, start, end+1)
+		}
+		rig.awaitPending(t, registration.sessionID, 0)
+	}
 }
 
 func jsonUint(n uint64) string {

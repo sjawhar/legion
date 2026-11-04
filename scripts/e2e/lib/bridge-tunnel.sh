@@ -7,7 +7,7 @@
 # worker stream, Dispatch, the Envoy listener, NATS and the session database). Pods dial the
 # Service; the Service's one pod runs a chisel reverse-tunnel server (mirror.gcr.io/jpillora/chisel,
 # pinned by digest). This file is a devbox live proof no CI job runs, which is why it keeps Google's
-# mirror rather than a copy in ghcr.io/sjawhar/legion/ci (.github/scripts/check-ci-images.sh names
+# mirror rather than a copy in ghcr.io/cybermonklabs/legion/ci (.github/scripts/check-ci-images.sh names
 # it in EXCEPTIONS on that ground). The devbox reaches that pod's control port only through
 # `kubectl port-forward` (never exposed by the Service, never by the
 # cluster network at all), and a chisel client built from the pinned source on the devbox asks the

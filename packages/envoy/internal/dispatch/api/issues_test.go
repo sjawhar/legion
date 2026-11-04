@@ -14,8 +14,8 @@ import (
 	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
-// The issue detail carries the open asks themselves, not a count: agents read
-// them from here because the inbox is human-only.
+// The issue detail carries the open asks themselves, not a count: agents read them from here
+// because the inbox needs the person scope, which an agent's credential does not hold.
 func TestIssueDetailCarriesOpenAsks(t *testing.T) {
 	t.Parallel()
 	handler := newTestHandler(t)
@@ -726,8 +726,11 @@ func TestListIssuesPinnedFilterAndLabels(t *testing.T) {
 	if other := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "bob"); other.Code != http.StatusOK || len(decodeBody[[]model.IssueSummary](t, other)) != 0 {
 		t.Fatalf("bob pinned issues: status=%d body=%s", other.Code, other.Body.String())
 	}
-	if bearer := agentRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "agent-token"); bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
-		t.Fatalf("bearer pinned issues: status=%d body=%s", bearer.Code, bearer.Body.String())
+	// `?pinned=true` reads the calling person's pins, so the shared token, which holds no scope,
+	// is turned away.
+	if bearer := agentRequest(t, handler, http.MethodGet, "/api/v1/issues?pinned=true", nil, "agent-token"); bearer.Code != http.StatusForbidden ||
+		!strings.Contains(bearer.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+		t.Fatalf("the shared token's pinned issues: status=%d body=%s, want 403 %s", bearer.Code, bearer.Body.String(), codeScopeRequired)
 	}
 }
 

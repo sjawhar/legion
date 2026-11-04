@@ -113,7 +113,7 @@ func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
 	t.Parallel()
 	database := storetest.Open(t)
-	for _, target := range recordedMarkTargets {
+	for _, target := range anchorTargets {
 		t.Run(target.table, func(t *testing.T) {
 			ctx := context.Background()
 			tx, err := database.Pool.Begin(ctx)

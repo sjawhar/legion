@@ -280,8 +280,8 @@ STEP_WARMUP=30s
 STEP_GRACE=20s
 RUN_LABEL=dispatch-loadtest/run
 ROLE_LABEL=dispatch-loadtest/role
-LEGION_REPO=sjawhar/legion
-ENVOY_IMAGE_REPO=ghcr.io/sjawhar/legion/envoy
+LEGION_REPO=cybermonklabs/legion
+ENVOY_IMAGE_REPO=ghcr.io/cybermonklabs/legion/envoy
 PG_IMAGE_PREFIX=mirror.gcr.io/pgvector/pgvector:0.8.1-pg
 SOCAT_IMAGE=mirror.gcr.io/alpine/socat:1.8.0.3
 RUNNER_IMAGE=mirror.gcr.io/library/debian:bookworm-slim
@@ -559,7 +559,7 @@ resolve_image() {
 }
 
 # image_for_commit SHA: ghcr.io's envoy image of SHA by digest. With none, it walks SHA's
-# first-parent ancestors on sjawhar/legion (gh api) to the newest that has one and dies naming
+# first-parent ancestors on cybermonklabs/legion (gh api) to the newest that has one and dies naming
 # both; nothing has been created by then.
 image_for_commit() {
   local commit=$1 image c i

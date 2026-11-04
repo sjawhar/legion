@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // A Clear on the Agents page is a per-viewer cutoff the server keeps, so it follows the human
@@ -12,7 +14,7 @@ import (
 // sessions.
 func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(t)
+	handler, database := newTestHandlerWithStore(t)
 	cutoff := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
 	saved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/planner-session/state", map[string]any{
 		"cleared_before": cutoff.Format(time.RFC3339Nano),
@@ -54,6 +56,8 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 		t.Fatalf("Bob agent state = %q, want an empty object (not null)", bob.Body.String())
 	}
 
+	// The deployment's shared token holds no scope, so both routes refuse it by naming the one
+	// they need; Alice's own token holds that scope and reads the map her browser reads.
 	for _, probe := range []struct {
 		method string
 		path   string
@@ -65,9 +69,20 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 		}},
 	} {
 		session := agentRequest(t, handler, probe.method, probe.path, probe.body, "agent-token")
-		if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
-			t.Fatalf("%s %s as a session: status=%d body=%s", probe.method, probe.path, session.Code, session.Body.String())
+		if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"`+codeScopeRequired+`"`) ||
+			!strings.Contains(session.Body.String(), model.ScopePerson) {
+			t.Fatalf("%s %s as the shared token: status=%d body=%s, want 403 %s naming the %s scope",
+				probe.method, probe.path, session.Code, session.Body.String(), codeScopeRequired, model.ScopePerson)
 		}
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("Alice's own token reading her agent state: status=%d body=%s", own.Code, own.Body.String())
+	}
+	if read := decodeBody[map[string]userAgentState](t, own); len(read) != 1 ||
+		!parseTimestamp(t, *read["planner-session"].ClearedBefore).Equal(later) {
+		t.Fatalf("Alice's own token read %#v, want her one entry at %s", read, later.Format(time.RFC3339Nano))
 	}
 }
 

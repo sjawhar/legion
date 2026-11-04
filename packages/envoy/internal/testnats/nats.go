@@ -39,16 +39,16 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-// Image is the NATS server image every Envoy test container runs: ghcr.io/sjawhar/legion/ci, the
+// Image is the NATS server image every Envoy test container runs: ghcr.io/cybermonklabs/legion/ci, the
 // copy of nats:2.10 (.github/ci-images.yaml). The envoy-go CI job reads this declaration and pulls
 // the image before its first test step, so no test reaches the registry mid-run; keep it a
 // single-line string constant.
-const Image = "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
+const Image = "ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
 
-// HubImage is the NATS server image the GCP hub runs: ghcr.io/sjawhar/legion/ci, the copy of
+// HubImage is the NATS server image the GCP hub runs: ghcr.io/cybermonklabs/legion/ci, the copy of
 // nats:2.15.1-alpine (.github/ci-images.yaml). The envoy-go and envoy-infra-go CI jobs read this
 // declaration and pull the image before their tests run; keep it a single-line string constant.
-const HubImage = "ghcr.io/sjawhar/legion/ci@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+const HubImage = "ghcr.io/cybermonklabs/legion/ci@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
 
 // Images are the two NATS server images the real-server tests run on, Image and HubImage, each
 // with the short name its subtest takes.
@@ -101,6 +101,14 @@ func Main(m *testing.M) int {
 // often it asks, so every connection it makes reaches the same streams; each subtest is a test of
 // its own and gets its own account, since subtests that each delete and recreate one name in a
 // shared account would race as tests did on a shared server.
+// A test that gives a stream a byte limit (MaxBytes) takes a server of its own (Start) instead:
+// that limit is the server's reservation, not the account's. nats-server adds it to the one
+// jetStream.storeReserved of the whole server when the stream is created and subtracts it when the
+// stream is deleted, under the server's own lock (jetstream.go:2423-2462), while the limits check
+// of every other stream create on that server reads the same field holding the account's lock
+// alone (jetstream_api.go:3310-3327, through checkBytesLimits at jetstream.go:2276). Two tests of
+// one server, one of them with a byte limit, are therefore a data race inside nats-server
+// v2.10.29, which the race detector reports against whichever test was running.
 // When the test ends, its account's streams are deleted to free their storage; nothing creates a
 // stream in that account again, so a delete that leaves files behind reaches no test.
 func URL(t testing.TB) string {
