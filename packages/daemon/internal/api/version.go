@@ -515,5 +515,6 @@ package api
 // settings carry the project's `memory` block (mode, config files, instructions), which every
 // plugin reads loosely and which changes no strictly parsed shape. This change adds no store
 // migration of its own: the three columns are the issue record's
-// (20261104073148_issue_memory_group).
+// (20261104073148_issue_memory_group), and the hand-over's answer beside them is too
+// (20261104153554_issue_memory_carried).
 const DaemonAPIVersion = 47

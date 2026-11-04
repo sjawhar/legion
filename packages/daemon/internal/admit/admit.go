@@ -984,8 +984,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// so the work goes on running under the group it has been running under, and no draw at all
 	// where that tree had been opened with none — a tree first opened before this release, which
 	// nothing draws for. A child out of a tree nothing ever opened has run under nothing, so the
-	// carry writes it nothing and its own first promotion draws it. Claims and tree lifecycles are
-	// keyed by the normalized project token, as promoteHolds reads them.
+	// carry writes it nothing and its own first promotion draws it. tree_lifecycles is keyed by
+	// the normalized project token, so the carry is handed that token, as promoteHolds reads it.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
 			return err

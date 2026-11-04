@@ -67,8 +67,8 @@ type Records interface {
 // spawn — so a tree is drawn the same way whichever opened it, and the mode recorded is the word
 // a draw records (config.Memory.Word), never the empty string a project naming no block leaves.
 // Writing no row is no error and no business of this helper's: a root that carries a draw
-// already, one that left a tree the daemon had opened, and a tree with no root record at all
-// each keep what they have (record.Store.DrawMemory).
+// already, one whose hand-over settled its memory (record.Store.CarryMemory), and a tree with no
+// root record at all each keep what they have (record.Store.DrawMemory).
 func DrawAndRecord(ctx context.Context, tx pgx.Tx, records Records, tree string, memory config.Memory,
 	coin func() (bool, error), at time.Time) error {
 	group, err := draw(memory.Word(), coin)
