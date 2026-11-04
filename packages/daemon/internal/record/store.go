@@ -1690,10 +1690,10 @@ func (s *Postgres) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.T
 		where id = $1 and kind = any($2::text[])`, id, lifecycleKindNames); err != nil {
 		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: %w", id, err)
 	}
-	// A catch-up's claim takes a second such lock, keyed by its issue, which DropCatchUps takes
-	// too: that drop reads the leases of the issue's catch-ups in a subquery over other rows, which
-	// the same recheck does not cover, so a claim committing beside it would be unseen and its row
-	// deleted under it. Under the lock a claim either commits before the drop takes it, and the
+	// A catch-up's claim takes an advisory lock of its own, keyed by its issue, which DropCatchUps
+	// takes too: that drop reads the leases of the issue's catch-ups in a subquery over other rows,
+	// which the same recheck does not cover, so a claim committing beside it would be unseen and its
+	// row deleted under it. Under the lock a claim either commits before the drop takes it, and the
 	// drop's delete, a statement of its own, sees the lease, or it waits for the drop and finds the
 	// row gone when the drop deleted it. A row of another kind, a notice that is no catch-up, and a
 	// row finished and gone each select nothing and lock nothing.

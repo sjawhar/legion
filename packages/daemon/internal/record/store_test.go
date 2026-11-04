@@ -1730,12 +1730,13 @@ func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
 	// The lane's lease of the catch-up, a moment from committing.
 	txLane, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
+	defer func() { _ = txLane.Rollback(ctx) }()
 	if _, leased, err := records.ClaimRow(ctx, txLane, catchUp, now, time.Minute); err != nil || !leased {
 		t.Fatalf("the lane's claim of the catch-up = %v, %v; want it leased", leased, err)
 	}
-	// The ready's drop in that moment. It runs apart: it waits on the lane's row until the lease
-	// commits, which the test does once the wait shows in pg_stat_activity, and a drop that
-	// returned before then read the row without waiting on the lane at all.
+	// The ready's drop in that moment. It runs apart: it waits on the lock the lane's claim holds
+	// until the lease commits, which the test does once that wait shows in pg_stat_activity, and a
+	// drop that returned before then read the row without waiting on the lane at all.
 	dropped := make(chan error, 1)
 	go func() {
 		dropped <- st.Tx(ctx, func(tx pgx.Tx) error { return records.DropCatchUps(ctx, tx, "LEGION-1", now) })
@@ -1750,7 +1751,7 @@ func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
 		}
 		var waiting int
 		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+			where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting)
 		return err == nil && waiting > 0
 	})
 	must(t, txLane.Commit(ctx))
@@ -1774,12 +1775,12 @@ func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
 
 // A lane finishing a catch-up and a transaction that locked the tree's decisions and then drops the
 // root's catch-ups (workflow.Adopt and spentKept, which lock them through UnclaimedKept before they
-// queue a catch-up) take the same two locks in opposite orders unless the drop leaves the leased row
-// alone. The finish deletes its row and then sets the decisions it claimed back to unclaimed (the
-// foreign key's on delete set null), which waits on the decisions the other transaction locked; a
-// drop that then locked every catch-up of the issue, the finishing one included, would wait on the
-// finish, and Postgres would abort one of the two as a deadlock. The drop locks only the catch-ups
-// no live lease holds, so both commit.
+// queue a catch-up) would take the same two locks in opposite orders if the drop locked the rows.
+// The finish deletes its row and then sets the decisions it claimed back to unclaimed (the foreign
+// key's on delete set null), which waits on the decisions the other transaction locked; a drop that
+// locked every catch-up of the issue, the finishing one included, would wait on the finish, and
+// Postgres would abort one of the two as a deadlock. The drop takes an advisory lock and no row, so
+// both commit.
 func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1859,8 +1860,8 @@ func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
 // drop's lease check reads the outbox in a subquery, which its delete does not recheck against a
 // lease committed after the statement began, so a claim of a copy made after the drop's own reads
 // would leave the copy deleted and its lane publishing it from memory, beside the fresh catch-up
-// naming the decisions the deletion released: told twice. The claim takes the drop's lock, so it
-// waits for the drop and claims nothing of a row the drop took.
+// naming the decisions the deletion released: told twice. The claim takes the drop's advisory lock,
+// so it waits for the drop and claims nothing of a row the drop took.
 func TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1909,7 +1910,10 @@ func TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued(t *testing.T) {
 			return err
 		})
 	}()
-	testwait.Eventually(t, "the claim of the copy to wait on the drop", func() bool {
+	// The claim must wait on the drop's advisory lock, not on the deleted row: the row wait alone is
+	// what a drop with no lock leaves, and it holds a claim back only while a row the delete took is
+	// still there. A copy the re-hold queues after that delete has no such row to wait on.
+	testwait.Eventually(t, "the claim of the copy to wait on the drop's lock", func() bool {
 		select {
 		case err := <-claimed:
 			t.Fatalf("the claim of the copy returned (%v) while the drop ran; want it waiting on the drop's lock", err)
@@ -1917,7 +1921,7 @@ func TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued(t *testing.T) {
 		}
 		var waiting int
 		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+			where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting)
 		return err == nil && waiting > 0
 	})
 	must(t, txDrop.Commit(ctx))

@@ -1277,8 +1277,8 @@ type Store interface {
 	// serialized by an advisory lock keyed by the issue, which ClaimRow takes too: a claim either
 	// commits before the drop reads the leases, and is seen, or it waits for the drop and claims
 	// nothing when the drop deleted its row (TestDroppingCatchUpsLeavesTheRowALaneIsLeasing,
-	// TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued). The drop locks no row, since a
-	// lane finishing a catch-up waits on the decisions its caller holds
+	// TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued). The drop locks no outbox row before
+	// its delete, since a lane finishing a catch-up waits on the decisions its caller holds
 	// (TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting). A leased row with no decisions is
 	// dropped as before: the
 	// runner executes it from memory, and the notice executor publishes it only while OutboxLeased
