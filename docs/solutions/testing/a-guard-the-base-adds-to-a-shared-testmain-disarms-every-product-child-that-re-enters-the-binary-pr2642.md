@@ -44,7 +44,7 @@ grows once a package both guards its environment and re-enters its own binary as
 
 ## Evidence
 
-In sjawhar/legion#2642, four of nine forward merges changed behaviour with no conflict marker at
+In sjawhar/legion#2642, four of its twelve forward merges changed behaviour with no conflict marker at
 the broken site. One was main's new `internal/daemon` `TestMain` calling `fixtureenv.Guard`, which
 strips every `LEGION_*` variable — and that binary is also the acceptance rig's role process,
 re-entered by its launcher with `LEGION_IDLE_RIG_URL`, `LEGION_SANDBOX`, `LEGION_ISSUE`,

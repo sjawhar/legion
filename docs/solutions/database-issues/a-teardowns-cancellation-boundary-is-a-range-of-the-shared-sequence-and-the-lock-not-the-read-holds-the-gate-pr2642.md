@@ -39,8 +39,8 @@ arrives beside it.
 - The first version compared `id < boundary_row` and could never cancel: the reviewer showed that
   every row queued after the mark has an id above the boundary (`store/issue_release.go:59` at that
   head). The settled shape is the range `first_row`, `boundary_row`, `last_row`, `started_row` and
-  `wake_row` across two migrations (`20261102153000_issue_release_rows.up.sql`,
-  `20261102183000_issue_release_wake.up.sql`), with a row outside the range cancelling.
+  `wake_row` across three migrations (`20261101222956_issue_idle_release.up.sql`,
+  `20261102153000_issue_release_rows.up.sql`, `20261102183000_issue_release_wake.up.sql`), with a row outside the range cancelling.
 - `CancelIssueRelease` shipped without `treelifecycle.Serialize`, which its three sibling writers
   all take. A park or close is one fact transaction that moves the issue's status and queues its
   rows together, so an unserialized cancel could read the status from before it and take its

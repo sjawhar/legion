@@ -35,7 +35,7 @@ related_issues:
 
 ## Evidence
 
-sjawhar/legion#2642 took nine forward merges over its life. Four resolved cleanly at the site that
+sjawhar/legion#2642 took twelve forward merges over its life. Four resolved cleanly at the site that
 later broke:
 
 - main's listener began refusing a subscribe that carried a port; the branch's rig registered with
