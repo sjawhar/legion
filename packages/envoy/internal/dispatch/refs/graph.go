@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -59,100 +58,6 @@ type Query struct {
 // thread, which every ask surface renders inline, and its own parts, each part_of it, which are
 // the ask's own text. The count on a card and the rows its panel opens read the same exclusion.
 var AskBacklinkExclusions = []string{"replies_to", "part_of"}
-
-// BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
-// list carries beside a row, counted the same way the rows behind it are listed. It counts only
-// edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's, comment's, message's or ask's mention once for each of its blocks'
-// links to the node, in place of the item's own edge (heldByABlock): a comment citing a node
-// from two paragraphs counts 2, and a document's block pointing at the node counts once whatever
-// its link's kind. An edge at a current block of a counted item is counted as that item's, since
-// the item's own read lists it (readEdgeRows): a comment citing one part of an ask counts once
-// for that ask. A node with no inbound edge is absent from the result; the caller decides what
-// zero means.
-//
-// An ask is counted with its own clarification thread and its own parts excluded
-// (AskBacklinkExclusions), which is also what keeps a reply that answers one of its parts from
-// being counted beside the reply's edge to the ask itself.
-//
-// It is the sequential half of the one count: QueueBacklinkCounts queues the same statement and
-// reads it with the same scan, for a caller that counts beside its other reads (the issue read's
-// own count, and api.queueAskDetails for every list of asks), so the two paths cannot drift.
-func BacklinkCounts(
-	ctx context.Context,
-	q Queryer,
-	toKind string,
-	ids []string,
-	excludeKinds []string,
-) (map[string]int, error) {
-	counts := make(map[string]int, len(ids))
-	if len(ids) == 0 {
-		return counts, nil
-	}
-	sql, args := backlinkCountsStatement(toKind, ids, excludeKinds)
-	rows, err := q.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
-	}
-	defer rows.Close()
-	if err := scanBacklinkCounts(rows, toKind, counts); err != nil {
-		return nil, err
-	}
-	return counts, nil
-}
-
-// QueueBacklinkCounts is the batched half: it queues BacklinkCounts's statement in b and reads its
-// rows into counts, for a caller that counts beside its other reads instead of spending a round
-// trip on it (the issue read's own count, api.getIssue, and api.queueAskDetails). No id queues
-// nothing and leaves counts as it is, so a caller need not ask whether it has any.
-func QueueBacklinkCounts(b *pgx.Batch, toKind string, ids, excludeKinds []string, counts map[string]int) {
-	if len(ids) == 0 {
-		return
-	}
-	sql, args := backlinkCountsStatement(toKind, ids, excludeKinds)
-	b.Queue(sql, args...).Query(func(rows pgx.Rows) error {
-		return scanBacklinkCounts(rows, toKind, counts)
-	})
-}
-
-// backlinkCountsStatement is the statement and arguments both halves run.
-func backlinkCountsStatement(toKind string, ids []string, excludeKinds []string) (string, []any) {
-	args := []any{toKind, ids, nodeKinds}
-	narrow := ` and g.from_kind = any($3) and not ` + heldByABlock("g")
-	if len(excludeKinds) > 0 {
-		args = append(args, excludeKinds)
-		narrow += " and not (g.kind = any($4))"
-	}
-	arms := `select g.to_id from graph_edges g where g.to_kind = $1 and g.to_id = any($2)` + narrow
-	if item := ItemKind(toKind); slices.Contains(itemKinds, item) {
-		tables, _ := item.tables()
-		arms += ` union all
-			select b.` + tables.item + `::text from graph_edges g
-			join ` + tables.blocks + ` b on b.node_id = g.to_id and b.position is not null
-			where g.to_kind = '` + item.BlockKind() + `' and b.` + tables.item + `::text = any($2)` + narrow
-	}
-	return `select id, count(*)::int from (` + arms + `) e (id) group by id`, args
-}
-
-// scanBacklinkCounts reads the rows backlinkCountsStatement returns into counts, which a node
-// with no inbound edge stays absent from. A batch can hand it rows that already hold an error -
-// one the sequential Query would have returned itself - and that error is wrapped here as
-// BacklinkCounts wraps its Query's; an error that arrives while the rows are read is the last
-// rows.Err(), unwrapped on both paths.
-func scanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("count %s backlinks: %w", toKind, err)
-	}
-	for rows.Next() {
-		var id string
-		var count int
-		if err := rows.Scan(&id, &count); err != nil {
-			return fmt.Errorf("scan %s backlink count: %w", toKind, err)
-		}
-		counts[id] = count
-	}
-	return rows.Err()
-}
 
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy
 // referenced-by shape still reports.
@@ -505,7 +410,9 @@ var nodeLoaders = map[string]nodeLoader{
 }
 
 // nodeKinds is every node kind nodeLoaders resolves, sorted, as the reads that filter
-// graph_edges in SQL bind it.
+// graph_edges in SQL bind it. BacklinkCounts binds it on its mention arm alone, the one arm
+// whose from_kind is a column; every other arm it reads fixes from_kind as a literal this list
+// holds, so the filter would drop nothing there.
 var nodeKinds = slices.Sorted(maps.Keys(nodeLoaders))
 
 // resolveNodes loads every distinct other end by kind.

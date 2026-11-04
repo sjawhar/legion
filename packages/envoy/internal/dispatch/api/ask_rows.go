@@ -184,16 +184,21 @@ func applyAskBacklinkCounts(asks []*model.Ask, counts map[string]int) {
 // revision - and returns the apply that stamps them onto the asks once the batch is closed. The
 // three statements are queued in that order wherever an ask is read: the issue read queues them
 // beside its other reads (readIssueDetails), and a read of its own sends them as a batch of its
-// own (loadAskDetails). No ask queues nothing and its apply stamps nothing.
+// own (loadAskDetails). No ask queues nothing and its apply stamps nothing. A node kind refs
+// declares no counting arms for is refused as the count is queued, which queues nothing and
+// answers nothing itself, so the apply reports that refusal.
 func queueAskDetails(b *pgx.Batch, asks []*model.Ask) func() error {
 	askIDs := distinctAskIDs(asks)
 	openedEventIDs := make(map[string]int64, len(askIDs))
 	counts := map[string]int{}
 	partIDs := make([]refs.AskIDs, len(asks))
 	events.QueueOpenedEventIDs(b, askIDs, openedEventIDs)
-	refs.QueueBacklinkCounts(b, "ask", askIDs, refs.AskBacklinkExclusions, counts)
+	countsErr := refs.QueueBacklinkCounts(b, "ask", askIDs, refs.AskBacklinkExclusions, counts)
 	refs.QueueAskPartIDs(b, asks, partIDs)
 	return func() error {
+		if countsErr != nil {
+			return countsErr
+		}
 		if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
 			return err
 		}
