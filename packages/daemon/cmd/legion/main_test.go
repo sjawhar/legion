@@ -1579,6 +1579,63 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told how many trees were drawn into a memory group
+// and under which mode, on one line however many issues the state carries. The line names no
+// issue: every issue of a tree carries its root's draw and the state names no tree, so the keys
+// stay in `--json`, where a line per issue would print hundreds on a live deployment.
+func TestPlainStateCountsTheTreesDrawnIntoAMemoryGroup(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	// A drawn root and a child of its tree, which carries the same draw: one tree, counted once.
+	root := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	child := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"admitted","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	// A second tree the same mode drew the other way, and a third an earlier mode drew.
+	second := `"LEGION-300":{"key":"LEGION-300","generation":1,"phase":"done","status":"done",` +
+		`"memoryGroup":"none","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T11:00:00Z"}`
+	third := `"LEGION-400":{"key":"LEGION-400","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"on","memoryDrawnAt":"2026-10-26T09:00:00Z"}`
+	// A tree first opened before the setting existed carries no draw and is counted in nothing.
+	undrawn := `"LEGION-500":{"key":"LEGION-500","generation":1,"phase":"implementing","status":"in_progress"}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "three trees under two modes",
+			issues: `{` + root + `,` + child + `,` + second + `,` + third + `,` + undrawn + `}`,
+			want:   "memory: 3 trees — 1 memory (on), 1 memory (random), 1 none (random)\n",
+		},
+		{
+			name:   "one tree, root and child",
+			issues: `{` + root + `,` + child + `}`,
+			want:   "memory: 1 tree — 1 memory (random)\n",
+		},
+		{name: "nothing drawn", issues: `{` + undrawn + `}`, want: "memory: none\n"},
+		{name: "no issues", issues: `{}`, want: "memory: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.

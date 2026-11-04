@@ -333,6 +333,15 @@ const legionIssue = z.strictObject({
   slot: legionSlotView.optional(),
   waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional(),
+  /** The memory group of the issue's tree: `memory` for a tree whose roles run with the project's
+   * memory overlays and instructions, `none` for one that runs without them, with the project's
+   * `memory.mode` in force when the group was drawn and the instant of that draw. The three are
+   * absent together while nothing has drawn for the tree — a tree first opened before the setting
+   * existed — and every issue of a tree carries its root's, since the draw is made once, on the
+   * root, when the tree's lifecycle row is first created (contract 47). */
+  memoryGroup: z.enum(["memory", "none"]).optional(),
+  memoryDrawMode: z.enum(["off", "on", "random"]).optional(),
+  memoryDrawnAt: timestamp.optional(),
 });
 
 /** `api.DaemonInfo` — the running daemon: its project, its store's schema, and its boot history. */

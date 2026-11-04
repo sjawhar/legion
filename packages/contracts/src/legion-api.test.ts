@@ -239,6 +239,53 @@ test("the state golden carries what an awaiting_person root waits on", () => {
   expect(parses({ kind: "other", ask: "ask-7" })).toBeFalse();
 });
 
+// Contract 47: the state golden carries LEGION-208, a root drawn into a memory group, and
+// LEGION-209, a child of that tree, each with the group, the mode it was drawn under and the
+// instant of the draw. The three are a tree's and are shown on every issue of it; an issue of a
+// tree no draw has reached carries none of them, so each is optional. A daemon before this
+// contract sent none, and its state must still parse.
+test("the state golden carries each issue's tree memory draw", () => {
+  const state = fixture("state.json") as {
+    issues: Record<string, Record<string, unknown>>;
+  };
+  for (const key of ["LEGION-208", "LEGION-209"]) {
+    const issue = state.issues[key];
+    if (issue === undefined) {
+      throw new Error(`state fixture lacks ${key}`);
+    }
+    expect({
+      memoryGroup: issue.memoryGroup,
+      memoryDrawMode: issue.memoryDrawMode,
+      memoryDrawnAt: issue.memoryDrawnAt,
+    }).toEqual({
+      memoryGroup: "memory",
+      memoryDrawMode: "random",
+      memoryDrawnAt: "2026-09-20T11:04:05Z",
+    });
+  }
+
+  const drawn = state.issues["LEGION-208"];
+  const parses = () => LegionStateResponse.safeParse(state).success;
+  expect(parses()).toBeTrue();
+
+  // A state from a daemon before contract 47, and one served to a pod below it.
+  for (const key of ["memoryGroup", "memoryDrawMode", "memoryDrawnAt"]) {
+    delete drawn[key];
+  }
+  expect(parses()).toBeTrue();
+
+  // A word no draw ever wrote, and a draw time that is no time.
+  drawn.memoryGroup = "both";
+  expect(parses()).toBeFalse();
+  drawn.memoryGroup = "none";
+  expect(parses()).toBeTrue();
+  drawn.memoryDrawMode = "sometimes";
+  expect(parses()).toBeFalse();
+  drawn.memoryDrawMode = "off";
+  drawn.memoryDrawnAt = "the morning";
+  expect(parses()).toBeFalse();
+});
+
 // The state golden carries LEGION-207, closed by its merge, with its production check open: the
 // repository, pull request and merge commit the check looks for, its looks, the wake that started
 // the latest and the bound. The check is present only while open, so an issue without one parses,

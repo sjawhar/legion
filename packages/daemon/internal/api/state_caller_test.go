@@ -41,12 +41,12 @@ const (
 // declaring 45): one key more and it refuses the whole state.
 var contract45ClaimView = []string{"session", "state", "locator", "capabilities", "pluginContract"}
 
-// stateServer serves populatedState, one value for every request, as a daemon whose pod at
-// statePodAddr is statePodUID and whose claims sup answers.
-func stateServer(t *testing.T, sup Supervisor) http.Handler {
+// stateServer serves state, one value for every request, as a daemon whose pod at statePodAddr is
+// statePodUID and whose claims sup answers.
+func stateServer(t *testing.T, state State, sup Supervisor) http.Handler {
 	t.Helper()
 	return NewServer("127.0.0.1", 8437, Options{
-		State: fakeSource{state: populatedState(t)}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
+		State: fakeSource{state: state}, StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
 		Supervisor: sup,
 		CallerPod: func(addr netip.Addr) (string, bool) {
 			if addr == netip.MustParseAddr(statePodAddr) {
@@ -71,9 +71,9 @@ func stateAsked(t *testing.T, handler http.Handler, remote string) []byte {
 }
 
 // stateFrom is GET /legion/v1/state asked from remote of a server of its own.
-func stateFrom(t *testing.T, remote string, sup Supervisor) []byte {
+func stateFrom(t *testing.T, state State, remote string, sup Supervisor) []byte {
 	t.Helper()
-	return stateAsked(t, stateServer(t, sup), remote)
+	return stateAsked(t, stateServer(t, state, sup), remote)
 }
 
 // podClaims is the claims of the pod at statePodAddr, each recording contract, beside a claim in
@@ -128,7 +128,7 @@ func claimViews(t *testing.T, body []byte) []map[string]any {
 // are served both; a pod whose claims cannot be read is served the body every reader since 45
 // takes.
 func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
-	full := stateFrom(t, "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
+	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(supervise.PodUpdateContract-1))
 	if !strings.Contains(string(full), `"updateRound"`) || !strings.Contains(string(full), `"updateHead"`) {
 		t.Fatalf("the fixture's state %s carries no update round; this test proves nothing", full)
 	}
@@ -147,7 +147,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(supervise.PodUpdateContract - 1), rounds: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
 
 			if tc.rounds {
 				if string(body) != string(full) {
@@ -162,7 +162,9 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 					}
 				}
 			}
-			// Nothing else of the body differs: it is the full state with the two keys gone.
+			// Nothing else of the body differs: it is the full state with the two claim keys gone,
+			// and with the three memory keys gone too, since a pod below this contract's own
+			// reader refuses those as well (memory_test.go holds that half).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
@@ -179,6 +181,9 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 						delete(view, "updateHead")
 					}
 				}
+				delete(issue, "memoryGroup")
+				delete(issue, "memoryDrawMode")
+				delete(issue, "memoryDrawnAt")
 			}
 			if err := json.Unmarshal(body, &got); err != nil {
 				t.Fatal(err)
@@ -186,7 +191,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			wantJSON, _ := json.Marshal(want)
 			gotJSON, _ := json.Marshal(got)
 			if string(gotJSON) != string(wantJSON) {
-				t.Fatalf("state = %s, want the full state without the two keys, %s", gotJSON, wantJSON)
+				t.Fatalf("state = %s, want the full state without those keys, %s", gotJSON, wantJSON)
 			}
 		})
 	}
@@ -195,7 +200,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 // The body a pod a contract behind is served is a copy: the next caller of the same daemon, at
 // this contract, is served the state as the source answered it, update rounds and all.
 func TestTheStateServedToAPodAContractBehindLeavesTheNextCallersStateWhole(t *testing.T) {
-	handler := stateServer(t, podClaims(supervise.PodUpdateContract-1))
+	handler := stateServer(t, populatedState(t), podClaims(supervise.PodUpdateContract-1))
 
 	behind := stateAsked(t, handler, statePodAddr+":41000")
 	operator := stateAsked(t, handler, "192.0.2.1:41000")

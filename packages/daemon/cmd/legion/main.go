@@ -550,6 +550,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, roundsSummary(state.Issues))
@@ -592,6 +593,61 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
 	}
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
+}
+
+// memoryDraw is one tree's memory draw as the state carries it (api.Issue.MemoryGroup): the group
+// the draw gave the tree, the project's mode it was drawn under, and the instant it was drawn.
+type memoryDraw struct {
+	group string
+	mode  string
+	at    string
+}
+
+// memorySummary is the one line an operator reads for the memory groups the project's trees were
+// drawn into: how many trees carry a draw at all, and how many of those under each group and mode,
+// in group and then mode order, so two runs over one state print one line. It names no issue: the
+// state names no tree, so a root and every issue under it carry one and the same draw and the
+// plain output cannot tell them apart. A draw is one per tree — its group, its mode and its
+// instant together, written once when the tree's lifecycle row is first created — so counting the
+// distinct draws counts the trees. The per-issue values are in `legion state --json`: a line per
+// issue would print hundreds on a live deployment.
+func memorySummary(issues map[string]api.Issue) string {
+	trees := map[memoryDraw]struct{}{}
+	for _, issue := range issues {
+		if issue.MemoryGroup == "" {
+			continue
+		}
+		drawn := ""
+		if issue.MemoryDrawnAt != nil {
+			drawn = issue.MemoryDrawnAt.UTC().Format(time.RFC3339Nano)
+		}
+		trees[memoryDraw{group: issue.MemoryGroup, mode: issue.MemoryDrawMode, at: drawn}] = struct{}{}
+	}
+	if len(trees) == 0 {
+		return "memory: none"
+	}
+	type groupMode struct{ group, mode string }
+	counts := map[groupMode]int{}
+	for draw := range trees {
+		counts[groupMode{group: draw.group, mode: draw.mode}]++
+	}
+	kinds := slices.Collect(maps.Keys(counts))
+	slices.SortFunc(kinds, func(a, b groupMode) int {
+		return cmp.Or(cmp.Compare(a.group, b.group), cmp.Compare(a.mode, b.mode))
+	})
+	named := make([]string, len(kinds))
+	for i, kind := range kinds {
+		mode := kind.mode
+		if mode == "" {
+			mode = "an unrecorded mode"
+		}
+		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, mode)
+	}
+	noun := "trees"
+	if len(trees) == 1 {
+		noun = "tree"
+	}
+	return fmt.Sprintf("memory: %d %s — %s", len(trees), noun, strings.Join(named, ", "))
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot

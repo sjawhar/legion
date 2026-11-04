@@ -514,14 +514,20 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
 // whose claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them
-// (withoutUpdateRounds), which is the body that contract's schema describes. Every later reader
-// takes the two as optional, so the body this serves when the claims cannot be read is the one
-// both read. Any other caller — a pod at this contract, the operator's `legion state`, a tmux
-// pane — is served the state as this contract writes it.
+// (withoutUpdateRounds), which is the body that contract's schema describes; and a caller below
+// memoryContract, the contract that added the issues' memory group, is served it without those
+// three fields (withoutMemory). The two compose: each is applied when the state carries something
+// of its own, so a caller below both — a pod one release behind during a roll — is served a body
+// without either. Every later reader takes all five as optional, so the body this serves when the
+// claims cannot be read is the one every reader from 45 on takes. Any other caller — a pod at this
+// contract, the operator's `legion state`, a tmux pane — is served the state as this contract
+// writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
-	// A state with no update round on any claim view is the body every contract reads, so it is
-	// served as it is with no read of the claims: outside a roll, that is every request.
-	if s.callerPod == nil || s.supervisor == nil || !carriesUpdateRounds(state) {
+	// A state with no update round on any claim view and no memory group on any issue is the body
+	// every contract reads, so it is served as it is with no read of the claims: outside a roll of
+	// a project with no memory, that is every request.
+	rounds, memory := carriesUpdateRounds(state), carriesMemory(state)
+	if s.callerPod == nil || s.supervisor == nil || (!rounds && !memory) {
 		return state
 	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)
@@ -534,15 +540,27 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	}
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round fields, which every plugin contract since 45 reads",
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round and memory fields, which every plugin contract since 45 reads",
 			"pod", pod, "error", err)
-		return withoutUpdateRounds(state)
+		return withoutMemory(withoutUpdateRounds(state))
 	}
-	if contract := podContract(claims, pod); contract == 0 || contract >= supervise.PodUpdateContract {
+	contract := podContract(claims, pod)
+	if contract == 0 {
 		return state
 	}
-	return withoutUpdateRounds(state)
+	if rounds && contract < supervise.PodUpdateContract {
+		state = withoutUpdateRounds(state)
+	}
+	if memory && contract < memoryContract {
+		state = withoutMemory(state)
+	}
+	return state
 }
+
+// memoryContract is the daemon contract that added the issues' memory group to the state
+// (version.go's 47): a plugin before it reads the state with a strict schema that knows none of
+// `memoryGroup`, `memoryDrawMode` and `memoryDrawnAt` and refuses the whole body for one of them.
+const memoryContract = 47
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -555,6 +573,16 @@ func carriesUpdateRounds(state State) bool {
 			if carries(worker.Claim) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// carriesMemory is whether any issue of state carries its tree's memory draw.
+func carriesMemory(state State) bool {
+	for _, issue := range state.Issues {
+		if issue.MemoryGroup != "" || issue.MemoryDrawMode != "" || issue.MemoryDrawnAt != nil {
+			return true
 		}
 	}
 	return false
@@ -596,6 +624,20 @@ func withoutUpdateRounds(state State) State {
 			}
 			issue.Workers = workers
 		}
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
+
+// withoutMemory is state with no issue carrying `memoryGroup`, `memoryDrawMode` or
+// `memoryDrawnAt`, the three fields memoryContract added to the state; nothing else of that
+// contract is on the route but `settings` keys, which every plugin reads loosely. The issue map is
+// copied, so the state the source answered is left as it was.
+func withoutMemory(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.MemoryGroup, issue.MemoryDrawMode, issue.MemoryDrawnAt = "", "", nil
 		issues[key] = issue
 	}
 	state.Issues = issues
