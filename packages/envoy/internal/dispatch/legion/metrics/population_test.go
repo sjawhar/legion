@@ -126,9 +126,13 @@ func TestReadGathersEveryFactTheRulesRead(t *testing.T) {
 	if row := report.WorkTime.Issues[0]; row.Hours != 7 || row.ParkedHours != 2 {
 		t.Errorf("the child's work time = %g hours with %g parked, want 7 and 2", row.Hours, row.ParkedHours)
 	}
+	// The turn the daemon recorded runs from hour 1 to hour 3, and the issue was parked from
+	// hour 2, so one of its two hours is off the bar with the rest of the parked time: the bar's
+	// seven hours are the work time's own.
 	bar := barOf(t, report, "implementer")
-	if bar.Segments.InATurn != 2 || bar.Segments.WaitingOnPerson != 1 {
-		t.Errorf("the implementer bar = %+v, want two hours in a turn and the hour of the ask on the person", bar.Segments)
+	if bar.Segments.InATurn != 1 || bar.Segments.WaitingOnPerson != 1 || bar.Hours != 7 {
+		t.Errorf("the implementer bar = %g hours, %+v, want seven hours with the unparked hour of the turn and the hour of the ask on the person",
+			bar.Hours, bar.Segments)
 	}
 	classed := map[string]string{}
 	for _, row := range report.Splitting.Filed {

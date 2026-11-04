@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
-	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
 // Scope is which of a project's Legion issues an answer counts, the Legion section's own toggle.
@@ -33,10 +32,15 @@ func ParseScope(raw string) (Scope, error) {
 }
 
 // The bars of metric 2: the six roles, each holding the phases that role works, and the seventh
-// for the phases no role works. Time in the queue is on no bar, so `queued` is on none of them.
+// for every hour of the issue's work time those six leave — the phases no role works
+// (`awaiting_person` and `held`), and the hours the timeline gives to no phase at all, such as
+// the wait between a handoff and the next role's first event. Time in the queue is on no bar, and
+// neither is an hour the work time leaves out, so the seven bars of an issue add up to its work
+// time (phaseTime).
 const barNoRole = "no_role"
 
-// bars are the seven stacked bars in the order the card draws them.
+// bars are the seven stacked bars in the order the card draws them. The seventh names no phase:
+// it is what the six above did not take.
 var bars = []struct {
 	Role   string
 	Phases []string
@@ -47,7 +51,7 @@ var bars = []struct {
 	{"tester", []string{phaseTesting}},
 	{"reviewer", []string{phaseReviewing}},
 	{"merger", []string{phaseRetro, phaseMerging, phaseAwaitingMerge}},
-	{barNoRole, []string{phaseAwaitingPerson, phaseHeld}},
+	{barNoRole, nil},
 }
 
 // The four classes of issue a Legion session filed (metric 4).
@@ -181,7 +185,7 @@ func Compute(population *Population, scope Scope, now time.Time) Report {
 	computed := &computation{
 		population: population,
 		scope:      scope,
-		phases:     map[string][]PhaseSpan{},
+		phases:     map[string]phaseTimeline{},
 		views:      map[string]*issueView{},
 		roots:      map[string]string{},
 		workTimes:  map[string]workTimeRow{},
@@ -205,7 +209,7 @@ func Compute(population *Population, scope Scope, now time.Time) Report {
 type computation struct {
 	population *Population
 	scope      Scope
-	phases     map[string][]PhaseSpan
+	phases     map[string]phaseTimeline
 	views      map[string]*issueView
 	// roots is each key's tree root and workTimes each issue's work-time row, each computed
 	// once: TreeRoot walks a parent chain allocating a set as it goes, workTimeOf runs the whole
@@ -214,10 +218,19 @@ type computation struct {
 	workTimes map[string]workTimeRow
 }
 
-// workTimeRow is one memoised answer of workTimeOf: the row, and whether the issue has one.
+// phaseTimeline is one issue's phase timeline with where it came from: the daemon's own
+// observations, or the event log's fallback (Population.Phases).
+type phaseTimeline struct {
+	spans    []PhaseSpan
+	observed bool
+}
+
+// workTimeRow is one memoised answer of workTimeOf: the row, the spans its hours are the measure
+// of, and whether the issue has a work time at all.
 type workTimeRow struct {
-	row WorkTimeIssue
-	ok  bool
+	row    WorkTimeIssue
+	worked []Span
+	ok     bool
 }
 
 // finished is the population every metric counts: "issues of the picked project that finished in
@@ -269,14 +282,21 @@ func (c *computation) isRoot(issue *Issue) bool {
 	return c.treeRoot(issue.Key) == issue.Key
 }
 
-// phasesOf is the issue's phase timeline, computed once.
-func (c *computation) phasesOf(issue *Issue) []PhaseSpan {
+// timelineOf is the issue's phase timeline with where it came from, computed once.
+func (c *computation) timelineOf(issue *Issue) phaseTimeline {
 	if timeline, held := c.phases[issue.Key]; held {
 		return timeline
 	}
-	timeline := c.population.Phases(issue)
+	spans, observed := c.population.Phases(issue)
+	timeline := phaseTimeline{spans: spans, observed: observed}
 	c.phases[issue.Key] = timeline
 	return timeline
+}
+
+// phasesOf is the issue's phase timeline alone, for the rules that read the spans and not where
+// they came from.
+func (c *computation) phasesOf(issue *Issue) []PhaseSpan {
+	return c.timelineOf(issue).spans
 }
 
 // viewOf is the issue with its tree and the timelines its segments read, computed once.
@@ -329,39 +349,52 @@ func (c *computation) workTime(finished []*Issue) WorkTime {
 // workTimeOf is one finished issue's work time, computed once: the work-time metric asks for
 // every finished issue's row, and the splitting metric asks again for every finished root.
 func (c *computation) workTimeOf(issue *Issue) (WorkTimeIssue, bool) {
+	held := c.workedOf(issue)
+	return held.row, held.ok
+}
+
+// workedSpansOf is the time the issue worked: the very spans computeWorkTime totalled for the
+// hours of its row. Metric 2 shares a bar out over them and nothing else, so an hour the work
+// time left out cannot reach a bar and no second subtraction can drift from this one.
+func (c *computation) workedSpansOf(issue *Issue) []Span {
+	return c.workedOf(issue).worked
+}
+
+// workedOf is the memoised answer of computeWorkTime.
+func (c *computation) workedOf(issue *Issue) workTimeRow {
 	if held, computed := c.workTimes[issue.Key]; computed {
-		return held.row, held.ok
+		return held
 	}
-	row, ok := c.computeWorkTime(issue)
-	c.workTimes[issue.Key] = workTimeRow{row: row, ok: ok}
-	return row, ok
+	held := c.computeWorkTime(issue)
+	c.workTimes[issue.Key] = held
+	return held
 }
 
 // computeWorkTime is the work time itself: the issue's life, less the time it sat parked and the
-// time it sat back in the queue.
-func (c *computation) computeWorkTime(issue *Issue) (WorkTimeIssue, bool) {
+// time it sat back in the queue. The spans that are left are the answer's second half, because
+// they are what the issue's bars of phase time are shared out over.
+func (c *computation) computeWorkTime(issue *Issue) workTimeRow {
 	start, ok := firstWorkerEvent(issue)
 	if !ok {
-		return WorkTimeIssue{}, false
+		return workTimeRow{}
 	}
-	life := Span{From: start, To: *issue.ClosedAt}
-	if life.Duration() <= 0 {
-		return WorkTimeIssue{
+	// A life of no length leaves no span to park, to queue or to put on a bar, which the span
+	// algebra below answers on its own.
+	life := []Span{{From: start, To: *issue.ClosedAt}}
+	parked := intersect(c.population.parkedSpans(issue), life)
+	queued := intersect(c.population.queuedSpans(issue), life)
+	worked := subtract(subtract(life, parked), queued)
+	return workTimeRow{
+		row: WorkTimeIssue{
 			Key: issue.Key, Title: issue.Title, Priority: issue.Priority, Root: c.isRoot(issue),
 			StartedAt: start, ClosedAt: *issue.ClosedAt, MergedAt: issue.MergedAt,
-		}, true
+			Hours:       hours(totalOf(worked)),
+			ParkedHours: hours(totalOf(parked)),
+			QueuedHours: hours(totalOf(queued)),
+		},
+		worked: worked,
+		ok:     true,
 	}
-	whole := []Span{life}
-	parked := intersect(c.population.parkedSpans(issue), whole)
-	queued := intersect(c.population.queuedSpans(issue), whole)
-	worked := subtract(subtract(whole, parked), queued)
-	return WorkTimeIssue{
-		Key: issue.Key, Title: issue.Title, Priority: issue.Priority, Root: c.isRoot(issue),
-		StartedAt: start, ClosedAt: *issue.ClosedAt, MergedAt: issue.MergedAt,
-		Hours:       hours(totalOf(worked)),
-		ParkedHours: hours(totalOf(parked)),
-		QueuedHours: hours(totalOf(queued)),
-	}, true
 }
 
 // firstWorkerEvent is where an issue's work time starts: the first event of any session titled
@@ -384,29 +417,46 @@ func firstWorkerEvent(issue *Issue) (time.Time, bool) {
 
 // phaseTime is metric 2: one stacked bar per worker type, each hour of each phase going to the
 // first segment of the precedence that holds.
+//
+// The hours shared out are the issue's work time and nothing else (the spec's "Rule details —
+// Parked and pre-work hours in phase time": "An hour that work time to merge leaves out is on no
+// bar of phase time ... So the bars of an issue add up to its work time, and the two cards
+// agree"). The six roles take the phases they work, the queue is dropped because its time is on
+// no bar, and the seventh bar takes what is left, so the seven are a partition of the work time
+// whatever the timeline holds.
 func (c *computation) phaseTime(finished []*Issue) PhaseTime {
-	metric := PhaseTime{Bars: make([]RoleBar, 0, len(bars))}
-	var whole, idle float64
-	for _, bar := range bars {
-		row := RoleBar{Role: bar.Role}
-		perIssue := make([]float64, 0, len(finished))
-		for _, issue := range finished {
-			view := c.viewOf(issue)
-			spans := phaseSpansOf(view.timeline, bar.Phases...)
+	metric := PhaseTime{Bars: make([]RoleBar, len(bars))}
+	perIssue := make([][]float64, len(bars))
+	for index, bar := range bars {
+		metric.Bars[index].Role = bar.Role
+		perIssue[index] = make([]float64, 0, len(finished))
+	}
+	for _, issue := range finished {
+		view := c.viewOf(issue)
+		left := subtract(c.workedSpansOf(issue), phaseSpansOf(view.timeline, phaseQueued))
+		for index, bar := range bars {
+			spans := left
+			if bar.Role != barNoRole {
+				spans = intersect(phaseSpansOf(view.timeline, bar.Phases...), left)
+				left = subtract(left, spans)
+			}
 			if len(spans) == 0 {
 				continue
 			}
 			segments := view.split(spans)
-			row.Segments.addSegments(segments)
-			row.Issues++
-			perIssue = append(perIssue, segments.total())
+			metric.Bars[index].Segments.addSegments(segments)
+			metric.Bars[index].Issues++
+			perIssue[index] = append(perIssue[index], segments.total())
 		}
+	}
+	var whole, idle float64
+	for index := range metric.Bars {
+		row := &metric.Bars[index]
 		row.Hours = round(row.Segments.total())
-		row.MedianHoursPerIssue = median(perIssue)
+		row.MedianHoursPerIssue = median(perIssue[index])
 		row.Segments = rounded(row.Segments)
 		whole += row.Hours
 		idle += row.Segments.Idle
-		metric.Bars = append(metric.Bars, row)
 	}
 	if whole > 0 {
 		metric.IdleShare = round(idle / whole)
@@ -421,8 +471,9 @@ func (c *computation) rework(finished []*Issue) Rework {
 	rounds, afterReview := make([]float64, 0, len(finished)), make([]float64, 0, len(finished))
 	var sentBack int
 	for _, issue := range finished {
-		timeline := c.phasesOf(issue)
-		row := ReworkIssue{Key: issue.Key, ReviewRounds: c.reviewRounds(issue, timeline), SentBack: sentBackOnce(timeline)}
+		phases := c.timelineOf(issue)
+		timeline := phases.spans
+		row := ReworkIssue{Key: issue.Key, ReviewRounds: reviewRounds(issue, phases), SentBack: sentBackOnce(issue, phases)}
 		if at, reviewed := firstEntry(timeline, phaseReviewing); reviewed {
 			after := []Span{{From: at, To: c.population.issueEnd(issue)}}
 			row.ImplementingHoursAfterFirst = hours(totalOf(intersect(phaseSpansOf(timeline, phaseImplementing), after)))
@@ -447,26 +498,36 @@ func (c *computation) rework(finished []*Issue) Rework {
 }
 
 // reviewRounds is "entries into `reviewing`, or into status `needs_review` before observations".
-func (c *computation) reviewRounds(issue *Issue, timeline []PhaseSpan) int {
-	if len(issue.Observed[legion.FieldPhase]) == 0 {
+// Before observations is where the sampler drew no timeline of the issue's own life: an issue
+// whose only `phase` mark is the one the sampler's first pass left after it closed has no
+// observed round of any hour it lived, so its rounds are its status entries.
+func reviewRounds(issue *Issue, timeline phaseTimeline) int {
+	if !timeline.observed {
 		return statusEntries(issue, "needs_review")
 	}
 	rounds := 0
-	for index, span := range timeline {
-		if span.Phase == phaseReviewing && (index == 0 || timeline[index-1].Phase != phaseReviewing) {
+	for index, span := range timeline.spans {
+		if span.Phase == phaseReviewing && (index == 0 || timeline.spans[index-1].Phase != phaseReviewing) {
 			rounds++
 		}
 	}
 	return rounds
 }
 
-// sentBackOnce is "a move from `testing`, `reviewing` or `accepting` to `implementing`".
-func sentBackOnce(timeline []PhaseSpan) bool {
-	for index := 1; index < len(timeline); index++ {
-		if timeline[index].Phase != phaseImplementing {
+// sentBackOnce is "a move from `testing`, `reviewing` or `accepting` to `implementing`": off the
+// observed timeline where the sampler drew one, and off the status history before observations,
+// as the review rounds beside it are. No fallback timeline can hold a send-back of its own, since
+// it places one span per phase in workflow order, so an issue the sampler never saw would record
+// none at all.
+func sentBackOnce(issue *Issue, timeline phaseTimeline) bool {
+	if !timeline.observed {
+		return statusMoved(issue, sentBackStatuses, statusImplementing)
+	}
+	for index := 1; index < len(timeline.spans); index++ {
+		if timeline.spans[index].Phase != phaseImplementing {
 			continue
 		}
-		switch timeline[index-1].Phase {
+		switch timeline.spans[index-1].Phase {
 		case phaseTesting, phaseReviewing, phaseAccepting:
 			return true
 		}
@@ -560,10 +621,14 @@ func (c *computation) classify(filed Filed) FiledIssue {
 	if filer == nil {
 		return row
 	}
+	// The tree of a filed issue: walk up from the parent it had at its `issue.created` event,
+	// through each issue's parent as Dispatch records it, and take the top it reaches; the filer
+	// walks the same way. The new issue is in the filer's tree when both walks reach the same
+	// issue, at any depth. The event's own `ancestors` list is read by nothing here: Dispatch
+	// leaves it empty, so a filing under a child of the filer read as out of the tree (the
+	// spec's "Rule details — The tree of a filed issue").
 	root := c.treeRoot(filer.Key)
-	inTree := filed.Parent == filer.Key || filed.Parent == root ||
-		slices.Contains(filed.Ancestors, filer.Key) || slices.Contains(filed.Ancestors, root)
-	if !inTree {
+	if filed.Parent == "" || c.treeRoot(filed.Parent) != root {
 		return row
 	}
 	row.FilerPhase = phaseAt(c.phasesOf(filer), filed.At)

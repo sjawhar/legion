@@ -111,6 +111,9 @@ type Issue struct {
 // Filed is one issue a Legion session created, as metric 4 classes it: the issue, the moment, and
 // the session's own title parsed into the role and issue (or controller) that filed it. The parent
 // and ancestors are the ones the issue had at its `issue.created` event, not the ones it has now.
+// The class is read off the parent alone, by walking the chain above it: Dispatch writes an empty
+// `ancestors` for an issue filed under a child, so the list is recorded as the event carried it
+// and no rule turns on it (the spec's "Rule details — The tree of a filed issue").
 type Filed struct {
 	Key       string
 	Title     string

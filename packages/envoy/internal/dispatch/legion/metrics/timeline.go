@@ -58,6 +58,16 @@ var childWorkingPhases = []string{
 // when it parks a root, and the gate treats both as parked (daemon workflow/gate.go).
 var parkedStatuses = []string{"backlog", "icebox"}
 
+// sentBackStatuses are the statuses a send-back moves out of before observations exist: the
+// workflow writes `testing` for the tester's phase and `needs_review` for both the reviewer's and
+// the architect's, and `in_progress` for the implementer's, so those are the words a move back to
+// implementing is read by (daemon workflow/table.go's statusForBackward).
+var sentBackStatuses = []string{"testing", "needs_review"}
+
+// statusImplementing is the status the workflow writes with the implementer's phase, which a
+// send-back moves into.
+const statusImplementing = "in_progress"
+
 // handoffWords is the handoff each phase ends with and the phase it therefore starts, as the
 // daemon's phase.Handoff pairs them: the planner's `plan`, the implementer's `implement`, the
 // tester's `test` and the reviewer's `review`. Retro, the merger's READY and the architect's
@@ -75,15 +85,22 @@ type PhaseSpan struct {
 	Span  Span
 }
 
-// Phases is the issue's phase timeline: the daemon's own where the sampler observed it, and the
-// event log's fallback where it did not. The fallback is the spec's "Before observations exist,
-// each role's phase starts at the first event of a session titled `Legion <role> · <KEY>` for the
-// issue, or at the status or handoff that marks it, and ends where the next role's phase starts".
-func (p *Population) Phases(issue *Issue) []PhaseSpan {
+// Phases is the issue's phase timeline and whether the sampler observed it: the daemon's own
+// where it did, and the event log's fallback where it did not. The fallback is the spec's
+// "Before observations exist, each role's phase starts at the first event of a session titled
+// `Legion <role> · <KEY>` for the issue, or at the status or handoff that marks it, and ends
+// where the next role's phase starts".
+//
+// Where the timeline came from is the answer's second half because an issue whose only
+// observation is the mark the sampler left after it closed has no observed hour of its own life:
+// the stretch that mark opens has no duration, so observedPhases keeps nothing of it, and the
+// rules that read a phase before observations (metric 3's review rounds and send-backs) must read
+// the status history instead.
+func (p *Population) Phases(issue *Issue) ([]PhaseSpan, bool) {
 	if observed := p.observedPhases(issue); len(observed) > 0 {
-		return observed
+		return observed, true
 	}
-	return p.fallbackPhases(issue)
+	return p.fallbackPhases(issue), false
 }
 
 // observedPhases is the timeline the sampler's `phase` observations draw, with each admitted
@@ -251,6 +268,17 @@ func statusEntries(issue *Issue, status string) int {
 		}
 	}
 	return entries
+}
+
+// statusMoved is whether the issue's status ever went straight from one of `from` to `to`, which
+// is how a move between two phases reads before any observation of them exists.
+func statusMoved(issue *Issue, from []string, to string) bool {
+	for index := 1; index < len(issue.StatusMarks); index++ {
+		if issue.StatusMarks[index].Value == to && slices.Contains(from, issue.StatusMarks[index-1].Value) {
+			return true
+		}
+	}
+	return false
 }
 
 // parkedSpans are the stretches the issue sat in a parked status (backlog or icebox), from the

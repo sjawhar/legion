@@ -92,9 +92,10 @@ func barOf(t *testing.T, report Report, role string) RoleBar {
 	return RoleBar{}
 }
 
-// timelineOf is a phase timeline written as "<phase> <from>-<to>" in hours after base, which is
-// what a phase test compares.
-func timelineOf(spans []PhaseSpan) []string {
+// timelineOf is an issue's phase timeline written as "<phase> <from>-<to>" in hours after base,
+// which is what a phase test compares.
+func timelineOf(population *Population, issue *Issue) []string {
+	spans, _ := population.Phases(issue)
 	written := make([]string, 0, len(spans))
 	for _, span := range spans {
 		written = append(written, fmt.Sprintf("%s %g-%g",

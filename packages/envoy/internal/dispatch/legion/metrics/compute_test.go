@@ -39,6 +39,80 @@ func TestNoQueueOrParkedHourEntersTheWorkTime(t *testing.T) {
 	}
 }
 
+// TestTheSevenBarsOfAnIssueAddUpToItsWorkTime: "An hour that work time to merge leaves out is on
+// no bar of phase time: an hour in `backlog` or `icebox`, an hour back in the queue, and any hour
+// before the issue's first worker event. So the bars of an issue add up to its work time, and the
+// two cards agree" (the spec's "Rule details — Parked and pre-work hours in phase time"). Both
+// timelines are read: the fallback, whose implementing phase a status opens three hours before
+// the first worker event and whose handoff leaves an hour on no phase at all, and the observed
+// one, which goes back to the queue mid-life.
+func TestTheSevenBarsOfAnIssueAddUpToItsWorkTime(t *testing.T) {
+	// The fallback: implementing from the status at hour -3, the tester's own event at hour 2 —
+	// the first worker event, where the work time starts — testing ended by its handoff at hour
+	// 3, the reviewer's own event an hour later, and two parked hours from hour 5.
+	fallback := newIssue("INFRA-1").
+		statusAt(hour(-3), "in_progress").
+		worked("tester", hour(2)).
+		handedOff("test", hour(3)).
+		worked("reviewer", hour(4)).
+		statusAt(hour(5), "backlog").
+		statusAt(hour(7), "needs_review").
+		closedAt(hour(9))
+	// The observed: a design hour before the first worker event, implementing from it, two hours
+	// back in the queue from hour 4 with the slot given up, and one parked hour from hour 7.
+	observed := newIssue("INFRA-2").worked("implementer", hour(0)).closedAt(hour(10)).
+		observeString(legion.FieldPhase, hour(-1), "admitted").
+		observe(legion.FieldSlot, hour(-1), "1").
+		observeString(legion.FieldPhase, hour(0), "implementing").
+		observeString(legion.FieldPhase, hour(4), "admitted").
+		observe(legion.FieldSlot, hour(4), "null").
+		observeString(legion.FieldPhase, hour(6), "implementing").
+		statusAt(hour(7), "backlog").
+		statusAt(hour(8), "in_progress").
+		observeString(legion.FieldPhase, hour(10), "done")
+	for _, one := range []struct {
+		issue     *Issue
+		workHours float64
+		parked    float64
+		queued    float64
+		bars      map[string]float64
+	}{
+		// Seven hours of life less the two parked ones. The three implementing hours before the
+		// first worker event are on no bar, the hour from the handoff to the next phase is no
+		// role's, and the two parked hours of reviewing are gone.
+		{fallback, 5, 2, 0, map[string]float64{
+			"architect": 0, "planner": 0, "implementer": 0, "tester": 1, "reviewer": 3, "merger": 0, barNoRole: 1,
+		}},
+		// Ten hours of life less the hour parked and the two back in the queue. The design hour
+		// before the first worker event is on no bar, and so are the queued hours.
+		{observed, 7, 1, 2, map[string]float64{
+			"architect": 0, "planner": 0, "implementer": 7, "tester": 0, "reviewer": 0, "merger": 0, barNoRole: 0,
+		}},
+	} {
+		t.Run(one.issue.Key, func(t *testing.T) {
+			report := Compute(fixture(hour(-24), hour(24), one.issue), ScopeAll, hour(24))
+			row := report.WorkTime.Issues[0]
+			if row.Hours != one.workHours || row.ParkedHours != one.parked || row.QueuedHours != one.queued {
+				t.Fatalf("the work time = %g hours (parked %g, queued %g), want %g (%g, %g)",
+					row.Hours, row.ParkedHours, row.QueuedHours, one.workHours, one.parked, one.queued)
+			}
+			hoursPerBar := map[string]float64{}
+			var whole float64
+			for _, bar := range report.PhaseTime.Bars {
+				hoursPerBar[bar.Role] = bar.Hours
+				whole += bar.Hours
+			}
+			if !reflect.DeepEqual(hoursPerBar, one.bars) {
+				t.Fatalf("the bars are %v, want %v", hoursPerBar, one.bars)
+			}
+			if whole != row.Hours {
+				t.Fatalf("the seven bars hold %g hours against a work time of %g: the two cards of one page disagree",
+					whole, row.Hours)
+			}
+		})
+	}
+}
+
 // TestAnIssueThatClosedWithNoLegionWorkIsNotCounted: the population is the issues that closed in
 // the window with Legion phase work — an event of a session titled `Legion <role> · <KEY>` for
 // their own key, or a handoff — and nothing else that closed.
@@ -108,7 +182,7 @@ func TestEachPhaseStartsAtItsRolesFirstEventAndEndsWhereTheNextStarts(t *testing
 		"design 0-1", "planning 1-2", "implementing 3-5", "testing 5-7", "reviewing 7-8",
 		"accepting 8-9", "retro 9-10",
 	}
-	if got := timelineOf(population.Phases(root)); !reflect.DeepEqual(got, want) {
+	if got := timelineOf(population, root); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the fallback timeline is %v, want %v", got, want)
 	}
 	report := Compute(population, ScopeAll, hour(24))
@@ -117,10 +191,10 @@ func TestEachPhaseStartsAtItsRolesFirstEventAndEndsWhereTheNextStarts(t *testing
 		hoursPerBar[bar.Role] = bar.Hours
 	}
 	want2 := map[string]float64{
-		"architect": 2, "planner": 1, "implementer": 2, "tester": 2, "reviewer": 1, "merger": 1, barNoRole: 0,
+		"architect": 2, "planner": 1, "implementer": 2, "tester": 2, "reviewer": 1, "merger": 1, barNoRole: 1,
 	}
 	if !reflect.DeepEqual(hoursPerBar, want2) {
-		t.Fatalf("the bars are %v, want %v: the architect's design and accepting, and the hour between a handoff and the next start on no bar", hoursPerBar, want2)
+		t.Fatalf("the bars are %v, want %v: the architect's design and accepting, and the hour between the plan handoff and the implementer's first event on the bar of no role, which works no phase", hoursPerBar, want2)
 	}
 	// Nothing was observed, so segments 2 and 3 can hold through nothing and every hour is idle.
 	if report.PhaseTime.IdleShare != 1 {
@@ -139,7 +213,7 @@ func TestAPhaseStartsAtTheHandoffOrStatusThatMarksItWhenItsRoleWroteNoEvent(t *t
 		statusAt(hour(4), "testing").
 		closedAt(hour(6))
 	want := []string{"planning 0-1", "implementing 1-4", "testing 4-6"}
-	if got := timelineOf(fixture(hour(-24), hour(24), root).Phases(root)); !reflect.DeepEqual(got, want) {
+	if got := timelineOf(fixture(hour(-24), hour(24), root), root); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the fallback timeline is %v, want %v", got, want)
 	}
 }
@@ -156,7 +230,7 @@ func TestAChildHasNoDesignPhaseAndItsArchitectBarIsItsAccepting(t *testing.T) {
 		closedAt(hour(5))
 	population := fixture(hour(-24), hour(24), root, child)
 	want := []string{"implementing 1-3", "accepting 3-5"}
-	if got := timelineOf(population.Phases(child)); !reflect.DeepEqual(got, want) {
+	if got := timelineOf(population, child); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the child's timeline is %v, want %v", got, want)
 	}
 	if bar := barOf(t, Compute(population, ScopeChildren, hour(24)), "architect"); bar.Hours != 2 {
@@ -175,7 +249,7 @@ func TestAnAdmittedIssueHoldingASlotIsDesignAndOneHoldingNoneIsQueue(t *testing.
 		observeString(legion.FieldPhase, hour(4), "done")
 	population := fixture(hour(-24), hour(24), root)
 	want := []string{"queued 0-1", "design 1-3", "planning 3-4"}
-	if got := timelineOf(population.Phases(root)); !reflect.DeepEqual(got, want) {
+	if got := timelineOf(population, root); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the observed timeline is %v, want %v", got, want)
 	}
 	report := Compute(population, ScopeAll, hour(24))
@@ -218,8 +292,9 @@ func TestReviewRoundsAndSendBacksComeFromThePhaseTimeline(t *testing.T) {
 }
 
 // TestBeforeObservationsReviewRoundsAreEntriesIntoNeedsReview: an issue the sampler never saw
-// counts its review rounds from the status the workflow set, and nothing moved it back to
-// implementing in a timeline drawn from first events alone.
+// counts its review rounds from the status the workflow set, and its send-back from the same
+// statuses: the move out of `needs_review` into `in_progress` at hour 3 is the reviewer asking
+// for changes, which no timeline drawn from first events alone can hold.
 func TestBeforeObservationsReviewRoundsAreEntriesIntoNeedsReview(t *testing.T) {
 	issue := newIssue("INFRA-1").worked("implementer", hour(0)).closedAt(hour(8)).
 		statusAt(hour(0), "in_progress").
@@ -229,8 +304,8 @@ func TestBeforeObservationsReviewRoundsAreEntriesIntoNeedsReview(t *testing.T) {
 		statusAt(hour(8), "done")
 	report := Compute(fixture(hour(-24), hour(24), issue), ScopeAll, hour(24))
 	row := report.Rework.Issues[0]
-	if row.ReviewRounds != 2 || row.SentBack {
-		t.Fatalf("the issue has %d review rounds and sent_back=%t, want two rounds from the statuses and no send-back", row.ReviewRounds, row.SentBack)
+	if row.ReviewRounds != 2 || !row.SentBack {
+		t.Fatalf("the issue has %d review rounds and sent_back=%t, want two rounds and the one send-back its statuses record", row.ReviewRounds, row.SentBack)
 	}
 }
 
