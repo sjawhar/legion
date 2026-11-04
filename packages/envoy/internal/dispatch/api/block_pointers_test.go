@@ -260,6 +260,48 @@ func TestAWriteRefusesABlockPointerOutsideItsIssueOrDocument(t *testing.T) {
 	}
 }
 
+// An issue created in one request seeds its spec inside the transaction that creates the issue,
+// so neither the spec's artifacts row nor the issue's own row is readable while the seed runs:
+// the pointer the spec introduces is held to the address the ledger carries - the spec's key,
+// the issue, and the parent the create already holds - and a plan task serving a requirement of
+// the parent's spec is created, its edge in the block index afterwards. The refusal that does
+// not turn on the issue still stands: the same seeded shape pointing at a block no document
+// holds is refused. The shipped types carry this test, a plan task's `serves` pointing at
+// requirements, so it swaps no schema.
+func TestASeededSpecPointsIntoItsParentsSpec(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	parent := createSpecIssue(t, handler, "CORE", ":::requirement{#r1}\nA requirement.\n:::\n")
+	// Each create needs a title of its own: two near-identical titles in a row are refused
+	// 409 POSSIBLE_DUPLICATE before the markdown is read at all, which would hide the pointer.
+	seedChild := func(title, serves string) *httptest.ResponseRecorder {
+		return createIssueRequest(t, handler, map[string]any{
+			"project": "CORE", "title": title, "parent": parent.Key,
+			"spec": ":::plan_task{#t1 serves=\"" + serves + "\"}\nServe it.\n:::\n",
+		})
+	}
+
+	r1 := "dispatch://" + parent.Key + "/spec#b-r1"
+	created := seedChild("A seeded child spec pointing into its parent", r1)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("a seeded spec pointing at the parent's requirement: status=%d body=%s, want 201", created.Code, created.Body.String())
+	}
+	child := decodeBody[model.Issue](t, created)
+	var served bool
+	rows := readBlockRefs(t, database, child.PrimaryArtifactID)
+	for _, row := range rows {
+		served = served || (row.BlockID == "t1" && row.Kind == "serves" && row.ToID == parent.Key+"/spec#r1")
+	}
+	if !served {
+		t.Fatalf("block_refs of the seeded spec = %#v, want t1's serves edge at %s/spec#r1", rows, parent.Key)
+	}
+
+	nowhere := "dispatch://" + parent.Key + "/spec#b-nope"
+	expectRefusal(t, "a seeded spec pointing at a block no document holds",
+		seedChild("Zeta omega lambda sigma phantom", nowhere),
+		http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, nowhere, "no document holds")
+}
+
 // A browser's write is never refused: a settled browser tree whose pointer names a block no
 // document holds writes its version and stores the pointer, which stays an unresolved reference,
 // as any citation of an absent block is.

@@ -528,30 +528,37 @@ func joinedSchemaError(err error, start func() error) error {
 // and a pointer of its at a block no document holds stays unresolved.
 func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
 	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
-		// The reference key is resolved here, inside the check's one call, so a write that
+		// The address is resolved here, inside the check's one call, so a write that
 		// introduces no pointer reads nothing for it.
-		refKey, err := documentRefKey(ctx, tx, artifactID)
+		address, err := addressOfDocument(ctx, tx, artifactID)
 		if err != nil {
 			return pmdoc.BlockWriting{}, nil, err
 		}
-		return refs.BlockTargets(ctx, tx, artifactID, refKey, offsetBlocks(offsets), targets)
+		return refs.BlockTargets(
+			ctx, tx, artifactID, address.RefKey, address.IssueKey, address.PendingParent,
+			offsetBlocks(offsets), targets,
+		)
 	})
 }
 
-// documentRefKey is the reference key of document artifactID, the address its blocks' node ids are
-// built from: the key this transaction recorded for an artifacts row it is creating
-// (Ledger.RegisterPendingArtifact), else the stored row's. A transaction creating the document
-// writes that row with the rest of its writes, after the document work, so no read of its own can
-// see it; one that is not creating it reads the row it already holds.
-func documentRefKey(ctx context.Context, tx pgx.Tx, artifactID string) (string, error) {
-	if refKey, pending := pendingRefKey(ctx, artifactID); pending {
-		return refKey, nil
+// addressOfDocument is the address of document artifactID: the reference key its blocks' node ids
+// are built from, the issue it belongs to, and, for a document whose issue this transaction
+// creates too, that issue's parent. It is the address this transaction recorded for an artifacts
+// row it is creating (Ledger.RegisterPendingArtifact), else the stored row's, whose issue_key
+// column answers the issue. A transaction creating the document writes that row with the rest of
+// its writes, after the document work, so no read of its own can see it; one that is not creating
+// it reads the row it already holds, which no transaction of its own creates an issue for.
+func addressOfDocument(ctx context.Context, tx pgx.Tx, artifactID string) (DocumentAddress, error) {
+	if address, pending := pendingArtifact(ctx, artifactID); pending {
+		return address, nil
 	}
-	var refKey string
-	if err := tx.QueryRow(ctx, `select coalesce(ref_key, '') from artifacts where id = $1`, artifactID).Scan(&refKey); err != nil {
-		return "", fmt.Errorf("read the reference of document %s: %w", artifactID, err)
+	var address DocumentAddress
+	if err := tx.QueryRow(ctx, `
+		select coalesce(ref_key, ''), coalesce(issue_key, '') from artifacts where id = $1
+	`, artifactID).Scan(&address.RefKey, &address.IssueKey); err != nil {
+		return DocumentAddress{}, fmt.Errorf("read the address of document %s: %w", artifactID, err)
 	}
-	return refKey, nil
+	return address, nil
 }
 
 func mergeUpdates(updates [][]byte) ([]byte, error) {

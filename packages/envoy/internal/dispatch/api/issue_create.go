@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -304,10 +305,16 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 	// The spec's artifacts row is written in the write phase below, after the document work, so
-	// the key that row is given - the issue's key and the 'spec' slug its insert names - is
-	// recorded for the reads of this transaction that need it: a block pointer of the seeded spec
-	// names a target in the spec by this key (docs.documentRefKey).
-	ledger.RegisterPendingArtifact(artifactID, key+"/spec")
+	// the address that row is given is recorded for the reads of this transaction that need it:
+	// the key its insert names - the issue's key and the 'spec' slug - and the issue itself,
+	// whose own row this transaction writes in the same phase. A block pointer of the seeded
+	// spec is held to that address (docs.addressOfDocument), and the parent goes with it because
+	// no read of this transaction can see the issues row either: the ancestors the pointer is
+	// held to are walked from that parent (refs.BlockTargets). parentKey is "" for a root issue,
+	// the null parent_key the insert below writes.
+	ledger.RegisterPendingArtifact(artifactID, docs.DocumentAddress{
+		RefKey: key + "/spec", IssueKey: key, PendingParent: parentKey,
+	})
 	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)

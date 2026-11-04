@@ -548,36 +548,33 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 	return changes, nil
 }
 
-// BlockTargets is where a write to document artifactID, whose reference key is refKey, lands and
-// the block each of targets names, by node id (text.TargetID), as the block index would hold it
-// once that write, leaving the blocks written (rendered, in document order, each parent before
-// its children), is indexed, read through q: a block of that document as written's node for its
-// id (uniqueBlocks: the first holder of a repeated id, and no id the index cannot key), any other
-// as its document's current blocks (document_blocks) hold it, with one query for every such
-// target. A target no block has is absent. The write lands in the document's own issue, or in
-// none when a project or a session holds it; that issue's ancestors are read only once a target
-// turns out to sit in another document (IssueAncestors), since a pointer inside the writing
-// document - a plan task's `needs`, the common case - is held to nothing above it
-// (pmdoc.CheckBlockPointers), and this runs inside the write's transaction.
+// BlockTargets is where a write to document artifactID, whose reference key is refKey and whose
+// issue is issueKey (empty when a project or a session holds the document), lands and the block
+// each of targets names, by node id (text.TargetID), as the block index would hold it once that
+// write, leaving the blocks written (rendered, in document order, each parent before its
+// children), is indexed, read through q: a block of that document as written's node for its id
+// (uniqueBlocks: the first holder of a repeated id, and no id the index cannot key), any other as
+// its document's current blocks (document_blocks) hold it, with one query for every such target.
+// A target no block has is absent. The issue's ancestors are read only once a target turns out to
+// sit in another document (IssueAncestors), since a pointer inside the writing document - a plan
+// task's `needs`, the common case - is held to nothing above it (pmdoc.CheckBlockPointers), and
+// this runs inside the write's transaction.
 //
-// The caller hands the reference key over rather than this read taking it from the artifacts row,
-// because a transaction creating the document has only queued that row: its own reads cannot see
-// it, while the caller knows the key the queued insert will write (docs.documentRefKey). The
-// issue the write lands in is read from that key for the same reason: a reference key is its
-// owner's key and the document's slug (migration 0071), so the write lands in the issue holding
-// that owner key, and in none when no issue holds it - a project's or a session's document.
-func BlockTargets(ctx context.Context, q Queryer, artifactID, refKey string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
-	writing := pmdoc.BlockWriting{Document: refKey}
-	if slug := strings.LastIndex(refKey, "/"); slug > 0 {
-		owner := refKey[:slug]
-		var held bool
-		if err := q.QueryRow(ctx, `select exists (select 1 from issues where key = $1)`, owner).Scan(&held); err != nil {
-			return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the issue of document %s: %w", artifactID, err)
-		}
-		if held {
-			writing.Issue = owner
-		}
-	}
+// The caller hands the reference key and the issue over rather than this read taking them from
+// the artifacts row, because a transaction creating the document has only queued that row: its
+// own reads cannot see it, while the caller knows what the queued insert will write
+// (docs.addressOfDocument). pendingParent is the parent of issueKey when the same transaction
+// creates that issue's row too, and empty otherwise: the issues row is only queued as well, so
+// the walk from issueKey would answer nothing, and the ancestors are that parent followed by its
+// own. A pending issue with no parent is a root, and both paths answer the empty list.
+func BlockTargets(
+	ctx context.Context,
+	q Queryer,
+	artifactID, refKey, issueKey, pendingParent string,
+	written []model.ArtifactBlock,
+	targets []text.Ref,
+) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
+	writing := pmdoc.BlockWriting{Document: refKey, Issue: issueKey}
 	nodes, _, _ := uniqueBlocks(written)
 	own := make(map[string]string, len(nodes))
 	for _, node := range nodes {
@@ -620,10 +617,18 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID, refKey string, wri
 		return pmdoc.BlockWriting{}, nil, err
 	}
 	// Only a target in another document can sit in another issue, so the ancestor walk is paid
-	// for only here.
-	if writing.Ancestors, err = IssueAncestors(ctx, q, writing.Issue); err != nil {
+	// for only here. An issue this transaction creates has no row to walk from, so its walk
+	// starts at the parent the caller holds, which stands at the head of the answer.
+	above := writing.Issue
+	if pendingParent != "" {
+		above = pendingParent
+		writing.Ancestors = append(writing.Ancestors, pendingParent)
+	}
+	ancestors, err := IssueAncestors(ctx, q, above)
+	if err != nil {
 		return pmdoc.BlockWriting{}, nil, err
 	}
+	writing.Ancestors = append(writing.Ancestors, ancestors...)
 	return writing, found, nil
 }
 

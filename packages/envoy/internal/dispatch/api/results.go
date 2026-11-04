@@ -291,10 +291,11 @@ func (input checkResultInput) refusal() error {
 }
 
 // issuesOpenForResult answers whether the recording issue and the check's issue are open, in
-// one query over the rows the caller has already locked (lockIssueRows). It makes no refusal of
-// its own for a closed issue, as requireOpenIssue does: the results route decides for itself,
-// since a closed issue takes a result for an after-merge check. An issue with no row is the
-// route's 404, which is the lock's answer too: lockIssueRows skips a key nothing holds.
+// one query under the owner locks the caller has already taken (lockIssueOwners). It makes no
+// refusal of its own for a closed issue, as requireOpenIssue does: the results route decides for
+// itself, since a closed issue takes a result for an after-merge check. An issue with no row is
+// the route's 404, which the locks never answer: lockIssueOwners takes an owner's lock whether
+// or not a row holds that key.
 func issuesOpenForResult(ctx context.Context, tx pgx.Tx, issueKey, checkIssueKey string) (bool, bool, error) {
 	open := map[string]bool{}
 	rows, err := tx.Query(ctx, `select key, closed_at is null from issues where key = any($1)`,

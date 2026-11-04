@@ -402,10 +402,13 @@ func (s *server) queueNewArtifact(
 	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text, now()`).Scan(&artifact.ID, &artifact.CreatedAt); err != nil {
 		return model.Artifact{}, err
 	}
-	// The document work that follows runs before the insert below, so the key that insert gives
-	// the row is recorded for the reads of this transaction that need it: a block pointer of a
-	// new document names a target in that document by this key (docs.documentRefKey).
-	ledger.RegisterPendingArtifact(artifact.ID, artifact.RefKey)
+	// The document work that follows runs before the insert below, so the address that insert
+	// gives the row - its key and the issue holding it, none for a project's or a session's
+	// document - is recorded for the reads of this transaction that need it: a block pointer of
+	// a new document is held to the document's key and its issue (docs.addressOfDocument). The
+	// issue already has its row, so no pending parent is recorded: its ancestors are walked from
+	// it.
+	ledger.RegisterPendingArtifact(artifact.ID, docs.DocumentAddress{RefKey: artifact.RefKey, IssueKey: deref(target.IssueKey)})
 	return artifact, queueExec(ledger, `
 		insert into artifacts (id, issue_key, project_key, session_id, slug, name, kind, is_primary, role, created_by, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, false, $8, $9, $10)
