@@ -46,17 +46,13 @@ func WebhookOwner(webhooks []string, name string) Owner {
 // is made of. The component checks it and writes its Variables into the container definitions;
 // `envoy-infra render webhook-listener-env` checks and prints it the same way.
 type ListenerEnv struct {
-	MachineID  string
-	NatsUrls   []string
-	ListenHost string
-	HostBridge string
-	// SubscribeAllTopics renders ENVOY_SUBSCRIBE_ALL_TOPICS=1 after ENVOY_HOST_BRIDGE, and false
-	// renders nothing (core.ListenerConfig.SubscribeAllTopics).
-	SubscribeAllTopics bool
-	NatsReplicas       int
-	Webhooks           []string
-	ReviewerAppId      *string // written only with github
-	MentionTrigger     *string // written only with github
+	MachineID      string
+	NatsUrls       []string
+	ListenHost     string
+	NatsReplicas   int
+	Webhooks       []string
+	ReviewerAppId  *string // written only with github
+	MentionTrigger *string // written only with github
 }
 
 // Check refuses what the component refuses of these inputs before it registers anything: every
@@ -127,7 +123,7 @@ func (e ListenerEnv) Variables() ([]string, error) {
 
 // config is the environment as core.ListenerConfig takes it, on the listener's fixed port.
 func (e ListenerEnv) config() core.ListenerConfig {
-	return core.ListenerConfig{MachineID: e.MachineID, Port: ListenerPort, ListenHost: e.ListenHost, HostBridge: e.HostBridge, SubscribeAllTopics: e.SubscribeAllTopics}
+	return core.ListenerConfig{MachineID: e.MachineID, Port: ListenerPort, ListenHost: e.ListenHost}
 }
 
 // SecretReadPolicy is the execution-role policy that reads the secret at arn into a container, as

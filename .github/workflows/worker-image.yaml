@@ -35,12 +35,22 @@ on:
         type: string
         required: false
         default: ""
+      image:
+        description: The image repository an attest-only call attests under, which the caller read from the `image` output of its earlier build call; empty in every other call, where the build job derives it for itself
+        type: string
+        required: false
+        default: ""
+      ci-ok-changes:
+        description: ci.yaml's toJSON(needs.changes), which the build's ci-ok report reads on a pull request (.github/actions/ci-ok-report); empty for every other caller
+        type: string
+        required: false
+        default: ""
     outputs:
       ref:
-        description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
+        description: The pushed image, pinned by digest (the `image` output below, then @sha256:…)
         value: ${{ jobs.build.outputs.ref }}
       image:
-        description: The pushed image's repository (ghcr.io/sjawhar/legion-worker)
+        description: The pushed image's repository, which the build job derives from $GITHUB_REPOSITORY with .github/scripts/repo-paths.sh
         value: ${{ jobs.build.outputs.image }}
       digest:
         description: The pushed image's digest (sha256:…)
@@ -49,12 +59,12 @@ on:
   workflow_dispatch:
     inputs:
       pi_legion_version:
-        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary and to set as /opt/legion/pi-legion's manifest version in the image
         type: string
         required: false
         default: ""
       pi_envoy_version:
-        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary
+        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary and to set as /opt/legion/pi-envoy's manifest version in the image
         type: string
         required: false
         default: ""
@@ -75,13 +85,15 @@ on:
 # copy of this file, so one that drops that `if:` gets those scopes too; its attestation is still
 # refused, because its certificate names `refs/pull/<n>/merge`, never `refs/heads/main`
 # (docs/kubernetes.md, "Pin by digest, never by tag").
+#
+# `actions: read` and `checks: write` are the scopes of the build's ci-ok report, which runs only on
+# ci.yaml's pull_request call; release.yaml's calls grant them too, since GitHub refuses a caller
+# that grants less than this block declares.
 permissions:
   contents: read
   packages: write # ghcr.io push
-
-# The image the build pushes and the attest job attests a digest of.
-env:
-  IMAGE: ghcr.io/sjawhar/legion-worker
+  actions: read
+  checks: write
 
 jobs:
   build:
@@ -113,10 +125,11 @@ jobs:
     # that fails closed.
     # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
     # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
-    # newest head's build, and ci.yaml's ci-ok then fails for that run. `gh run rerun` of the newest
-    # head's run restores it, so re-run an older head's run only after the newest head's build has
-    # completed. The job has no draft or closed `if:`: its only pull_request run is ci.yaml's call,
-    # which never runs on a draft (ci.yaml's `changes` skips it) and has no `closed` trigger.
+    # newest head's build, and ci.yaml's ci-ok then fails, or is never posted, for that run.
+    # `gh run rerun` of the newest head's run restores it, so re-run an older head's run only after
+    # the newest head's build has completed. The job has no draft or closed `if:`: its only
+    # pull_request run is ci.yaml's call, which never runs on a draft (ci.yaml's `changes` skips
+    # it) and has no `closed` trigger.
     concurrency:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -135,6 +148,23 @@ jobs:
           ref: ${{ env.BUILT_SHA }}
           # This job never pushes with git.
           persist-credentials: false
+
+      # The image this build pushes and whose digest attest attests, derived from
+      # $GITHUB_REPOSITORY rather than written here, so moving the repository to another owner or
+      # name moves the image with it (.github/scripts/repo-paths.sh). It is derived here, in the
+      # build job, and not once at the workflow level, because the attest job below holds
+      # `id-token` and `attestations: write` and so runs no script at all
+      # (.github/scripts/check-release-credentials.sh); it reads the repository from this job's
+      # `image` output, or from the caller's `image` input when this job skipped. $GITHUB_ENV
+      # gives the steps after this one the same `${IMAGE}` they always read.
+      - name: Derive the image repository
+        run: |
+          # Assigned first, never `echo "IMAGE=$(…)"`: a command substitution inside echo's
+          # arguments cannot fail the step, since echo exits 0 whatever the substitution did, so
+          # a refusal from the script would write an empty IMAGE and the job would go on until
+          # some later step failed on an empty image name, far from the cause.
+          image=$(.github/scripts/repo-paths.sh worker_image)
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
 
       # The sha- tag alone: release.yaml's worker_image_release adds the legion version tag to this
       # image's digest once publish has released that version, so a version tag still means
@@ -253,6 +283,25 @@ jobs:
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # ci.yaml's pull_request call only: this job's result, and ci-ok itself when this job is that
+      # run's last, from the step every ci.yaml job ends with. The build checked out the pull
+      # request's head, which may predate that step, so the workspace is first checked out again,
+      # .github only, at the commit the run itself checked out (github.sha), whose ci.yaml and report
+      # step the rest of the run reads. The image is pushed by now, so nothing reads the build's tree.
+      - if: always() && github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github
+          persist-credentials: false
+      - name: Report ci-ok when this is the run's last job
+        if: always() && github.event_name == 'pull_request'
+        uses: ./.github/actions/ci-ok-report
+        with:
+          job: worker-image
+          changes: ${{ inputs.ci-ok-changes }}
+          job-status: ${{ job.status }}
+
   # A GitHub artifact attestation of the digest the build pushed, stored with GitHub. A pull request
   # run publishes its head's sha- tag too, and a pull request can edit this workflow, so a tag alone
   # cannot say which run published an image. The attestation's Sigstore certificate carries this
@@ -272,6 +321,12 @@ jobs:
   # `--cert-identity …/worker-image.yaml@refs/heads/main`, `--source-ref refs/heads/main`) refuses
   # it. release.yaml's own attest-only call attests only the digest its build-only call pushed in
   # the same run. `!cancelled()` lets it run past the build job an attest-only call skips.
+  #
+  # The subject's repository is the build job's own `image` output, which that job derived with
+  # .github/scripts/repo-paths.sh; this job holds `id-token` and `attestations: write`, so it runs
+  # no script of its own to derive it. In an attest-only call the build job skipped and has no
+  # output, so the caller passes the `image` its earlier build call reported (release.yaml's
+  # worker_image_attest, from needs.worker_image.outputs.image) and that value wins here.
   attest:
     needs: build
     if: ${{ !cancelled() && github.event_name != 'pull_request' && !inputs.skip_attest && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.attest_digest != '')) }}
@@ -285,5 +340,5 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ env.IMAGE }}
+          subject-name: ${{ inputs.image || needs.build.outputs.image }}
           subject-digest: ${{ inputs.attest_digest || needs.build.outputs.digest }}

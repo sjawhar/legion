@@ -362,6 +362,28 @@ What each part is for:
   Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
   repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
   does any key it does not know.
+- **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
+  repository that moved: after a transfer GitHub's events name the new repository while every tree
+  Legion has already recorded names the old one.
+
+  ```yaml
+  repository_renames:
+    - from: <old-owner>/<name>
+      to: <new-owner>/<name>
+  ```
+
+  Both names are compared without case, wherever the daemon compares a repository name. The
+  equivalence is read-side only: no record is rewritten, and a tree keeps the repository name it
+  was recorded under for its whole life, so a pair must stay in the file for as long as any record
+  names the old repository. The loader refuses a pair whose two names are one repository, a
+  repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
+  owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
+  directory a worker reads is keyed by an owner and holds one installation's token; several
+  repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
+  counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
+  `legion start --check-config` prints one line
+  per configured pair, so you can read back what the daemon will treat as one repository before
+  the transfer.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes

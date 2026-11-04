@@ -164,6 +164,56 @@ test("an active or pulsed block is drawn on that block alone, through typing bef
   });
 });
 
+/** The `title` of each element the editor draws with `className`, in document order. */
+function drawnTitles(view: EditorView, className: string): (string | null)[] {
+  return Array.from(view.dom.querySelectorAll(`.${className}`), (element) =>
+    element.getAttribute("title")
+  );
+}
+
+test("block marks draw each block's classes and title, through typing, until replaced", async () => {
+  await withMarksEditor(
+    "First paragraph\n\nSecond paragraph\n\nThird paragraph",
+    ({ handle, view }) => {
+      const [first, second, third] = [0, 1, 2].map((index) => {
+        const id = blockIdOf(view.state.doc.child(index));
+        if (id === null) throw new Error(`paragraph ${index} has no block id`);
+        return id;
+      });
+      handle.setBlockMarks([
+        { blockId: first, className: "stale-mark", title: "A decision changed after it." },
+        { blockId: second, className: "changed-mark" },
+        { blockId: second, className: "stale-mark", title: "A decision changed after it." },
+      ]);
+      expect(drawn(view, "stale-mark")).toEqual(["First paragraph", "Second paragraph"]);
+      expect(drawn(view, "changed-mark")).toEqual(["Second paragraph"]);
+      expect(drawnTitles(view, "stale-mark")).toEqual([
+        "A decision changed after it.",
+        "A decision changed after it.",
+      ]);
+      // The marks are presentation: the document holds no class and no title of them.
+      expect(JSON.stringify(view.state.doc.toJSON())).not.toContain("stale-mark");
+
+      view.dispatch(view.state.tr.insertText("new ", 1));
+      expect(drawn(view, "stale-mark")).toEqual(["new First paragraph", "Second paragraph"]);
+
+      // Active and marked at once: both classes on the one block.
+      handle.setActiveBlocks([second]);
+      expect(drawn(view, "dispatch-block-active")).toEqual(["Second paragraph"]);
+      expect(drawn(view, "changed-mark")).toEqual(["Second paragraph"]);
+
+      handle.setBlockMarks([{ blockId: third, className: "changed-mark" }]);
+      expect(drawn(view, "stale-mark")).toEqual([]);
+      expect(drawn(view, "changed-mark")).toEqual(["Third paragraph"]);
+      expect(drawn(view, "dispatch-block-active")).toEqual(["Second paragraph"]);
+
+      handle.setBlockMarks([]);
+      expect(drawn(view, "changed-mark")).toEqual([]);
+      expect(drawnTitles(view, "dispatch-block-active")).toEqual([null]);
+    }
+  );
+});
+
 test("an active block stays drawn through an edit that opens or closes it", async () => {
   // "First paragraph" is the document's first block: its text ends at 16, the second block's
   // starts at 18.

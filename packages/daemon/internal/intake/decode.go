@@ -51,9 +51,10 @@ const serverStartedSubject = "notifications.dispatch.server.started"
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
 // repository is a nil Fact, whatever subject carried it. deploys are the project's deploy workflows
-// (ConsumerSpec.Deploys): a workflow run of any other workflow is a nil Fact. Dispatch's
+// (ConsumerSpec.Deploys): a workflow run of any other workflow is a nil Fact, its repository read
+// under the deployment's repository equivalence (renames, ConsumerSpec.Renames). Dispatch's
 // announcement of its fleet's build is matched before the issue subjects, which it is not one of.
-func decodeMessage(subject, project string, repositories []ghrepo.Repository, deploys []config.Deploy, data []byte) (decodedMessage, error) {
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -85,7 +86,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, unread, err = decodeGitHubFact(subject, repositories, deploys, envelope.Payload)
+		fact, unread, err = decodeGitHubFact(subject, repositories, deploys, renames, envelope.Payload)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
@@ -311,7 +312,8 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number, Mark: event.mark()}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number,
+			Mark: event.mark(), Actor: dispatch.Actor(event.Actor)}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`
@@ -403,6 +405,7 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		// comment_delivery), which joins its thread as comment.created does and carries the same
 		// ask_id, ask_state and ask_waiting_on. A comment on no ask is no fact.
 		var comment struct {
+			ID        string `json:"id"`
 			Ask       string `json:"ask_id"`
 			State     string `json:"ask_state"`
 			WaitingOn string `json:"ask_waiting_on"`
@@ -427,7 +430,8 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			*unread = append(*unread, fmt.Sprintf("ask_state %q disagrees with ask_waiting_on %q", comment.State, comment.WaitingOn))
 			return nil, nil
 		}
-		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor),
+			Mark: event.mark(), Comment: comment.ID}, nil
 	case "issue.claimed", "issue.released":
 		var payload struct {
 			Claim json.RawMessage `json:"claim"`
@@ -588,7 +592,7 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys []config.Deploy, payload string) (Fact, []string, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, payload string) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
 		return nil, nil, nil
@@ -596,7 +600,9 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys 
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
 	// a dot. Only the event of a repository GitHub intake hears (ConsumerSpec.Repositories, as
 	// SetRepositories changes them) is this daemon's, matched case-insensitively as GitHub matches
-	// owner and repository names, and its fact names the heard repository.
+	// owner and repository names, and its fact names the heard repository. The heard set already
+	// carries both names of a configured rename (the daemon's heardRepositories), so the match
+	// itself takes no equivalence.
 	repo, _ := rawString(raw, "repo")
 	at := slices.IndexFunc(repositories, func(heard ghrepo.Repository) bool { return strings.EqualFold(heard.String(), repo) })
 	if at < 0 {
@@ -619,7 +625,7 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys 
 	case "checks":
 		fact, err = decodeChecks(subject, repository, raw)
 	case "workflow":
-		fact = decodeWorkflowRun(repository, deploys, raw)
+		fact = decodeWorkflowRun(repository, deploys, renames, raw)
 	}
 	// Comments, and every other kind, route to the current role but do not change the durable
 	// workflow record.
@@ -767,12 +773,12 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 // a transaction, and a repository whose CI runs many workflows costs the daemon nothing for them. A
 // malformed run is acknowledged rather than poison: it can wake nothing, and the next run's
 // envelope is read on its own.
-func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, raw map[string]json.RawMessage) Fact {
+func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, raw map[string]json.RawMessage) Fact {
 	if action, _ := rawString(raw, "action"); action != "completed" {
 		return nil
 	}
 	path, _ := rawString(raw, "path")
-	if _, ok := DeployOf(deploys, repository.String(), path); !ok {
+	if _, ok := DeployOf(deploys, renames, repository.String(), path); !ok {
 		return nil
 	}
 	runID, ok := rawPositiveDecimal(raw, "run_id", 64)
@@ -790,13 +796,17 @@ func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, ra
 	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch}
 }
 
-// DeployOf is the deploy of deploys whose workflow a run of repo at path is: its repository is repo,
-// compared case-insensitively as GitHub compares names, and its workflow file is path exactly. A
-// project names a repository's workflow once (config's readDeploys), so at most one matches. It is
-// the one matching rule the decoder's filter and the workflow's wake (deployRunCompleted) share.
-func DeployOf(deploys []config.Deploy, repo, path string) (config.Deploy, bool) {
+// DeployOf is the deploy of deploys whose workflow a run of repo at path is: its repository is
+// repo, compared as renames compares two names — as GitHub compares names, without case, and a
+// configured rename's two names as one repository, so a `deploys:` entry naming the repository as
+// it was matches a run on the one it moved to — and its workflow file is path exactly. A project
+// names a repository's workflow once, the configured renames included (config's readDeploys and
+// checkDeployRenames, which refuses two entries a rename makes one repository), so at most one
+// matches. It is the one matching rule the decoder's filter and the workflow's wake
+// (deployRunCompleted) share.
+func DeployOf(deploys []config.Deploy, renames ghrepo.Renames, repo, path string) (config.Deploy, bool) {
 	at := slices.IndexFunc(deploys, func(deploy config.Deploy) bool {
-		return strings.EqualFold(deploy.Repo.String(), repo) && deploy.Workflow == path
+		return renames.Same(deploy.Repo.String(), repo) && deploy.Workflow == path
 	})
 	if at < 0 {
 		return config.Deploy{}, false

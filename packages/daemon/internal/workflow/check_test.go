@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -45,10 +46,17 @@ type checkRig struct {
 
 func newCheckRig(t *testing.T, builtFrom string) checkRig {
 	t.Helper()
+	return renamedCheckRig(t, builtFrom, ghrepo.Renames{})
+}
+
+// renamedCheckRig is newCheckRig under the deployment's repository equivalence renames
+// (Config.RepositoryRenames): the one line of Config a configured rename changes.
+func renamedCheckRig(t *testing.T, builtFrom string, renames ghrepo.Renames) checkRig {
+	t.Helper()
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, BuiltFrom: builtFrom, RepositoryRenames: renames, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }
@@ -301,6 +309,45 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	}
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
 		t.Fatalf("check_compare rows from a daemon built from no repository = %+v, want the one", got)
+	}
+}
+
+// A build is compared against an open check whose repository a configured rename pairs with the
+// one the daemon is built from (Config.BuiltFrom), from either side: the check of a tree recorded
+// before the transfer names the repository as it was while the daemon is built from the one it
+// moved to, and a tree recorded after it the other way round, and one build carries both their
+// merges. With no pair configured neither is the build's, as today, and a repository of neither
+// name is never the build's, pair or no pair.
+func TestABuildIsComparedAgainstAChecksRenamedRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name, builtFrom, repo string
+	}{
+		{name: "built from the repository as it was, the check recorded on the one it moved to", builtFrom: "sjawhar/legion", repo: "cybermonklabs/legion"},
+		{name: "built from the repository it moved to, the check recorded on the one it was", builtFrom: "cybermonklabs/legion", repo: "sjawhar/legion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("the pair configured", func(t *testing.T) {
+				rig := renamedCheckRig(t, tc.builtFrom, renamedLegion)
+				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
+				openRootCheck(t, rig, "LEGION-301", "acme/widgets", "main", 8)
+				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
+				compares := checkCompares(t, rig.pool, "LEGION-300")
+				if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f0000", OpenedAt: checkOpened}) {
+					t.Fatalf("check_compare rows of the check on %s = %+v, want one for look 1 of build b00f0000", tc.repo, compares)
+				}
+				if got := checkCompares(t, rig.pool, "LEGION-301"); len(got) != 0 {
+					t.Fatalf("check_compare rows of the acme/widgets check = %+v, want none: the pair widens nothing else", got)
+				}
+			})
+			t.Run("no pair configured", func(t *testing.T) {
+				rig := renamedCheckRig(t, tc.builtFrom, ghrepo.Renames{})
+				openRootCheck(t, rig, "LEGION-300", tc.repo, "main", 7)
+				rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
+				if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
+					t.Fatalf("check_compare rows of the check on %s = %+v, want none: it is another repository's", tc.repo, got)
+				}
+			})
+		})
 	}
 }
 
