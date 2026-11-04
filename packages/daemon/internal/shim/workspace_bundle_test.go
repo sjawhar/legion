@@ -18,13 +18,13 @@ import (
 // answers the size it refused, which is the reason the daemon records.
 func TestABundleOverTheReleasesBoundIsRefusedWithItsSize(t *testing.T) {
 	testbin.RequireJJFilters(t)
-	workspace := bundledWorkspace(t)
+	workspace, home := bundledWorkspace(t)
 
 	path := socketPath(t)
 	daemon := listen(t, path)
 	child := newOMP(t)
 	cfg := config(t, path, child)
-	cfg.Env = append(fixtureenv.Isolated(t.TempDir()), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+	cfg.Env = append(fixtureenv.Isolated(home), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 		"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "JJ_USER=tester", "JJ_EMAIL=tester@example.test")
 	run(t, cfg, newClock())
 	p := daemon.accept(t)
@@ -70,7 +70,7 @@ func TestABundleOverTheReleasesBoundIsRefusedWithItsSize(t *testing.T) {
 			t.Fatalf("the save left %s in the workspace", entry.Name())
 		}
 	}
-	if refs := jjGit(t, workspace, "for-each-ref", "--format=%(refname)", "refs/legion-bundle/"); refs != "" {
+	if refs := jjGit(t, home, workspace, "for-each-ref", "--format=%(refname)", "refs/legion-bundle/"); refs != "" {
 		t.Fatalf("the save left its temporary refs behind:\n%s", refs)
 	}
 }
@@ -93,8 +93,12 @@ func TestABundleOfNoWorkspaceIsRefusedByName(t *testing.T) {
 }
 
 // bundledWorkspace is a colocated jj workspace with one unpushed commit and a working-copy change
-// of its own: what a released pod's workspace holds, in miniature.
-func bundledWorkspace(t *testing.T) string {
+// of its own: what a released pod's workspace holds, in miniature. It answers the workspace and
+// the home every command of the fixture runs under, which is the home the shim under test is
+// given too (docs/testing.md, and shim_test.go's jjAs): the fixture and the code it exercises
+// read one configuration, and it is outside the workspace, whose every file this fixture bundles
+// and asserts on.
+func bundledWorkspace(t *testing.T) (workspace, home string) {
 	t.Helper()
 	for _, tool := range []string{"jj", "git"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -102,51 +106,55 @@ func bundledWorkspace(t *testing.T) string {
 		}
 	}
 	root := t.TempDir()
-	workspace := filepath.Join(root, "ws")
-	if err := os.Mkdir(workspace, 0o755); err != nil {
-		t.Fatal(err)
+	home = filepath.Join(root, "home")
+	workspace = filepath.Join(root, "ws")
+	for _, dir := range []string{home, workspace} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	jjGit(t, workspace, "init", "--quiet", "-b", "main", workspace)
+	jjGit(t, home, workspace, "init", "--quiet", "-b", "main", workspace)
 	if err := os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	jjGit(t, workspace, "add", "-A")
-	jjGit(t, workspace, "-c", "user.name=tester", "-c", "user.email=tester@example.test", "commit", "--quiet", "-m", "one")
-	jjRun(t, workspace, "git", "init", "--colocate", workspace)
-	jjRun(t, workspace, "new", "-R", workspace, "-m", "unpushed")
+	jjGit(t, home, workspace, "add", "-A")
+	jjGit(t, home, workspace, "-c", "user.name=tester", "-c", "user.email=tester@example.test", "commit", "--quiet", "-m", "one")
+	jjRun(t, home, workspace, "git", "init", "--colocate", workspace)
+	jjRun(t, home, workspace, "new", "-R", workspace, "-m", "unpushed")
 	if err := os.WriteFile(filepath.Join(workspace, "wip.txt"), []byte(strings.Repeat("work\n", 4096)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return workspace
+	return workspace, home
 }
 
 // jjRun runs one jj command in the workspace it reads, as every jj a test starts must
 // (docs/testing.md).
-func jjRun(t *testing.T, dir string, args ...string) string {
+func jjRun(t *testing.T, home, dir string, args ...string) string {
 	t.Helper()
-	return workspaceCommand(t, dir, append([]string{"jj"}, args...))
+	return workspaceCommand(t, home, dir, append([]string{"jj"}, args...))
 }
 
-func jjGit(t *testing.T, dir string, args ...string) string {
+func jjGit(t *testing.T, home, dir string, args ...string) string {
 	t.Helper()
-	return workspaceCommand(t, dir, append([]string{"git"}, args...))
+	return workspaceCommand(t, home, dir, append([]string{"git"}, args...))
 }
 
-// workspaceCommand runs one jj or git of a fixture's workspace under the same isolated
-// environment the rest of this package's fixtures use (fixtureenv.Isolated, as shim_test.go's
-// jjAs does), so no command of a test reads the git or jj configuration, the credentials or the
-// LEGION_ variables of whoever runs the tests — in a pod, of the role whose live workspace this
-// binary stands in. Isolated's own JJ_CONFIG names a file that does not exist, which is what
-// keeps the host's jj configuration out; the fixture writes none of its own.
+// workspaceCommand runs one jj or git of a fixture's workspace under the isolated environment
+// this package's fixtures use (fixtureenv.Isolated, as shim_test.go's jjAs does), so no command
+// of a test reads the git or jj configuration, the credentials or the LEGION_ variables of
+// whoever runs the tests — in a pod, of the role whose live workspace this binary stands in.
+// Isolated's own JJ_CONFIG names a file that does not exist, which is what keeps the host's jj
+// configuration out; the fixture writes none of its own.
 //
-// The home is a sibling of the workspace, never a directory inside it: this package's fixtures
-// bundle the workspace's unpushed work and assert on what the bundle holds, and a home under it
-// would put jj's and git's own files into the very change under test.
-func workspaceCommand(t *testing.T, dir string, args []string) string {
+// home is the fixture's, and the shim under test is given the same one, so the two read one
+// configuration (docs/testing.md). It is outside the workspace: this fixture bundles that
+// workspace's unpushed work and asserts on what the bundle holds, and a home under it would put
+// jj's and git's own files into the very change under test.
+func workspaceCommand(t *testing.T, home, dir string, args []string) string {
 	t.Helper()
 	command := exec.Command(args[0], args[1:]...)
 	command.Dir = dir
-	command.Env = append(fixtureenv.Isolated(filepath.Join(filepath.Dir(dir), "fixture-home")),
+	command.Env = append(fixtureenv.Isolated(home),
 		"JJ_USER=tester", "JJ_EMAIL=tester@example.test",
 		"GIT_AUTHOR_NAME=tester", "GIT_AUTHOR_EMAIL=tester@example.test",
 		"GIT_COMMITTER_NAME=tester", "GIT_COMMITTER_EMAIL=tester@example.test")
