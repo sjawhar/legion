@@ -284,6 +284,12 @@ registerText("success callout timestamp text", CALLOUT_SUCCESS_TIMESTAMP_TEXT, C
 registerText("quote body text on surface", QUOTE_BODY_TEXT, SURFACE);
 registerText("info callout title text", CALLOUT_INFO_TITLE_TEXT, CALLOUT_INFO_BG);
 registerText("inline warning text on surface", INLINE_WARNING_TEXT, SURFACE);
+/** The marks a pill paints over `SURFACE_MUTED`: a result's Pass and Fail, a check's state and
+ *  a requirement's gap each draw the pill's shape in their own colour (`pillShapeClassName`),
+ *  rather than stacking a colour after the pill's own muted one. */
+registerText("success text on surface-muted", SUCCESS_TEXT, SURFACE_MUTED);
+registerText("danger text on surface-muted", DANGER_TEXT, SURFACE_MUTED);
+registerText("inline warning text on surface-muted", INLINE_WARNING_TEXT, SURFACE_MUTED);
 /** `CALLOUT_INFO_BG` also backs the composer form and a selected margin card (`selectedCardBg`
  * reuses its exact shades under its own name), so primary, secondary, and stronger muted text
  * roles need contrast checks.

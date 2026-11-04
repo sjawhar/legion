@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
 	"github.com/jackc/pgx/v5"
@@ -60,28 +59,14 @@ func issueComponentsEqual(left, right model.IssueComponents) bool {
 }
 
 // issueAncestors is an issue event's ancestors: issue's parent chain, parent first up to the
-// root, [] for a root, which it answers without a query. The walk stops at parentDepthCap, as
-// every recursive issue walk does. issue is as loadIssue read it in q, so a nil Parent is a null
-// parent_key.
+// root, [] for a root, which it answers without a query. The walk is refs.IssueAncestors, the
+// server's one recursive ancestor query, bounded by parentDepthCap as every recursive issue walk
+// is. issue is as loadIssue read it in q, so a nil Parent is a null parent_key.
 func issueAncestors(ctx context.Context, q queryer, issue model.Issue) ([]string, error) {
-	ancestors := []string{}
 	if issue.Parent == nil {
-		return ancestors, nil
+		return []string{}, nil
 	}
-	if err := q.QueryRow(ctx, `
-		with recursive ancestors as (
-			select p.key, p.parent_key, 1 as depth
-			from issues i join issues p on p.key = i.parent_key where i.key = $1
-			union
-			select i.key, i.parent_key, a.depth + 1
-			from issues i join ancestors a on i.key = a.parent_key
-			where a.depth < $2
-		)
-		select coalesce(array_agg(key order by depth), '{}') from ancestors
-	`, issue.Key, parentDepthCap).Scan(&ancestors); err != nil {
-		return nil, fmt.Errorf("read the ancestors of %s: %w", issue.Key, err)
-	}
-	return ancestors, nil
+	return refs.IssueAncestors(ctx, q, issue.Key)
 }
 
 // newIssueEventPayload is the payload of an issue.created, issue.updated or issue.closed: the

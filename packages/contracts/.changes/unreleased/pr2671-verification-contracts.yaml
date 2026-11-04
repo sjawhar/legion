@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+  The block schema's own shape is declared once, as a JSON Schema in `schemas/block-schema.schema.json`, and generated into Go (`pmdoc/schema_generated.go`) and TypeScript (`src/block-schema.generated.ts`), which the editor and the dashboard import in place of their own copies.
+  A typed block's attributes keep the order `blocks.json` declares them in.
+  New shapes for the verification work: `DocumentRole`, `CheckBlock`, `CheckResult`, `CheckResultCurrency`, `IssueCheckResults`, `IssueCoverage`, `RequirementCoverage`, `ArtifactReviewKind`, `AskApprovalDocument`, and the `result.recorded` event.
+  Three new `dispatch` specs: `dispatch result`, `dispatch results` and `dispatch plan-approve`, and `dispatch request-approval` takes `include_verification`.

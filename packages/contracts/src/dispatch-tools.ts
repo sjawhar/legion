@@ -1221,7 +1221,7 @@ export const dispatchToolSpecs = [
       "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
-      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
+      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, a typed block's serves and needs under it, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
       "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
@@ -1239,7 +1239,7 @@ export const dispatchToolSpecs = [
       blocks: z
         .boolean()
         .describe(
-          "List the live document's blocks, with each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
+          "List the live document's blocks, with a typed block's serves and needs and each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
         )
         .optional(),
       ref: z
@@ -1285,6 +1285,12 @@ export const dispatchToolSpecs = [
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
+      "Refused 409 PLAN_APPROVED_BY_REVIEW on an issue's plan, which its plan review approves " +
+      "(dispatch plan-approve), never a person. " +
+      "On an issue's spec the answer ends with a `Coverage of <name>:` line naming each requirement " +
+      "the spec marks that no check serves, in any document of the issue or of its descendants, or saying " +
+      "the spec marks no requirements; a spec every requirement of which has a check gets no such line. It never " +
+      "names a missing plan task, and a gap refuses nothing. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1300,8 +1306,116 @@ export const dispatchToolSpecs = [
         .describe(
           `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
+      include_verification: z
+        .boolean()
+        .describe(
+          "Ask for the issue's Verification document in the same request, beside this one: one Inbox card names both at their current versions, and the answer records the human's review on each. 409 NO_VERIFICATION_DOCUMENT when the issue has no verification.md. Without it the request names this document alone and records nothing on the Verification document."
+        )
+        .optional(),
     }),
     validation: documentOwnerValidation(true),
+  },
+  {
+    name: "dispatch_plan_approve",
+    example: { issue: "DSP-1", version: 2 },
+    description:
+      "Record the plan review's approval of an issue's plan at the version it reviewed. A plan is " +
+      "approved by that review, never by a person: dispatch request-approval on a plan is refused " +
+      "409 PLAN_APPROVED_BY_REVIEW, so no plan approval ever reaches a human's Inbox. The approval " +
+      "is pinned to the version named, so a later plan version makes it stale and the review runs " +
+      "again. Refused 409 NOT_PLAN_DOCUMENT on any other document, the issue's spec included, and " +
+      "400 INVALID_REVIEW for a version the plan does not have. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      artifact: z
+        .string()
+        .describe("Plan document artifact id, slug, or filename; the issue's plan.md by default.")
+        .optional(),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe("The plan version the review read and approved."),
+    }),
+  },
+  {
+    name: "dispatch_result",
+    example: {
+      issue: "DSP-1",
+      check: "k1",
+      role: "implementer",
+      verdict: "pass",
+      commit: "1111111111111111111111111111111111111111",
+    },
+    description:
+      "Record one result of one check of an issue's Verification document, and print the " +
+      "pull-request body line it implies. The check is named by its block id, or, when two " +
+      "Verification documents in reach share that id, by its canonical reference " +
+      "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
+      "id no Verification document of the issue or of an issue above it holds is 400 " +
+      "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
+      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "a child's run of a parent's check appears under that check. A closed issue takes a " +
+      "result only for a check whose when is after_merge or default_branch — the production " +
+      "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +
+      "every other write. Write the printed line into the pull-request body unchanged: it is " +
+      "the one grammar every writer uses, and it carries no link to Dispatch. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      check: z
+        .string()
+        .describe(
+          "The check block's id, or its canonical reference dispatch://KEY/artifact/verification-md#b-<id> when the id is not unique among the issue's Verification document and those of the issues above it."
+        ),
+      role: z
+        .string({ max: 32 })
+        .describe(
+          "Who ran it: implementer, tester, reviewer. At most 32 characters of a-z and -, printed in the pull-request line."
+        ),
+      verdict: z.enum(["pass", "fail"]).describe("Whether the check passed."),
+      commit: z.string().describe("The 40-character lowercase hex commit the check ran at."),
+      surface: z.string().describe("Where a person reaches the change.").optional(),
+      run: z.string().describe("The command that proved it.").optional(),
+      observed: z.string().describe("What the command printed.").optional(),
+      negative_control: z
+        .string()
+        .describe("The deliberately broken input and the refusal seen.")
+        .optional(),
+      failed: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run failed; 0 by default.")
+        .optional(),
+      skipped: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run skipped; 0 by default.")
+        .optional(),
+      excluded: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run excluded; 0 by default.")
+        .optional(),
+      screenshots: z
+        .array(z.string())
+        .describe(
+          "dispatch:// references to image documents of this issue or of the check's issue."
+        )
+        .optional(),
+    }),
+  },
+  {
+    name: "dispatch_results",
+    example: { issue: "DSP-1" },
+    description:
+      "Print each check of an issue's Verification document with its latest result and whether " +
+      "that result is current. A result is current when it ran at the commit the work stands at " +
+      "— the head of an open pull request of the check's issue, the final head of a merged one, " +
+      "or, for an after_merge or default_branch check, a commit on the repository's default " +
+      "branch — and the check's words have not changed since; older otherwise, and unknown when " +
+      "Dispatch cannot read the repository. A push that moves the pull request's head makes a " +
+      "result older with no write of anyone's: record it again at the new head. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+    }),
   },
   {
     name: "dispatch_artifact",
@@ -1350,11 +1464,17 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " +
+      "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " +
+      "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " +
+      "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " +
       `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
-      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " +
+      "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " +
+      "and `Text:`, then those two sections; a pinned one adds " +
       "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
       "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +

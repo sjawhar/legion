@@ -67,7 +67,7 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 The controller hands it to the running tree whose code it is, and files a Legion root only when no
 tree owns that code. Either way it replies under your evidence comment with where the work went.
 You file nothing, and you wait for nothing. When the report issue is missing or closed, put the
-evidence in the message itself. A production check's `Production:` line then names the defect as
+evidence in the message itself. A production check's recorded result then names the defect as
 sent to the controller.
 
 ### When no controller takes it
@@ -117,7 +117,7 @@ of these that holds, so a person sees it and the controller finds it when it ret
    - Then post the evidence there and ask there, as [What the ask says](#what-the-ask-says)
      spells it. Say in your summary that you reopened or created it, so the controller knows.
 
-Name the ask in your summary, and in a production check's `Production:` line.
+Name the ask in your summary, and in the result a production check records.
 
 ## Where it goes
 
@@ -136,7 +136,7 @@ controller topic your `Legion addressing` line names (`expects_reply: none`), ho
 the issue it came from, the evidence and the decision it needs. The controller creates or reopens
 the report issue and opens the ask. When that publish fails because no controller holds the role,
 take step 2 or 3 of [When no controller takes it](#when-no-controller-takes-it). A production
-check's `Production:` line then names the finding as sent to the controller, or names the ask.
+check's recorded result then names the finding as sent to the controller, or names the ask.
 
 ## What the ask says
 

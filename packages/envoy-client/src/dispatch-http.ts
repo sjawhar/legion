@@ -8,11 +8,13 @@ import type {
   Artifact,
   ArtifactBlock,
   ArtifactReferences,
+  ArtifactReview,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
   AskRead,
+  CheckResultRecorded,
   ClaimedIssue,
   Comment,
   CommentRead,
@@ -34,6 +36,8 @@ import type {
   Handoff,
   HandoffSummary,
   Issue,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDetails,
   IssuePriority,
   IssueRead,
@@ -48,6 +52,7 @@ import type {
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RecordCheckResultInput,
   RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
@@ -1139,7 +1144,7 @@ export class DispatchClient {
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor; summary: string }
+    input: { actor: Actor; summary: string; include_verification?: boolean }
   ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
     const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
       "POST",
@@ -1147,6 +1152,36 @@ export class DispatchClient {
       input
     );
     return { ...answer.payload, recorded: answer.status === 201 };
+  }
+
+  /**
+   * Records the plan review's approval of a plan document at `version`. A plan is approved by its
+   * review, never by a person: `requestApproval` on a plan answers 409 `PLAN_APPROVED_BY_REVIEW`,
+   * and this answers 409 `NOT_PLAN_DOCUMENT` on any document whose role is not `plan`.
+   */
+  async planApprove(
+    artifactID: string,
+    input: { actor: Actor; version: number }
+  ): Promise<ArtifactReview> {
+    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "plan-reviews"], input);
+  }
+
+  /**
+   * Records one result of one check of an issue's Verification document, and answers it beside
+   * the pull-request body line it implies. `issue` is the issue the result is recorded on; the
+   * check may be one of an issue above it, and the result is recorded against that issue.
+   */
+  async recordResult(issue: string, input: RecordCheckResultInput): Promise<CheckResultRecorded> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "results"],
+      input
+    );
+  }
+
+  /** Each check of an issue's Verification document with every result recorded against it. */
+  async issueResults(issue: string): Promise<IssueCheckResults> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "results"]);
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {
@@ -1346,6 +1381,23 @@ export class DispatchClient {
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/artifacts/{slug}/blocks`: the blocks of one issue document named
+   *  by its slug (`spec` for the issue's spec), with no read of the issue to resolve its id. */
+  async issueArtifactBlocks(issue: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "issues", issue, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/projects/{key}/artifacts/{slug}/blocks`: the same for a project document. */
+  async projectArtifactBlocks(project: string, slug: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug, "blocks"]);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks, with
+   *  one `gaps` line per gap. Nothing is ever refused for a gap. */
+  async issueCoverage(key: string): Promise<IssueCoverage> {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(key), "coverage"]);
   }
 
   /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks with their ids, text,
