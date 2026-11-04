@@ -18,16 +18,50 @@ Before you write a design, a recommendation or options, start a fresh subagent a
 <The problem only.>
 
 From this problem alone, research and answer three questions. Do not ask for or propose a design.
-1. What is best practice here? Every practice that applies to this kind of problem, as a table with one row per practice and the columns `Practice | Source | Why it applies to this case`. Source is a page you read (the tools' own documentation, two or three well-regarded projects), as a link. Why it applies names the facts of this problem that make the practice matter here; "it is a best practice" is not a reason. Put every practice you name in any answer below in this table, a practice a fact of the setup rules out included, and leave no cell empty.
-2. What is the world-class answer? The criteria that make it the best answer for this problem.
+1. What is best practice here? Every practice that applies to this kind of problem.
+2. What is the world-class answer? The criteria that make it the best answer for this problem, and each action they ask for (a drill or a test included).
 3. Which fact of this setup, if any, rules out a practice or the world-class answer? A cost in time, money or effort is not such a fact.
+
+Answer as one numbered list, 1 to N, each number once at the very start of its line (`1. ` or `**1.** `, no indent, no heading): every practice, every action a world-class criterion asks for and every practice a fact rules out is its own item. Put nothing of substance outside the items, and number no other lines. Each item gives the practice or action, a source you read (the tools' own documentation, two or three well-regarded projects) as a link, and why it applies to this case: the facts of this problem that make it matter here; "it is a best practice" is not a reason. An item a fact rules out also names that fact.
 ```
 
 Wait for its answers in the same turn: in Claude Code, start it with `run_in_background: false`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive.
 
-Then write the practice table yourself, in a file or a Dispatch comment, before any action that states or leans to a design: text you write, a file, a subagent brief, or a command's arguments, such as an issue title, even in a dry run. The table is step 1's record. It has one row for each practice its answers name, in the world-class criteria and the ruling-out facts too and a practice they rule out included, with the same three columns. Fill each row from its answers: a link it gives as the source, and a reason that names a fact of this problem. For each row whose source is not a link or whose reason names no fact of this problem, ask a research subagent for the missing cell (in Claude Code, a fresh subagent given its answers, started with `run_in_background: false`), and fill it from that answer, never from your own words. Do not take any action that states or leans to a design while a row is incomplete: an incomplete row is not a reason to drop the practice. Below the table, copy its world-class answer and the ruling-out facts. Recording them does not end your turn: go on with the work.
+Then, before any action that states or leans to a design (text you write, a file, a subagent brief, or a command's arguments, such as an issue title, even in a dry run), save its whole answer, unchanged, to `research.md`, and write the practice table to `table.md`: one row per item number, `| # | Practice | Source | Why it applies to this case |`, filled from that item. For an item with no link or with no reason that names a fact of this problem, ask a research subagent for the missing part (in Claude Code, a fresh subagent given its answer, started with `run_in_background: false`), add its answer to `research.md`, and fill the row from it, never from your own words. Then run this check, and fix and run it again until it prints `OK`:
 
-Then start a second fresh subagent, and wait for it in the same turn, to check the table. Send it the research subagent's whole answer and your table, and ask it to name every practice, every action a world-class criterion asks for (a drill or a test included) and every practice a fact rules out that has no row whose practice cell states that same thing. Add a row for each one it names, filled from the research answers or a research subagent as above, and check the new table again until it names none: in omp, send it the new table and wait; in Claude Code, start a new fresh checker with `run_in_background: false` and send it the whole answer and the new table. Its answer "no missing rows" ends step 1; take no action that states or leans to a design before it.
+```bash
+python3 - research.md table.md <<'EOF'
+import re, sys
+research, table = (open(p).read() for p in sys.argv[1:3])
+bad, items, rows = [], [], {}
+for i, line in enumerate(research.splitlines(), 1):
+    m = re.match(r"(?:\*\*)?(\d+)[.)](?:\*\*)?\s+\S", line)
+    if m:
+        items.append(int(m.group(1)))
+    elif re.match(r"[\s>#*_+-]*\d+[*_]*[.)][*_]*(\s|$)", line) or line.lstrip().startswith("|"):
+        bad.append(f"research.md line {i} is numbered or a table but not a top-level item: {line.strip()[:60]}")
+if not items or items != list(range(1, len(items) + 1)):
+    bad.append(f"research.md numbers its items {items}, not once each from 1 to N")
+for line in table.splitlines():
+    cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+    if line.lstrip().startswith("|") and cells[0].isdigit():
+        rows.setdefault(int(cells[0]), []).append(cells)
+for n in sorted(set(items) | set(rows)):
+    r = rows.get(n, [])
+    if n not in items:
+        bad.append(f"row {n}: no such item in research.md")
+    elif len(r) != 1:
+        bad.append(f"item {n}: {len(r)} rows, not 1")
+    elif len(r[0]) != 4:
+        bad.append(f"item {n}: {len(r[0])} cells, not 4 (# | Practice | Source | Why)")
+    elif not all(c.strip("-–— ") for c in r[0][1:]):
+        bad.append(f"item {n}: empty practice, source or reason")
+print("\n".join(bad) or f"OK: {len(items)} items, {len(items)} rows")
+sys.exit(1 if bad else 0)
+EOF
+```
+
+Take no action that states or leans to a design before it prints `OK`. It checks only that every item has one complete row; that each source is real and each reason fits this case is yours to check while you fill the rows. Recording them does not end your turn: go on with the work.
 
 Then:
 
@@ -68,6 +102,7 @@ Follow-up:
 List each place it accepts less than that answer (a manual step, a workaround, a second system, a narrower scope, a temporary fix), and whether the proposal gives a fact of this case that requires it. End with WORLD-CLASS, or the findings.
 ```
 
+- Paste the proposal by code that reads its file into the message, never by retyping or summarizing it. Before you post anything about the proposal to a person (an ask, a comment, a message or the approval request), start one more fresh subagent and wait for it in the same turn (in Claude Code, with `run_in_background: false`): send it the proposal file's text as it was at each send, each follow-up message you sent the reviewers, and both reviewers' final replies with the times they arrived. Ask it whether each follow-up holds the whole file text, the practice table included, and whether both final replies arrived. Post nothing until it answers that both hold; send the whole text again and wait for the new verdicts for each thing it names.
 - Fix each finding from either review, or record it in the `### Best practice and world-class` entry with the fact or the cost that requires it. Never request approval while a finding is neither. A NOT WORLD-CLASS verdict whose findings are all fixed or recorded does not block the request.
 - Write the final round's verdicts of both reviewers in that entry, not in another section: for each reviewer, its own verdict, its model (such as `anthropic/claude-opus-5`, never its role or agent name), the id of its run (the agent id or session id your harness gave it; the two reviewers are two runs with two ids) and the clock time (UTC) its final answer arrived. Take that time from your harness at the moment the answer arrives: run `date -u` as your next action, write the time and the run id to a file at once, and copy the entry's times from that file. Never write the time later from your own clock, from the time you edit the entry, or from text the reviewer or you wrote. Name the verdicts in the approval request, so the approver sees that the reviews ran and what they found.
 - Run step 2 again before a later approval request when the design, the problem, its constraints or the evidence changed since the last review.
