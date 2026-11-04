@@ -685,7 +685,11 @@ type mpNATSSession struct {
 	holds map[string]chan struct{}
 	// gates holds, per session, the next frame's reply until its release closes, then answers it
 	// done (gate).
-	gates      map[string]mpFrameGate
+	gates map[string]mpFrameGate
+	// receipts holds, per session, the next frame whose "received" goes out at once and whose
+	// "done" waits until its release closes (receiveThenGate), as a plugin that took the frame and
+	// is still writing it.
+	receipts   map[string]mpFrameGate
 	failing    map[string]bool
 	failed     map[string]int
 	unexpected []string
@@ -694,7 +698,7 @@ type mpNATSSession struct {
 
 func mpStartNATSSessions(t *testing.T, uri string) *mpNATSSession {
 	t.Helper()
-	serving := &mpNATSSession{journal: mpJournalOf(t), holds: map[string]chan struct{}{}, gates: map[string]mpFrameGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
+	serving := &mpNATSSession{journal: mpJournalOf(t), holds: map[string]chan struct{}{}, gates: map[string]mpFrameGate{}, receipts: map[string]mpFrameGate{}, failing: map[string]bool{}, failed: map[string]int{}, stopping: make(chan struct{})}
 	conn, err := natsgo.Connect(uri, natsgo.Name("mp-sessions"))
 	if err != nil {
 		t.Fatalf("connect the row's sessions to NATS: %v", err)
@@ -738,11 +742,27 @@ func (s *mpNATSSession) receive(msg *natsgo.Msg) {
 	delete(s.holds, sessionID)
 	gate, gated := s.gates[sessionID]
 	delete(s.gates, sessionID)
+	receipt, received := s.receipts[sessionID]
+	delete(s.receipts, sessionID)
 	failing := s.failing[sessionID]
 	if failing && !hold {
 		s.failed[sessionID]++
 	}
 	s.mu.Unlock()
+	if received {
+		s.reply(msg, relayReplyReceived)
+		close(receipt.arrived)
+		select {
+		case <-receipt.release:
+		case <-s.stopping:
+			return
+		}
+		s.reply(msg, relayReplyDone)
+		taken := time.Now()
+		s.took(sessionID, event, taken)
+		s.journal.receipt(mpReceipt{session: sessionID, event: event, at: taken, answer: mpPromptTaken})
+		return
+	}
 	if gated {
 		close(gate.arrived)
 		select {
@@ -790,6 +810,17 @@ func (s *mpNATSSession) gate(sessionID string) (arrived <-chan struct{}, release
 	defer s.mu.Unlock()
 	g := mpFrameGate{arrived: make(chan struct{}), release: make(chan struct{})}
 	s.gates[sessionID] = g
+	return g.arrived, sync.OnceFunc(func() { close(g.release) })
+}
+
+// receiveThenGate answers the next frame to sessionID "received" at once and "done" only once
+// release runs, then records it taken: a session that has the frame and is still writing it. The
+// returned channel closes when that frame arrives.
+func (s *mpNATSSession) receiveThenGate(sessionID string) (arrived <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := mpFrameGate{arrived: make(chan struct{}), release: make(chan struct{})}
+	s.receipts[sessionID] = g
 	return g.arrived, sync.OnceFunc(func() { close(g.release) })
 }
 

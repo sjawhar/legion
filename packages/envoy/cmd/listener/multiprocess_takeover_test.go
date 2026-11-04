@@ -1124,3 +1124,95 @@ func TestTwoPodsSIGKILLWithAFrameUnansweredReachesTheSessionWithin15s(t *testing
 	serving.requireKnown(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
+
+// A frame whose "received" reply reached the stopping relay is not sent again by the pod that
+// takes over, however long the session then takes to write it. The session answers the frame
+// "received" at once - it has the frame - and "done" only once it has written it, here 2 s past
+// the stopping relay's settle grace. The pod is stopped in between. A received frame is not in
+// doubt: its session said it has it, and the frame's reply subscription heard that before the
+// term ended. The session must take the message exactly once. At fde2b129 the stopping relay
+// counts a frame as settled only on "done" (settleStoppedFrames waits for outstanding, which
+// "received" does not clear), logs this one in doubt when its grace ends, and the successor sends
+// it again: twice. The same holds when the term ends for a lost receive connection rather than a
+// stop (INFRA-557 tester's round 29, the architect's rule that a frame whose received reply
+// arrived never repeats).
+func TestTwoPodsARelayedFrameItsSessionReceivedIsNotSentAgainAfterAStop(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartNATSSessions(t, uri)
+	const sessionID = "ses_mp_relay_received_once"
+	a.registerNATS(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived, release := serving.receiveThenGate(sessionID)
+	t.Cleanup(release)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
+	}
+
+	a.Terminate(t)
+	time.Sleep(relaySettleGrace + 2*time.Second) // the session is still writing the frame it received
+	release()
+	a.WaitExit(t, "SIGTERM")
+	mpWaitActive(t, b, mpHardBound)
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
+}
+
+// A frame the session answers inside the stopping relay's settle grace reaches it once when the
+// term ends for a lost receive connection, not a stop. The session has the frame ("received") and
+// is writing it when the pod's receive connection alone is cut; the pod releases the lease after
+// leaseReceiveLost and its relays stop, while its session-consumer connection stays up. The
+// session answers "done" 200 ms after that release, inside relaySettleGrace, so the stopping relay
+// acks the message. The standby takes the released lease at its next poll - about 100 ms after the
+// release, well inside the grace - and must not restart the session's consumer until
+// relayFormerSettle has passed (lease.FormerSettleWait), or it is given the message again before
+// the ack lands. This is the one row that reads that wait: the stop rows reach the successor only
+// after the stopping pod has exited. With relayFormerSettle at zero it fails 3 of 3, the message
+// taken twice (INFRA-557 tester's round 29).
+func TestTwoPodsARelayedFrameAnsweredInsideTheGraceOfAReceiveLostReleaseIsTakenOnce(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartNATSSessions(t, uri)
+	const sessionID = "ses_mp_relay_recvlost_grace_once"
+	a.registerNATS(t, serving, sessionID)
+	publisher := mpConnectPublisher(t, uri)
+	warm := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
+
+	arrived, release := serving.receiveThenGate(sessionID)
+	t.Cleanup(release)
+	m := publisher.mustPublish(t, sessionID)
+	select {
+	case <-arrived:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never relayed %s to the session", a.instance, m.event)
+	}
+	t.Cleanup(a.lanes.cut(mpReceiveConnection(a.instance)))
+	mpEventually(t, mpHardBound, a.instance+" to release the lease for its lost receive connection", func() bool {
+		return mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`) != ""
+	})
+	time.Sleep(200 * time.Millisecond) // inside relaySettleGrace of the release
+	release()
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+
+	after := publisher.mustPublish(t, sessionID)
+	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOrder(t, []mpMessage{warm, m, after})
+}
