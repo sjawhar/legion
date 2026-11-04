@@ -237,10 +237,34 @@ test("a new item goes after the request's last message, and stays there on the r
   ).toEqual([...turn, later, grepCall, grepResult]);
 });
 
-test("a list that only lost items, or changed its header, keeps its place with the new text", async () => {
+// Every byte of a request before its last cache breakpoint has to repeat, or the provider writes
+// the whole conversation behind the changed byte to its cache again. The list's header names the
+// read that produced it ("As read at …; this read failed: …"), which differs from one request to
+// the next whenever a read crosses its 800 ms deadline, so a kept place keeps its bytes too.
+test("a list that only lost items, or changed its header, keeps its place and its bytes", async () => {
   const session = {};
   const cached = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
   const read = readingEach(LATER, LIST, cached);
+  await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
+    skill,
+    ask,
+    later,
+    readCall,
+    readResult,
+  ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
+  ).toEqual([skill, ask, later, readCall, readResult, grepCall, grepResult]);
+});
+
+// The one change that does move the list also re-renders it, so a new item is never hidden behind
+// the bytes a kept place holds.
+test("an item written after a kept place moves the list, with the text of that read", async () => {
+  const session = {};
+  const stale = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+  const read = readingEach(LIST, stale, LATER);
   await withSessionAnswers([skill, ask], requestOf(read, noBranch, session));
   const turn = [skill, ask, readCall, readResult];
   expect(await withSessionAnswers([...turn], requestOf(read, noBranch, session))).toEqual([
@@ -252,15 +276,7 @@ test("a list that only lost items, or changed its header, keeps its place with t
   ]);
   expect(
     await withSessionAnswers([...turn, grepCall, grepResult], requestOf(read, noBranch, session))
-  ).toEqual([
-    skill,
-    ask,
-    { role: "user", content: [{ type: "text", text: cached }], timestamp: 0 },
-    readCall,
-    readResult,
-    grepCall,
-    grepResult,
-  ]);
+  ).toEqual([...turn, grepCall, grepResult, later]);
 });
 
 test("a list whose place left the conversation, as a compaction leaves it, goes after the last message again", async () => {
