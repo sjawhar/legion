@@ -146,9 +146,9 @@ func (a *adoptionHarness) slotted(key string) bool {
 	return a.count(`select count(*) from slots where issue = $1`, key) > 0
 }
 
-// waiting is the keys of admission's waiting line, read as admission reads it (its judgeLine):
-// the mirror rows of every issue a blocker can hold first, so the line leaves out an issue one
-// of them holds where it stands, and the children-first judgement next.
+// waiting is the keys of admission's waiting line, read as admission reads it (the steps of
+// blockers.JudgeLine): the mirror rows of every issue a blocker can hold first, so the line
+// leaves out an issue one of them holds where it stands, and the children-first judgement next.
 func (a *adoptionHarness) waiting() []string {
 	a.t.Helper()
 	var keys []string
@@ -161,7 +161,7 @@ func (a *adoptionHarness) waiting() []string {
 		if err != nil {
 			return err
 		}
-		facts, err := record.ReadLineFacts(context.Background(), tx, a.records, "LEGION", issues)
+		facts, err := record.ReadLineFacts(context.Background(), tx, a.records, testProject, issues)
 		if err != nil {
 			return err
 		}

@@ -1,18 +1,21 @@
-//go:build e2e
-
 // The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go,
-// no_required_checks_live_test.go, child_adoption_live_test.go, ci_red_no_takeover_live_test.go and
-// handoff_records_live_test.go, whose scripts (scripts/e2e/merged-root-waits.sh,
-// scripts/e2e/no-required-checks.sh, scripts/e2e/child-adoption.sh, scripts/e2e/ci-red-no-takeover.sh
-// and scripts/e2e/handoff-records.sh) make the same run around them through
-// scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every such
-// proof needs before and around the daemon it boots: the configuration it boots with (newLiveProof
-// reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds workflowConfig
-// around it), the log file the script names, the stand-ins for Dispatch and Envoy's listener, the
-// store the daemon runs on, the seeding of a tree into the next free admission slots (admit), and
-// the reads and writes a step makes of them: the envelopes it publishes, the events it waits for
-// the daemon to take, and the notices an issue's architect is told (architectNotices). What the
-// driver keeps is what its own proof drives.
+// no_required_checks_live_test.go, child_adoption_live_test.go, ci_red_no_takeover_live_test.go,
+// handoff_records_live_test.go and admission_issues_live_test.go. The first five are built with
+// `-tags e2e` by scripts of their own (scripts/e2e/merged-root-waits.sh,
+// scripts/e2e/no-required-checks.sh, scripts/e2e/child-adoption.sh,
+// scripts/e2e/ci-red-no-takeover.sh and scripts/e2e/handoff-records.sh), which make the same run
+// around them through scripts/e2e/lib/live-daemon-proof.sh; the sixth runs in the ordinary
+// `go test ./internal/daemon/` on the broker that package's other tests take (newLiveProofOn over
+// workflowNATS), which is why this file carries no build tag of its own.
+//
+// A driver embeds liveProof, which holds what every such proof needs before and around the daemon
+// it boots: the configuration it boots with (newLiveProof reads the broker LEGION_E2E_NATS_URL
+// names, skips when it names none, and builds workflowConfig around it), the log file the script
+// names, the stand-ins for Dispatch and Envoy's listener, the store the daemon runs on, the
+// seeding of a tree into the next free admission slots (admit), and the reads and writes a step
+// makes of them: the envelopes it publishes, the events it waits for the daemon to take, and the
+// notices an issue's architect is told (architectNotices). What the driver keeps is what its own
+// proof drives.
 package daemon
 
 import (
@@ -79,18 +82,24 @@ type liveProof struct {
 	project string
 }
 
-// newLiveProof readies workflowConfig for a driver to seed and boot: Dispatch and Envoy's listener
-// answered by the run's own stand-ins, the stream the daemon's intake consumes on the broker
-// liveNATSURLEnv names, which boot refuses to run without, and the store opened and migrated. With
-// no broker named, the test skips, naming script, the driver's own script that starts one. A
-// driver whose proof needs more of the configuration sets it on cfg before it boots: nothing here
-// reads more of it than the project and the store.
+// newLiveProof is newLiveProofOn over the broker liveNATSURLEnv names, which boot refuses to run
+// without. With no broker named, the test skips, naming script, the driver's own script that
+// starts one: a proof whose script owns a nats-server of its own is driven by that script alone.
 func newLiveProof(t *testing.T, script string) liveProof {
 	t.Helper()
 	natsURL := os.Getenv(liveNATSURLEnv)
 	if natsURL == "" {
 		t.Skipf("%s is unset, so there is no broker to drive the daemon's intake through; %s starts a nats-server and sets it", liveNATSURLEnv, script)
 	}
+	return newLiveProofOn(t, natsURL)
+}
+
+// newLiveProofOn readies workflowConfig over natsURL for a driver to seed and boot: Dispatch and
+// Envoy's listener answered by the run's own stand-ins, the stream the daemon's intake consumes,
+// and the store opened and migrated. A driver whose proof needs more of the configuration sets it
+// on cfg before it boots: nothing here reads more of it than the project and the store.
+func newLiveProofOn(t *testing.T, natsURL string) liveProof {
+	t.Helper()
 	cfg := workflowConfig(t, natsURL)
 	p := liveProof{t: t, cfg: cfg, board: newLiveDispatch(t, cfg.Project), notices: newNoticeListener(), records: record.NewStore()}
 	dispatchServer := httptest.NewServer(p.board)

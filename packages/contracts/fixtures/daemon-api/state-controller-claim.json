@@ -15,6 +15,11 @@
       "LEGION-210",
       "LEGION-211"
     ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-211"
+    ],
     "blocked": [
       {
         "issue": "LEGION-209",
@@ -36,6 +41,7 @@
       "generation": 1,
       "phase": "admitted",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -83,6 +89,7 @@
       "generation": 1,
       "phase": "admitted",
       "status": "todo",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {}
@@ -92,6 +99,7 @@
       "generation": 1,
       "phase": "admitted",
       "status": "todo",
+      "tree": "LEGION-210",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {}
@@ -101,6 +109,7 @@
       "generation": 2,
       "phase": "implementing",
       "status": "todo",
+      "tree": "LEGION-211",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {}

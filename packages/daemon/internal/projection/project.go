@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -101,6 +102,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			Generation:    issue.Generation,
 			Phase:         issue.Phase,
 			Status:        issue.Status,
+			Tree:          issue.Tree,
 			Repo:          issue.Repo,
 			DefaultBranch: issue.DefaultBranch,
 			Workers:       map[claim.Role]api.PhaseView{},
@@ -215,30 +217,23 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		return api.State{}, err
 	}
 	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it
-	// judges wait on, read in this transaction's snapshot like every other fact here. The rows
-	// of every issue a blocker can hold come before the line, because the line leaves out an
-	// issue whose first phase one of them holds and cannot judge that itself
-	// (record.LineFacts.Held); the children-first wait is read the same way and for the same
-	// reason (record.LineFacts.ChildWaits, workflow.ChildWaitsOf), and is judged here rather
-	// than read from anywhere, since the daemon stores it nowhere; the roots the line then
-	// names are read after it, since only the line can say which they are. The deciders' own
-	// judgement (blockers.Blocked) then names exactly the roots admission skips, the issues it
-	// holds back and the parents whose children go first.
-	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, nil))
+	// judges wait on, read in this transaction's snapshot like every other fact here, through the
+	// one judgement admission itself promotes from (blockers.JudgeLine): the rows of every issue
+	// a blocker can hold, the children-first wait, the line those two leave, and the rows of the
+	// issues the line names. The deciders' own judgement (blockers.Blocked) then names exactly
+	// the roots admission skips, the issues it holds back and the parents whose children go
+	// first.
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, s, project, issues, slots, facts, nil)
 	if err != nil {
 		return api.State{}, err
 	}
-	facts.Held = blockers.HeldIssues(rows, issues)
-	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, s, project, issues, facts.Gates); err != nil {
-		return api.State{}, err
-	}
-	waiting := record.WaitingIssues(record.Waiting(issues, slots, facts))
-	named, err := blockers.Load(ctx, tx, s, project, blockers.Judged(nil, waiting))
-	if err != nil {
-		return api.State{}, err
-	}
-	maps.Copy(rows, named)
+	waiting := record.WaitingIssues(line)
 	projected.Admission.Active = active
+	// The roots of the live trees, which no slot says any more: a slot counts one issue at work,
+	// so a running tree holds none while its root waits for its children and they wait for a
+	// slot. The pass's own facts already name every lifecycle, so this costs no further read.
+	trees := record.LiveRoots(issues, facts)
+	projected.Admission.Trees = slices.Sorted(maps.Keys(trees))
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key

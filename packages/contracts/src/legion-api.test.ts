@@ -464,7 +464,8 @@ test("a field the Go shape requires cannot be dropped", () => {
 // nobody has finished — a child held at `admitted` and a waiting root alike — by issue key, each
 // with the keys it waits on, among them keys the state's `issues` does not record. `blocked` is
 // required, so a daemon older than the plugin cannot leave it out, and `waiting` keeps its own
-// meaning beside it: the roots' waiting line.
+// meaning beside it: the admission line, which since contract 47 carries children as well as
+// roots.
 test("the state golden names what every blocked issue waits on", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -480,6 +481,33 @@ test("the state golden names what every blocked issue waits on", () => {
 
   const malformed = fixture("state.json") as { admission: { blocked: unknown[] } };
   malformed.admission.blocked = [{ issue: "LEGION-209" }];
+  expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
+});
+
+// Contract 47: the cap counts the issues at work, so `active` and `waiting` name issues of any
+// depth and say nothing about which trees run. `trees` says it instead — the root of every live
+// tree, required, so a daemon older than the plugin cannot leave the controller reading `active`
+// as the running trees — and each issue's `tree` names its own root, so a child is told from a
+// root. The computed golden carries a child: LEGION-209 stands in LEGION-208's tree, and all
+// three live trees are named while one issue alone holds a slot.
+test("the state names the live trees and each issue's own tree", () => {
+  const state = LegionStateResponse.parse(fixture("state-controller-claim.json"));
+
+  expect(state.admission.active).toEqual(["LEGION-208"]);
+  expect(state.admission.trees).toEqual(["LEGION-208", "LEGION-210", "LEGION-211"]);
+  expect(state.issues["LEGION-209"]?.tree).toBe("LEGION-208");
+  expect(state.issues["LEGION-208"]?.tree).toBe("LEGION-208");
+
+  const dropped = fixture("state.json") as { admission: Record<string, unknown> };
+  delete dropped.admission.trees;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+
+  const malformed = fixture("state.json") as { issues: Record<string, { tree?: unknown }> };
+  const issue = malformed.issues["LEGION-208"];
+  if (issue === undefined) {
+    throw new Error("state fixture lacks LEGION-208");
+  }
+  issue.tree = "not an issue key";
   expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
 });
 

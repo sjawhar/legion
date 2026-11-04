@@ -38,6 +38,11 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this 
 // LEGION-210, behind one the daemon has never observed and so cannot call finished. LEGION-211
 // waits in the same line on an issue of its own, and is in neither `blocked` nor any judgement:
 // a root carrying a run is work already under way.
+//
+// It carries the trees too (dispatch://INFRA-980): LEGION-208's lifecycle stands open under the
+// workflow, and the two roots waiting in the line are live trees of their own, so `trees` names
+// three roots while one issue alone holds a slot — which is the reading `active` can no longer
+// give. Each issue's `tree` names its root, so the child LEGION-209 is told from the three roots.
 func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	const issue = "LEGION-208"
 	architect, err := claim.NewToken("legion", issue, claim.RoleArchitect)
@@ -55,6 +60,9 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
+		// The tree the architect runs stands open under the workflow, which is what makes it a
+		// live tree now that its slot no longer says so.
+		lifecycles: []string{issue},
 		mirror: []record.DispatchIssueRow{
 			{Key: issue, Project: "LEGION", Status: "in_progress", Blockers: []string{}, Seq: 4},
 			{Key: "LEGION-209", Project: "LEGION", Status: "todo", Blockers: []string{"LEGION-300"}, Seq: 5},
