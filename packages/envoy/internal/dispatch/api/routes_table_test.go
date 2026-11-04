@@ -105,7 +105,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 159
+	const registeredRoutes = 161
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -124,7 +124,7 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has no handler", key)
 		}
 		switch route.Auth {
-		case authPublic, authAny, authHuman, authBearer:
+		case authPublic, authAny, authHuman, authBearer, authOwnInbox:
 		default:
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
@@ -236,7 +236,7 @@ func TestRoutesTableAuthCellsMatchHandlers(t *testing.T) {
 				expectRefused(t, route, "anonymous")
 				expectAdmitted(t, route, "cookie")
 				expectAdmitted(t, route, "bearer")
-			case authHuman:
+			case authHuman, authOwnInbox:
 				expectRefused(t, route, "anonymous")
 				expectAdmitted(t, route, "cookie")
 				expectRefused(t, route, "bearer")

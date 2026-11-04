@@ -119,7 +119,8 @@ func Census(ctx context.Context, pool *store.Pool, since time.Time) (DeliveryCen
 	actual := map[node]map[recipient]bool{}
 	rows, err = tx.Query(ctx, censusSources+`
 		select g.from_kind, g.from_id, g.to_kind, g.to_id from `+refs.AllEdgesSQL+` g
-		join sources s on s.kind = g.from_kind and s.id = g.from_id where g.kind = 'delivered_to'`, since)
+		join sources s on s.kind = g.from_kind and s.id = g.from_id
+		where g.kind = 'delivered_to' and g.to_kind in ('session', 'role')`, since)
 	if err != nil {
 		return report, fmt.Errorf("census graph: %w", err)
 	}
