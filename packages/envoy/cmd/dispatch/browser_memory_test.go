@@ -1027,6 +1027,14 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				left = append(left, opened.room)
 				opened.leave()
 			}
+			// Each of those rooms is the budget's to close only once the server has forgotten its
+			// browser, which the drive waits for before it asks the budget for a room one of them
+			// has to be closed for (requireBrowserForgotten): the admissions below are the ones the
+			// budget is short for, and an admission that meets a departure still settling waits for
+			// it and is refused where it outlasts the admission's own wait.
+			for _, room := range left {
+				requireBrowserForgotten(t, server, room, 1)
+			}
 			// Then more who stay, until one is refused, which none is while a room whose browser
 			// went is still charged: each admission the budget is short for waits for the close of
 			// one of them.
@@ -1047,24 +1055,30 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				break
 			}
 			// A browser that stayed leaves just before the next asks: that admission waits for the
-			// leaving browser's room to settle and be closed, and is admitted into it. The server
-			// hears of a departure only when ygo reports it, which it does at the end of the
-			// peer's teardown - after it has taken the peer out of the room and flushed the room's
+			// room it left to be closed, and is admitted into it. A socket's close is not the end
+			// of its browser's departure. ygo reports the departure at the end of the peer's
+			// teardown - after it has taken the peer out of the room and flushed the room's
 			// pending updates to the store (sjawhar/ygo v1.54.1-sami.3,
-			// provider/websocket/peer.go:517-663) - and that report is what marks the room's
-			// browsers departed (settleLastPeer, departedPeers). A socket cannot observe that
-			// window from outside, and inside it the room still looks held by a live browser, so a
-			// sweep leaves nothing pending and refuses the admission at once (roomBudget.await):
-			// the drive therefore holds the next socket inside the server for a second, which is
-			// orders of magnitude past that report, measured at 1.6 to 2.7 ms. The hold costs the
-			// admission nothing of the room it waits for: while no admission waits on the budget
-			// and the charges are within its limit, nothing closes a room (Service.unlockState),
-			// so the room the browser left is still the budget's to close when the hold ends.
+			// provider/websocket/peer.go:517-663, OnLastPeer) - that report runs the settlement
+			// the room owes inside the teardown (settleLastPeer), and only once it returns does
+			// the socket's handler forget the browser (removeConnection), which is what empties
+			// the room's connected set and leaves the room unused (unusedLocked) for the budget to
+			// close. Until then the room is charged and no sweep can close it, so an admission
+			// placed inside that window waits for it and is refused where the window outlasts the
+			// wait the admission has (admissionWait, the settle delay and
+			// admissionFlushAllowance): the settlement of a mebibyte of prose took 10 to 20 s here
+			// with the pod's rooms full and two processors to share, against the 10 s of that
+			// wait. The drive therefore waits for the server's own report that the socket has
+			// ended (requireBrowserForgotten) rather than for a hold of its own, and asks only
+			// then. The wait costs the admission nothing of the room it waits for: while no
+			// admission waits on the budget and the charges are within its limit, nothing closes a
+			// room (Service.unlockState), so the room the browser left is still the budget's to
+			// close when the next browser asks for one.
 			leaving := stayed[len(stayed)-1]
 			stayed = stayed[:len(stayed)-1]
 			left = append(left, leaving.room)
-			server.holdNextAdmission(t, fleet.copies[next], time.Second)
 			leaving.leave()
+			requireBrowserForgotten(t, server, leaving.room, 1)
 			opened, refused := admit(t)
 			if refused != nil {
 				t.Fatalf("the browser asking just after another left was refused (%v), want it admitted once the room that browser left was closed", refused)
@@ -3596,22 +3610,6 @@ func (p *memoryServer) roomLive(t *testing.T, artifactID string) bool {
 	return *read.Live
 }
 
-// holdNextAdmission makes the server hold the next socket to the document for wait before it
-// weighs the room budget (docs.Service.HoldNextAdmissionForTest), so a drive can place an
-// admission after work of the server's own that the socket cannot observe. The hold is taken by
-// the next socket to that document and by no other.
-func (p *memoryServer) holdNextAdmission(t *testing.T, artifactID string, wait time.Duration) {
-	t.Helper()
-	body, err := json.Marshal(map[string]int64{"ms": wait.Milliseconds()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	answer := p.send(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/_test/hold-admission", "application/json", strings.NewReader(string(body)), http.Header{"X-Dispatch-User": {"alice"}})
-	if answer.status != http.StatusNoContent {
-		t.Fatalf("holding the next socket to document %s for %s: %d %.300s, want 204", artifactID, wait, answer.status, answer.body)
-	}
-}
-
 // requireRoomAbsent fails the test unless the server says the document is not live (roomLive).
 func requireRoomAbsent(t *testing.T, server *memoryServer, artifactID, what string) {
 	t.Helper()
@@ -3946,6 +3944,35 @@ func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []bu
 		closes := slices.DeleteFunc(budgetCloses(t, server), func(made budgetClose) bool { return !slices.Contains(rooms, made.room) })
 		if len(closes) >= want || time.Now().After(deadline) {
 			return closes
+		}
+	}
+}
+
+// documentSocketsEnded is how many of room's document sockets the server has reported ended: its
+// access log holds one line for each (accesslog.Message), written in the wrapper's defer once the
+// handler it wraps has returned (accesslog.Handler), which is after that handler has forgotten the
+// browser (docs.Service.ServeHTTP, removeConnection). A refused browser's socket is one of them,
+// since the refusal completes the upgrade only to close it (refuseOverRoomBudget).
+func documentSocketsEnded(server *memoryServer, room string) int {
+	return strings.Count(server.output.String(), `msg="dispatch: request" method=GET route=/ws/doc/{room} path=/ws/doc/`+room+" ")
+}
+
+// requireBrowserForgotten waits for the server's report that want of room's document sockets have
+// ended (documentSocketsEnded), which is the end of their browsers' departures and not the socket's
+// close: ygo reports a departure at the end of the peer's teardown, the report runs the room's
+// settlement there (settleLastPeer), and the handler forgets the browser once that returns
+// (removeConnection), which is what leaves the room unused for the budget to close (unusedLocked).
+// A drive that means "the room this browser left is the budget's to close" waits for this rather
+// than for a hold of its own: a mebibyte's settlement took 10 to 20 s here with the pod's rooms
+// full, where the budget's own wait for it is 10 s (admissionWait), so an admission placed inside
+// that window is refused however long the hold before it was.
+func requireBrowserForgotten(t *testing.T, server *memoryServer, room string, want int) {
+	t.Helper()
+	for deadline := time.Now().Add(browserAnswerWithin); ; time.Sleep(100 * time.Millisecond) {
+		if ended := documentSocketsEnded(server, room); ended >= want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the server reported %d of %s's %d document sockets ended within %s, want its browsers' departures over:\n%s", ended, room, want, browserAnswerWithin, server.output.tail())
 		}
 	}
 }
