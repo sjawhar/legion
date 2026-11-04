@@ -1,5 +1,11 @@
 # Changelog
 
+## [29.3.0] - 2026-11-04
+
+### Changed
+
+- A read-only GitHub App narrowing (`--github-read-only`, the API's `read_only`) now also holds `pull_requests: read`, so a read-only token can read pull requests, as the Legion daemon's own read-only token does. An App without the Pull requests permission now gets `NARROWING_REFUSED` for a read-only narrowing.
+
 ## [29.2.0] - 2026-11-04
 
 ### Changed
