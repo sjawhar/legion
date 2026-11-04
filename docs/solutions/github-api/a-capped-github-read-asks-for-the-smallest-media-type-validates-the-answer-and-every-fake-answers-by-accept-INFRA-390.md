@@ -41,7 +41,7 @@ related_issues:
 
 ## Evidence
 
-- On sjawhar/legion `scratch/infra-390-large-head` (320 files of about 7 KB), the JSON answer was
+- On cybermonklabs/legion `scratch/infra-390-large-head` (320 files of about 7 KB), the JSON answer was
   1,239,400 bytes. Before the fix, `Ref` failed with `GitHub response body exceeds the
   1048576-byte limit`. Under the SHA media type, the tester's proxy logged `-> 200 40 bytes`.
   This is the second failure from the same cap. `delivery/reconcile_volume_test.go` records the

@@ -14,7 +14,7 @@ ENVEOF
         cat > /etc/envoy/watchdog.json << 'CFGEOF'
 {
   "container_name": "envoy-listener",
-  "image": "ghcr.io/sjawhar/legion/envoy:example",
+  "image": "ghcr.io/cybermonklabs/legion/envoy:example",
   "env_file": "/etc/envoy/listener.env",
   "network_mode": "host",
   "healthcheck_cmd": "curl -sf http://127.0.0.1:9020/healthz"

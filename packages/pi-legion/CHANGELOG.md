@@ -3,6 +3,12 @@
 `@sjawhar/pi-legion` was split from `@sjawhar/pi-legion-envoy` 7.x (LEGION-247). Every release
 before the split, and the Envoy plugin's releases after it, are in `packages/pi-envoy/CHANGELOG.md`.
 
+## [18.3.0] - 2026-11-04
+
+### Changed
+
+- The package `repository.url`, which is the repository link on its npm page, names `cybermonklabs/legion`.
+
 ## [18.2.0] - 2026-11-04
 
 ### Changed

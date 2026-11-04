@@ -45,7 +45,7 @@ whole list: earlier phases' commits are legitimately authored by their own role'
   `git config`): `--config` outranks the pane's identity and puts the wrong App on your commits,
   and the repository-scoped jj config is one file shared by every issue workspace of the clone.
 - A wrong identity on your own commit (the other App, or none) is a pane-environment problem:
-  report it to the architect, never pin it (sjawhar/legion
+  report it to the architect, never pin it (cybermonklabs/legion
   `docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
 - Another role's commit with you as committer, which you did not rewrite under the guard in
   *Rewriting pushed commits* (`skill://legion-worker/references/conflicts-and-rewrites.md`), means

@@ -154,7 +154,7 @@ func responderEvent(responding bool) []byte {
 // frame to each). Whether this deployment's relay takes frames from a test hook at all is judged
 // here, on the process the call reached.
 func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if _, ok := s.actingPerson(w, r); !ok {
 		return
 	}
 	if _, ok := s.deps.AgentStream.(*agentstream.Memory); !ok {

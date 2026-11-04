@@ -596,6 +596,12 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		// write nothing judged, so the table is refused rather than mounted (project_scope.go).
 		panic("api.Register: the route table holds a mutating row the project-scope check cannot decide: " + strings.Join(undecidable, "; "))
 	}
+	if unmounted := scopedRoutesNotMounted(); len(unmounted) > 0 {
+		// A scope named on a route nothing serves is a scope nothing enforces — a row renamed or
+		// deleted and its entry left behind — so the table is refused rather than mounted
+		// (routeScopes).
+		panic("api.Register: the route table's scope map names a route the table does not mount: " + strings.Join(unmounted, "; "))
+	}
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
@@ -615,6 +621,16 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
+		if len(route.OAuthScopes) > 0 {
+			// Ahead of the keyed layer and the project and session checks, so the row's own
+			// scopes are the first thing a request is held to: a credential that holds none is
+			// told so rather than told its write belongs to another project or another session,
+			// and its refusal claims no idempotency key, so the person who ticks the scope back
+			// is not answered the stored refusal under the same key. It is inside the drain, so
+			// a client that asked to be told to continue is handled as it is for every other
+			// early answer.
+			handler = s.gateRouteScopes(route.OAuthScopes, handler)
+		}
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
 			//
@@ -698,6 +714,11 @@ type apiError struct {
 	// that carries none. Only a refusal that knows when the caller may come back sets it
 	// (brokerTokenActor's 429); writeHandlerError writes the header.
 	retryAfter int
+	// scope is the OAuth scope a missing-scope refusal names, and is empty for every other
+	// refusal. Only missingScopeError sets it; writeHandlerError writes the challenge header
+	// from it, so a refusal a handler returns as an error is the same answer refuseMissingScope
+	// writes directly.
+	scope string
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -780,7 +801,9 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		}
 		if auth.MatchesSharedAgentToken(r, token, s.deps.AgentTokens) {
 			accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
-			return model.Actor{}, false, nil
+			// A credential that holds no scope, not the absence of one: the deployment's one
+			// shared token is nobody's, so it acts as no person.
+			return model.Actor{Credential: scopelessCredential}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
 			return s.serviceTokenActor(r, token)
@@ -803,8 +826,21 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	accesslog.Note(r.Context(), accesslog.KindUser, login)
-	return model.Actor{Kind: "user", ID: login}, true, nil
+	// A person at a browser is the person, so their cookie holds every scope and names no agent
+	// that acted for them.
+	return model.Actor{Kind: "user", ID: login, Credential: personCredential}, true, nil
 }
+
+// The two credentials every request of their kind shares. Each is a fact of the deployment
+// rather than of one request — a browser's cookie holds both scopes, and the shared token and a
+// service-account token hold none — and the cookie's is on the dashboard's hottest path, so
+// allocating either per request would be waste. Nothing writes a Credential or appends to its
+// Scopes: Holds reads, actingPerson copies the slice header onto the act it records, and
+// tokenScopes builds a set of its own.
+var (
+	scopelessCredential = &model.Credential{}
+	personCredential    = &model.Credential{Scopes: model.Scopes}
+)
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
 // projected service-account token. A rejected token is a 401 of its own: it
@@ -830,18 +866,26 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 			"service-account token rejected (%s)", reason)
 	}
 	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
-	return model.Actor{Service: &claims.Subject}, false, nil
+	// A credential that holds no scope, not the absence of one: a pod's projected token proves a
+	// workload and no person, so it acts as nobody.
+	return model.Actor{Service: &claims.Subject, Credential: scopelessCredential}, false, nil
 }
 
+// actorFrom is the actor a write records: the caller optionalActor resolved, or, for a bearer
+// that proves no session of its own, the session its body names. The request's credential stops
+// here (model.Actor.Recorded): a handler stores this actor and compares it with a stored one,
+// which carries none.
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {
 		return model.Actor{}, err
 	}
-	if present {
-		return actor, nil
+	if !present {
+		if actor, err = bearerSessionActor(r, actor, supplied); err != nil {
+			return model.Actor{}, err
+		}
 	}
-	return bearerSessionActor(r, actor, supplied)
+	return actor.Recorded(), nil
 }
 
 // bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
@@ -866,7 +910,9 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 			return model.Actor{}, errorf(http.StatusForbidden, "ACTOR_SESSION_MISMATCH",
 				"this request's credential acts for session %s; its actor names another writer", authenticated.ID)
 		}
-		actor := authenticated
+		// Recorded: the actor a handler writes and compares carries no credential, as a stored
+		// actor decoded from JSON carries none (model.Actor.Recorded).
+		actor := authenticated.Recorded()
 		if supplied != nil {
 			actor.Origin = supplied.Origin
 		}
@@ -883,6 +929,9 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 		Origin:  supplied.Origin,
 		Owner:   authenticated.Owner,
 		Service: authenticated.Service,
+		// No Credential: this actor is one a handler records and compares, and a stored actor
+		// was decoded from JSON, which carries none (model.Actor.Recorded). A layer that needs
+		// the request's own credential reads it from optionalActor (callerHoldsScope).
 	}, nil
 }
 
@@ -930,17 +979,196 @@ func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst 
 	return true
 }
 
-func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
-	actor, present, err := s.optionalActor(r)
+// codeScopeRequired refuses a caller whose credential does not hold an OAuth scope the route
+// needs: the deployment's shared token and a pod's projected token hold none, and a personal
+// token holds the set its own row names.
+const codeScopeRequired = "OAUTH_SCOPE_REQUIRED"
+
+// insufficientScopeChallenge is the WWW-Authenticate header RFC 6750 section 3.1 gives a refusal
+// for a scope the credential does not hold. Both ways of writing that refusal go through it, so
+// a caller cannot tell them apart by the challenge.
+func insufficientScopeChallenge(scope string) string {
+	return fmt.Sprintf("Bearer error=%q, scope=%q", "insufficient_scope", scope)
+}
+
+// refuseMissingScope answers 403 OAUTH_SCOPE_REQUIRED for one scope the request's credential
+// does not hold, under the challenge RFC 6750 section 3.1 gives that refusal. writeError sets no
+// header, so the header goes on here and the body through it, which keeps the refusal the same
+// shape as every other.
+func refuseMissingScope(w http.ResponseWriter, scope, message string) {
+	w.Header().Set("WWW-Authenticate", insufficientScopeChallenge(scope))
+	writeError(w, codeScopeRequired, http.StatusForbidden, message)
+}
+
+// missingScopeError is refuseMissingScope as an error, for a check that cannot run at the gate
+// because what it reads is known only once a row is loaded (answerAsk's approval asks).
+// writeHandlerError writes the challenge header from the error's scope, so such a refusal is the
+// gate's own answer in every part a caller can see.
+func missingScopeError(scope, message string) *apiError {
+	return &apiError{status: http.StatusForbidden, code: codeScopeRequired, message: message, scope: scope}
+}
+
+// gateRouteScopes is the one place a route's OAuth scopes are enforced: register wraps every row
+// that declares any (routeScopes) in it, ahead of the keyed, project and session layers, so the
+// table is what decides and a handler restates nothing. A credential the deployment configured
+// rather than a person — the shared token, a pod's service-account token, a broker-issued token
+// scoped to a project — holds none of them; a personal token holds the set its own row names.
+// The first scope the credential lacks, in the order the row declares them, is 403
+// OAUTH_SCOPE_REQUIRED (refuseMissingScope); a caller that does not resolve at all answers
+// through writeAuthenticationError, as every gate on this server does.
+//
+// The caller it resolved rides along (resolvedCallerKey), so no layer behind it verifies the
+// same bearer twice or presents the same DPoP proof twice.
+func (s *server) gateRouteScopes(scopes []string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			s.writeAuthenticationError(w, err)
+			return
+		}
+		for _, scope := range scopes {
+			if !actor.Credential.Holds(scope) {
+				refuseMissingScope(w, scope, fmt.Sprintf(
+					"this request's credential does not hold the %s scope, which this route requires", scope))
+				return
+			}
+		}
+		handler(w, r.WithContext(context.WithValue(
+			r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human})))
+	}
+}
+
+// actingPerson answers the person a request acts for, on a route gateRouteScopes has already
+// held to the `person` scope. It names no scope of the route's own: the table decides those, and
+// a handler that repeated them could drift from the row it serves. On a row the table gives the
+// `person` scope, the refusal below is a backstop the gate makes unreachable. On the calls whose
+// row declares no scope — `GET /api/v1/issues?pinned=true` (issue_queries.go), a reword of
+// another session's ask (asks.go) and a follow for another session (ask_followers.go) — it is
+// the only check of the scope, and those calls must not lose it.
+//
+// The actor it hands back is the person and not the agent beside them. Every route this opens
+// reads the person from actor.ID (inbox.go, agent_tokens.go, ask_transitions.go), and three
+// readers of what such a route records match on the actor being the person: the answers query
+// (answerEventsQuery in asks.go), the event broker's notice (events.Broker.Notify) and the
+// approval review read (docs/approval_review.go). A personal token's own actor carries no ID at
+// all and a broker-issued token's is its session, so either would be recorded as somebody else.
+// The person is the cookie caller's own login, and otherwise the owner the credential names,
+// which is the one field every credential that holds a scope carries; the login is canonical
+// (model.CanonicalLogin), the form everything that compares logins compares.
+//
+// The agent is not lost: Act names the credential that acted — its scopes, the personal token it
+// is, the session a broker-issued token proved — so a write records which credential made it and
+// not only whom it was made for. A browser's cookie names no agent, since the person themselves
+// acted, and carries none. A credential that proved no session takes the one the `session` query
+// parameter names where the caller gives it, the convention messages.go already reads; one that
+// proved a session is refused a parameter naming another, 403 ACTOR_SESSION_MISMATCH, which is
+// what bearerSessionActor answers the same disagreement in a body.
+func (s *server) actingPerson(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
+	actor, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return model.Actor{}, false
 	}
-	if !present {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "only users may perform this action")
+	if !actor.Credential.Holds(model.ScopePerson) {
+		refuseMissingScope(w, model.ScopePerson, fmt.Sprintf(
+			"this request's credential does not hold the %s scope, which this route requires", model.ScopePerson))
 		return model.Actor{}, false
 	}
+	// Past that check the credential is not nil: Credential.Holds answers false for nothing at
+	// all.
+	credential := actor.Credential
+	person := actor.ID
+	if actor.Owner != nil {
+		person = *actor.Owner
+	}
+	var act *model.ActorAct
+	if credential.TokenID != "" || credential.Session != "" {
+		session := credential.Session
+		if named := strings.TrimSpace(r.URL.Query().Get("session")); named != "" {
+			if session != "" && named != session {
+				writeError(w, "ACTOR_SESSION_MISMATCH", http.StatusForbidden, fmt.Sprintf(
+					"this request's credential acts for session %s; its session parameter names another session", session))
+				return model.Actor{}, false
+			}
+			session = named
+		}
+		act = &model.ActorAct{
+			Session:   session,
+			TokenID:   credential.TokenID,
+			TokenName: credential.TokenName,
+			Scopes:    credential.Scopes,
+		}
+	}
+	return model.Actor{Kind: "user", ID: model.CanonicalLogin(person), Act: act}, true
+}
+
+// actSessionFromBody records on actor's act the session the request body names, for the
+// person-scope handlers that already decode a body actor: answerAsk, putUserState, editAsk and
+// the follower routes. A
+// credential that proved no session of its own - a personal token - names its agent nowhere
+// else on a route whose body is already read, so the body's actor is taken for it, exactly as
+// `?session=` is taken on every other route (actingPerson). A credential that did prove one - a
+// broker-issued token - decides it, and a body naming another session is the disagreement
+// bearerSessionActor and actingPerson both refuse, 403 ACTOR_SESSION_MISMATCH, rather than a
+// write recorded as a session the caller merely asked for.
+//
+// Only those routes read it: decodeJSON refuses an unknown field, so a body actor on a route
+// whose input struct does not declare one is a 400, and four of the mutating rows a person's
+// scope opened are DELETEs with no body at all. A browser's actor names no agent (act is nil),
+// so there is nothing for a body to name, and its body actor is ignored here as it always was.
+func actSessionFromBody(w http.ResponseWriter, actor model.Actor, supplied *model.Actor) (model.Actor, bool) {
+	named := ""
+	if supplied != nil && supplied.Kind == "session" {
+		named = strings.TrimSpace(supplied.ID)
+	}
+	if actor.Act == nil || named == "" {
+		return actor, true
+	}
+	if actor.Act.Session != "" && actor.Act.Session != named {
+		writeError(w, "ACTOR_SESSION_MISMATCH", http.StatusForbidden, fmt.Sprintf(
+			"this request acts for session %s; its actor names another session", actor.Act.Session))
+		return model.Actor{}, false
+	}
+	// A copy, so a handler holding the actor actingPerson answered keeps the act it was given.
+	act := *actor.Act
+	act.Session = named
+	actor.Act = &act
 	return actor, true
+}
+
+// callerHoldsScope reports whether this request's credential holds one OAuth scope. It is the
+// question every check inside a handler asks that a person's own credential must pass as the
+// person at a browser passes it: taking a live holder's claim and releasing anyone's claim
+// (issue_claim.go), following or unfollowing an ask for any session (ask_followers.go),
+// rewording any ask (asks.go) and reading any direct conversation (messages.go). None of them
+// can read it off the actor they hold: a bearer's recorded actor is the session it acts for,
+// and actorFrom drops the credential from what it hands back (model.Actor.Recorded). A caller
+// that does not resolve at all holds nothing, and the route's own gate answers it.
+func (s *server) callerHoldsScope(r *http.Request, scope string) bool {
+	actor, _, err := s.optionalActor(r)
+	if err != nil {
+		return false
+	}
+	return actor.Credential.Holds(scope)
+}
+
+// requireCallerScope refuses a request whose credential does not hold one scope, for a field
+// that is not a route's own gate: the claim's `force` (issue_claim.go), which every
+// authenticated caller may send and only a person's own credential may set. Where such a check
+// passes a caller it lacks the scope for rather than refusing it, callerHoldsScope above is the
+// predicate to read instead.
+func (s *server) requireCallerScope(w http.ResponseWriter, r *http.Request, scope string) bool {
+	actor, _, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return false
+	}
+	if !actor.Credential.Holds(scope) {
+		refuseMissingScope(w, scope, fmt.Sprintf(
+			"this request's credential does not hold the %s scope, which this field requires", scope))
+		return false
+	}
+	return true
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:

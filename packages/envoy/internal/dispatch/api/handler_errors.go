@@ -61,6 +61,9 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 			// Before the body: writeError writes the status and the headers go with it.
 			w.Header().Set("Retry-After", strconv.Itoa(apiErr.retryAfter))
 		}
+		if apiErr.scope != "" {
+			w.Header().Set("WWW-Authenticate", insufficientScopeChallenge(apiErr.scope))
+		}
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
 		if apiErr.status == http.StatusInternalServerError {

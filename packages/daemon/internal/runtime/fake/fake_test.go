@@ -292,7 +292,7 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	reasons := []string{"image ghcr.io/sjawhar/legion-worker@sha256:old, now ghcr.io/sjawhar/legion-worker@sha256:new"}
+	reasons := []string{"image ghcr.io/cybermonklabs/legion-worker@sha256:old, now ghcr.io/cybermonklabs/legion-worker@sha256:new"}
 	fake.ScriptPodDrift(drifted.Claim, reasons...)
 	known := runtime.Known{Claim: drifted.Claim, Locator: &drifted}
 	if got, err := fake.PodDrift(ctx, known); err != nil || !slices.Equal(got, reasons) {

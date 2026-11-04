@@ -601,50 +601,95 @@ test("a switch from the header is stored under the person who made it and names 
   }
 });
 
-// A3, a regression guard: the route a switch goes through refuses an agent's bearer, the shared
-// agent token and a person's own agent token alike, so no agent can switch a session from
-// Dispatch. The route refused a bearer before this change, so this row passes at the commit
-// before it too; it is here so that a later change to the route cannot open the switch.
-test("an agent's bearer cannot switch a session: the messages route answers 403 HUMAN_ONLY and nothing is sent @phone", async ({
+// A3, rewritten for INFRA-1017, which opened this route to a person's own credential. Three
+// things hold now. A credential that holds no `person` scope - the deployment's shared agent
+// token - is refused the route, 403 OAUTH_SCOPE_REQUIRED under the challenge RFC 6750 gives that
+// refusal, and nothing is sent. A person's own token sends for them, and what it sends is
+// recorded as the person with the agent beside them, which is how every reader names it. And the
+// mechanism that still keeps an agent from switching a session's model is the accept: a message
+// carrying an act is never taken as the session's own user turn (409 ACCEPT_WRITTEN_BY_AGENT),
+// so the text an agent wrote reaches the session as a card it reads rather than as typed input
+// it runs. No test exercised that refusal in a browser before this one.
+test("a person's own token sends a switch recorded as them with the agent beside it, the shared token holds no person scope, and the accept refuses to take an agent's message as the session's turn @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(8);
   const id = session.session_id;
   await setLiveSessions([session]);
   await publishAgentStreamFrame(id, freshReplay(id), "replay");
-  const personal = await mintAgentToken("t", "alice");
+  const personal = await mintAgentToken("switcher", "alice");
+  /** The agent the person's token acts through, which `session=` names on the send. */
+  const agentSession = "e2e-switch-agent";
   expect(await getSentMessages()).toEqual([]);
-  for (const [bearer, actor] of [
-    [e2eAgentToken, { id, kind: "session" }],
-    [personal, undefined],
-  ] as const) {
-    const response = await fetch(
-      new URL(`/api/v1/agents/${encodeURIComponent(id)}/messages`, baseUrl),
-      {
-        body: JSON.stringify({
-          body: "/model anthropic/model-b",
-          delivery: "steer",
-          ...(actor === undefined ? {} : { actor }),
-        }),
-        headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
-        method: "POST",
-      }
-    );
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual(expect.objectContaining({ code: "HUMAN_ONLY" }));
-  }
+
+  const messagesPath = `/api/v1/agents/${encodeURIComponent(id)}/messages`;
+  const switchBody = { body: "/model anthropic/model-b", delivery: "steer" };
+  // The shared token holds no scope, so the gate refuses it before the body is read: the actor
+  // it names changes nothing.
+  const shared = await fetch(new URL(messagesPath, baseUrl), {
+    body: JSON.stringify({ ...switchBody, actor: { id, kind: "session" } }),
+    headers: { Authorization: `Bearer ${e2eAgentToken}`, "Content-Type": "application/json" },
+    method: "POST",
+  });
+  expect(shared.status).toBe(403);
+  expect(await shared.json()).toEqual(expect.objectContaining({ code: "OAUTH_SCOPE_REQUIRED" }));
+  expect(shared.headers.get("WWW-Authenticate")).toBe(
+    'Bearer error="insufficient_scope", scope="person"'
+  );
   expect(await getSentMessages()).toEqual([]);
   expect(await listAgentMessages(id)).toEqual([]);
 
-  const { context, page } = await viewer(browser, testInfo, "alice");
+  const sent = await fetch(new URL(`${messagesPath}?session=${agentSession}`, baseUrl), {
+    body: JSON.stringify(switchBody),
+    headers: { Authorization: `Bearer ${personal}`, "Content-Type": "application/json" },
+    method: "POST",
+  });
+  expect(sent.status, await sent.text()).toBe(201);
+  const stored = await storedSwitch(id, "/model anthropic/model-b");
+  const read = await listAgentMessages(id);
+  expect(read).toHaveLength(1);
+  expect(read[0]?.message.author).toMatchObject({
+    act: { session: agentSession },
+    id: "alice",
+    kind: "user",
+  });
+  const sends = await sentSwitches();
+  expect(sends).toHaveLength(1);
+  expect(sends[0]).toMatchObject({ message: "/model anthropic/model-b", mode: "steer" });
+
+  // The session may not take it as its own turn: the act is what refuses it, and the person
+  // typed nothing.
+  const accept = await fetch(
+    new URL(`/api/v1/messages/${stored.id}/deliveries/${stored.attempt}/accept`, baseUrl),
+    {
+      body: JSON.stringify({ actor: { id, kind: "session" } }),
+      headers: { Authorization: `Bearer ${e2eAgentToken}`, "Content-Type": "application/json" },
+      method: "POST",
+    }
+  );
+  expect(accept.status).toBe(409);
+  expect(await accept.json()).toEqual(expect.objectContaining({ code: "ACCEPT_WRITTEN_BY_AGENT" }));
+
+  const alice = await viewer(browser, testInfo, "alice");
+  const bob = await viewer(browser, testInfo, "bob");
   try {
-    await page.goto(livePath(id));
-    await expect(page.getByTestId("agent-thread-empty")).toBeVisible();
-    await expect(page.getByText("/model anthropic/model-b")).toHaveCount(0);
-    expect(await getSentMessages()).toEqual([]);
-    await expectNoSidewaysScroll(page, testInfo);
+    // The switch is alice's own, so her page draws it on her side of the thread; to everyone
+    // else it is a card, and the card names her and the agent that sent it for her.
+    await alice.page.goto(livePath(id));
+    await expect(
+      alice.page.getByTestId("agent-message-user").filter({ hasText: "/model anthropic/model-b" })
+    ).toBeVisible();
+    await bob.page.goto(livePath(id));
+    const card = bob.page
+      .getByTestId("agent-message-other")
+      .filter({ hasText: "/model anthropic/model-b" });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`alice, acting through session ${agentSession}`);
+    await expectNoSidewaysScroll(alice.page, testInfo);
+    await expectNoSidewaysScroll(bob.page, testInfo);
   } finally {
-    await context.close();
+    await alice.context.close();
+    await bob.context.close();
   }
 });
 

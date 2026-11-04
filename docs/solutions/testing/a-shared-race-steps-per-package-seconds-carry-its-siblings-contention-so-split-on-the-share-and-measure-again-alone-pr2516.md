@@ -39,7 +39,7 @@ upper bound that carries the other packages' contention, not the package's own c
 
 ## Evidence
 
-In sjawhar/legion `envoy-go-race` ran six package groups on one `go test -race -timeout 30m`
+In cybermonklabs/legion `envoy-go-race` ran six package groups on one `go test -race -timeout 30m`
 line. On job 123461966609 `internal/dispatch/docs` reported `1772.969s` of that 1800 s budget,
 and the six packages' times summed to 5125 s inside 1842 s of step wall — they ran concurrently,
 so none of those six numbers was a package's own cost. The step later died on its deadline
