@@ -3407,7 +3407,14 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       // answers at once, with what the stub's own prints, and the model call runs until the
       // deadline aborts it, so the deadline is the only clock the outcome reads.
       const halted = bind({
-        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "20" },
+        // The three calls that trip the breaker must time out in their review. A STUB row runs the
+        // real `dispatch … --dry-run` stub above, a Bun process, and the dry run gets READ_SHARE
+        // (half) of this deadline: at 20 ms that was 9 ms, and starting Bun took 16-60 ms
+        // (median 32) on an idle two-CPU box, so the call ended "error: dispatch ask --dry-run did
+        // not finish within 9 ms" instead of timing out in its review. Half of this covers that
+        // start many times over, and the review, which never answers (untilAborted), still times
+        // out on the rest.
+        env: { ...STUB, OMP_ASKGATE_TIMEOUT_MS: "2000" },
         cwd: work,
         complete: untilAborted,
         dryRun: async () => ({
@@ -3431,7 +3438,9 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
       ]);
-    });
+      // Three calls wait out the review deadline above, so the row's own bound is the sum of them
+      // with room to spare, not bun test's 5 s default.
+    }, 30_000);
 
     test("a rebuttal binds the dry run's arguments, its flag gone from the argv", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });

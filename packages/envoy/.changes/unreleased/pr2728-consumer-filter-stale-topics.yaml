@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A session consumer''s filter no longer loses a topic the session follows when two calls write it at once. A registration, an unsubscribe and a relay restart each read the session''s stored topics before they took the session''s consumer lock, so one that waited for the lock could write back a topic set older than the one another call had stored and written meanwhile, and messages on the dropped topic were skipped. Each now reads the stored topics under that lock.'
+time: 2026-11-03T18:30:01.000000000Z
+custom:
+    Issue: pr2728

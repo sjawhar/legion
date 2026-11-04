@@ -50,7 +50,9 @@ export interface CensusEvent {
   readonly payload: {
     /** The ask an `ask.*` event carries. */
     readonly id?: Ask["id"];
-    readonly kind?: Ask["kind"];
+    /** The ask kind an `ask.*` event carries, or the review kind an `artifact.*` event does:
+     *  one field, two vocabularies, of which the census reads `"approval"` alone. */
+    readonly kind?: Ask["kind"] | ArtifactReviewEventPayload["kind"];
     /** The ask a comment replied to or a review answered. */
     readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
     readonly approval?: RecordedApproval;
