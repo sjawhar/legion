@@ -97,14 +97,25 @@ Each item below names a variable, then its purpose.
 - `DISPATCH_FILE_STORE_BUCKET`
 
   Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres.
-  The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
-  without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
-  The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+  The value chooses the store (`files.Open`), and the server and `backfill-files` both open it there, so they never read one value as two stores:
+
+  - `gs://<bucket>` is a Google Cloud Storage bucket, reached through the JSON API with Application Default Credentials (on GKE, the pod's Workload Identity principal; elsewhere `GOOGLE_APPLICATION_CREDENTIALS` or a gcloud login).
+    The principal needs `storage.objects.create` and `storage.objects.get` on the bucket and nothing more (`roles/storage.objectCreator` and `roles/storage.objectViewer`):
+    an upload reads the key's metadata first and writes nothing when the bucket already holds it, then writes in one request with `ifGenerationMatch=0`, carrying the body's CRC32C and MD5, which GCS checks, so no object is ever overwritten and none is deleted;
+    a write that loses that precondition to a concurrent writer of the same key is an object already held.
+    A value after `gs://` that is not a Cloud Storage bucket name (a path after the bucket among them) refuses the boot.
+
+  - Any other value is an S3 bucket's name.
+    The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket:
+    without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure.
+    The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused.
+
+  An image whose Dispatch does not know `gs://` reads the value as an S3 bucket's name and fails every call, so a deployment sets a `gs://` value only on an image that carries it.
   An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version.
   The version route serves a row still holding bytes from the row and any other from the bucket:
   it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes;
   a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole.
-  `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`;
+  `/healthz` reports `files`: null when unset, else whether the bucket answered within two seconds (S3: a `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, whose absence is a healthy answer, so `storage.objects.get` alone serves it, while a bucket that does not exist or a refused grant fails it);
   it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down.
   `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below).
 
@@ -313,7 +324,7 @@ a run against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, new uploads go to the bucket;
 the files uploaded before it stay in their rows until `backfill-files` moves them, oldest first, one row at a time:
-it writes the object under the row's hash (a write S3 verifies against that hash, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
+it writes the object under the row's hash (a write the bucket verifies, S3 against that hash and Cloud Storage against its CRC32C and MD5, and the store refuses before any call when the bytes do not hash to it), reads it back and checks it, and only then clears the row's bytes, in one statement that clears only a row still holding them.
 A row it cannot move (a store failure, bytes that do not hash to the row's hash, a row with no hash) is printed as `FAILED version <id>` and passed over, so one bad row holds up no other;
 the run exits 1 when any row failed, and can be run again at any time, since each row is done or untouched and the server serves a row until its bytes are cleared.
 Two writing passes at once (`backfill-files` and `--restore`, in any pairing) are refused by an advisory lock (`another backfill-files pass holds the
@@ -334,7 +345,7 @@ envoy-dispatch backfill-files --verify-only   # read back every moved row; exit 
 envoy-dispatch backfill-files --restore       # the rollback: write every moved row's bytes back from the bucket
 ```
 
-It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, refuses a bucket it cannot `HeadBucket` before touching a row, and reads nothing else of the server's configuration.
+It needs `DATABASE_URL` and `DISPATCH_FILE_STORE_BUCKET`, which it opens as the server does (`gs://<bucket>` or an S3 bucket's name, with the same credentials and grant), refuses a bucket whose health probe fails (the one `/healthz` runs) before touching a row, and reads nothing else of the server's configuration.
 Clearing a row's bytes leaves dead tuples behind:
 the table shrinks on disk only after `VACUUM FULL` or `pg_repack`, while the nightly dump shrinks at once; measure the dump, or vacuum first.
 
@@ -1387,13 +1398,53 @@ any), creates the function `block_ref_listed(to_types, to_id)`, true when `to_ty
 The column is added with no default, so no row is rewritten, and the previous release, which neither reads nor writes it, keeps writing rows that hold null and so are listed as before.
 The column takes `block_refs` `ACCESS EXCLUSIVE` and the view `graph_edges` `ACCESS EXCLUSIVE` for the migration's short transaction, so a block index write and a reference read wait behind it.
 It refuses and rewrites no row; its census answers `0`.
-No shipped block type declares a `block[]` attribute, so no pointer row exists for a build that does not know one to drop.
+The shipped `plan_task` and `check` declare the `block[]` attributes `serves` and `needs`, so a document written since they shipped holds pointer rows, which a build that does not read `to_types` lists as it lists every other `block_refs` row.
 
 Migration `20261101183525_graph_edges_ask_parts_and_block_pointers` re-states `graph_edges` once with the arms of both migrations of this release that wrote it.
 `20261101143211` added an ask's parts and `20261101144855` filtered the `block_refs` arm by `block_ref_listed`, each from `0142`'s arms, and timestamps sort them, so the later one replaced the view the earlier one wrote.
 This states every arm of both, and is the arm list a later migration re-states from.
 It creates nothing and reads no stored row; it refuses and rewrites no row, and its census answers `0`.
 It takes the view `ACCESS EXCLUSIVE` for its short transaction, as the two before it do.
+
+Migration `20261102110000_artifact_document_roles` gives `artifacts` a nullable `role`, `verification` for the document an issue holds as `verification.md` and `plan` for its `plan.md`, null for every other document.
+The upload route sets it from the slug when it creates the row and never changes it, as `is_primary` never changes, and the Verification and Plan tabs find their document by it rather than by reading names back.
+Two checks hold it to those two values and to a markdown document of an issue, and the partial unique index `artifacts_issue_role` holds an issue to one document per role.
+The backfill gives the role to the issue documents already stored under those slugs, so the Plan tab works on a plan written before this deploy;
+`artifacts_ref_key_key` (`0009`) makes `<issue key>/<slug>` unique, so no issue holds two of either.
+The column is nullable with no default, so the previous release keeps writing documents with no role, and the add and the backfill take `artifacts` `ACCESS EXCLUSIVE` in the migration's transaction.
+It refuses and rewrites no row; its census answers `0`.
+
+Migration `20261102110100_asks_approval_documents` lets one approval request name more than one document: a spec and its issue's Verification document are approved in one Inbox card, and the human's answer records a review on each.
+`asks.approval` grows a `documents` array, one entry per document with its `artifact_id`, `name`, `version` and `requested_version`, whose first entry is the document the request was opened on;
+`approval.artifact_id`, `name`, `version` and `requested_version` go on holding that first document's four values, so the previous release reads such a request as the one-document request it has always read.
+The backfill writes the array every stored approval already implies, and the trigger `asks_normalize_approval_documents` writes it for a row the previous release inserts or rewrites during a rolling deploy;
+the rebuilt `asks_approval_kind_check` then requires the array, each entry held to the bounds the top-level four have always been held to.
+`asks_open_approvals` (`0014`) still indexes the first document alone, and the new `asks_open_approval_documents` indexes every document of an open request, so a read by any of them seeks.
+Every statement locks `asks` alone, the index build taking `SHARE`, so an ask write waits for it; it refuses no stored row and rewrites only the approval blobs it fills in, and its census answers `0`.
+
+Migration `20261102110200_artifact_review_kinds` gives `artifact_reviews` a not-null `kind` defaulted `person`, the other value being `plan_review`: the approval a plan review records of a plan version (`POST /api/v1/artifacts/{id}/plan-reviews`), which no human is ever asked to give.
+A plan review's state is `approved`, so `0120`'s trigger gives its row a sequence as it gives every other review one, and the approval goes stale at a later version exactly as a spec's does.
+The constant default rewrites no row, so the statement holds `artifact_reviews` `ACCESS EXCLUSIVE` for the catalog change alone; its census answers `0`.
+
+Migration `20261102122200_check_results` creates `check_results`, one row per result recorded against a `check` block of an issue's Verification document (`dispatch result`).
+A row names the issue the result was recorded on, the check's own issue, document, block id, that block's `changed_version` and `text_sha256` when the result was recorded, the `role` that ran it, the `surface`, `run`, `observed`, `commit_sha`, `negative_control`, the `failed`, `skipped` and `excluded` counts, the `verdict`, the `screenshots`, the session and actor, and the `event_seq` of the `result.recorded` event on the check's issue.
+The stored digest is what makes a result older when the check's words change: a read compares it with the block's digest now.
+Nothing updates a row — another run is another row — and a table check refuses a `pass` that counts a failed, skipped or excluded case.
+`check_results_check` serves the Verification tab's read of one check's results newest first, and `check_results_issue` an issue's own reads.
+A new table: nothing existing is read, locked or rewritten, the previous release neither reads nor writes it, and its census answers `0`.
+
+Migration `20261102122300_pull_request_heads` creates `pull_request_heads`, the current head of every pull request Dispatch has seen an event for, so a recorded result can say whether it ran at the commit the work stands at.
+This is not `delivery_pull_requests`, which keeps the merged pull requests of the delivery population and no head commit: this table holds open ones too, by any author and in any repository, one row per pull request.
+A row names the `repo` and `number`, the `head_sha` (on a merge, the final head of the merged work), the `head_ref` and `base_ref`, the `state` (`open`, `closed` or `merged`), the `issue_key` Dispatch's attribution picks and which of its five sources named it, the title and URL, the pull request's `updated_at` as the event reported it, and when the reconcile last read it through the App.
+An older event arriving after a newer one leaves the row as it is, and the reconcile re-reads an open row older than five minutes.
+It also reads, once each, the merged rows no read of GitHub has ever reached that are attributed to nobody: a `pull_request` envelope naming no head repository attributes nobody, and nothing else looks at a merged row again, so without that arm a result at such a merged head would read `older` for good.
+`pull_request_heads_issue_head` answers the currency read, `pull_request_heads_open_stale` the reconcile's open batch, and `pull_request_heads_merged_unread` its merged arm.
+A new table, as above; its census answers `0`.
+
+Migration `20261102122400_default_branch_commits` creates `default_branch_commits`, what Dispatch's GitHub App answered about one commit of one repository: whether the repository's default branch carries it.
+A result for an `after_merge` or `default_branch` check is current only at such a commit, and the answer is read when the results are read, never written by a push, so this cache keeps those reads off GitHub.
+A yes is kept for good, since a commit on the default branch never leaves it, and a no is re-read after five minutes, since a commit merges later.
+A new table, as above; its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -2071,7 +2122,7 @@ Each item below names a path with its method and identity, then its purpose.
   Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`):
   `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus;
   the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds;
-  `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
+  `files`, whether the file store's bucket answers its two-second probe (S3: `HeadBucket`; Cloud Storage: a metadata read of a key no upload writes, which a missing object answers healthy) where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else;
   `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured).
   Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five.
   The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;
@@ -2096,7 +2147,7 @@ Each item below names a path with its method and identity, then its purpose.
 
   The process's metrics in the Prometheus text format:
   `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
-  the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
+  the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 
@@ -2334,16 +2385,26 @@ Each item below names a path with its method and identity, then its purpose.
   The answer is `{node, edges}`, the node read and its edges.
   Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`.
   The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)).
-  A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
-  a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
-  and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
-  a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
-  A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
-  pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
-  `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
-  `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
-  A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
-  when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+  What is listed, and from where:
+
+  - A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document);
+    a typed block's `block[]` pointer is an edge of the attribute's kind from it, listed only while its target has a type the attribute allows;
+    and a mention a block of a comment or issue message, or a part of an ask, holds is listed from that block (`node.kind` `block`, id `comment/<uuid>#<block id>`, `message/<uuid>#<block id>` or `ask/<uuid>#<part id>`, `node.parent` the comment, message or ask);
+    a document's, comment's, message's or ask's own read also lists the edges at its blocks, an ask's parts among them, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read, or a part of the ask read, is listed once, under that block.
+
+  - A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`;
+    pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment, and for an ask's part, a revision of the ask's parts) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
+
+  - `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
+    `404` for a node that does not exist, a block no current version or revision holds (unpinned; an ask's part is called a part, `no part "<part>" in ask <id>`, where a comment's and a message's is called a block) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's or the ask's current one or that did not hold the block.
+
+  - A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
+    when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
+    A caller with no cursor starts from `since=0`, which lists every mention committed before the read that carries a `source_seq`, and after that reads again from the highest `source_seq` an answer showed it.
+    A mention written with no event (a rebuild, a backfill, an older build) carries no `source_seq` until a later write of its source stamps it with that write's event, and until then only a read without `since` lists it.
+    A signed-in page may start from `GET /auth/whoami`'s `event_head` instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from `0`.
+    Never take a `since` from `max(events.id)` read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later.
+    An empty answer is not proof that nothing is new, so the caller reads again with the id it holds.
 
 - `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
 
@@ -2519,6 +2580,41 @@ Each item below names a path with its method and identity, then its purpose.
   a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`).
   While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing.
 
+- `/api/v1/issues/{key}/results` (GET, POST; cookie, trusted header, or bearer)
+
+  GET lists the `check` blocks of the issue's Verification document in document order:
+  `{issue, verification_artifact_id, checks}`, each check with its attributes (`when`, `surface`, `run`, `negative_control`), the version its words last changed in, their digest, and every result recorded against it from any issue, newest first.
+  Each result carries `currency`: `current`, `older`, or `unknown`.
+  It is `unknown` whenever Dispatch cannot see the repository the check's issue resolves to — it resolves to none, or the App cannot read it — whatever the check's `when`, and whenever a read of Dispatch's own fails:
+  a commit there may head a pull request Dispatch was never able to learn, so it is marked neither current nor older.
+  A `before_merge` result is current while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue, and the check's words are the ones it proved.
+  The issue a result was recorded on is read for nothing here, so a child's pull request never makes a result against a check above it current.
+  An `after_merge` or `default_branch` result is current while its commit is on the default branch of that repository.
+  Nothing is written on a push: a push that moves a pull request's head makes the result at the old head older by itself.
+  An issue with no Verification document answers no checks.
+
+  POST records one result: `{check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?, actor?}`.
+  `{key}` is the issue the result is recorded on; `check` names a check of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical block reference (`409 CHECK_AMBIGUOUS`); any other id is `400 UNKNOWN_CHECK`.
+  `role` is at most 32 characters of `[a-z-]`, `verdict` is `pass` or `fail`, `commit` is 40 lowercase hex, and absent counts are 0; a `pass` counting any failed, skipped or excluded case is `400 RESULT_CONTRADICTS`, and any other malformed field `400 RESULT_INPUT`.
+  A screenshot names an image document of the recording issue or of the check's issue.
+  The result is appended as `result.recorded` on the check's own issue, naming the recording issue.
+  A closed issue, the recording one or the check's, takes a result only for a check whose `when` is `after_merge` or `default_branch` — the production check after the merge — and refuses every other with `409 ISSUE_CLOSED`; every other write on a closed issue stays refused.
+  The answer is `{result, line}`, `line` the pull-request body line the result implies, which carries no link to Dispatch.
+
+- `/api/v1/issues/{key}/coverage` (GET; cookie, trusted header, or bearer)
+
+  What each requirement of the issue's spec lacks: `{issue, spec_artifact_id, has_plan, requirements, gaps}`.
+
+  A requirement is a `requirement` block of the spec, and `requirements` lists them in document order, each with its block reference, its words, and how many `check` and `plan_task` blocks name it in `serves`.
+
+  A block counts when it is in any document of the issue or of any descendant issue, at any status; the descendants are one recursive `child_of` walk bounded by `refs.IssueDepthCap` (`refs.IssueDescendants`).
+
+  `gaps` is one line per gap, `<block id> has no check` and `<block id> has no plan task`, the second only once the issue has a plan document, or the single line `the spec marks no requirements` for a spec that marks none.
+
+  Nothing is ever refused for a gap.
+
+  This is not `GET /api/v1/search/coverage`, which reports how much of what meaning search ranks carries a vector.
+
 - `/api/v1/issues/{key}/handoffs/{phase}` (POST; bearer (an agent session naming itself in `actor`))
 
   Record the session's handoff for one phase of the issue, `{actor, body}`:
@@ -2547,6 +2643,9 @@ Each item below names a path with its method and identity, then its purpose.
   Any other file's kind is read from its bytes, never from the part's declared `Content-Type`:
   it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image.
   An upload's name finds the issue's artifact whose name or slug it is, so a name that is an artifact's slug (`plan-md` for `plan.md`) is that artifact's next version, never a second artifact the same reference would also name.
+  A document an issue first holds under `verification.md` or `plan.md` carries that role (`artifacts.role`, `verification` or `plan`), which the row keeps for good: a later upload of the same name is that document's next version, and no upload moves a role.
+  An issue holds at most one document of each role, and the issue read names both (`verification_artifact_id` and `plan_artifact_id`), as the Verification and Plan tabs find them.
+  A role decides what a document is for: `POST /api/v1/artifacts/{id}/plan-reviews` takes only a `plan`, `POST /api/v1/artifacts/{id}/approval-requests` refuses one, and `--include-verification` and `GET .../results` read the `verification` document's `check` blocks.
   A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`, naming the artifact's slug, name and kind.
   A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text;
   an upload under an existing artifact's name, one stored longer included, is never refused for its length.
@@ -2623,7 +2722,11 @@ Each item below names a path with its method and identity, then its purpose.
 - `/api/v1/artifacts/{id}/approval-requests` (POST; cookie, trusted header, or bearer)
 
   Ask a human to approve a document's latest settled version.
-  The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`;
+  With `include_verification` it asks for the issue's Verification document (`role` `verification`) in the same request, each document at its own current settled version, and the answer records the human's review on each;
+  an issue with no Verification document is `409 NO_VERIFICATION_DOCUMENT`, and one whose Verification document has no settled version is `409 NO_VERSION`.
+  The flag is for the issue's spec alone: on any other document it is `409 NOT_SPEC_DOCUMENT`.
+  A document whose role is `plan` is `409 PLAN_APPROVED_BY_REVIEW`: a plan is approved by its plan review, never by a person.
+  The question is `Approve <name> (version <N>)?`, or `Approve <name> (version <N>) and <name> (version <N>)?` for a request naming two documents, followed by the optional `summary` (blank is `400 SUMMARY_INPUT`;
   past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`).
   A request on a document a human approved earlier names that approval in `ask.approval.approved` (`{version, at, by}`);
   a first request carries no `approved` key.
@@ -2637,6 +2740,17 @@ Each item below names a path with its method and identity, then its purpose.
   an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was.
   While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading.
   It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting).
+  Every answer carries `coverage`, one line per requirement of the issue's spec with no check, or the single line `the spec marks no requirements` for a spec that marks none (`GET /api/v1/issues/{key}/coverage`), and no line at all for a covered spec; it is empty for a document that is not a spec.
+
+  It never names a missing plan task, since the plan comes after the approval; a spec with gaps still opens the request, and a coverage read that failed answers `coverage_unread: true` with no lines.
+
+- `/api/v1/artifacts/{id}/plan-reviews` (POST; cookie, trusted header, or bearer)
+
+  Record a plan review's approval of a plan version: `{version}`, the version the review read.
+  It writes an `approved` review of kind `plan_review` and emits `artifact.approved`, so every read of the document shows it approved and a later version makes it stale, as a spec's approval goes stale.
+  It is `409 NOT_PLAN_DOCUMENT` on any document that is not the issue's plan, the issue's spec included — a document whose `role` is `plan`, or one a rolling deploy left with no role whose slug is `plan-md`, is the plan — `409 NO_VERSION` on a plan with no settled version, and `400 INVALID_REVIEW` for a version the plan does not have.
+  No person is ever asked to approve a plan, which is why `/api/v1/artifacts/{id}/approval-requests` refuses one.
+  A review Dispatch carries to a later version keeps the `kind` of the review it carries, so a plan version restored to the text its plan review approved is still `plan_review` and no carry ever records a plan's approval as a person's.
 
 - `/api/v1/artifacts/{id}/asks?state=` (GET, POST; cookie, trusted header, or bearer)
 
@@ -2831,7 +2945,7 @@ What each node type weighs:
 | `table_header_row`, `table_row` | a row | 3 | block id |
 | `table_header`, `table_cell` | a cell and its paragraph | 4 | block id, alignment, spans |
 | `footnote_definition` | a footnote definition | 3, and 3 when empty | block id, label |
-| `callout`, `ask` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
+| `callout`, `ask`, `requirement`, `plan_task`, `check` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
 | `text` | a run of text; each mark a run carries is the inline syntax that opens it | 1 | none (marks) |
 | `hardbreak` | a hard line break | 3, beside its line's 1 | isInline |
 | `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |

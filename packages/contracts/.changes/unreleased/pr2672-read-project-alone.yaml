@@ -1,4 +1,0 @@
-kind: Changed
-body: '`dispatch_read` takes a project with no artifact, which lists the project''s documents on no issue, and its description says an issue read lists the issue''s documents under `Documents:`.'
-custom:
-    Issue: pr2672

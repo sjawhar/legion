@@ -337,8 +337,8 @@ def go_notices_runs():
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
+go test -count=1 -timeout 20m ./internal/dispatch/api
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -360,6 +360,20 @@ SCHEMA_SCRIPT = (
 # cmd/listener package compiles under the serverchange tag, whichever test the run selects.
 SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
+
+
+# The four packages the test job's race step runs, and which its plain step therefore leaves out.
+# One list: both step texts below are built from it, and check-ci-filters.sh fails when either step
+# in ci.yaml differs from the text built here, so the two steps cannot name different sets.
+DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
+DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
+DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
+DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)
+DAEMON_PLAIN_STEP = "Test the Go daemon"
+DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
+DAEMON_PLAIN_SCRIPT = f"""\
+set -o pipefail
+go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -392,14 +406,19 @@ GATES = [
     ], reads=CI_SELF + setup_go("typecheck", f"{DAEMON}/go.mod")),
 
     gate("test", "test", runs=[
-        step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
-        step_run("test", "Test the concurrent packages under the race detector",
-                 "go test -count=1 -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
-                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
+        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT, DAEMON, DAEMON_RACE_PKGS, race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
+    ], exact=[
+        # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
+        # pinned, as the envoy-go unit step's is. A Run cannot name "./... but the four", so the
+        # entry declares the superset ./..., as the envoy-go unit step's does; the race step's Run
+        # above is what claims the four.
+        pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
+            (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
     ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
@@ -486,8 +505,9 @@ GATES = [
         ("skills/dispatch-writing-specs/SKILL.md", "packages/contracts/src/dispatch-tools.test.ts:1056 existsSync(skills/dispatch-writing-specs/SKILL.md)"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-href-references.json", "packages/contracts/src/dispatch-href.test.ts:49-53"),
         (f"{ENVOY}/internal/dispatch/text/testdata/dispatch-text-references.json", "packages/contracts/src/dispatch-text-references.test.ts:10-14"),
-        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,48-50 and gen-go.ts:516 (--check compares the committed file)"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,48-50 and gen-go.ts:520"),
+        (f"{ENVOY}/internal/contracts/generated.go", "packages/contracts/scripts/gen-go.test.ts:6,55-59 and gen-go.ts's outputs list (--check compares the committed file)"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.test.ts:7,55-59 and gen-go.ts's outputs list"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema_generated.go", "packages/contracts/scripts/gen-go.test.ts:8-11,55-59 and gen-go.ts's outputs list (the block schema's shape, generated from schemas/block-schema.schema.json)"),
     ) + biome(at("contracts", "Lint contracts")) + bun_job("contracts") + CI_SELF),
 
     gate("conflicts_script", "conflicts-script", reads=reads(
@@ -613,7 +633,7 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,
+        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
                  ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
@@ -622,7 +642,7 @@ GATES = [
         # on the service's one checkpointer beside the other package binaries), then ./... but it
         # and internal/integration, which the integration step tests: counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
+            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
@@ -634,9 +654,9 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
         ("packages/contracts/scripts/gen-go.ts", f"{at('envoy-go', 'Check Go contracts are generated from the shared schema')} (packages/contracts/package.json check:go)"),
-        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts:65 reads schemas/envelope.schema.json"),
-        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts:4-27 imports ../src/*"),
-        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts:520,528 --check compares it"),
+        ("packages/contracts/schemas/**", "packages/contracts/scripts/gen-go.ts's envelopeFile and blockSchemaFile read schemas/"),
+        (CONTRACTS_SRC, "packages/contracts/scripts/gen-go.ts's imports of ../src/*"),
+        (f"{DAEMON}/internal/dispatch/generated.go", "packages/contracts/scripts/gen-go.ts's outputs list: --check compares it"),
         (f"{ENVOY}/internal/dispatch/pmdoc/gen/**", f"{at('envoy-go', 'Check pmdoc fixtures are up to date')} (gen.ts --check)"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/gen.ts:4-5 imports @legion/proof-editor (exports -> src/lib.ts, src/lib-headless.ts)"),
         (".github/actions/pull-test-images/**", at("envoy-go", "Pull test container images")),
@@ -744,8 +764,8 @@ GATES = [
     ], reads=reads(
         (f"{ENVOY}/scripts/e2e-local.test.sh", at("envoy-e2e-local", "Refusal test for e2e-local.sh")),
         (f"{ENVOY}/scripts/e2e-local.sh", f"{at('envoy-e2e-local', 'Local end-to-end acceptance')}; e2e-local.test.sh:6"),
-        (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:52,547-578 posts each fixture"),
-        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:582-587 runs bun in packages/envoy-client importing @legion/envoy-client/delivery"),
+        (f"{ENVOY}/scripts/fixtures/github/**", "packages/envoy/scripts/e2e-local.sh:54,610-641 posts each fixture"),
+        (ENVOY_CLIENT_SRC, "packages/envoy/scripts/e2e-local.sh:658-675 and :851-895 run bun in packages/envoy-client importing @legion/envoy-client/delivery and @legion/envoy-client/transport"),
         (CONTRACTS_SRC, "packages/envoy-client/src/delivery.ts imports @legion/contracts"),
     ) + setup_go("envoy-e2e-local", f"{ENVOY}/go.mod") + bun_job("envoy-e2e-local") + CI_SELF),
 

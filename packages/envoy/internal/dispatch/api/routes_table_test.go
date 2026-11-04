@@ -105,7 +105,14 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 155
+<<<<<<< conflict 1 of 1
+%%%%%%% diff from: tvuqvtlp dfe196e1 "chore: release pi-legion v17.5.0 [skip ci]"
+\\\\\\\        to: nqzxsuqs 8b8d0f1d "merge: bring main forward"
+-	const registeredRoutes = 154
++	const registeredRoutes = 155
++++++++ qmopuppr 3bf3468d "chore: fold changelog fragments [skip ci]"
+	const registeredRoutes = 158
+>>>>>>> conflict 1 of 1 ends
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)

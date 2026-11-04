@@ -90,6 +90,14 @@ type Deps struct {
 	// both, reading on Publisher's connection.
 	RoleClaims roles.ClaimStore
 	Sessions   roles.SessionLookup
+	// KeptLanes is where the handover behind a keep reads the role's kept lane and its drain
+	// cursor, to tell whether the copy just kept is the one that lane's drain would hand over
+	// next (handOverKept). cmd/dispatch passes the same bus.Client it publishes through, whose
+	// grant covers that read. A nil reader makes no handover at all, as a nil role reader is
+	// errNoRoleReaders: the kept copy then waits for the role's next claim, keep or the
+	// listener's sweep, which is what this package's tests that publish through a stand-in with
+	// no stream behind it leave it to.
+	KeptLanes KeptLaneReader
 	// PublishFailures counts a destination of a publish attempt that did not reach it, by
 	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
 	// registry, so a denied or refused destination shows on /metrics rather than only in the
@@ -107,9 +115,9 @@ type Deps struct {
 // "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
 // holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
 // answer never came - the holder's receipt, or the stream's acknowledgement of the stored copy
-// for a holder with a serving port (roleForward.send) - and "failed" for every other failure
-// (sendChains). Every increment goes through here: a Deps built without a counter - the package's
-// own tests - then counts nothing instead of dereferencing nil.
+// for a holder whose entry records a port (roleForward.send) - and "failed" for every other
+// failure (sendChains). Every increment goes through here: a Deps built without a counter - the
+// package's own tests - then counts nothing instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return
@@ -128,6 +136,16 @@ func failedAnswer(err error) <-chan error {
 	answer := make(chan error, 1)
 	answer <- err
 	return answer
+}
+
+// lostToContextEnd reports whether err is ctx's own end rather than a failure of the work that
+// met it: this process stopping, or a window that ran out of time. It is the one test the batch
+// makes of a send that came back with nothing of NATS in it (sendChains), that an event's
+// destination resolution makes of a read that did not answer (resolveDestinations), and that the
+// handover behind a keep makes before it logs a read or a forward that failed (handOverKept),
+// since what the stop cut short is the batch's to say and not each of theirs.
+func lostToContextEnd(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && errors.Is(err, ctx.Err())
 }
 
 // scanBatch reads a batch (readBatch) and publishes it (publishBatch): it resolves its events'
@@ -761,8 +779,16 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 		return err
 	}
 	for _, event := range resolvable {
+<<<<<<< conflict 1 of 1
++++++++ nqzxsuqs 8b8d0f1d "merge: bring main forward"
 		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(ctx, deps, event, found)
 		event.resolveLost = event.resolveErr != nil && ctx.Err() != nil && errors.Is(event.resolveErr, ctx.Err())
+%%%%%%% diff from: tvuqvtlp dfe196e1 "chore: release pi-legion v17.5.0 [skip ci]"
+\\\\\\\        to: qmopuppr 3bf3468d "chore: fold changelog fragments [skip ci]"
+ 		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(event.event, event.item.Topic, event.routing, found)
+-		event.resolveLost = event.resolveErr != nil && ctx.Err() != nil && errors.Is(event.resolveErr, ctx.Err())
++		event.resolveLost = lostToContextEnd(ctx, event.resolveErr)
+>>>>>>> conflict 1 of 1 ends
 		var unanswered *unansweredRecipients
 		event.incomplete = errors.As(event.resolveErr, &unanswered)
 	}

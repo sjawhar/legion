@@ -22,8 +22,10 @@ The same route forwards a team or other ad-hoc topic's message to each session r
 topic that holds its own NATS connection, as this one does, other than its sender, and the sender's
 error names each session that did not reply. The stream stores each forward on the recipient's
 agent subject, and when the listener supports consumer delivery that session takes the stored copy
-once, also after a restart or a dropped connection (below). A role message is not kept for a later
-claimant, and on the core path a session does not recover one it missed.
+once, also after a restart or a dropped connection (below). A role message no live holder can take
+is kept for the session that claims the role next. That session is handed the message once, within
+one hour of the keep, and the publish answers 202 to say the listener kept it. On the core path a
+session does not recover a role message it missed.
 
 This extension claims the role for the session the host has open, and every automatic claim is
 soft: it names the session it continues, which is a fork's or branch's parent, or the session
@@ -397,16 +399,34 @@ gated write only when it consumes one, so a write sent any other way is refused 
 
 - **The record.** While the gate is bound, pi-envoy keeps one owner-only file for its process in
   the `askgate/` directory of the CLI's state directory of each session id it binds
-  (`<state>/sessions/<id>/askgate/<pid>-<start>.json`, where `<state>` is `DISPATCH_STATE_DIR`,
-  else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names the Oh My Pi process,
-  its Linux start time, and the process's owner-only marker store. Each process writes and removes
-  only its own file, so two processes that bind one session never drop each other. pi-envoy sets
+  (`<state>/sessions/<id>/askgate/<pid>-<start>-<ns>.json`, where `<state>` is
+  `DISPATCH_STATE_DIR`, else `$XDG_STATE_HOME/dispatch`, else `~/.local/state/dispatch`). It names
+  the Oh My Pi process, its Linux start time, its pid namespace (the inode `/proc/self/ns/pid`
+  names), and the process's owner-only marker store. Each process writes and removes only its own
+  file, so two processes that bind one session never drop each other. pi-envoy sets
   `DISPATCH_STATE_DIR` in the session's environment when it is not set, so a command that changes
   `HOME` or `XDG_STATE_HOME` still finds the record. A record of a session the process switched
   away from stays until the process exits, since a shell or an eval kernel started before the
   switch still acts as that session. A record whose process is gone, or whose pid another process
   now holds, is inert, and the CLI's session pruning keeps a directory whose record is live. A
   record pi-envoy cannot write is a notice in the session, at start or at a switch.
+- **Other pid namespaces.** One state directory can serve processes of several pid namespaces: the
+  host's and those of the containers that mount the host's state directory, each with a pid
+  namespace of its own. A pid and a start time name a process only in the namespace they were read
+  in, so the CLI looks up by pid only an owner of its own namespace. An owner of another one counts
+  live while its marker store changed within the last two hours; the process touches its store
+  every ten minutes while it keeps a record, so a live one never looks gone from another namespace.
+  The process also makes its store again, empty, before each write of its own file, so a store that
+  another process removed is back by the gate's next call. A record written by an older pi-envoy
+  names no namespace and is still looked up by pid in the reader's own. The pruning keeps a store
+  such a pi-envoy named for 14 days rather than two hours, since its process may be a live one of
+  another namespace, which touches its store only when it mints a marker, and it keeps a session
+  directory whose record names a store that is still there. A process of another namespace that
+  reads the record (the host's CLI, for a box's session) is never that session's own agent, whose
+  calls run in its process's namespace, so it reads such an owner live only by its store. Every
+  `dispatch` command that shares the state directory must be this release or later (pi-envoy's,
+  and the copy Claude Code sessions run): an earlier one reads a namespaced owner by pid, and its
+  pruning can still remove a box session's idle directory.
 - **The marker.** The gate mints one file in the store for each literal call it lets run, created
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry
@@ -417,7 +437,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   its marker until
   shutdown, and a marker older than two hours, longer than any tool's time limit, is refused and
   removed. The process removes its store when it exits; the CLI's daily session pruning removes
-  the store of a process that is gone and that nothing changed for two hours.
+  the store of a process that is gone and that nothing changed for two hours, which for a process
+  of another pid namespace is how it is known to be gone.
 - **The check.** After `--help`, `--dry-run` and the session and Dispatch settings, and before a
   gated write posts, the CLI reads the session's record. With a live one it reads each file the
   argv names once and consumes one matching marker by unlinking it: exactly one process wins, so a

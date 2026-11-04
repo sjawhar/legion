@@ -24,8 +24,8 @@ func listenerEnv(c core.ListenerConfig, urls ...string) (string, error) {
 // Where a value enters core, a value holding an nkey seed (bus.HoldsSeed) is refused naming
 // the field by its path, never quoting it, and nothing is rendered: the authorization's names,
 // rule entries and noAuthUser, Render's and StartScript's header lines, StartScript's server
-// arguments and config path, and the listener's machineId, hostBridge, allowed hosts and NATS
-// URLs. Otherwise each would reach a refusal's %q, the rendered authorization, the start script
+// arguments and config path, and the listener's machineId, allowed hosts and NATS URLs.
+// Otherwise each would reach a refusal's %q, the rendered authorization, the start script
 // or the environment a watchdog writes as root. Each row's clean value, in the same place, is
 // accepted and reaches that output.
 func TestASeedInAnInputIsRefusedUnechoed(t *testing.T) {
@@ -94,11 +94,6 @@ func TestASeedInAnInputIsRefusedUnechoed(t *testing.T) {
 		{"Render's header line, lowercase", func(v string) (string, error) {
 			return placeholder().Render([]string{"fine", "a " + strings.ToLower(v)})
 		}, "header[1] holds an nkey seed (not echoed)", "", "clean"},
-		{"the listener's hostBridge, split across DNS labels", func(v string) (string, error) {
-			c := listener
-			c.HostBridge = split(v) + ".example"
-			return listenerEnv(c, url)
-		}, "hostBridge holds an nkey seed (not echoed)", "hostBridge", "cleanlabels"},
 		{"a NATS URL's host, split across DNS labels", func(v string) (string, error) {
 			return listenerEnv(listener, url, "nats://"+split(v)+".example:4222")
 		}, "natsUrls[1] holds an nkey seed (not echoed)", "natsUrls", "cleanlabels"},
@@ -151,11 +146,6 @@ func TestASeedInAnInputIsRefusedUnechoed(t *testing.T) {
 			c.MachineID = "host-" + v
 			return listenerEnv(c, url)
 		}, "machineId holds an nkey seed (not echoed)", "machineId", "example"},
-		{"the listener's hostBridge", func(v string) (string, error) {
-			c := listener
-			c.HostBridge = "bridge-" + v + ".example"
-			return listenerEnv(c, url)
-		}, "hostBridge holds an nkey seed (not echoed)", "hostBridge", "example"},
 		{"the listener's allowed hosts", func(v string) (string, error) {
 			c := listener
 			c.AllowedHosts = []string{"ok.internal.example", v + ".example"}

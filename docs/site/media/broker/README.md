@@ -31,7 +31,7 @@ Workspace's identity provider, serving the broker's sign-in client through `--co
 secret the rig generates into its workdir) and signing every authorization in as the request's
 approver, `alice@example.com`, through `--sign-in-as`, with no page to fill in; starts the broker
 on its development secrets file, which stands in for Secrets Manager and tags `DEMO_API_KEY`
-`owner=alice@example.com`, `tier=human`, with grants lasting until their session ends, trusting
+`owner=alice@example.com`, `tier=human`, with grants lasting 12 hours when a request names no `--ttl`, trusting
 that issuer for tokens and sign-in (`BROKER_SIGNIN_*`, which the broker requires) and listing
 Dispatch's account as its caller; starts the Dispatch e2e harness's three
 servers on `DATABASE_URL` with the server pointed at the broker
