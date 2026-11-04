@@ -1,4 +1,0 @@
-kind: Changed
-body: |-
-  The Dispatch skills teach the three typed blocks: a spec marks each requirement as a `requirement` block, an issue's checks live in its Verification document as `check` blocks, and a plan's tasks are `plan_task` blocks that say which requirements they serve and which tasks they need first.
-  A spec no longer carries an Acceptance section of prose, and `dispatch result` records what a check saw.

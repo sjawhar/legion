@@ -737,6 +737,16 @@ type keptRun struct {
 	closed   map[uint64]bool
 	publishd int
 	counts   keptCounts
+	// seekHeldHandOver makes the drive take the hand-over inside a held task
+	// (handOverInsideAHeldTask) whenever it is enabled while that task names kept decisions, until
+	// one has counted (keptCounts.handedBeforeConfirm), rather than leave it to the generator's pick
+	// among the enabled steps. Until then it also keeps the child and the grandchild in the root's
+	// tree for that step: no other step hands them over, orphans the child or closes the tree
+	// (reservesMembers). Without that, a schedule that hands both over before the root holds such
+	// a task never enables the step at all, which seed 24 took under -race (run 41808140568). The
+	// seeds that test that window then reach it on every schedule that reaches a held task naming
+	// kept decisions while the root lingers (TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild).
+	seekHeldHandOver bool
 }
 
 // A person's decision on a tree nobody in it can hear reaches an architect of that tree exactly
@@ -1132,19 +1142,20 @@ func (r *keptRun) enabled() []func() {
 	if r.parkedOrWaiting() {
 		ops = append(ops, r.readmit)
 	}
-	if r.handOverEnabled(r.child) {
+	reserved := r.reservesMembers()
+	if !reserved && r.handOverEnabled(r.child) {
 		ops = append(ops, r.handOverChild, r.handOverChildWithoutItsRun)
 	}
-	if r.handOverEnabled(r.grandchild) {
+	if !reserved && r.handOverEnabled(r.grandchild) {
 		ops = append(ops, r.handOverGrandchild)
 	}
-	if r.orphanEnabled() {
+	if !reserved && r.orphanEnabled() {
 		ops = append(ops, r.orphanChild)
 	}
 	if !r.queued.handed && r.adoptionTarget() != nil {
 		ops = append(ops, r.adoptQueued)
 	}
-	if r.closeEnabled() {
+	if !reserved && r.closeEnabled() {
 		ops = append(ops, r.closeTree)
 	}
 	due := r.rows(true)
@@ -1182,9 +1193,19 @@ func (r *keptRun) enabled() []func() {
 		}
 	}
 	if len(overs) > 0 && r.awaitingConfirmation(r.root) {
-		ops = append(ops, func() { r.handOverInsideAHeldTask(overs[r.rng.IntN(len(overs))]) })
+		handOver := func() { r.handOverInsideAHeldTask(overs[r.rng.IntN(len(overs))]) }
+		if r.reservesMembers() && r.namesKeptDecisions(r.root) {
+			return []func(){handOver}
+		}
+		ops = append(ops, handOver)
 	}
 	return ops
+}
+
+// reservesMembers is whether the drive keeps the root's members in its tree for the hand-over
+// inside a held task (seekHeldHandOver): no other step moves them out until one has counted.
+func (r *keptRun) reservesMembers() bool {
+	return r.seekHeldHandOver && r.counts.handedBeforeConfirm == 0
 }
 
 // trackedIssues is every issue this run records decisions on, which is where a move can carry a
@@ -1984,8 +2005,10 @@ func (r *keptRun) raceOps(publishing int64) []keptRaceOp {
 	if r.parkedOrWaiting() {
 		ops = append(ops, keptRaceOp{kind: "readmit", what: fmt.Sprintf("the re-admission of %s", keptRoot)})
 	}
-	for _, over := range r.handOvers() {
-		ops = append(ops, keptRaceOp{kind: "handover", over: over, what: over.what})
+	if !r.reservesMembers() {
+		for _, over := range r.handOvers() {
+			ops = append(ops, keptRaceOp{kind: "handover", over: over, what: over.what})
+		}
 	}
 	return ops
 }

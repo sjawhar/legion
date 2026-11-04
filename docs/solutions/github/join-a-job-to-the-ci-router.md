@@ -253,15 +253,15 @@ limit, where they evict main's entries.
   (`key: <family>-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}`), with the
   family's prefix as `restore-keys` only off main:
   `restore-keys: ${{ github.ref != 'refs/heads/main' && format('<family>-{0}-', runner.os) || '' }}`
-  (the families are `go-daemon`, `go-docs`, `go-envoy`, `go-envoy-infra`, `go-notices`). Main
-  restores by the exact key only, so the entry it saves after a Go bump holds nothing the older Go
-  built; a pull request still falls back to the prefix. Each family keeps one entry, refreshed only
-  when Go is bumped. Do not
+  (the families are `go-daemon`, `go-docs`, `go-envoy`, `go-envoy-test`, `go-envoy-infra`,
+  `go-notices`). Main restores by the exact key only, so the entry it saves after a Go bump holds
+  nothing the older Go built; a pull request still falls back to the prefix. Each family keeps one
+  entry, refreshed only when Go is bumped. Do not
   key on go.sum: every go.sum change would leave a whole entry, up to a gigabyte, for seven days. A
   go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
   stale entry costs a run only what changed. Share a family only with the jobs that build the same
   packages, or whichever job saves first owns the entry the others then miss.
-- Save with `actions/cache/save` as the job's last step, with
+- Save with `actions/cache/save` as the last step before the `ci-ok-report` step, with
   `if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'`.
   The workflow's only push trigger is main.
 - The release workflows' Go builds (release.yaml's `legion_build`, release-envoy-infra.yaml's

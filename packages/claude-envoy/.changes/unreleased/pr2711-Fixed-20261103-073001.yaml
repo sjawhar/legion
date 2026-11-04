@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-  The `legion-controller` skill's escalation reference, which main's Rebuild Claude Envoy plugin
-  workflow copies into `legion/` from this commit's source after the merge, says what happens to
-  unpushed work when the daemon replaces an issue's pod. Before the replacement, the daemon checks
-  every workspace on the pod's disk, a failed claim's included, and pushes what the remote lacks to
-  a rescue branch, `legion/<KEY>-rescue-<pod>-<n>`, which the issue is told of. When that check
-  fails, the pod is not replaced, and the `update-stalled` wake's `reason` names the claim, the
-  workspace and the error.
