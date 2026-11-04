@@ -21,8 +21,9 @@
  *  Two things fail the check, each printed under its own heading:
  *
  *  - a row at or above the threshold with no marker, because A5's claim does not hold for it;
- *  - a marker no row at or above the threshold used, because a comment that calls a row slow
- *    when it is not is a lie the next reader believes.
+ *  - a marker every row of which came in under `STALE_BAND_SHARE` of the threshold, because a
+ *    comment that calls a row slow when it is not is a lie the next reader believes. The band is
+ *    why a row that measures 1.9 s on one run keeps its marker: see the constant.
  *
  *  A marker in a file the report never ran is neither: no row of that file could have used it.
  *  Those are counted apart, so a run over some of the suite judges only what it ran.
@@ -79,10 +80,13 @@ export interface Verdict {
   readonly rowsRun: number;
   readonly rowsSlow: number;
   readonly markersFound: number;
+  /** Markers a row earned: one at or above the threshold, or one inside the band below it. */
   readonly markersUsed: number;
+  /** Of those, the ones no row of theirs took the threshold for: earned inside the band alone. */
+  readonly markersInBand: number;
   /** Rows at or above the threshold that no marker covers. */
   readonly unmarked: readonly Row[];
-  /** Markers in a file the report ran that no row at or above the threshold used. */
+  /** Markers in a file the report ran whose every row came in under the band. */
   readonly stale: readonly Marker[];
   /** Markers in a file the report never ran: judged by neither rule. */
   readonly notRun: readonly Marker[];
@@ -190,20 +194,38 @@ function covers(marker: Marker, row: Row): boolean {
   return marker.title !== undefined && marker.title === row.title;
 }
 
-/** A5, judged: which slow rows carry no marker, and which markers no slow row used. */
+/** How much of the threshold a marked row has to reach for its marker to be earned: 1,500 ms at
+ *  the 2,000 ms bar. The bar itself (`--slow-ms`) is unchanged - a row at or above it still
+ *  fails without a marker - and this band moves with it.
+ *
+ *  It exists because a row that sits at the bar cannot be judged by one run. Four of the eight
+ *  rows of `coverage.e2e.ts`, `plan-tab.e2e.ts` and `verification.e2e.ts` live in the 1.5-2.7 s
+ *  band; over 15 one-worker runs of one pod against one unchanged head, the Plan tab row
+ *  measured 1893-2639 ms and the currency row of `verification.e2e.ts` 1685-2069 ms, the pod
+ *  having drifted some 20 % slower and back inside half an hour. Without the band, such a row
+ *  fails this check whichever way it is written - bare when the run is slow, marked when the run
+ *  is fast - so both halves of the verdict report the machine rather than the suite. With it,
+ *  the half that catches a lie still does its work: a marker over a row that really became fast,
+ *  well under the band, is still stale. */
+export const STALE_BAND_SHARE = 0.75;
+
+/** A5, judged: which slow rows carry no marker, and which markers no row of theirs earned. */
 export function judge(rows: readonly Row[], markers: readonly Marker[], slowMs: number): Verdict {
   const ran = new Set(rows.map((row) => basename(row.file)));
   const slow = rows.filter((row) => row.ms >= slowMs);
+  const nearlySlow = rows.filter((row) => row.ms >= slowMs * STALE_BAND_SHARE);
   const unmarked = slow.filter((row) => !markers.some((marker) => covers(marker, row)));
-  const used = markers.filter((marker) => slow.some((row) => covers(marker, row)));
+  const overBar = markers.filter((marker) => slow.some((row) => covers(marker, row)));
+  const earned = markers.filter((marker) => nearlySlow.some((row) => covers(marker, row)));
   const judged = markers.filter((marker) => ran.has(basename(marker.file)));
   return {
     markersFound: markers.length,
-    markersUsed: used.length,
+    markersInBand: earned.length - overBar.length,
+    markersUsed: earned.length,
     notRun: markers.filter((marker) => !ran.has(basename(marker.file))),
     rowsRun: rows.length,
     rowsSlow: slow.length,
-    stale: judged.filter((marker) => !used.includes(marker)),
+    stale: judged.filter((marker) => !earned.includes(marker)),
     unmarked,
   };
 }
@@ -246,7 +268,8 @@ if (import.meta.main) {
     }
   }
   if (verdict.stale.length > 0) {
-    console.error(`// SLOW(>=2s) comments no row at or above ${slowMs} ms used:`);
+    const band = Math.round(slowMs * STALE_BAND_SHARE);
+    console.error(`// SLOW(>=2s) comments whose every row came in under ${band} ms:`);
     for (const marker of verdict.stale) {
       console.error(`  ${marker.file}:${marker.line} ${marker.reason}`);
     }
@@ -254,7 +277,8 @@ if (import.meta.main) {
   console.error(
     `rows run ${verdict.rowsRun}, rows >= ${slowMs} ms ${verdict.rowsSlow}, ` +
       `markers found ${verdict.markersFound} (${verdict.notRun.length} in files this report did ` +
-      `not run), markers used ${verdict.markersUsed}`
+      `not run), markers earned ${verdict.markersUsed} (${verdict.markersInBand} by a row inside ` +
+      `the band below ${slowMs} ms rather than at or over it)`
   );
   if (verdict.unmarked.length > 0 || verdict.stale.length > 0) process.exit(1);
 }

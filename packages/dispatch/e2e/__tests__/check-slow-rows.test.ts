@@ -148,3 +148,35 @@ test("a marker no slow row used is stale, unless its file never ran", () => {
   expect(elsewhere.notRun).toEqual([...markers]);
   expect(elsewhere.unmarked.map((slow) => slow.file)).toEqual(["nav.e2e.ts"]);
 });
+
+// The band under the bar: a row this pod runs at 1.9 s one time and 2.1 s the next is one row,
+// and its marker is earned either way. The bar itself does not move - a row inside the band
+// still owes no marker - so the band only ever keeps a marker, never demands one.
+test("a marker a row earned inside the band is not stale, and the band demands no new markers", () => {
+  const markers = markersIn("margin.e2e.ts", describeSource);
+  const inBand = judge([row("margin.e2e.ts", 5, { ms: 1_600 })], markers, 2_000);
+  expect(inBand.stale).toEqual([]);
+  expect(inBand.markersUsed).toBe(1);
+  expect(inBand.markersInBand).toBe(1);
+  expect(inBand.rowsSlow).toBe(0);
+  expect(inBand.unmarked).toEqual([]);
+
+  // A row that took the bar earns its marker as it always did, and is not counted as banded.
+  const overBar = judge([row("margin.e2e.ts", 5, { ms: 2_000 })], markers, 2_000);
+  expect(overBar.markersUsed).toBe(1);
+  expect(overBar.markersInBand).toBe(0);
+
+  // A row well under the band is the lie the stale half exists for, and still fails.
+  const wellUnder = judge([row("margin.e2e.ts", 5, { ms: 1_499 })], markers, 2_000);
+  expect(wellUnder.stale).toEqual([...markers]);
+  expect(wellUnder.markersUsed).toBe(0);
+});
+
+// The band is a share of the threshold, so `--slow-ms` moves both halves together: the same
+// 1,600 ms row is inside the band of a 2 s bar and well under the band of a 4 s one.
+test("the band moves with the threshold", () => {
+  const markers = markersIn("margin.e2e.ts", describeSource);
+  const rows = [row("margin.e2e.ts", 5, { ms: 1_600 })];
+  expect(judge(rows, markers, 2_000).stale).toEqual([]);
+  expect(judge(rows, markers, 4_000).stale).toEqual([...markers]);
+});
