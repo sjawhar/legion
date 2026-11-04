@@ -58,7 +58,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
-			t.Run("the listener reaches healthy and a session as the same user receives", func(t *testing.T) {
+			t.Run("the listener reaches healthy and every session registration is refused by name", func(t *testing.T) {
 				t.Parallel()
 				seed, server, uri := startGrantServer(t, image.Ref, core.HostPermissions(liveMachineID))
 				held := cmdtest.HoldPort(t)
@@ -68,35 +68,22 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				})
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
+				// A session on a host user shares that user, and the operations of its own hold:
+				// it reads its agent stream's control subject and writes that stream's frames.
 				conn, errs := connect(t, uri, seed)
-				received, err := conn.SubscribeSync(contracts.AgentSubject(liveServingSession))
+				_, err := conn.SubscribeSync(contracts.AgentStreamControlSubject(liveSession))
 				require.NoError(t, err)
-				_, err = conn.SubscribeSync(contracts.AgentStreamControlSubject(liveServingSession))
-				require.NoError(t, err)
-				require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(liveServingSession), []byte(`[]`)))
+				require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(liveSession), []byte(`[]`)))
 				require.NoError(t, conn.Flush())
 
-				// The host's set holds no session consumer's call, so this listener can give a
-				// session none, and the only registration it still answers is a serving port's:
-				// that answer carries no delivery field at all, and the session's messages are
-				// pushed to its port from the listener's own durable. This is also the one grant
-				// under which a session's user may subscribe to every notification topic, so what
-				// the listener publishes on the stream's subjects is read here over NATS as well.
-				serving := startServingPort(t, liveServingSession)
-				answer := postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveServingSession+
-					`","topics":["notifications.team.deploy-squad"],"port":`+strconv.Itoa(serving.port)+`,"host":"127.0.0.1"}`)
-				require.NotContains(t, answer, `"delivery"`, "the registration's answer: %s", answer)
-
-				postListener(t, process, port, "/v1/messages/send", `{"target_session":"`+liveServingSession+`","message":"example message"}`)
-				sent, _ := nextEnvelope(t, process, received)
-				require.Equal(t, contracts.AgentSubject(liveServingSession), sent.Topic)
-				require.Equal(t, "example message", sent.PayloadSummary)
-
-				// A portless registration, the one every session that is not served on a port
-				// makes, asks for the consumer this grant cannot manage, so the listener refuses
-				// it by name and writes nothing: the registry knows no such session afterwards.
+				// The host's set holds no session consumer's call, so this listener can give no
+				// session a consumer, and a session is reached through its own consumer and
+				// nothing else: the core receive path is gone with dispatch://INFRA-771 and the
+				// serving port with sjawhar/legion#2674. So every registration this listener
+				// answers is refused by name and writes nothing, and the registry knows no such
+				// session afterwards.
 				refusedStatus, refusal := postListenerHost(t, port, "/v1/interests/subscribe",
-					`{"session_id":"`+liveSession+`","topics":[],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"live-epoch"}}`,
+					`{"session_id":"`+liveSession+`","topics":["notifications.team.deploy-squad"],"self_subscribed":true,"delivery":{"consumer":true,"epoch":"live-epoch"}}`,
 					"127.0.0.1:"+strconv.Itoa(port))
 				require.Equal(t, http.StatusServiceUnavailable, refusedStatus,
 					"the registration's answer: %s\n%s", refusal, process.Output.String())
@@ -105,23 +92,16 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				require.Equal(t, http.StatusNotFound, entryStatus,
 					"the refused registration left %s in the registry: %s", liveSession, entry)
 
-				// A role message reaches its holder as the copy the stream stores on the holder's
-				// agent subject; the publish route answers once the stream acknowledged storing
-				// it, and no holder answers a receipt.
-				postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveServingSession+`","role":"`+liveRole+`"}`)
-				postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
-				forwarded, _ := nextEnvelope(t, process, received)
-				require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
-
-				// A team topic, which the stream stores, reaches the session subscribed to it on
-				// the subject itself: the listener's stored publish is a publish on that subject.
+				// This is the one grant under which a session's user may subscribe to every
+				// notification topic, so what the listener publishes on the stream's subjects is
+				// read here over NATS: a team topic the stream stores reaches this subscription
+				// on the subject itself, whoever is registered.
 				adhoc, err := conn.SubscribeSync("notifications.team.>")
 				require.NoError(t, err)
 				require.NoError(t, conn.Flush())
 				postListener(t, process, port, "/v1/messages/publish", `{"topic":"notifications.team.deploy-squad","message":"example ad-hoc message"}`)
 				team, _ := nextEnvelope(t, process, adhoc)
 				require.Equal(t, "notifications.team.deploy-squad", team.Topic)
-
 				// Every allowed operation came first, so a violation for one would be the first error.
 				require.NoError(t, conn.Publish("outside.example", nil))
 				requireViolation(t, conn, errs, `Publish to "outside.example"`)
@@ -290,12 +270,18 @@ func TestListenerHostPermissionsOnRealServers(t *testing.T) {
 
 // A user holding SessionPermissions alone, as sessions that share one user hold it, receives on
 // its own relay subject, the subject the listener that owns the session publishes the session's
-// consumer messages on, and publishes a reply; the server refuses it every notification topic
-// beside that one, a subscribe to the reply inboxes and a JetStream API request, on the 2.10
-// image and on the hub's. A session takes no message from a notification subscription of its own:
-// not notifications.>, not the agent subjects (notifications.agent.*), not even its own agent
-// subject. Request/reply from such a session is refused by design, and it reads the stream
-// through no call of its own.
+// consumer messages on, and answers that frame on the inbox the listener named in it; the server
+// refuses it every notification topic beside that one, a subscribe to the reply inboxes and a
+// JetStream API request, on the 2.10 image and on the hub's. A session takes no message from a
+// notification subscription of its own: not notifications.>, not the agent subjects
+// (notifications.agent.*), not even its own agent subject. Request/reply from such a session is
+// refused by design, and it reads the stream through no call of its own.
+//
+// The narrowing of this set is of the subscribe side alone: a session keeps every publish entry
+// it had, _INBOX.> among them, because every relay frame is answered on the listener's own inbox
+// and a session that could not answer would be relayed the same message for ever. Whether another
+// session's relay subject is refused is dispatch://INFRA-840's, not this set's, and is not
+// asserted here.
 func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
@@ -327,7 +313,10 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 			data, err := json.Marshal(item)
 			require.NoError(t, err)
 			listener, _ := connect(t, uri, listenerSeed)
-			require.NoError(t, listener.Publish(bus.DeliverSubject(liveSession), data))
+			answers, err := listener.SubscribeSync(natsgo.NewInbox())
+			require.NoError(t, err)
+			require.NoError(t, listener.Flush())
+			require.NoError(t, listener.PublishRequest(bus.DeliverSubject(liveSession), answers.Subject, data))
 			require.NoError(t, listener.Flush())
 			frame, err := relayed.NextMsg(10 * time.Second)
 			require.NoError(t, err, "no relay frame reached %s", bus.DeliverSubject(liveSession))
@@ -335,6 +324,15 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 			require.NoError(t, json.Unmarshal(frame.Data, &received))
 			require.Equal(t, item.Topic, received.Topic)
 			require.Equal(t, item.PayloadSummary, received.PayloadSummary)
+
+			// The session's answer on that inbox goes through under the narrowed grant: a publish
+			// the server refuses is reported on the connection's error handler and never by
+			// Respond, so the answer arriving at the listener is what says the entry is held.
+			require.NoError(t, frame.Respond([]byte("done")))
+			require.NoError(t, conn.Flush())
+			answer, err := answers.NextMsg(10 * time.Second)
+			require.NoError(t, err, "the session's answer never reached the listener's inbox %s", answers.Subject)
+			require.Equal(t, "done", string(answer.Data))
 
 			// Every notification topic beside that subject is refused: the family's root, the
 			// agent subjects a session of an earlier release subscribed to, and its own among

@@ -235,15 +235,21 @@ func TestEnsureCreatesTheConsumerWithTheSessionSettings(t *testing.T) {
 // delivers nothing the stream held before it, never the stream from sequence 1: not when it has
 // delivered nothing, not when its first delivery is still unacked, though nats-server v2.10.29
 // reports such a consumer's ack floor as 0, and not once everything it delivered is acked.
+//
+// What the stream holds before the consumer is on a topic the session follows, not on its own
+// agent subject: a create with no position starts at the first message stored on that agent
+// subject, since that message is the session's own and nothing else would ever deliver it
+// (Ensure, dispatch://INFRA-771). A followed topic's history from before the session is not the
+// session's, and this is the test that it is never delivered.
 func TestRestartAtFloorNeverDeliversWhatTheStreamHeldBeforeTheConsumer(t *testing.T) {
 	owner, consumers := sessionConsumersOnStream(t)
 	ctx := context.Background()
 	const session = "ses_fresh"
 	agent := contracts.AgentSubject(session)
 	filters := []string{agent, "notifications.dispatch.issue.K-1.>"}
-	publishStored(t, owner, agent, "before 1")
+	publishStored(t, owner, "notifications.dispatch.issue.K-1.comment", "before 1")
 	publishStored(t, owner, "notifications.github.o.r.push", "unfiltered")
-	last := publishStored(t, owner, agent, "before 2")
+	last := publishStored(t, owner, "notifications.dispatch.issue.K-1.comment", "before 2")
 
 	if start, err := consumers.Ensure(ctx, session, filters, 0); err != nil || start.StartSeq != last+1 {
 		t.Fatalf("Ensure of a new consumer = %+v, %v; want a start at %d", start, err, last+1)

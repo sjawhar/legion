@@ -240,6 +240,7 @@ Each item below names a script, then what it proves.
   every Envoy event reaches a real Oh My Pi session and a real Claude Code session under `legion claude-bridge` exactly once
   — agent sends and Dispatch messages, comments on a followed Dispatch issue (in their publish order), role publishes through the listener, core role publishes through the role lane, and a publish to the team topic both sessions follow
   — also when it was published while the session was killed and resumed, its NATS connection was cut, either of two listeners was killed, or Dispatch was SIGKILLed right after its writes, all built from the checkout and run in an issue pod;
+  and a message stored on a session's own agent subject before that session first registers reaches it once;
   with `--build-from` an earlier revision's listener and plugins show the losses under a session restart.
   Manual, never CI
 
@@ -4147,7 +4148,7 @@ on any exit the workflow runs on its branches that have not finished are cancell
 
 ## envoy-session-delivery.sh
 
-INFRA-594's live proof: every Envoy event reaches a real Oh My Pi session and a real Claude Code session exactly once, also when it was published while the session, its NATS connection, either listener or Dispatch was down.
+INFRA-594's live proof: every Envoy event reaches a real Oh My Pi session and a real Claude Code session exactly once, also when it was published while the session, its NATS connection, either listener or Dispatch was down, and when it was stored for a session before that session first registered (INFRA-771).
 Manual: it needs a model provider and is never wired into CI.
 
 ```bash
@@ -4198,7 +4199,7 @@ Dispatch reaches NATS through a proxy of its own too.
 Each session gets one setup prompt, which makes it follow `notifications.dispatch.issue.<KEY>.>` and the run's own team topic `notifications.team.live-delivery-<run>`, and hold a role of its own;
 the listener's registry is then read to show them, and `GET /v1/sessions` to show each session's `delivery` reading `consumer` — read again with the table, and a failure either time
 — so every count below is a count of what a session's own consumer carried.
-Then six windows run, each with one disruption, and every event of the window is published while the disruption holds:
+Then seven windows run, each with one disruption, and every event of the window is published while the disruption holds:
 
 | window | disruption |
 | :--- | :--- |
@@ -4208,6 +4209,7 @@ Then six windows run, each with one disruption, and every event of the window is
 | d | listener `dispatch` SIGKILLed and restarted |
 | e | Dispatch's own NATS connection cut at its proxy, so its outbox cannot publish what the writes commit; Dispatch's writes made and Dispatch SIGKILLed right after they return; the proxy restored and Dispatch restarted, so events committed before the kill are published after the restart; the run prints the stream's stored time of each comment of the window beside the restart time |
 | f | none (the control) |
+| g | the Claude Code session SIGKILLed and replaced by one whose id has never registered, with the window's one envelope published on that id's own agent subject, and stored, before it starts |
 
 Every server takes its port from [`lib/held-port.py`](#libheld-portpy), never a port picked free a moment earlier.
 natsd binds the client and monitor ports the kernel chooses (`-p -1 -m -1`), and the script reads both from its log.
@@ -4221,7 +4223,7 @@ A client of a server a window has stopped therefore waits rather than being refu
 Only a listener of a `--build-from` revision that takes no `ENVOY_LISTEN_FD` (`c3d09eec` and `926040d9` take none) binds a number:
 it can bind only the `PORT` it is given, so it gets a port picked free below the kernel's ephemeral range, and its restart binds the same number again.
 
-Every window publishes these events.
+Windows a to f publish these events.
 Each event carries a marker of its own in its text:
 
 | kind | events |
@@ -4231,13 +4233,22 @@ Each event carries a marker of its own in its text:
 | role | `POST /v1/messages/publish` to each session's role; a core NATS publish of an Envoy envelope on `notifications.role.<role>`, which the role lane forwards |
 | team | `POST /v1/messages/publish` to the team topic both sessions follow, one event counted in both of them; `notifications.team.>` is a stream subject, so the publish is stored and each session's own consumer holds it until that session is back: in window a, which SIGKILLs both sessions, the row must still read 1 for each |
 
+Window g publishes none of them.
+Its one event is a core NATS publish of an Envoy envelope on `notifications.agent.<the new Claude Code session id>`, counted in that session alone.
+It is a direct core publish rather than a `POST /v1/messages/send` because the listener refuses a send to a session it does not know, and that nothing knew the session yet is the whole case:
+the stream captures `notifications.agent.>`, so the envelope is stored while no session of that id exists, and the listener must give the session's consumer the first sequence the stream holds on its own agent subject when it first registers.
+An agent subject is one session's alone, so that start is never older than the session itself.
+This is what sjawhar/legion#2720's deleted replay sweep did for a brand-new session.
+
 The listener sends go to listener `dispatch`, and to listener `shared` in window d.
 In window d, Dispatch cannot reach its listener:
 its lookup of the session (`GET /v1/registry/<id>`) gets no answer within its five-second window on the kept port (a picked port refuses the connection), so it records its two messages as failed attempts with no envelope.
 Nothing was published for them, and they are expected 0 times (`/0` in the table).
 
 After each window, the script waits up to `SESSION_DELIVERY_SETTLE_S` for every marker to reach its session, then `SESSION_DELIVERY_HOLD_S` more for a repeat.
-At the end it counts each marker in each transcript the event was meant for.
+At the end it counts each marker in every transcript the session the event was meant for has had.
+A session the run replaces writes a new transcript — window g replaces the Claude Code session — so the windows before the replacement are counted in the transcript it had then, and the run is judged as a whole.
+Each later transcript's lines are counted on from the one before it, which the session wrote earlier, so the issue-order comparison reads one rising line number per session.
 In the Oh My Pi session file it counts `envoy-message` cards and user messages.
 In the Claude Code transcript `<CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl` it counts user messages (no tool results, no meta lines) and the `queued_command` attachments of prompts Claude Code took during a turn.
 It does not count the assistant's replies, Claude Code's `queue-operation` and `api-request-blob` lines, or the plugins' own ledger entries.
@@ -4266,7 +4277,8 @@ the mixed rollout, a hub already updated serving a session that still runs the p
 The listener this checkout builds refuses a registration it can give no session consumer before it writes anything (`409 not_requested` or `409 invalid_session_id`, `503 no_grant` or `503 consumer_error`), so `--plugins-from` names a tree whose plugins ask for one;
 a tree from before they did is run with `--build-from`, which serves it the listener of its own revision.
 
-`--disruptions a,c` runs only the windows named.
+`--disruptions a,c` runs only the windows named, any subset of `a` to `g`.
+A subset that publishes no comment of the followed issue (`g` alone) has no comment order to compare, and the run says so rather than judging it.
 
 | input | default | meaning |
 | :--- | :--- | :--- |

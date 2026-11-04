@@ -183,9 +183,16 @@ type SessionConsumerStart struct {
 // a consumer only for those), so a message stored on the new subject after the consumer last
 // looked, and before the update, is delivered too.
 //
-// A missing consumer is created starting at stream sequence startSeq, or, when startSeq is 0, at
-// the sequence after the stream's last, which delivers what the stream stores from then on, as
-// DeliverNew does, and gives the consumer a start its ack floor never reads below (RestartAtFloor).
+// A missing consumer is created starting at stream sequence startSeq. When startSeq is 0 the
+// caller holds no position for the session, and the consumer starts at the first sequence the
+// stream holds on the session's own agent subject (firstStoredOn), or, when it holds none, at the
+// sequence after the stream's last, which delivers what the stream stores from then on, as
+// DeliverNew does. An agent subject is one session's alone and no message can be stored there
+// before the session id exists, so that start reaches back no further than the session itself and
+// hands it what was stored for it before it could register - a message published while its NATS
+// connection was down, or one that raced its first registration - which is what sjawhar/legion
+// #2720's sweep delivered before this release removed the sweep (dispatch://INFRA-771).
+// Either start is a sequence the consumer's ack floor never reads below (RestartAtFloor).
 // A consumer missing because a restart of it (RestartAtFloor) on this SessionConsumers deleted it,
 // or may have, and did not confirm its create, is created at the start that restart read instead,
 // whatever startSeq is, so the session loses nothing it had not acked.
@@ -200,6 +207,13 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 			start := startSeq
 			if pending, ok := s.pendingStart(name); ok {
 				start = pending
+			}
+			if start == 0 {
+				stored, err := s.firstStoredOn(ctx, contracts.AgentSubject(sessionID))
+				if err != nil {
+					return SessionConsumerStart{}, err
+				}
+				start = stored
 			}
 			created, err := s.create(ctx, name, filters, start)
 			// A consumer that appeared since the info, created by another call, is updated instead.
