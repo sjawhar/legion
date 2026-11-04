@@ -604,12 +604,27 @@ func (p *Pool) resetStatements(dirty []int) string {
 	}
 	// One Exec of the lot is one round trip and, under the simple protocol, one implicit
 	// transaction: a database whose reset fails part way through is never put back.
-	statements := make([]string, 0, 1+len(p.restores)+len(p.sequences))
+	//
+	// The analyze is what makes a reused database plan like a fresh clone. A truncate resets
+	// pg_class.reltuples but leaves pg_statistic describing the rows the test before wrote, so
+	// a test whose claim is about a plan - how many rows a page reads, which index a query
+	// takes - reads one answer on a clone of the template and another on a database recycled
+	// from a test that seeded and analysed a large table. Measured in internal/dispatch/api:
+	// a page read 8 events rows on a clone and 10 on a database the 200,000-event relay test
+	// had used, with the same nine rows in its window. It costs what it scans and these tables
+	// have just been emptied, so it is the cheap half of the statement, not the dear one; a
+	// test that wrote nothing truncates nothing and analyses nothing. It runs last, after the
+	// template's own rows are back, so the statistics describe what the next test will read.
+	statements := make([]string, 0, 2+len(p.restores)+len(p.sequences))
+	joined := strings.Join(tables, ", ")
 	if len(tables) > 0 {
-		statements = append(statements, "truncate table "+strings.Join(tables, ", ")+" restart identity cascade")
+		statements = append(statements, "truncate table "+joined+" restart identity cascade")
 	}
 	statements = append(statements, p.restores...)
 	statements = append(statements, p.sequences...)
+	if len(tables) > 0 {
+		statements = append(statements, "analyze "+joined)
+	}
 	return strings.Join(statements, ";\n")
 }
 
