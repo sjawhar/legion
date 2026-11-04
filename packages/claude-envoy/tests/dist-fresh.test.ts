@@ -238,6 +238,7 @@ test("the dependency guard detects calls after comment-like strings", async () =
       path: "/tmp/node_modules/block.js",
     },
     {
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the fixture is source text holding a template literal
       source: 'const template = `${import.meta.require("/tmp/node_modules/template.js")}`',
       path: "/tmp/node_modules/template.js",
     },

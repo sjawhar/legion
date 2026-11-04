@@ -70,14 +70,23 @@ type Deps struct {
 	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
-	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
-	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
-	// against the bucket this process actually has rather than against a constant derived from a
+	// RereadLimitFor of RereadOverallLimit, so that an address's own rate is ordered against
+	// the bucket this process really mounts rather than against a constant derived from a
 	// bucket it may never mount.
 	RereadLimit *ratelimit.Limit
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
 	RereadOverallLimit *ratelimit.Limit
+	// RereadRate derives both reread buckets from the replica count this process counts and
+	// moves them whenever that count changes. The route is served from that rate's own pair
+	// whenever it is set (RereadRate.Buckets), so RereadLimit and RereadOverallLimit are then
+	// read by nothing. Only cmd/broker sets it, from the fleet budget of the store it mounts,
+	// and only its serving clock changes the count.
+	//
+	// nil is every rate fixed at registration, which is what a test gets: cmd/broker always
+	// builds one, so no broker a deployment runs is without it. A test that wants rates that
+	// never move passes none and pins the two limits above, or takes their defaults.
+	RereadRate *RereadRate
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
 	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
@@ -124,9 +133,10 @@ type Deps struct {
 type server struct {
 	deps            Deps
 	launcherLimiter *launcherLimiter
-	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadOverall
-	// RereadOverallLimit over one bucket every caller shares; refuseReread takes from both or
-	// neither.
+	// rereadLimiter is the per-address bucket on POST /v1/secrets/{name}/reread
+	// (clientAddress) and rereadOverall the one every caller shares; refuseReread takes from
+	// both or neither. For a Deps that carries a RereadRate these are that rate's own pair, so
+	// a change of the replica count moves the rates this route really runs at.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
 	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
@@ -144,17 +154,27 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	rereadOverall := DefaultRereadOverallLimit
-	if deps.RereadOverallLimit != nil {
-		rereadOverall = *deps.RereadOverallLimit
-	}
-	// Derived from the shared bucket resolved just above, and only when the caller named no
-	// bucket of its own: a caller that passes one - the rows that drive the per-address bucket
-	// on its own - keeps what it passed, exactly as every other optional dep here is defaulted
-	// rather than overridden.
-	reread := RereadLimitFor(rereadOverall)
-	if deps.RereadLimit != nil {
-		reread = *deps.RereadLimit
+	// The two buckets POST /v1/secrets/{name}/reread is served from. A Deps that carries a rate
+	// is served from the rate's own pair, which it moves at each count the serving clock gives;
+	// one that does not gets a fixed pair, at the limits it pinned or their defaults.
+	var rereadLimiter *ratelimit.Keyed
+	var rereadBucket *ratelimit.Bucket
+	if deps.RereadRate != nil {
+		rereadLimiter, rereadBucket = deps.RereadRate.Buckets()
+	} else {
+		rereadOverall := DefaultRereadOverallLimit
+		if deps.RereadOverallLimit != nil {
+			rereadOverall = *deps.RereadOverallLimit
+		}
+		// Derived from the shared bucket resolved just above, and only when the caller named no
+		// bucket of its own: a caller that passes one - the rows that drive the per-address
+		// bucket on its own - keeps what it passed, exactly as every other optional dep here is
+		// defaulted rather than overridden.
+		reread := RereadLimitFor(rereadOverall)
+		if deps.RereadLimit != nil {
+			reread = *deps.RereadLimit
+		}
+		rereadLimiter, rereadBucket = ratelimit.NewKeyed(reread), ratelimit.NewBucket(rereadOverall)
 	}
 	token := DefaultTokenLimit
 	if deps.TokenLimit != nil {
@@ -167,8 +187,8 @@ func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{
 		deps:            deps,
 		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
-		rereadLimiter:   ratelimit.NewKeyed(reread),
-		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+		rereadLimiter:   rereadLimiter,
+		rereadOverall:   rereadBucket,
 		tokenLimiter:    ratelimit.NewKeyed(token),
 		accountLimiter:  ratelimit.NewKeyed(account),
 	}

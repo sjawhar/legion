@@ -57,10 +57,12 @@ func runHandoffsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 		return 1
 	}
 	stateURL := cfg.DaemonURL + "/legion/v1/state"
+	tokens := appauth.New(cfg.GitHubApps, appauth.Options{})
+	defer tokens.Close()
 	return handoffimport.Run(ctx, handoffimport.Options{
 		Project:  cfg.Project,
 		State:    func(ctx context.Context) ([]byte, error) { return get(ctx, stateURL) },
-		Tokens:   appauth.New(cfg.GitHubApps, appauth.Options{}),
+		Tokens:   tokens,
 		Dispatch: dispatch.New(cfg.DispatchURL, token),
 		DryRun:   *dryRun,
 	}, stdout, stderr)
