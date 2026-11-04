@@ -71,7 +71,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
-import { refocusAfterDiagrams } from "./refocus-after-diagrams";
+import { refocusWhenSettled } from "./refocus-when-settled";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
@@ -445,14 +445,15 @@ export function ProofDocument({
     [artifact.id, pendingWaiter]
   );
   // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
-  // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
-  // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
-  // down. One re-run waits at a time: a newer focus drops an older one's, and so does the editor
-  // unbinding.
+  // click to a block - runs `focus` now and `refocus` once more after the drawing around its
+  // target has settled (`refocusWhenSettled`): the page's mermaid diagrams, and this editor's own
+  // blocks, whose hosted cards and pictures draw after it opened and push a target below them
+  // down. The editor's drawn root is what grows, so it is what is watched. One re-run waits at a
+  // time: a newer focus drops an older one's, and so does the editor unbinding.
   const focusInEditor = useCallback((focus: () => void, refocus: () => void = focus) => {
     disposeRefocusRef.current?.();
     focus();
-    disposeRefocusRef.current = refocusAfterDiagrams(refocus);
+    disposeRefocusRef.current = refocusWhenSettled(refocus, editorRef.current?.view.dom);
   }, []);
   // The fragment the block focus last followed, which the focus of a short id rewrites to the
   // whole block's: an address this document wrote itself is no change for it to follow again.

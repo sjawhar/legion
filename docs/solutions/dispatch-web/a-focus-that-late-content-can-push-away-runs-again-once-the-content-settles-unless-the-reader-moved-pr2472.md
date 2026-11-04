@@ -34,7 +34,8 @@ related_issues:
 ## Evidence
 
 sjawhar/legion#2472 added `refocusAfterDiagrams`
-(`packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts`) and first used it only for
+(`packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts`, since widened to any late
+drawing and renamed `refocusWhenSettled` in `refocus-when-settled.ts`) and first used it only for
 the `#b-` link and `VersionView`. Review round 1 found the live document's `?comment=<id>` link
 (focused once from `useMarginSheet.ts`) still landed off-screen after a late diagram: quote at
 y=657 before the draw, y=10668 after. Round 2 routed every focus through `ProofDocument`'s

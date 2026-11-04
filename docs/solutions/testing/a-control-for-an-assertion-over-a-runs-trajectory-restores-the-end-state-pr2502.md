@@ -49,8 +49,9 @@ under the same dip passed. The tester reproduced both from a dip written indepen
 
 The spec's own acceptance named a different fault — "with the page's jump re-run removed, the
 moved past-version rows still fail".
-`packages/dispatch/web/src/features/doc/refocus-after-diagrams.ts:24` returns a no-op when no
-diagram is waiting, and the moved row has no diagram, so that removal leaves the row green. The
+`packages/dispatch/web/src/features/doc/refocus-when-settled.ts` (then
+`refocus-after-diagrams.ts`) returned a no-op when no
+diagram was waiting, and the moved row has no diagram, so that removal leaves the row green. The
 plan recorded the line and proposed the `VersionView` dependency-list mutation instead; the tester
 later confirmed the asymmetry in one run, where the diagram-bearing row failed with
 `viewport ratio 0` while the no-diagram row passed.

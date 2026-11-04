@@ -16,7 +16,7 @@ import { DocumentReferences, documentSource, useReferenceClick } from "./documen
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
-import { refocusAfterDiagrams } from "./refocus-after-diagrams";
+import { refocusWhenSettled } from "./refocus-when-settled";
 import { DocumentRuntime } from "./runtime";
 import type { AskBlockHost } from "./typed-block-drawing";
 
@@ -134,9 +134,12 @@ export function VersionView({
       setEditorHandle(editor);
       if (embedded !== undefined && highlighted !== undefined) {
         editor.focusMark(highlighted.id);
-        // A diagram above the quote that draws after this focus pushes it down, so the focus
-        // runs again once the diagrams have drawn; the cleanup drops it once unmounted.
-        disposeRefocus = refocusAfterDiagrams(() => editor.focusMark(highlighted.id));
+        // A diagram or a card above the quote that draws after this focus pushes it down, so the
+        // focus runs again once the drawing has settled; the cleanup drops it once unmounted.
+        disposeRefocus = refocusWhenSettled(
+          () => editor.focusMark(highlighted.id),
+          editor.view.dom
+        );
       }
       if (changeBaseline === undefined) return;
       // The baseline is parsed by the shared headless engine, which the shell warms after the
