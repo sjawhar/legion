@@ -161,15 +161,21 @@ json_field() {
 # /api/v1/references?to=TARGET, whose edges are the incoming ones) and answers 0 when exactly
 # the references SOURCE names point at it, in any order, 1 when others do, and 2 when the read
 # itself failed — which a bounded wait takes for "not yet" and a direct caller for a failure.
+#
+# A source is named by the item it is. This release indexes a text from the block that holds it,
+# so an edge made by a comment's citation names `<comment>#b-<block>`; which block of a comment
+# carried the citation is not what this proof is about, so the fragment is dropped and a source
+# citing the target from two of its own blocks counts once.
 references_hold() {
   local target=$1
   shift
   local wanted found answer
-  wanted=$(printf '%s\n' "$@" | sort)
+  wanted=$(printf '%s\n' "$@" | sort -u)
   answer=$(call GET "/api/v1/references?to=$target") || return 2
   found=$(printf '%s' "$answer" |
-    bun -e 'let data = ""; process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => { for (const edge of JSON.parse(data).edges ?? []) console.log(edge.node?.ref ?? ""); });' |
-    sort) || return 2
+    bun -e 'let data = ""; process.stdin.on("data", (chunk) => { data += chunk; }); process.stdin.on("end", () => { for (const edge of JSON.parse(data).edges ?? []) console.log((edge.node?.ref ?? "").replace(/#b-.*$/, "")); });' |
+    sort -u) || return 2
+  references_found=$found
   [ "$found" = "$wanted" ]
 }
 
@@ -211,6 +217,22 @@ done
 if [ "$base_port" = "$head_port" ] || [ "$base_port" = "$envoy_port" ] || [ "$head_port" = "$envoy_port" ]; then
   fail "the base, head and fake Envoy ports must differ ($base_port, $head_port, $envoy_port)"
 fi
+# The `vector` extension is the deployment's bootstrap's to install, as a cluster's master role
+# (0072_embeddings_core.up.sql), and the role this run connects as is not one, so a database
+# without it is one no build can migrate. It is read here rather than met with a failed boot.
+[ "$(psql "$database_url" -X -tAc "select count(*) from pg_extension where extname = 'vector'" 2>/dev/null)" = 1 ] ||
+  fail "DATABASE_URL must name a database that already holds the vector extension, which only the cluster's master role can install"
+# How far apart two block-index reconciliation ticks are when nothing is owed, read from the
+# constant the loop runs on (internal/dispatch/docs, BlockIndexReconcileInterval) rather than
+# guessed, so the drain below waits exactly as long as this build can take and no longer. A
+# declaration this does not recognise fails the run here, rather than leaving a number of this
+# script's own to go stale beside the code.
+block_index=$root/packages/envoy/internal/dispatch/docs/block_index.go
+reconcile_seconds=$(sed -n \
+  's/^[[:space:]]*BlockIndexReconcileInterval = \([0-9]\{1,\}\) \* time\.Second$/\1/p' "$block_index")
+[[ "$reconcile_seconds" =~ ^[1-9][0-9]*$ ]] ||
+  fail "could not read BlockIndexReconcileInterval from $block_index"
+note "block-index reconciliation every ${reconcile_seconds}s"
 note "database host $db_host (URL not printed)"
 note "base commit $base_sha"
 pass
@@ -233,10 +255,40 @@ pass
 
 begin reset-database
 # Empty, migrations included: the base build migrates the new schema at boot, and this build
-# migrates it forward, which is the upgrade this proof is about.
+# migrates it forward, which is the upgrade this proof is about. Every table, view, routine and
+# type of the public schema goes, and the extensions it holds stay: `vector` is installed by the
+# cluster's master role (0072_embeddings_core.up.sql says so, and takes it as given with
+# `create extension if not exists`), which the role this run connects as is not, so dropping the
+# schema would leave a database no build can migrate.
+reset_sql="do \$\$
+declare object record;
+begin
+  for object in select table_name, table_type from information_schema.tables where table_schema = 'public' loop
+    if object.table_type = 'VIEW' then
+      execute format('drop view if exists public.%I cascade', object.table_name);
+    else
+      execute format('drop table if exists public.%I cascade', object.table_name);
+    end if;
+  end loop;
+  for object in
+    select p.oid::regprocedure as signature from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+  loop
+    execute format('drop routine if exists %s cascade', object.signature);
+  end loop;
+  for object in
+    select t.oid::regtype as name from pg_type t join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public' and t.typtype in ('e', 'c', 'd')
+      and not exists (select 1 from pg_depend d where d.objid = t.oid and d.deptype = 'e')
+      and not exists (select 1 from pg_class c where c.oid = t.typrelid and c.relkind <> 'c')
+  loop
+    execute format('drop type if exists %s cascade', object.name);
+  end loop;
+end
+\$\$;"
 psql "$database_url" -X -q -v ON_ERROR_STOP=1 -c 'set client_min_messages = warning' \
-  -c 'drop schema if exists public cascade' -c 'create schema public' >/dev/null ||
-  fail "could not reset the database's public schema"
+  -c "$reset_sql" >/dev/null ||
+  fail "could not empty the database's public schema"
 pass
 
 begin fake-envoy
@@ -247,6 +299,10 @@ note "fake Envoy listener on http://127.0.0.1:$envoy_port"
 pass
 
 agent_token=$(openssl rand -hex 24)
+# Both processes serve one database, so each must sign its cookies with the key the other
+# holds, as e2e/run-server.sh gives two-process mode: a process with a key of its own is
+# refused registration by the one already live.
+signin_key=$(openssl rand -hex 32)
 base_url=http://127.0.0.1:$base_port
 head_url=http://127.0.0.1:$head_port
 
@@ -266,6 +322,7 @@ start_server() {
     DATABASE_URL="$database_url" \
     DISPATCH_AGENT_TOKEN="$agent_token" \
     DISPATCH_DEV_SIGNIN=1 \
+    DISPATCH_DEV_SIGNIN_SHARED_KEY="$signin_key" \
     DISPATCH_IDENTITY=cookie \
     DISPATCH_INSECURE_COOKIE=1 \
     DISPATCH_LISTEN_HOST=127.0.0.1 \
@@ -298,6 +355,9 @@ note "the base build made $target_key and $host_key"
 # The citation is a bare issue key, which only this release's grammar reads.
 written=$(call POST "/api/v1/issues/$host_key/comments" "{\"body\":\"Blocked on $target_key today.\",$actor}" | json_field id) ||
   fail "the base build refused the comment"
+# Every issue is referenced by its own spec, a structural edge no text makes, so it stands in
+# every reading of the target's "Referenced by" below.
+spec_edge="dispatch://$target_key/spec"
 note "the base build wrote the comment $written"
 pass
 
@@ -308,10 +368,10 @@ begin base-alone
 waited=0
 while [ "$waited" -lt 45 ]; do
   held=0
-  references_hold "dispatch://$target_key" || held=$?
+  references_hold "dispatch://$target_key" "$spec_edge" || held=$?
   case "$held" in
     0) ;;
-    1) fail "the base build indexed the bare key it cannot read: $target_key has an edge after ${waited}s" ;;
+    1) fail "the base build indexed the bare key it cannot read: after ${waited}s $target_key is referenced by $(echo "$references_found" | tr '\n' ' ')" ;;
     *) fail "the base build's read of $target_key's references failed after ${waited}s" ;;
   esac
   sleep 5
@@ -329,25 +389,45 @@ note "this build serves $head_url on the schema it migrated forward, beside the 
 pass
 
 begin overlap
-# The older build, still serving, writes a second comment and edits the first. Neither write is
+# The older build, still serving, writes a second comment citing the same issue by its bare key
+# (an edit of the first is the other half of the same case, and Dispatch admits a comment edit
+# from a person alone, which this run holds no cookie for). Neither write is
 # indexed with this release's grammar — the build making them does not have it — and both are
 # enqueued by the triggers this build's migration installed.
 target_url=$base_url
 second=$(call POST "/api/v1/issues/$host_key/comments" "{\"body\":\"Also blocked on $target_key.\",$actor}" | json_field id) ||
   fail "the base build refused the second comment"
-call PATCH "/api/v1/comments/$written" "{\"body\":\"Still blocked on $target_key today.\",$actor}" >/dev/null ||
-  fail "the base build refused the edit"
 kill -0 "$base_pid" 2>/dev/null || fail "the base build exited while it was writing"
-note "the base build wrote $second and edited $written while this build was serving"
+note "the base build wrote $second while this build was serving"
 pass
 
+# What a timed-out drain prints before it fails: the target's "Referenced by" as the last read
+# answered, and how many rows still owe this build's grammar. A drain that ran and wrote
+# something else is a different failure from one that never ran, and a timeout naming neither is
+# unactionable.
+report_drain() {
+  note "the last read of $target_key's references: $(printf '%s' "${references_found:-}" | tr '\n' ' ')"
+  note "rows still owed this build's grammar: $(psql "$database_url" -X -tAc \
+    'select count(*) from refs_grammar_owed' 2>&1 | tr -d '\n')"
+}
+
 begin drained
-# The older build stops, and nothing else is asked of this one: no rebuild command, no edit.
+# The older build stops, and nothing else is asked of this one: no rebuild command, no edit. It
+# is waited out rather than signalled and left: a process still running holds the block-index
+# lease for the length of its own pass (a session advisory lock, which Postgres drops with the
+# session), and a process still writing would add to what this build owes an index.
 stop_pid "$base_pid"
+kill -0 "$base_pid" 2>/dev/null && fail "the base build is still running after it was stopped"
 base_pid=''
 target_url=$head_url
-until_true 180 "$target_key to be referenced by both comments the base build wrote" \
-  references_hold "dispatch://$target_key" \
+# With the base build gone, the only thing between the writes it left and the target's
+# "Referenced by" is this build's own reconciliation: the next tick, at most one interval away,
+# and that tick's own pass. Two intervals is that bound with a whole interval to spare, and it is
+# the interval's own, so a release that changes the cadence changes this wait with it.
+timeout_hook=report_drain
+until_true $((reconcile_seconds * 2)) "$target_key to be referenced by both comments the base build wrote" \
+  references_hold "dispatch://$target_key" "$spec_edge" \
   "dispatch://$host_key/comment/$written" "dispatch://$host_key/comment/$second"
+timeout_hook=''
 note "$target_key is referenced by $written and $second, with no command run"
 pass

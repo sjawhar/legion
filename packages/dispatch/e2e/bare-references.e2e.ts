@@ -1,22 +1,23 @@
 import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { isIdPrefix } from "../web/src/features/refs/text-references";
 import {
   baseUrl,
   createComment,
   createIssueArtifact,
-  createMessage,
   dashboardOrigin,
   getArtifactText,
   listMyReplies,
   userHeaders,
 } from "./api";
-import { connectedDot, documentEditor } from "./editor";
+import { connectedDot, documentEditor, openSpec } from "./editor";
 import {
-  conversationTurn,
+  ANCHOR,
   HOST_KEY,
   INERT_REFERENCE,
   OTHER_KEY,
+  openMarginThread,
   QUESTION_IDS,
   questionBlock,
   questionText,
@@ -63,21 +64,38 @@ const NO_ISSUE_ROW = "Blocked on CORE-1, which no issue holds.";
 const NO_ISSUE_KEY = "CORE-404";
 
 /** Rows no document can hold as a line of its text, each with the reason. They are read on the
- *  rendered and preview surfaces like any other. */
+ *  rendered and preview surfaces like any other.
+ *
+ *  A row's `refs` is a property of the body string, which a comment, an ask and a message store
+ *  as written; a document stores a tree, and the markdown an upload parses into one resolves
+ *  both forms of an escaped `#` before anything reads the document. `GET
+ *  /api/v1/artifacts/{id}/text` for a document uploaded with `See &#35;q2 here.` answers `See
+ *  #q2 here.`, so the line the document holds is one the table itself reads as a citation of q2
+ *  (the row `See #q2 for the rollout.`): the two rows below are true where their body is stored
+ *  as written and untestable on a document, and their exclusion is no gap in the grammar. */
 const EDITOR_EXCLUDED: Readonly<Record<string, string>> = {
   ':::callout{#d1 affects="dispatch://CORE-1/spec#b-a dispatch://CORE-1/spec#b-b"}':
     "an unclosed directive, which in a document opens a block that swallows the text after it",
   ":::ask{#q2}\nWhich region first?\n:::":
     "written into a document it is the q2 question block's own declaration, not text in it",
+  "See &#35;q2 here.":
+    "a document stores no numeric character reference: the text it holds is `See #q2 here.`",
+  "See \\#q2 and #q3 here.":
+    "a document stores no backslash escape: the text it holds is `See #q2 and #q3 here.`",
 };
 
-/** Rows the live editor draws no title for though the renderer links them, each with the reason.
- *  The editor's reader is handed a block's own text and no origin, so a reference a row writes
- *  only as a dashboard address is no candidate of its. */
-const EDITOR_UNREAD: Readonly<Record<string, string>> = {
-  [`https://dispatch.test/issues/CORE-1/spec#b-${"a".repeat(256)} and https://dispatch.test/issues/CORE-1/spec#b-${"a".repeat(255)}`]:
-    "written only as a dashboard address, which the editor does not read",
-};
+/** Whether `row` writes a prefix two of its own items carry: the table proves an ambiguous
+ *  short id with two ids that differ past their eighth character, and ids are minted, so no
+ *  world made through the API holds two that one prefix names. The ambiguous prefix is proved
+ *  on its own (e2e/prefix-links.e2e.ts, which writes its twin straight into Postgres); here the
+ *  row is left out, since rewriting both of its ids into this world's one item of that kind
+ *  would make the prefix name exactly one. */
+function writesAnAmbiguousPrefix(row: Row): boolean {
+  const ids = Object.keys(row.items ?? {});
+  return ids.some((id, at) =>
+    ids.some((other, index) => index > at && other.slice(0, 8) === id.slice(0, 8))
+  );
+}
 
 /** One table row as this world holds it. */
 interface Case {
@@ -142,24 +160,27 @@ function casesFor(
   world: ReferenceWorld,
   questions: Readonly<Record<string, SettledQuestion>>
 ): Case[] {
-  for (const body of [
-    NO_ISSUE_ROW,
-    ...Object.keys(EDITOR_EXCLUDED),
-    ...Object.keys(EDITOR_UNREAD),
-  ]) {
+  for (const body of [NO_ISSUE_ROW, ...Object.keys(EDITOR_EXCLUDED)]) {
     if (DISPATCH_TEXT_REFERENCES.filter((row) => row.body === body).length !== 1) {
       throw new Error(`setup: the table no longer holds exactly one ${JSON.stringify(body)}`);
     }
   }
-  // Every reference this world holds a target for, which is what the editor draws a title for.
-  const made = new Set<string>([
-    `dispatch://${world.host.key}`,
-    `dispatch://${world.other.key}`,
-    `dispatch://${world.acme.key}`,
-    `dispatch://${world.host.key}/spec`,
+
+  // Every reference the live editor draws a title for: the issues this world holds, the records
+  // a short id names, each question block's ask, and any document of an issue it holds - a
+  // document's title is the name its own reference carries, so the editor draws one whether or
+  // not that document exists, as it does for a block of one.
+  const issues = [world.host.key, world.target.key, world.other.key, world.acme.key];
+  const named = new Set<string>([
+    ...issues.map((key) => `dispatch://${key}`),
     ...Object.values(world.items).map((item) => item.reference),
     ...QUESTION_IDS.map((id) => askReference(world, questions, id)),
   ]);
+  const document = new RegExp(`^dispatch://(${issues.join("|")})/(spec|artifact/)`);
+  // A document's title is the name its own reference carries, so the editor draws one whether
+  // or not that document exists; a block's title is the block's own text, so it draws only for
+  // a block this world holds.
+  const made = (link: string) => named.has(link) || (document.test(link) && !link.includes("#b-"));
   return DISPATCH_TEXT_REFERENCES.map((row, index) => {
     const ids = new Map(
       Object.entries(row.items ?? {}).map(([id, reference]) => [
@@ -178,14 +199,7 @@ function casesFor(
       ])
     );
     const links = (row.links ?? row.refs).map((link) => asks.get(link) ?? substituteIds(link, ids));
-    const unread = EDITOR_UNREAD[row.body] !== undefined;
-    return {
-      body,
-      drawn: unread ? [] : links.filter((link) => made.has(link)),
-      index,
-      links,
-      row,
-    };
+    return { body, drawn: links.filter(made), index, links, row };
   });
 }
 
@@ -261,7 +275,9 @@ async function expectWorldHolds(world: ReferenceWorld, cases: readonly Case[]): 
       }
     }
     // A row whose reference names nothing must still name nothing: its written id is no prefix
-    // of the real record of that kind.
+    // of the real record of that kind. Only a value the grammar resolves as a prefix can hit
+    // one - `#b-a` is a block id of one character, which names nothing whatever this world
+    // minted - so a shorter value is no collision, however the ids came out.
     for (const [index, link] of (item.row.links ?? item.row.refs).entries()) {
       if (item.links[index] !== link) {
         continue;
@@ -269,7 +285,7 @@ async function expectWorldHolds(world: ReferenceWorld, cases: readonly Case[]): 
       const written = /\/(ask|comment|message)\/([^/?#]+)$|#b-(.+)$/.exec(link);
       const value = written?.[2] ?? written?.[3];
       const kind = written?.[3] === undefined ? written?.[1] : "block";
-      if (value === undefined || kind === undefined) {
+      if (value === undefined || kind === undefined || !isIdPrefix(value)) {
         continue;
       }
       if (whole.get(kind)?.startsWith(value.toLowerCase()) === true) {
@@ -298,7 +314,11 @@ function madeTitles(
   ]);
 }
 
-/** Checks that every reference in scope to a target this world made reads as its title. */
+/**
+ * Checks that every reference in scope to a target this world made reads as its title. A
+ * one-line preview cuts a title that does not fit and ends it with an ellipsis, so what is
+ * shown is the title or its own opening.
+ */
 async function expectMadeTitles(
   scope: Locator,
   selector: (reference: string) => string,
@@ -311,36 +331,45 @@ async function expectMadeTitles(
       continue;
     }
     for (const each of await scope.locator(selector(link)).all()) {
-      await expect(each, rowName(item)).toHaveText(title);
+      const shown = (await each.textContent()) ?? "";
+      const opening = shown.endsWith("…") ? shown.slice(0, -1) : shown;
+      expect(title.startsWith(opening) && (shown === title || shown.endsWith("…")), {
+        message: `${rowName(item)}: ${link} reads ${JSON.stringify(shown)}, not ${JSON.stringify(title)}`,
+      }).toBe(true);
     }
   }
 }
 
-test("a Conversation message links each reference the shared table links and nothing else, and a link opens its target", async ({
+test("a margin thread's replies link each reference the shared table links and nothing else, and a link opens its target", async ({
   browser,
-}) => {
+}, testInfo) => {
   test.setTimeout(60_000 + DISPATCH_TEXT_REFERENCES.length * 1_500);
   const world = await seedReferenceWorld();
-  const cases = casesFor(world, world.questions);
+  const cases = casesFor(world, world.questions).filter(
+    (item) => !writesAnAmbiguousPrefix(item.row)
+  );
   await expectWorldHolds(world, cases);
   const titles = madeTitles(world, world.questions, "spec");
-  // One message per row on the host, so a `#id` in it resolves against the host's spec.
-  const messages = new Map<Case, string>();
+  // One thread on the host's spec, one reply per row: every row is drawn at once, each read
+  // against the host's own questions (`source`, the margin's owner).
+  const root = await createComment(
+    world.host.key,
+    { anchor: { artifact: "spec", quote: ANCHOR }, body: "Where does each row stand?" },
+    referenceAgent
+  );
+  expect(root.anchor?.quote).toBe(ANCHOR);
   for (const item of cases) {
-    messages.set(
-      item,
-      (await createMessage(world.host.key, { body: item.body }, referenceAgent)).id
-    );
+    await createComment(world.host.key, { body: item.body, reply_to: root.id }, referenceAgent);
   }
 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto(`/issues/${world.host.key}/conversation`);
-    const body = (item: Case) =>
-      conversationTurn(page, "message", messages.get(item) ?? "")
-        .locator(RENDERED_BODY)
-        .first();
+    await openSpec(page, world.host.key, ANCHOR);
+    const card = await openMarginThread(page, testInfo.project.name, root.id);
+    const replies = card.locator("li[data-reply]");
+    await expect(replies).toHaveCount(cases.length);
+    const body = (item: Case) => replies.nth(cases.indexOf(item)).locator(RENDERED_BODY).first();
     for (const item of cases) {
       await expect
         .poll(() => referenceTargetsIn(body(item), RENDERED_REFERENCE), { message: rowName(item) })
@@ -356,8 +385,11 @@ test("a Conversation message links each reference the shared table links and not
     await expect(page.getByRole("heading", { name: world.other.title }).first()).toBeVisible();
 
     // A `#id` opens the document at that question, which starts below the fold.
-    await page.goto(`/issues/${world.host.key}/conversation`);
-    await body(caseOf(cases, "See #q2 for the rollout."))
+    await openSpec(page, world.host.key, ANCHOR);
+    const reopened = await openMarginThread(page, testInfo.project.name, root.id);
+    await reopened
+      .locator("li[data-reply]")
+      .nth(cases.indexOf(caseOf(cases, "See #q2 for the rollout.")))
       .getByRole("link", { exact: true, name: questionText("q2", "spec") })
       .click();
     await expect(page).toHaveURL(new RegExp(`/issues/${HOST_KEY}/spec#b-q2$`));
@@ -376,7 +408,10 @@ test("the one-line preview shows each reference the shared table links as its ta
   // A Replies row keeps one line of at most 160 characters of its newest reply, so a longer
   // row, or one of several lines, is read on the rendered and editor surfaces alone.
   const cases = casesFor(world, world.questions).filter(
-    (item) => item.row.body.length <= 160 && !item.row.body.includes("\n")
+    (item) =>
+      !writesAnAmbiguousPrefix(item.row) &&
+      item.row.body.length <= 160 &&
+      !item.row.body.includes("\n")
   );
   await expectWorldHolds(world, cases);
   const titles = madeTitles(world, world.questions, "spec");
@@ -474,7 +509,7 @@ test("the live editor draws each reference the shared table links whose target e
   // The questions first, so each marker line opens exactly its row's blocks, then one marker and
   // one row each.
   const written = casesFor(world, world.questions).filter(
-    (item) => EDITOR_EXCLUDED[item.row.body] === undefined
+    (item) => EDITOR_EXCLUDED[item.row.body] === undefined && !writesAnAmbiguousPrefix(item.row)
   );
   const content = [
     ...QUESTION_IDS.map((id) => questionBlock(id, DOCUMENT.slug)),
@@ -489,7 +524,7 @@ test("the live editor draws each reference the shared table links whose target e
   expect(uploaded.artifact.slug).toBe(DOCUMENT.slug);
   const questions = await settledQuestions(world.host.key, DOCUMENT.slug, QUESTION_IDS);
   const cases = casesFor(world, questions).filter(
-    (item) => EDITOR_EXCLUDED[item.row.body] === undefined
+    (item) => EDITOR_EXCLUDED[item.row.body] === undefined && !writesAnAmbiguousPrefix(item.row)
   );
   await expectWorldHolds(world, cases);
   const titles = madeTitles(world, questions, DOCUMENT.slug);
@@ -519,10 +554,6 @@ test("the live editor draws each reference the shared table links whose target e
     }
 
     // A bare key opens its issue, and the document's stored text is what was written.
-    const line = (body: string) =>
-      documentEditor(page)
-        .locator("p")
-        .filter({ hasText: new RegExp(`^${body.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) });
     await documentEditor(page)
       .locator(`a.dispatch-reference[data-dispatch-href="dispatch://${world.other.key}"]`)
       .first()
@@ -534,7 +565,13 @@ test("the live editor draws each reference the shared table links whose target e
     // A `#id` opens this document at its own question, which stands above the fold it is
     // followed from.
     await open();
-    const question = line("See #q2 for the rollout.").locator("a.dispatch-reference");
+    // The line the `#id` row was written as. The editor draws a resolved reference's title in
+    // front of the reference's own text, which it keeps and hides, so the line reads
+    // `See <the question>#q2 for the rollout.`: the words around the reference name the line.
+    const question = documentEditor(page)
+      .locator("p")
+      .filter({ hasText: /^See .*#q2 for the rollout\.$/ })
+      .locator("a.dispatch-reference");
     await expect(question).toHaveAttribute(
       "data-dispatch-href",
       askReference(world, questions, "q2")

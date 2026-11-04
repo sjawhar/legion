@@ -82,7 +82,7 @@ async function seedTitles(): Promise<Seeded> {
     {
       address: `dispatch://${world.host.project}-999999`,
       label: "Missing issue",
-      path: `/api/v1/issues/${world.host.project}-999999`,
+      path: `/api/v1/issues/${world.host.project}-999999/summary`,
     },
     {
       address: `dispatch://${world.target.key}/ask/${MISSING_ASK}`,
