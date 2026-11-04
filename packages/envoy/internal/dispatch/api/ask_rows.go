@@ -46,10 +46,13 @@ const lastReplyJoin = `
 		left join lateral (` + newestReply + `) lr on true`
 
 // approvalMoved says the ask aliased a is an approval request a version moved past the version its
-// agent last handed to the human. waitingOnExpression and describeAsk, which reads it for a reply's
+// agent last handed to the human. A request that names two documents is moved when either of them
+// is: each document of approval.documents carries its own version and requested_version, and the
+// first of them is the pair approval.version and approval.requested_version repeat.
+// waitingOnExpression and describeAsk, which reads it for a reply's
 // waiting_on (commentThreadTarget.waitingOnAfter), share it.
 const approvalMoved = `(a.kind = 'approval'
-		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint)`
+		and jsonb_path_exists(a.approval, '$.documents[*] ? (@.requested_version < @.version)'))`
 
 // waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a document's
 // awaiting approval and the approval route's hand-back decision share; a reply's own waiting_on

@@ -797,8 +797,14 @@ func githubPayload(event string, body map[string]any) string {
 			"before": stringValue(body["before"]),
 			// sender is the account whose push the synchronize reports (the webhook's sender): the
 			// daemon takes the move's push by it.
-			"sender":           nestedString(body, "sender", "login"),
-			"head_ref":         nestedString(body, "pull_request", "head", "ref"),
+			"sender":   nestedString(body, "sender", "login"),
+			"head_ref": nestedString(body, "pull_request", "head", "ref"),
+			// head_repo is the repository the head branch lives in, which is this repository for a
+			// branch of it and another for a fork's. Dispatch attributes a check result's currency
+			// to a pull request only when the two are the same, since anyone may open a fork's pull
+			// request at any commit and title it after an issue (delivery's headAttribution). GitHub
+			// sends null for it once a fork is deleted, which normalizes to the empty string.
+			"head_repo":        nestedString(body, "pull_request", "head", "repo", "full_name"),
 			"base_ref":         nestedString(body, "pull_request", "base", "ref"),
 			"merged":           strconv.FormatBool(boolValue(nested(body, "pull_request", "merged"))),
 			"merge_commit_sha": nestedString(body, "pull_request", "merge_commit_sha"),

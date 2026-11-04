@@ -1152,7 +1152,7 @@ describe("the dispatch CLI", () => {
 
   describe("doc-read --blocks", () => {
     const listing = [
-      "Blocks of spec.md, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.",
+      "Blocks of spec.md, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words, then a typed block's serves and needs. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.",
       "h-1 heading (sha256:h; 0 comments, 0 asks): # Café plan",
       // The 60th character is an emoji, two UTF-16 units: a cut by code unit would split it.
       `p-1 paragraph (sha256:p; 1 comment, 0 asks): ${"x".repeat(59)}😀…`,

@@ -1,5 +1,108 @@
 # Changelog
 
+## [main@7ae56d094176] - 2026-11-04
+
+### Added
+
+- The `legion` MCP tool a Legion phase worker on Claude Code holds gains `ready_for_update`, its
+  answer to the daemon's update task on the issue's pod: push every commit you want kept to the
+  issue branch first, because the pod and the disk it carries are replaced once every worker of
+  the pod has answered. It ends no phase, so the phase hook leaves the phase open where
+  `handoff_complete` and `request_backward_move` close it; the `Stop` of the turn it answered in
+  blocks nothing, so that turn ends and the daemon sees it end. No reminder follows that turn:
+  the daemon is what wakes the worker again, with the task it held behind the round, once the
+  pod is replaced and its process comes back on the new pod in the same session.
+  `package.json`'s `legion.daemonApiVersion` is 46.
+- The `dispatch` command (`dist/dispatch.js`) records and reads Legion phase handoffs on their
+  Dispatch issue: `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>`
+  records the file's text, one JSON object of at most 262144 bytes, as this session's next version
+  of the phase's handoff, and `dispatch handoff-read --issue <KEY> --phase <phase> [--version <n>]`
+  prints a line naming the record's version, id, session and time, then the body exactly as
+  stored. The bundled tool descriptions carry both.
+
+### Changed
+
+- The plugin declares daemon API contract 45 in `package.json`'s `legion.daemonApiVersion`: the
+  `legion` MCP tool's `handoff_complete` reports the phase's Dispatch handoff record, `handoffId`
+  and `handoffVersion`, the newest record of the phase's word read from the Dispatch this session's
+  envoy.json names, and the implementer also its pushed tip (`legion/<issue>@origin`), refused when
+  `@-` is not pushed; retro and the merger's READY report `@-`. No committed `.legion/` handoff file
+  is looked up, and the check that the handoff commit was authored by the pane's
+  `JJ_USER`/`JJ_EMAIL` identity is gone. Its `legion/` copies of the Legion skills teach
+  `dispatch handoff-write` and `dispatch handoff-read`, drop the commit trailer that kept a
+  handoff commit from starting CI and retro's removal of `.legion/<issue>/`, and no longer carry
+  the reference on that trailer. Main's Rebuild Claude Envoy plugin workflow builds `dist/` and
+  `legion/` from this commit's source after the merge; until that rebuild lands, the committed
+  plugin is the contract-44 build, which a contract-45 daemon refuses at registration. Install the
+  plugin from main once the rebuild commit is there, in the cutover order pi-legion's changelog
+  gives.
+- Under Claude Code the `dispatch` command acts as `ENVOY_SESSION_ID` (claude-envoy's QA
+  override), else `CLAUDE_CODE_SESSION_ID`: the session claude-envoy registers and claims under, so
+  a handoff it writes is the claim's session's, which the daemon requires.
+- An ask a person said to keep open now stays open: the `dispatch` skill's "Close what you
+  opened" tells a session that finds such an ask needless to say why in its thread and leave
+  the close to that person. The skill told a session to resolve any needless ask that turn and
+  named no exception, so a session retracted an ask a person had just said not to dismiss.
+- An exact undo of an edit to an approved document restores its approval when no decision block
+  in it was decided since, and the plugin says so: the `dispatch-writing-specs` skill's "Approval"
+  ends "An exact undo can restore approval.", the `dispatch request-approval` help says that such
+  a version needs no request and that a document that then does not read approved needs one, and
+  the line a write prints when it superseded an approval says when a later write brings it back.
+- The `dispatch` skill now says `--turn agent` needs `--reply-to-ask`: it marks a progress
+  note on an open ask's thread. It read as if `--turn agent` suited any comment, and the CLI
+  refuses `--turn` without `--reply-to-ask`.
+
+### Fixed
+
+- `envoy_send` no longer ends in a bare `The operation timed out.`: a send that is not confirmed
+  delivered says so and names its `idempotency_key`, and `envoy_send` takes that key, so the same
+  message sent again within 72 hours is dropped as a repeat if the first copy arrived. A send whose
+  key Envoy already held says it was sent once.
+- The `legion-controller` skill's escalation reference, which main's Rebuild Claude Envoy plugin
+  workflow copies into `legion/` from this commit's source after the merge, says what happens to
+  unpushed work when the daemon replaces an issue's pod. Before the replacement, the daemon checks
+  every workspace on the pod's disk, a failed claim's included, and pushes what the remote lacks to
+  a rescue branch, `legion/<KEY>-rescue-<pod>-<n>`, which the issue is told of. When that check
+  fails, the pod is not replaced, and the `update-stalled` wake's `reason` names the claim, the
+  workspace and the error.
+- A `dispatch` write that stalls (cut off after 20 s without progress, or failed in transport)
+  is sent again under its `Idempotency-Key` when an earlier call of the same session saw,
+  within the last five minutes, that the Dispatch runs the keyed layer. Each call is a new
+  process, so before this fix every such write probed `/healthz`, and under load the probe's
+  5 s bound ran out, so the write was reported as perhaps taken effect instead. The session's
+  `state.json` now carries that sighting (`keyedLayer`), and it still expires five minutes
+  after the answer that showed it.
+- The bundled `dispatch_artifact` tool description says that an upload of a document's slug makes
+  its next version, as an upload of its name does.
+- `dispatch <command> --help` lists the keys a JSON flag's value takes, from the schema the
+  call is checked against: each key with whether it is required, its type or its values, and
+  its description, and the keys of a nested object or list of objects below it.
+  `dispatch doc-edit --help` said an operation in `--ops-json` takes "only the keys below"
+  and listed none, so a caller learned the field names only from a refusal.
+  `--precondition-json`, `--components-json`, `--anchor-json` and `--options-json` list
+  their keys too.
+- The bundled `dispatch` command and tools resolve a bare document reference that is one document's slug and another's filename (a `plan-md-2`
+  named `plan-md` beside `plan.md`) as the slug's document, as Dispatch's own document routes
+  resolve it, instead of refusing it as naming two documents. Only a filename two documents share
+  is still refused.
+- A `dispatch` write that Dispatch may still be running (an attempt cut off after 20 s without
+  progress, or answered `409 KEY_IN_FLIGHT`) is asked again under its `Idempotency-Key` every
+  3 s at most (longer only when a `Retry-After` asks) until 55 s, inside the command's 60 s
+  deadline, so it ends in the answer Dispatch stores for it. Before, it stopped asking 30 s after
+  the first attempt, so a write Dispatch took 50 s to finish, or two silent attempts in a row,
+  was reported as perhaps taken effect although it landed. An upload of a megabyte or more keeps
+  the five-attempt schedule, since each repeat sends its whole file again. When a write still
+  ends with no answer after the command saw the keyed layer, the message says Dispatch finishes
+  it and to read it back before sending it again, since a new command sends it under a new key.
+  A picture upload that ends that way, or with any answer that may come after Dispatch stored it
+  (a gateway's page, Dispatch's own 5xx, a transport failure), says the picture may or may not
+  have been uploaded, rather than that it was not.
+- `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+  is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+  refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+  upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+  A name with no extension, such as a document title, is still taken.
+
 ## [main@6b1524cdb8aa] - 2026-11-01
 
 ### Fixed

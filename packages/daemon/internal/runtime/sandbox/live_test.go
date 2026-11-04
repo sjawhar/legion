@@ -57,6 +57,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -748,6 +749,7 @@ type liveRig struct {
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
+	fixtureenv.Live(t)
 	env := readLiveEnv(t)
 	r := newLiveRig(t, env)
 	defer r.close()

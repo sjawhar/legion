@@ -122,43 +122,56 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 	return response
 }
 
-// One approval request on a document with no request open costs twenty-six round trips, counted
+// One approval request on a document with no request open costs thirty-four round trips, counted
 // as the issue read's are (roundTrips): one for each statement it runs on its own and one for
-// each batch, whatever that batch holds. In the order it sends them:
+// each batch, whatever that batch holds. The first eight read the coverage the answer reports,
+// before the request's transaction opens (approvalCoverage); the twenty-six after them are the
+// transaction itself. In the order it sends them:
 //
-//  1. begin, the request's own transaction;
-//  2. the artifact row (loadArtifact);
-//  3. a batch of 3: that artifact's versions, its latest review and its open approval request
+//  1. the artifact row the coverage is read for (loadArtifact);
+//  2. a batch of 3: that artifact's versions, its latest review and its open approval request
 //     (loadArtifactRow, queueArtifactDetails);
-//  4. the owning issue's row, locked (requireOpenOwner);
-//  5. the document's settled version number (settledVersionNumber);
-//  6. a batch of 2: the approval before the write - the latest review and the open request
+//  3. the issue's spec and whether it has a plan (issueCoverage);
+//  4. the spec's settled version, to read its text at (docs.Text, through requirementBlocksIn);
+//  5. begin, that text read's read-only snapshot;
+//  6. the document's stored snapshot;
+//  7. the updates after it;
+//  8. commit, which ends the text read; this spec marks no requirement, so the coverage asks
+//     nothing further - no descendant walk and no count of what serves each requirement;
+//  9. begin, the request's own transaction;
+//  10. the artifact row (loadArtifact);
+//  11. a batch of 3: that artifact's versions, its latest review and its open approval request
+//     (loadArtifactRow, queueArtifactDetails);
+//  12. the owning issue's row, locked (requireOpenOwner);
+//  13. the document's settled version number (settledVersionNumber);
+//  14. a batch of 2: the approval before the write - the latest review and the open request
 //     (attachApproval, queueApprovals);
-//  7. the open approval ask, which there is none of (docs.OpenApprovalAsk);
-//  8. the new ask's id (select gen_random_uuid()::text);
-//  9. the latest approved review the request carries (docs.LatestApprovedReview);
-//  10. the ask row (openApprovalAsk);
-//  11. the author's follow (asks.FollowAuthor);
-//  12. the question's references, none of which it names (replaceReferences);
-//  13. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
+//  15. the open approval ask naming this document, which there is none of
+//     (docs.OpenApprovalAskForDocuments);
+//  16. the new ask's id (select gen_random_uuid()::text);
+//  17. the latest approved review the request carries (docs.LatestApprovedReview);
+//  18. the ask row (openApprovalAsk);
+//  19. the author's follow (asks.FollowAuthor);
+//  20. the question's references, none of which it names (replaceReferences);
+//  21. the ask's block-state row, inserted where it has none (refs.IndexAskPartsCounted, through
 //     lockItemState);
-//  14. that state row, read and locked;
-//  15. the part rows of the new ask - its question and each option (writeItemBlocks);
-//  16. the text of each part at the new revision;
-//  17. the state the parts were indexed at (storeItemState);
-//  18. the thread's followers, for the event payload (events.AskEventPayload);
-//  19. the issue's sequence, locked (appendEvent);
-//  20. the ask.opened event row;
-//  21. that event's payload, rewritten with its own id (events.Broker.Append);
-//  22. the issue's last_seq;
-//  23. the references' source sequence (refs.Stamp);
-//  24. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
-//  25. a batch of 2: the approval as the request leaves it (attachApproval again);
-//  26. commit.
+//  22. that state row, read and locked;
+//  23. the part rows of the new ask - its question and each option (writeItemBlocks);
+//  24. the text of each part at the new revision;
+//  25. the state the parts were indexed at (storeItemState);
+//  26. the thread's followers, for the event payload (events.AskEventPayload);
+//  27. the issue's sequence, locked (appendEvent);
+//  28. the ask.opened event row;
+//  29. that event's payload, rewritten with its own id (events.Broker.Append);
+//  30. the issue's last_seq;
+//  31. the references' source sequence (refs.Stamp);
+//  32. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
+//  33. a batch of 2: the approval as the request leaves it (attachApproval again);
+//  34. commit.
 //
-// The three batches hold seven statements between them, so a request that sent each statement on
-// its own would send thirty round trips.
-func TestApprovalRequestsCostTwentySixRoundTrips(t *testing.T) {
+// The four batches hold ten statements between them, so a request that sent each statement on
+// its own would send forty round trips.
+func TestApprovalRequestsCostThirtyFourRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
@@ -179,7 +192,7 @@ func TestApprovalRequestsCostTwentySixRoundTrips(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("request approval: status=%d body=%s", response.Code, response.Body.String())
 	}
-	const want = 26
+	const want = 34
 	if len(counted) != want {
 		t.Fatalf("the approval request made %d round trips, want %d:\n%s",
 			len(counted), want, strings.Join(roundTripLines(counted), "\n"))
