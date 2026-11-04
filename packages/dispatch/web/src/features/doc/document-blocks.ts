@@ -117,20 +117,25 @@ function plainBlockEnd(lines: readonly string[], start: number): number {
 }
 
 /**
- * `markdown` cut into the units a reader sees: a heading, a paragraph, a whole list, a whole
- * table, a fenced code block or a `:::ask` block. Blocks are separated by blank lines, except
- * that a fenced code block (`codeFenceEnd`) and a decision block (`closingFenceAfter`) are kept
- * whole whatever they hold - an `:::ask` example written inside a code fence is code, and a
- * nested colon run inside a decision block does not end it.
+ * `markdown` cut into the units a reader sees, one at a time and in order: a heading, a
+ * paragraph, a whole list, a whole table, a fenced code block or a `:::ask` block. Blocks are
+ * separated by blank lines, except that a fenced code block (`codeFenceEnd`) and a decision
+ * block (`closingFenceAfter`) are kept whole whatever they hold - an `:::ask` example written
+ * inside a code fence is code, and a nested colon run inside a decision block does not end it.
  *
  * A block's `source` is its own lines, exactly as they stand, and the blank lines between two
  * blocks belong to neither: joining every `source` with the one blank line the renderer writes
  * between blocks (`\n\n`) gives the document back.
+ *
+ * It yields rather than returning a list because the caller that runs on the page's own thread
+ * wants only the document's first few thousand characters (`leadingBlocks`), and a document is
+ * 406,000 of them: a caller that stops reading stops the splitting, so the first screenful
+ * costs the first screenful rather than ~10,000 line strings and a copy of the whole document
+ * into block sources (dispatch://INFRA-341, R11).
  */
-export function splitBlocks(markdown: string): DocumentBlock[] {
+export function* blocksOf(markdown: string): Generator<DocumentBlock> {
   const endsWithNewline = markdown.endsWith("\n");
   const lines = (endsWithNewline ? markdown.slice(0, -1) : markdown).split("\n");
-  const blocks: DocumentBlock[] = [];
   let i = 0;
   while (i < lines.length) {
     if (BLANK_LINE.test(lines[i])) {
@@ -139,21 +144,25 @@ export function splitBlocks(markdown: string): DocumentBlock[] {
     }
     const codeEnd = codeFenceEnd(lines, i);
     if (codeEnd !== undefined) {
-      blocks.push({ source: lines.slice(i, codeEnd + 1).join("\n"), kind: "code" });
+      yield { source: lines.slice(i, codeEnd + 1).join("\n"), kind: "code" };
       i = codeEnd + 1;
       continue;
     }
     const askEnd = closingFenceAfter(lines, i);
     if (askEnd !== undefined) {
-      blocks.push({ source: lines.slice(i, askEnd + 1).join("\n"), kind: "ask" });
+      yield { source: lines.slice(i, askEnd + 1).join("\n"), kind: "ask" };
       i = askEnd + 1;
       continue;
     }
     const end = plainBlockEnd(lines, i);
-    blocks.push(describeBlock(lines.slice(i, end)));
+    yield describeBlock(lines.slice(i, end));
     i = end;
   }
-  return blocks;
+}
+
+/** Every block of `markdown`, in order (`blocksOf`), for a caller that reads all of them. */
+export function splitBlocks(markdown: string): DocumentBlock[] {
+  return [...blocksOf(markdown)];
 }
 
 /**
@@ -164,15 +173,21 @@ export function splitBlocks(markdown: string): DocumentBlock[] {
  *
  * A block is never cut, so what this answers is Markdown in its own right - a fenced code block
  * and a decision block come whole or not at all, and the blocks are rejoined by the one blank
- * line `splitBlocks` says belongs between two of them. That is what lets a surface parse and
+ * line `blocksOf` says belongs between two of them. That is what lets a surface parse and
  * draw a document's first screenful before the rest of it has been parsed at all
  * (`DocumentPreview`): the prefix renders as the same blocks the whole document renders them as.
+ *
+ * It stops splitting at the block that does not fit, so a document of any length costs the
+ * screenful it answers rather than a split of all of it.
  */
 export function leadingBlocks(markdown: string, characters: number): string {
-  const blocks = splitBlocks(markdown);
-  let taken = blocks[0]?.source ?? markdown;
-  for (let at = 1; at < blocks.length; at += 1) {
-    const next = `${taken}\n\n${blocks[at].source}`;
+  let taken: string | undefined;
+  for (const block of blocksOf(markdown)) {
+    if (taken === undefined) {
+      taken = block.source;
+      continue;
+    }
+    const next = `${taken}\n\n${block.source}`;
     if (next.length > characters) {
       return taken;
     }

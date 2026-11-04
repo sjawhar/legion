@@ -217,6 +217,22 @@ export interface RenderedMarkdownOptions {
    *  characters of syntax in one text node and the page would lay every line of it out twice
    *  (`features/doc/DocumentPreview.tsx`). */
   whilePending?: "source" | "nothing";
+  /** Whether an answer to a source this element has moved on from is still worth painting, by
+   *  keeping the element's place on a parse the worker had already been posted when the render
+   *  was cancelled (`markdown-engine.ts`, `keepAPostedParse`). `true` by default, because the
+   *  streaming turn in the live view needs it: the frame the worker is holding is the newest
+   *  parse its reader can be shown before the stream pauses. A surface whose source does not
+   *  stream passes `false`, so an unmount leaves the queue nothing to build on the reader's
+   *  thread for a paint that would be thrown away and a cache place that would be taken
+   *  (`features/doc/DocumentPreview.tsx`). */
+  keepAPostedParse?: boolean;
+  /** Whether this element takes the worker's own answer or none at all, rather than a parse the
+   *  page makes on the reader's thread when the worker misses its deadline, crashes or cannot
+   *  be created (`markdown-engine.ts`, `theWorkerOrNothing`). `false` by default, because a
+   *  body must end formatted whatever became of the worker; the document preview passes `true`,
+   *  since its source is a whole document and it already has its first screenful drawn with the
+   *  editor arriving behind it. */
+  theWorkerOrNothing?: boolean;
 }
 
 /** Every anchor a paint leaves for a portal: the reference anchors the link pass found, as
@@ -412,10 +428,12 @@ export function useRenderedMarkdown(
   {
     pictures = "block",
     decorate,
+    keepAPostedParse = true,
     onRendered,
     paintInSlices,
     rawHtml = "refuse",
     softBreaks = "space",
+    theWorkerOrNothing = false,
     whilePending = "source",
   }: RenderedMarkdownOptions = {}
 ): RenderedMarkdown {
@@ -621,13 +639,27 @@ export function useRenderedMarkdown(
           painting.current = stop;
         }
       },
-      // The frame the worker is holding is the newest parse a streaming turn can be shown
-      // before it pauses, so this element is still given that answer after it has asked for a
-      // newer frame (`markdown-engine.ts`).
-      { keepAPostedParse: true }
+      // What this surface wants of a parse it has moved on from, and of one the worker never
+      // answers: both are the surface's own call (`RenderedMarkdownOptions`), and the defaults
+      // are the live view's - the frame the worker is holding is the newest parse a streaming
+      // turn can be shown before it pauses, and every other body must end formatted whatever
+      // became of the worker.
+      { keepAPostedParse, theWorkerOrNothing }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, rawHtml, root, softBreaks, whilePending]);
+  }, [
+    Card,
+    decorate,
+    keepAPostedParse,
+    markdown,
+    paint,
+    paintInSlices,
+    rawHtml,
+    root,
+    softBreaks,
+    theWorkerOrNothing,
+    whilePending,
+  ]);
 
   return {
     isFallback,

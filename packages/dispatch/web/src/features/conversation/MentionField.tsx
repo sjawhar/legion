@@ -26,11 +26,12 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { AgentName, type AgentText } from "../refs/AgentName";
+import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { Timestamp } from "../refs/Timestamp";
 import type { TextEditRange } from "./block-spans";
 import type { AcceptedMention } from "./composer-model";
 import { mentionText, survivingMentions } from "./send-request";
+import { useAgents } from "./useAgents";
 
 export interface MentionOption {
   readonly capabilities: readonly string[];
@@ -103,6 +104,47 @@ export function mentionOptions(
         title: text.sessionText(agent.session_id, agent.title),
       })),
   ];
+}
+
+/**
+ * Everything a host of this field has to wire up to give it a working `@` picker: the option
+ * list, whether the picker is open, and the report the field sends when that changes. Both
+ * hosts take it from here - the Conversation tab's composer (`MentionComposer.tsx`) and an
+ * ask's answer area (`features/inbox/AskAnswerArea.tsx`) - because they had written the same
+ * four steps twice and the copies had already drifted: only the composer read the registry
+ * again when its picker opened, so a session started inside the poller's 15 s was offered in
+ * one picker and not the other.
+ *
+ * `enabled` is whether this host's channel takes a mention at all. `suppliedAgents`, where a
+ * host has its own list, is offered in place of the registry and no registry read is made.
+ */
+export function useMentionOptions(
+  enabled: boolean,
+  suppliedAgents?: readonly Agent[]
+): {
+  /** For the field's `onPickerOpenChange`. */
+  readonly onPickerOpenChange: (open: boolean) => void;
+  readonly options: MentionOption[];
+  /** Whether the picker is open, for a host that moves under it: the docked composer rises over
+   *  the page while the list is showing. */
+  readonly pickerOpen: boolean;
+} {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const readsTheRegistry = suppliedAgents === undefined && enabled;
+  const live = useAgents(readsTheRegistry, pickerOpen);
+  const agents = suppliedAgents ?? live.agents;
+  const text = useAgentText();
+  const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
+  const { refetch } = live;
+  useEffect(() => {
+    // An open picker is kept fresh through the shell's one poller (`useAgents`), whose interval
+    // is 15 s, and read once more here the moment it opens: a session started since the last
+    // poll is offered to the reader who is asking for it now.
+    if (readsTheRegistry && pickerOpen) {
+      void refetch();
+    }
+  }, [pickerOpen, readsTheRegistry, refetch]);
+  return { onPickerOpenChange: setPickerOpen, options, pickerOpen };
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */

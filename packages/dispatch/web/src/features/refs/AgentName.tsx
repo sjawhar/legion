@@ -257,14 +257,11 @@ export function useAgentText(): AgentText {
     return {
       initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),
       label: (actor: Actor) => label({ actor }),
-      part: (part: AgentPart) =>
-        typeof part === "string"
-          ? part
-          : isQuoted(part)
-            ? part.markdown
-            : "artifact" in part
-              ? part.artifact
-              : label(part),
+      part: (part: AgentPart) => {
+        if (typeof part === "string") return part;
+        if (isQuoted(part)) return part.markdown;
+        return "artifact" in part ? part.artifact : label(part);
+      },
       sessionText: (sessionId: string, storedTitle: string | undefined) =>
         resolveAgent({ sessionId, storedTitle }, registry).name,
     };
@@ -347,31 +344,21 @@ export function AgentParts({
   quote?: (markdown: string) => ReactNode;
 }): ReactNode {
   const quotes = parts.some(isQuoted);
+  const drawPart = (part: AgentPart): ReactNode => {
+    if (typeof part === "string") {
+      return quotes ? <span className="whitespace-pre-wrap">{part}</span> : part;
+    }
+    if (isQuoted(part)) {
+      return quote === undefined ? part.markdown : quote(part.markdown);
+    }
+    if ("artifact" in part) {
+      return artifact === undefined ? part.artifact : artifact(part.artifact);
+    }
+    return <AgentName {...part} inline />;
+  };
   const drawn = parts.map((part, index) => (
     // biome-ignore lint/suspicious/noArrayIndexKey: the parts are one fixed sentence, in order.
-    <Fragment key={index}>
-      {typeof part === "string" ? (
-        quotes ? (
-          <span className="whitespace-pre-wrap">{part}</span>
-        ) : (
-          part
-        )
-      ) : isQuoted(part) ? (
-        quote === undefined ? (
-          part.markdown
-        ) : (
-          quote(part.markdown)
-        )
-      ) : "artifact" in part ? (
-        artifact === undefined ? (
-          part.artifact
-        ) : (
-          artifact(part.artifact)
-        )
-      ) : (
-        <AgentName {...part} inline />
-      )}
-    </Fragment>
+    <Fragment key={index}>{drawPart(part)}</Fragment>
   ));
   return quotes ? <span className="inline-flex max-w-full items-baseline">{drawn}</span> : drawn;
 }

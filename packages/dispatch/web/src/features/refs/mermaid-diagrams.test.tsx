@@ -5,10 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import {
-  installIntersectionObserver,
-  installShowingIntersectionObserver,
-} from "../../__tests__/intersection-observer";
+import { installIntersectionObserver } from "../../__tests__/intersection-observer";
 
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
@@ -105,7 +102,7 @@ describe("Mermaid diagrams", () => {
     FakeWorker.readyDelayMs = 0;
     FakeWorker.sent = [];
     globalThis.Worker = FakeWorker as unknown as typeof Worker;
-    restoreIntersections = installShowingIntersectionObserver();
+    restoreIntersections = installIntersectionObserver({ showOnObserve: true }).restore;
     resetMermaidDiagrams();
   });
 

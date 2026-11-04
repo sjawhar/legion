@@ -58,6 +58,17 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
  * in either document, and the reader's first block was still the editor's at 15.6 s
  * (dispatch://INFRA-341, R11). The first pass costs a parse of 2,000 characters.
  *
+ * Neither pass is ever paid for on the reader's own thread. This is the one surface that asks
+ * the engine for the worker or nothing (`theWorkerOrNothing`): the queue's deadline is 10 s and
+ * the measurement above puts the answer well past it, so the fallback every other body wants -
+ * the page parsing it itself - would be a synchronous parse of the whole document in the middle
+ * of the very wait this surface exists to shorten. It needs no fallback: the first pass is
+ * already drawn in front of the reader and the editor is arriving behind it. For the same
+ * reason it keeps no posted parse (`keepAPostedParse: false`): where the editor lands first
+ * this element unmounts, and a kept place would have the queue build the whole parsed document
+ * on the reader's thread for a paint thrown away in the next line, and hold it in the answer
+ * cache afterwards.
+ *
  * Until the first pass lands the element holds nothing (`whilePending: "nothing"`): 2,000
  * characters of Markdown syntax is no document to read, and the pass that replaces it is a
  * frame away.
@@ -77,8 +88,10 @@ export function DocumentPreview({ markdown }: { markdown: string }): ReactNode {
   // paragraph is a space (hard-wrapped Markdown is one paragraph), and a line of raw HTML leaves
   // the source to the literal-text fallback rather than drawing as text.
   const { isFallback, isPending, portals } = useRenderedMarkdown(root, source, paintBlock, {
+    keepAPostedParse: false,
     onRendered: () => setDrawnOnce(true),
     paintInSlices: paintBlockInSlices,
+    theWorkerOrNothing: true,
     whilePending: "nothing",
   });
 

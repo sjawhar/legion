@@ -1,14 +1,15 @@
+import { answerSelected } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
-import { AgentParts, AskResolutionLine } from "../refs/AgentName";
+import { AskResolutionLine } from "../refs/AgentName";
 import { askResolutionReason } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { Timestamp } from "../refs/Timestamp";
+import { LineParts } from "./ActivityLine";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 
@@ -36,7 +37,7 @@ function AskEventBody({
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
       <MarkdownBody markdown={question} onRendered={onRendered} />
-      <AskOptionList options={options} selected={answer?.selected ?? []} />
+      <AskOptionList options={options} selected={answer === null ? [] : answerSelected(answer)} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
       </p>
@@ -54,7 +55,7 @@ function AskEventBody({
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
               <s>
                 was:{" "}
-                {[(previous.selected ?? []).join(", "), previous.text ?? ""]
+                {[answerSelected(previous).join(", "), previous.text ?? ""]
                   .filter((part) => part !== "")
                   .join(" - ")}
               </s>
@@ -101,10 +102,7 @@ export function EventBody({
   // and cut to the line, as the Activity tab's own line does.
   return (
     <p className={`font-medium ${textPrimaryOnSurface}`}>
-      <AgentParts
-        parts={eventDescription(event)}
-        quote={(markdown) => <MarkdownPreview className="min-w-0" lines={1} markdown={markdown} />}
-      />
+      <LineParts description={eventDescription(event)} />
     </p>
   );
 }

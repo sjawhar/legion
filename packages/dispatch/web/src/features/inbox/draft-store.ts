@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction, useCallback, useSyncExternalStore } from "react";
 
 import type { AcceptedMention } from "../conversation/composer-model";
+import { survivingMentions } from "../conversation/send-request";
 
 /** One unsent draft: what the reader typed, and the mentions picked in it, whose offsets are into
  *  that exact text (`features/conversation/MentionField.tsx`). The two travel together because
@@ -18,6 +19,22 @@ export const EMPTY_DRAFT: Draft = { mentions: [], text: "" };
 /** Whether a draft holds nothing: no text and no picked mention. */
 export function draftEmpty(draft: Draft): boolean {
   return draft.text === "" && draft.mentions.length === 0;
+}
+
+/** Why Ask back and Reply refuse an empty box: each sends what the box holds. */
+export const EMPTY_DRAFT_REFUSAL = "Write something first.";
+
+/** Why a send that posts what the box holds refuses `draft`, or `null` where it does not: the
+ *  one rule, because the open card's Ask back and the answered ask's Reply are the same send. */
+export function emptyDraftRefusal(draft: Draft): string | null {
+  return draft.text.trim() === "" ? EMPTY_DRAFT_REFUSAL : null;
+}
+
+/** The mentions a draft would put on the wire: those whose span the reader has not edited since
+ *  the picker wrote it (`survivingMentions`). A box's text is what the reader sees, so a mention
+ *  they typed over is their own prose and reaches nobody. */
+export function draftTargets(draft: Draft): readonly AcceptedMention[] {
+  return survivingMentions(draft.text, draft.mentions);
 }
 
 /** Whether two drafts say the same thing, so a write that changes nothing tells nobody. */

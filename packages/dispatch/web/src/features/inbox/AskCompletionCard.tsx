@@ -1,3 +1,4 @@
+import { answerSelected } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -78,19 +79,20 @@ export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNo
             : `Show ${earlier.length} earlier answers`}
         </summary>
         <div className="mt-2 space-y-3">
-          {earlier.map((previous) => (
-            <div key={previous.at}>
-              {(previous.selected ?? []).length === 0 ? null : (
-                <p>{(previous.selected ?? []).join(", ")}</p>
-              )}
-              {previous.text === null || previous.text === "" ? null : (
-                <MarkdownBody markdown={previous.text} />
-              )}
-              <p className="mt-1">
-                {previous.user} · <Timestamp at={previous.at} />
-              </p>
-            </div>
-          ))}
+          {earlier.map((previous) => {
+            const chosen = answerSelected(previous);
+            return (
+              <div key={previous.at}>
+                {chosen.length === 0 ? null : <p>{chosen.join(", ")}</p>}
+                {previous.text === null || previous.text === "" ? null : (
+                  <MarkdownBody markdown={previous.text} />
+                )}
+                <p className="mt-1">
+                  {previous.user} · <Timestamp at={previous.at} />
+                </p>
+              </div>
+            );
+          })}
         </div>
       </details>
     </div>
@@ -150,15 +152,14 @@ function AnsweredAsk({
   owner: { project: string; slug: string } | undefined;
 }): ReactNode {
   const { answer } = ask;
+  const chosen = answer === null ? [] : answerSelected(answer);
   const inBlock = frame === "block";
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
   // free text - render it under an Other label so the record reads as a chosen option, not an
   // unlabeled addendum. An ask with no options at all has no Other row to have chosen, so its
   // free text is always the plain answer instead.
   const otherText =
-    ask.options.length > 0 && answer !== null && (answer.selected ?? []).length === 0
-      ? answer.text
-      : null;
+    ask.options.length > 0 && answer !== null && chosen.length === 0 ? answer.text : null;
   return (
     <article
       className={`relative rounded-xl p-4 text-sm ${inBlock || hasUrgencyNotch(ask, inBlock) ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
@@ -195,7 +196,7 @@ function AnsweredAsk({
           </p>
         ) : null}
         <AskEditHistory ask={ask} edits={edits} />
-        <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
+        <AskOptionList options={ask.options} selected={chosen} />
         {otherText !== null && otherText !== "" ? (
           <div className="mt-2">
             <p className={`text-sm font-medium ${textPrimaryOnSuccessCallout}`}>Other</p>

@@ -23,11 +23,13 @@
  * start or load) the draw gets `unavailable` instead, inside the call for a source asked for while
  * the worker is failed and at the failure for a source waiting on it, so a body's block stays code
  * and an editor's block drops any drawing of an earlier source and shows its source.
- * `mermaidDrawsSettled` resolves once no source is waiting, so a focus in a document (a block
- * link, a comment link's quote, a reader's click to a block, a past version's highlighted mark)
- * can run again after the diagrams above its target have drawn and moved it; it is read a frame
- * after the focus, since the blocks near the viewport ask from an observer's first delivery
- * (`features/doc/refocus-after-diagrams.ts`).
+ * `mermaidDrawsWaiting` answers whether any source is still waiting, which is what a focus in a
+ * document (a block link, a comment link's quote, a reader's click to a block, a past version's
+ * highlighted mark) watches: it runs again once the page has held still with nothing waiting,
+ * read once a frame rather than awaited, since the blocks near the viewport ask from an
+ * observer's first delivery and the page's height goes on settling after the last of them
+ * (`features/doc/refocus-after-diagrams.ts`). `mermaidDrawsSettled` resolves once no source is
+ * waiting, which is how a test waits out the queue.
  *
  * Both mount the SVG with `showMermaidSvg` in an open shadow root of the preview element, so the
  * diagram's own `<style>` styles that diagram alone rather than every SVG and `<text>` on the
@@ -373,8 +375,10 @@ export function drawMermaidDiagrams(
 /**
  * Resolves on the microtask after no source is waiting for the worker: every block that asked
  * has drawn, been refused or been cancelled, or a failure or a reset cleared the queue. With
- * none waiting it resolves at once. A focus in a document runs again then, after the diagrams
- * above its target have drawn and moved it (`features/doc/refocus-after-diagrams.ts`).
+ * none waiting it resolves at once. It is the queue's own settle point, which is what a test
+ * waits on rather than polling the page; the document's focus correction watches
+ * `mermaidDrawsWaiting` a frame at a time instead, because the height it is waiting for goes
+ * on settling after the last diagram has drawn.
  */
 export function mermaidDrawsSettled(): Promise<void> {
   if (!mermaidQueue.waiting) return Promise.resolve();

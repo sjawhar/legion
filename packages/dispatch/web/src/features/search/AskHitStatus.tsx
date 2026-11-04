@@ -1,3 +1,4 @@
+import { answerSelected } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { SearchAsk } from "../../api/types";
@@ -30,6 +31,7 @@ export const ANSWER_PREVIEW_CHARS = 280;
  *  label or name never widens the row it sits in. */
 export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean }): ReactNode {
   const answer = ask.state === "open" ? undefined : ask.answer;
+  const chosen = answer === undefined ? [] : answerSelected(answer);
   return (
     <div
       className={`mt-1 min-w-0 text-xs ${muted ? textMutedOnSelectedCard : textSecondaryOnSurface}`}
@@ -49,9 +51,7 @@ export function AskHitStatus({ ask, muted }: { ask: SearchAsk; muted: boolean })
             className={`min-w-0 [overflow-wrap:anywhere] ${ask.state === "resolved" ? "basis-full" : ""}`}
           >
             {answer.user} · <Timestamp at={answer.at} /> ·{" "}
-            {(answer.selected ?? []).length === 0
-              ? "No option chosen"
-              : `Chose ${(answer.selected ?? []).join(", ")}`}
+            {chosen.length === 0 ? "No option chosen" : `Chose ${chosen.join(", ")}`}
           </span>
         )}
       </div>

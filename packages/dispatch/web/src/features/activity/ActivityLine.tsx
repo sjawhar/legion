@@ -13,8 +13,9 @@ type ArtifactVersionEvent = Extract<Event, { type: "artifact.version" }>;
 
 /** An activity line's parts as this tab draws them: a question the line quotes is formatted and
  *  cut to the one line the row gives it, and with `artifact` the artifact's name is a link to
- *  it. */
-function LineParts({
+ *  it. The margin's event line draws the same parts the same way (`EventBody.tsx`), so the two
+ *  stay in lockstep by sharing this rather than by writing the quote renderer twice. */
+export function LineParts({
   artifact,
   description,
 }: {

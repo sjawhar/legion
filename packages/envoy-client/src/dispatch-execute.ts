@@ -48,6 +48,7 @@ import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
   actorLabel,
+  answerSelected,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
@@ -2508,8 +2509,7 @@ function askSummary(
   outgoing: GraphReferences | string
 ): string {
   const answer = ask.answer;
-  // A server from before the fix sends `null` for an answer that picked no option.
-  const selected = answer?.selected ?? [];
+  const selected = answer === null ? [] : answerSelected(answer);
   const earlierAnswers = answers.slice(0, -1);
   const parts = askPartEdges(ask, incoming);
   const partRef = (id: string) => `${askRef}#b-${encodeBlockId(id)}`;

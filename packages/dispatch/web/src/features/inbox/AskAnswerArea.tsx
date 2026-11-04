@@ -5,42 +5,19 @@ import {
   type RefObject,
   type SetStateAction,
   useId,
-  useMemo,
   useRef,
-  useState,
 } from "react";
 
 import type { ArtifactOwner } from "../../api/client";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { textMutedOnSurface } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
-import type { AcceptedMention } from "../conversation/composer-model";
 import {
   MentionField,
   type MentionFieldHandle,
-  mentionOptions,
+  useMentionOptions,
 } from "../conversation/MentionField";
-import { survivingMentions } from "../conversation/send-request";
-import { useAgents } from "../conversation/useAgents";
-import { useAgentText } from "../refs/AgentName";
 import type { Draft } from "./draft-store";
-
-/** Why Answer and **Answer with it anyway** refuse a draft that names a session: an answer is a
- *  decision on the ask, which carries no mentions (`AnswerAskInput`), so the words would reach
- *  the session as prose and the session itself not at all. Ask back posts a comment, which does
- *  carry them, which is why the reason says where to send it instead. */
-export const ANSWER_MENTION_REFUSAL =
-  "An answer cannot mention a session. Remove the mention, or send it with Ask back.";
-
-/** Why Ask back and Reply refuse an empty box: each sends what the box holds. */
-export const EMPTY_DRAFT_REFUSAL = "Write something first.";
-
-/** The mentions a draft would put on the wire: those whose span the reader has not edited since
- *  the picker wrote it (`survivingMentions`). A box's text is what the reader sees, so a mention
- *  they typed over is their own prose and reaches nobody. */
-export function draftTargets(draft: Draft): readonly AcceptedMention[] {
-  return survivingMentions(draft.text, draft.mentions);
-}
 
 /** What the buttons under the area are given: the id of the line already showing each refusal the
  *  host named, and whether a file the field took is still uploading. */
@@ -98,13 +75,11 @@ export function AskAnswerArea({
    *  project. Without one the field takes a paste as text. */
   readonly uploadOwner?: ArtifactOwner;
 }): ReactNode {
-  // The registry is kept fresh through the shell's one poller while the picker is open, as the
-  // Conversation tab's composer keeps it (`MentionComposer.tsx`): the sessions `@` lists are the
-  // same sessions, read the same way.
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const { agents } = useAgents(true, pickerOpen);
-  const agentText = useAgentText();
-  const options = useMemo(() => mentionOptions(agents, agentText), [agents, agentText]);
+  // Everything the `@` picker needs, from the one place both its hosts take it
+  // (`useMentionOptions`): the registry is kept fresh through the shell's one poller while the
+  // picker is open and read again the moment it opens, exactly as the Conversation tab's
+  // composer keeps it. The sessions `@` lists are the same sessions, read the same way.
+  const { onPickerOpenChange, options } = useMentionOptions(true);
   const ownFieldRef = useRef<MentionFieldHandle>(null);
   const field = fieldRef ?? ownFieldRef;
   const upload = useDraftUpload((text) =>
@@ -136,7 +111,7 @@ export function AskAnswerArea({
         onPaste={
           uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
         }
-        onPickerOpenChange={setPickerOpen}
+        onPickerOpenChange={onPickerOpenChange}
         options={options}
         placeholder={placeholder}
       />

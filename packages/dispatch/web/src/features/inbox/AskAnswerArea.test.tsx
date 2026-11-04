@@ -7,10 +7,10 @@ import { MemoryRouter } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Agent, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
-import { ANSWER_MENTION_REFUSAL, EMPTY_DRAFT_REFUSAL } from "./AskAnswerArea";
 import { AskCard } from "./AskCard";
 import { AskReplyComposer } from "./AskThread";
-import { ANSWER_REFUSAL } from "./useAskAnswerForm";
+import { EMPTY_DRAFT_REFUSAL } from "./draft-store";
+import { ANSWER_MENTION_REFUSAL, ANSWER_REFUSAL } from "./useAskAnswerForm";
 
 /** INFRA-341 (R2, R3, R4): the one answer area under an ask - the open card's box and the reply
  *  box under an answered ask - mounts the Conversation tab's field and `@` picker, stores a
@@ -183,6 +183,42 @@ test("Ask back posts the picked session as a mention, which the answer refuses t
       body: "Ask @Planner",
       mentions: [{ target: "session:A" }],
     });
+  } finally {
+    view.unmount();
+  }
+});
+
+// The shell's one poller refreshes the registry every 15 s, so the list a picker opens on can be
+// that old. The Conversation tab's composer reads it again the moment its picker opens; the ask's
+// picker did not, while this file's own comment said the two were kept the same way, so a session
+// started inside those 15 s was offered in one picker and not the other. Both hosts now take the
+// read from `useMentionOptions`, and this row is the ask side of it.
+test("opening the ask's @ picker reads the registry again, so a session started since the last poll is offered", async () => {
+  const builder: Agent = { ...planner, session_id: "B", title: "Builder" };
+  listAgents.mockResolvedValue([planner, builder]);
+  const input = ask();
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  // What the last poll left: the registry as it was before Builder started. It is inside the
+  // query's `staleTime`, so nothing but the picker's own read goes looking for a newer one.
+  queryClient.setQueryData(["agents"], [planner]);
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={async () => thread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const field = (await view.findByLabelText("Your answer")) as HTMLTextAreaElement;
+    expect(listAgents).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "Ask @" } });
+    const listbox = await view.findByRole("listbox", { name: "Mention suggestions" });
+    expect(within(listbox).getByRole("option", { name: "Planner" })).toBeDefined();
+    await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(1));
+    await view.findByRole("option", { name: "Builder" });
   } finally {
     view.unmount();
   }

@@ -22,7 +22,9 @@ import { itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { AskAnswerArea, draftTargets, EMPTY_DRAFT_REFUSAL } from "./AskAnswerArea";
+import { AskAnswerArea } from "./AskAnswerArea";
+import { askCommentInput, postAskComment } from "./ask-comment";
+import { emptyDraftRefusal } from "./draft-store";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
 export type CreateReply = (
@@ -33,13 +35,6 @@ export type CreateReply = (
 
 const createReply: CreateReply = (issueKey, input, bounds) =>
   api.createComment(issueKey, input, bounds);
-
-/** What one Reply puts on the wire: the words, and the targets picked in them, frozen when the
- *  press starts so a keystroke after it cannot change what is being sent. */
-interface ReplyInput {
-  readonly body: string;
-  readonly mentions: readonly string[];
-}
 
 function AskReply({
   comment,
@@ -112,20 +107,7 @@ export function AskReplyComposer({
   const { sending } = useSending(mutationKey);
   // The form shows a refused reply itself, with Retry, under the draft it kept.
   const submit = useKeyedWrite({
-    write: ({ body, mentions }: ReplyInput, bounds) => {
-      const input: CreateCommentInput = {
-        ask_id: ask.id,
-        body,
-        ...(mentions.length === 0 ? {} : { mentions: mentions.map((target) => ({ target })) }),
-      };
-      if (ask.issue_key === null) {
-        if (ask.artifact_id === null || ask.artifact_id === undefined) {
-          throw new Error("document ask is missing its artifact id");
-        }
-        return api.createArtifactComment(ask.artifact_id, input, bounds);
-      }
-      return reply(ask.issue_key, input, bounds);
-    },
+    write: (input: CreateCommentInput, bounds) => postAskComment(ask, input, bounds, reply),
     inline: true,
     label: () => `Reply on “${ask.question}”`,
     mutationKey,
@@ -135,17 +117,14 @@ export function AskReplyComposer({
     },
   });
   /** Why Reply refuses the draft as it stands: it posts what the box holds. */
-  const refusal = draft.text.trim() === "" ? EMPTY_DRAFT_REFUSAL : null;
+  const refusal = emptyDraftRefusal(draft);
 
   // The field's own Ctrl/Cmd+Enter stands down while a picture is still uploading
   // (`AskAnswerArea`), and Reply says the upload is what holds it, so neither way in sends a
   // reply the picture would miss.
   const sendReply = () => {
     if (refusal !== null || sending) return;
-    submit.mutate({
-      body: draft.text.trim(),
-      mentions: draftTargets(draft).map((mention) => mention.target),
-    });
+    submit.mutate(askCommentInput(ask.id, draft));
   };
 
   return (

@@ -378,17 +378,24 @@ export function setParseDeadline(limitMs = PARSE_TIME_LIMIT_MS): void {
 /** What a caller of `renderWithEngine` wants beyond the rendering itself. */
 export interface RenderWithEngineOptions {
   /** Keeps the caller's place on a parse the worker has already been posted when the render is
-   *  cancelled, so that answer still reaches `render` (`worker-queue.ts`, `keepIfPosted`). Every
-   *  element `useRenderedMarkdown` draws asks for it, whatever surface it is on: the streaming
-   *  turn is where it matters - its reader would otherwise watch a body that never changes -
-   *  and no other surface is harmed by it, since an element decides for itself what an answer to
-   *  a source it has moved on from is worth (sjawhar/legion#2519). A caller that asks must
-   *  expect such an answer, and gets nothing in place of one: the deadline and a worker that
-   *  never runs answer a kept place with no parse at all, since the render that asked has gone.
-   *  `useMarkdownHeadline` is the caller that does not ask - a headline of a source it has moved
-   *  on from would read as the wrong one - and off is the default: a cancelled render runs no
-   *  more. */
+   *  cancelled, so that answer still reaches `render` (`worker-queue.ts`, `keepIfPosted`). The
+   *  streaming turn is where it matters - its reader would otherwise watch a body that never
+   *  changes - and most surfaces are unharmed by it, since an element decides for itself what
+   *  an answer to a source it has moved on from is worth (sjawhar/legion#2519). A caller that
+   *  asks must expect such an answer, and gets nothing in place of one: the deadline and a
+   *  worker that never runs answer a kept place with no parse at all, since the render that
+   *  asked has gone. Off is the default: a cancelled render runs no more. `useMarkdownHeadline`
+   *  is one caller that does not ask - a headline of a source it has moved on from would read
+   *  as the wrong one - and the document preview is the other (`RenderedMarkdownOptions`). */
   readonly keepAPostedParse?: boolean;
+  /** Takes the worker's own answer or none at all: a deadline, a crash, or a page that can
+   *  create no worker leaves this caller with nothing rather than a parse on the reader's own
+   *  thread (`worker-queue.ts`, `theWorkerOrNothing`). Off is the default, because a body must
+   *  end formatted whatever became of the worker. The document preview is the one caller that
+   *  asks: its source is a whole document, whose on-page parse costs more than the wait it
+   *  would end, and it already has its first screenful drawn and the editor arriving behind
+   *  it (`features/doc/DocumentPreview.tsx`). */
+  readonly theWorkerOrNothing?: boolean;
 }
 
 /** Renders `markdown` with a loaded engine: parsed here for a body up to the threshold; for a
@@ -400,7 +407,7 @@ function renderLoaded(
   softBreaks: SoftBreaks,
   rawHtml: RawHtml,
   render: (rendering: MarkdownRendering) => void,
-  { keepAPostedParse = false }: RenderWithEngineOptions
+  { keepAPostedParse = false, theWorkerOrNothing = false }: RenderWithEngineOptions
 ): () => void {
   if (!parsesInTheWorker(markdown)) {
     render({
@@ -438,7 +445,7 @@ function renderLoaded(
     ({ openMermaidFence, parsed }) => {
       render({ engine, openMermaidFence, parsed, pending: false });
     },
-    { keepIfPosted: keepAPostedParse }
+    { keepIfPosted: keepAPostedParse, theWorkerOrNothing }
   );
 }
 
@@ -472,8 +479,11 @@ export function loadedEngine(): MarkdownEngine | undefined {
  * cannot be created, whose chunk does not load, that crashes, or that holds a body past its
  * deadline leaves that body to the page's own thread, so a reader always ends with a formatted
  * body; only the parser refusing a body ends in its literal text. That is for a render still
- * waiting: a place kept on a posted parse belongs to a render already cancelled, so it takes
- * the worker's own answer or none, and the page parses nothing for it (sjawhar/legion#2519).
+ * waiting and willing to take such an answer: a place kept on a posted parse belongs to a
+ * render already cancelled, and a caller that asked for the worker or nothing has said that a
+ * parse on the reader's thread is worse for it than no parse at all
+ * (`RenderWithEngineOptions`), so both take the worker's own answer or none and the page parses
+ * nothing for either (sjawhar/legion#2519).
  *
  * Returns the cancel: a cancelled `render` never runs again - unless the caller asked to keep a
  * posted parse (`RenderWithEngineOptions`) and the worker is holding that body, whose answer

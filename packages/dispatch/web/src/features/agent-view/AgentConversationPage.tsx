@@ -57,11 +57,10 @@ function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
 }
 
 /** What the composer's placeholder says the `/` list holds. It always holds the delivery modes
- *  (`deliveryModes` answers with at least one), so the key is always worth naming; a session
+ *  (`deliveryModes` answers with at least one, so there is no list without them), and a session
  *  that published commands of its own has those in the list above them. */
-function slashHint(hasCommands: boolean, hasModes: boolean): string {
-  if (hasCommands) return ", / for commands";
-  return hasModes ? ", / for send modes" : "";
+function slashHint(hasCommands: boolean): string {
+  return hasCommands ? ", / for commands" : ", / for send modes";
 }
 
 /**
@@ -280,7 +279,7 @@ export function AgentConversationPage(): ReactNode {
           placeholder={
             switchPending
               ? "Waiting for the session to answer the switch…"
-              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${slashHint(commands !== undefined, modes.length > 0)}…`
+              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${slashHint(commands !== undefined)}…`
           }
           replayCount={replays}
           resetKey={sessionId}

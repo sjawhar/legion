@@ -1,7 +1,8 @@
+import { answerSelected } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
-import { ApiError, api, apiErrorMessage, type WriteBounds } from "../../api/client";
+import { ApiError, apiErrorMessage, type WriteBounds } from "../../api/client";
 import { inboxQuery, projectsQuery, whoAmIQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
@@ -15,14 +16,14 @@ import type {
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { isViewer } from "../refs/actor";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
-import { ANSWER_MENTION_REFUSAL, draftTargets, EMPTY_DRAFT_REFUSAL } from "./AskAnswerArea";
 import { answerAskInput } from "./answer-ask";
 import { useAnswerDraft } from "./answer-drafts";
+import { askArtifactId, askCommentInput, postAskComment } from "./ask-comment";
 import {
   clearPendingAskThreadInvalidation,
   hasPendingAskThreadInvalidation,
 } from "./ask-thread-freshness";
-import { type Draft, EMPTY_DRAFT } from "./draft-store";
+import { type Draft, draftTargets, EMPTY_DRAFT, emptyDraftRefusal } from "./draft-store";
 import { markAnswerOutstanding } from "./outstanding-answers";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
@@ -52,12 +53,12 @@ interface AskAnswerFailure {
   retryable: boolean;
 }
 
-/** What one Ask back puts on the wire: the words, and the targets picked in them. Both are
- *  frozen when the press starts, so a keystroke after it cannot change what is being sent. */
-interface ClarificationInput {
-  readonly body: string;
-  readonly mentions: readonly string[];
-}
+/** Why Answer and **Answer with it anyway** refuse a draft that names a session: an answer is a
+ *  decision on the ask, which carries no mentions (`AnswerAskInput`), so the words would reach
+ *  the session as prose and the session itself not at all. Ask back posts a comment, which does
+ *  carry them, which is why the reason says where to send it instead. */
+export const ANSWER_MENTION_REFUSAL =
+  "An answer cannot mention a session. Remove the mention, or send it with Ask back.";
 
 /** Why Answer refuses a draft that is neither an option picked nor words written: the two ways
  *  an ask is answered, and the box holds neither. */
@@ -258,18 +259,9 @@ export function useAskAnswerForm({
     inline: true,
     label: () => `Question back on “${ask.question}”`,
     // The clarification is a comment, so the sessions the reader picked ride with it and each
-    // one gets the comment; the targets are frozen with the attempt, as the text is.
-    write: ({ body, mentions }: ClarificationInput, bounds) => {
-      const input: CreateCommentInput = {
-        ask_id: ask.id,
-        body,
-        ...(mentions.length === 0 ? {} : { mentions: mentions.map((target) => ({ target })) }),
-      };
-      if (ask.issue_key === null) {
-        return api.createArtifactComment(documentArtifactId(), input, bounds);
-      }
-      return createReply(ask.issue_key, input, bounds);
-    },
+    // one gets the comment; the targets are frozen with the attempt, as the text is
+    // (`askCommentInput`).
+    write: (input: CreateCommentInput, bounds) => postAskComment(ask, input, bounds, createReply),
     onSettled: () => {
       submitGuard.release();
     },
@@ -284,19 +276,11 @@ export function useAskAnswerForm({
     },
   });
 
-  /** A document ask's artifact; the server always sets it, so its absence is a contract error. */
-  function documentArtifactId(): string {
-    if (ask.artifact_id === null || ask.artifact_id === undefined) {
-      throw new Error("document ask is missing its artifact id");
-    }
-    return ask.artifact_id;
-  }
-
   /** The reads that carry this ask besides its own thread: the Inbox and its owner's lists. */
   function invalidateOwnerReads(): void {
     void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
     if (ask.issue_key === null) {
-      void queryClient.invalidateQueries({ queryKey: ["artifact", documentArtifactId()] });
+      void queryClient.invalidateQueries({ queryKey: ["artifact", askArtifactId(ask)] });
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       return;
     }
@@ -321,7 +305,7 @@ export function useAskAnswerForm({
   const startChanging = () => {
     if (!canChangeAnswer || recordedAsk?.answer === null || recordedAsk === null) return;
     const current = recordedAsk.answer;
-    const realSelected = (current.selected ?? []).filter((label) =>
+    const realSelected = answerSelected(current).filter((label) =>
       recordedAsk.options.some((option) => option.label === label)
     );
     replacing.current = current;
@@ -388,7 +372,7 @@ export function useAskAnswerForm({
   const answerRefusal =
     submitHint ?? (answerMentioned ? ANSWER_MENTION_REFUSAL : canAnswer ? null : ANSWER_REFUSAL);
   /** Why Ask back refuses it: it posts what the box holds, and the box is empty. */
-  const clarificationRefusal = trimmedAnswer === "" ? EMPTY_DRAFT_REFUSAL : null;
+  const clarificationRefusal = emptyDraftRefusal(answerDraft);
   const answerPlaceholder = reasonRequired
     ? "Why?"
     : isApproval && selected.includes("Approve")
@@ -451,10 +435,8 @@ export function useAskAnswerForm({
     sendAnswer(answerText);
   };
   const sendClarification = () => {
-    const body = answerText.trim();
-    if (clarificationRefusal !== null || body === "") return;
-    const mentions = draftTargets(answerDraft).map((mention) => mention.target);
-    submitGuard.guard(() => clarification.mutate({ body, mentions }));
+    if (clarificationRefusal !== null) return;
+    submitGuard.guard(() => clarification.mutate(askCommentInput(ask.id, answerDraft)));
   };
   const completed = changing ? null : recordedAsk;
   // What the reader typed and no form will ever send: the question closed under them - withdrawn,
@@ -472,7 +454,6 @@ export function useAskAnswerForm({
     answers,
     answerText,
     askChanged,
-    canAnswer,
     canChangeAnswer,
     cancelChanging,
     changing,
@@ -497,7 +478,6 @@ export function useAskAnswerForm({
     startChanging,
     submitGuard,
     submit,
-    submitHint,
     toggleOther,
     threadQuery,
     trimmedAnswer,

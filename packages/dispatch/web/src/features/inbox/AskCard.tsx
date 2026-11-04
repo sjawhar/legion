@@ -23,9 +23,7 @@ import {
   inlineWarningText,
   linkHoverText,
   linkText,
-  primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
+  primaryButton,
   secondaryButton,
   textMutedHoverToSecondary,
   textMutedOnSurface,
@@ -230,10 +228,14 @@ export function AskCard({
   const loneAnswerReasonId = useId();
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
-  const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
+  /** The project document this ask belongs to: the one it was asked on, else the one the host
+   *  is showing it under. It names the ask's own reference, the replies' references, and where
+   *  a file dropped into the box goes. */
+  const askOwner = displayedAsk.document ?? owner;
+  const reference = itemRoute("ask", displayedAsk, askOwner);
   // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
   // ask's issue, or the project of the document it was asked on.
-  const documentProject = (displayedAsk.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
+  const documentProject = (askOwner ?? displayedAsk.anchor_artifact)?.project;
   const uploadOwner: ArtifactOwner | undefined =
     displayedAsk.issue_key !== null
       ? { issue: displayedAsk.issue_key }
@@ -334,9 +336,8 @@ export function AskCard({
         ) : null}
       </div>
     );
-  // A reply's own `dispatch://` reference needs the project document behind a document ask,
-  // which only an Inbox row carries on the ask itself.
-  const replyOwner = displayedAsk.document ?? owner;
+  // A reply's own `dispatch://` reference needs the project document behind a document ask
+  // (`askOwner`), which only an Inbox row carries on the ask itself.
   const threadNode =
     thread === "collapsed" ? (
       <AskThreadDisclosure
@@ -345,7 +346,7 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
-        owner={replyOwner}
+        owner={askOwner}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
@@ -356,27 +357,22 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
-        owner={replyOwner}
+        owner={askOwner}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
     );
 
   const answerLabel = changing ? "Save answer" : "Answer";
+  /** What Answer says while it is busy: this card's own send, or an upload the draft is waiting
+   *  on, which keeps the label while the picture lands. */
+  const answerBusy = mutation.isPending ? (changing ? "Saving…" : "Answering…") : undefined;
   /** Answer, in each place this card draws it: inside the answer area, and as the lone button a
    *  compact card shows over a closed note disclosure. Only its own send, or an upload the draft
    *  is waiting on, disables it; every other reason it cannot be pressed it states and refuses. */
   const submitButton = (shownBy: string | undefined, uploading: boolean) => (
     <RefusableButton
-      busy={
-        mutation.isPending
-          ? changing
-            ? "Saving…"
-            : "Answering…"
-          : uploading
-            ? answerLabel
-            : undefined
-      }
+      busy={answerBusy ?? (uploading ? answerLabel : undefined)}
       className="min-h-11"
       refusal={answerRefusal}
       refusalShownBy={shownBy}
@@ -389,7 +385,7 @@ export function AskCard({
     questionChoice ? (
       <fieldset aria-label="Question-shaped answer" className="flex gap-2">
         <button
-          className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+          className={`min-h-11 ${primaryButton}`}
           disabled={isSubmitting}
           onClick={sendClarification}
           ref={(node) => node?.focus()}

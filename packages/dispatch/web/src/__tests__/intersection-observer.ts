@@ -21,7 +21,18 @@ export interface IntersectionControl {
   readonly restore: () => void;
 }
 
-export function installIntersectionObserver(): IntersectionControl {
+/**
+ * Installs the stub. With `showOnObserve`, every element an observer watches is reported wholly
+ * on screen on the task after it is observed, as a browser showing the whole page would:
+ * happy-dom lays nothing out and its own observer reports nothing ever, so a test whose subject
+ * is not an on-screen rule - a diagram's drawing, say - would otherwise see a page where
+ * nothing is on screen. Without it nothing is reported until the test says so.
+ */
+export function installIntersectionObserver({
+  showOnObserve = false,
+}: {
+  showOnObserve?: boolean;
+} = {}): IntersectionControl {
   const original = globalThis.IntersectionObserver;
   const live = new Set<ObserverStub>();
 
@@ -41,6 +52,9 @@ export function installIntersectionObserver(): IntersectionControl {
 
     observe(target: Element): void {
       this.targets.add(target);
+      if (showOnObserve) {
+        setTimeout(() => report(target, undefined), 0);
+      }
     }
 
     takeRecords(): IntersectionObserverEntry[] {
@@ -79,50 +93,5 @@ export function installIntersectionObserver(): IntersectionControl {
       globalThis.IntersectionObserver = original;
     },
     show: (element, placement) => report(element, placement),
-  };
-}
-
-/**
- * An IntersectionObserver that reports every element observed as wholly on screen, on the task
- * after it is observed, and answers the restore. happy-dom lays nothing out and its own observer
- * reports nothing ever, so a test whose subject is not an on-screen rule - a diagram's drawing,
- * say - sees the page a browser showing the whole of it would give.
- */
-export function installShowingIntersectionObserver(): () => void {
-  const original = globalThis.IntersectionObserver;
-
-  class ShowingObserver {
-    private readonly callback: IntersectionObserverCallback;
-    private readonly watched = new Set<Element>();
-
-    constructor(callback: IntersectionObserverCallback) {
-      this.callback = callback;
-    }
-
-    disconnect(): void {
-      this.watched.clear();
-    }
-
-    observe(target: Element): void {
-      this.watched.add(target);
-      setTimeout(() => {
-        if (!this.watched.has(target)) return;
-        const entry = { isIntersecting: true, target } as unknown as IntersectionObserverEntry;
-        this.callback([entry], this as unknown as IntersectionObserver);
-      }, 0);
-    }
-
-    takeRecords(): IntersectionObserverEntry[] {
-      return [];
-    }
-
-    unobserve(target: Element): void {
-      this.watched.delete(target);
-    }
-  }
-
-  globalThis.IntersectionObserver = ShowingObserver as unknown as typeof IntersectionObserver;
-  return () => {
-    globalThis.IntersectionObserver = original;
   };
 }

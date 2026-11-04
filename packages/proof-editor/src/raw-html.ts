@@ -36,29 +36,38 @@ const HTML_COMMENT = /<!--[\s\S]*?-->/g;
  * it, as it does with the policy off, so the body falls back to its literal text rather than
  * losing it.
  */
-const AMONG_BLOCKS: Record<string, true> = {
-  blockquote: true,
-  containerDirective: true,
-  footnoteDefinition: true,
-  listItem: true,
-  root: true,
-};
+const AMONG_BLOCKS: ReadonlySet<string> = new Set([
+  "blockquote",
+  "containerDirective",
+  "footnoteDefinition",
+  "listItem",
+  "root",
+]);
 
 /**
  * Rewrites `node`'s children, and their own, in place: every `html` child loses its comments and
  * is dropped where nothing is left of it, and one among blocks gains the paragraph that can hold
  * it.
+ *
+ * A node whose children this leaves alone keeps the array it had. This runs over every node of
+ * every body on the page and in the parse worker, and the overwhelming majority of bodies hold
+ * no raw HTML at all, so the copy is made only once a child has actually changed - the 16,000
+ * nodes of an 8,000-item list cost no array each (dispatch://INFRA-341, R11).
  */
 function rewrite(node: MdastNode): void {
-  if (node.children === undefined) return;
-  const amongBlocks = AMONG_BLOCKS[node.type] === true;
-  const kept: MdastNode[] = [];
-  for (const child of node.children) {
+  const children = node.children;
+  if (children === undefined) return;
+  const amongBlocks = AMONG_BLOCKS.has(node.type);
+  /** The rewritten children, once one of them differs from what stood there; until then the
+   *  node's own array is still right. */
+  let kept: MdastNode[] | undefined;
+  for (const [index, child] of children.entries()) {
     if (child.type !== "html") {
       rewrite(child);
-      kept.push(child);
+      kept?.push(child);
       continue;
     }
+    kept ??= children.slice(0, index);
     // What the raw HTML shows: itself without the comments in it, which draw as nothing. Raw
     // HTML that was nothing but comments shows nothing, so its node goes.
     const shown = (child.value ?? "").replace(HTML_COMMENT, "").trim();
@@ -66,7 +75,9 @@ function rewrite(node: MdastNode): void {
     child.value = shown;
     kept.push(amongBlocks ? { type: "paragraph", children: [child] } : child);
   }
-  node.children = kept;
+  if (kept !== undefined) {
+    node.children = kept;
+  }
 }
 
 /** remark transformer — the headless parser's `rawHtml: 'text'` policy, which only a body

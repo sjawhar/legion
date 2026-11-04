@@ -33,7 +33,13 @@
  */
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Actor, Ask, Comment, Message } from "@legion/contracts";
+import {
+  type Actor,
+  type Ask,
+  answerSelected,
+  type Comment,
+  type Message,
+} from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
 import {
   byCreatedAt,
@@ -170,7 +176,7 @@ function sourceAsk(ask: Ask): SourceAsk {
       ask.answer === null
         ? null
         : {
-            selected: ask.answer.selected ?? [],
+            selected: answerSelected(ask.answer),
             text: ask.answer.text,
             user: ask.answer.user,
             at: ask.answer.at,

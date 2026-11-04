@@ -54,7 +54,6 @@ import {
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { useComposerRegistry } from "../margin/margin-context";
-import { useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
 import { SendStoppedError } from "../writes/keyed-write";
@@ -75,7 +74,7 @@ import {
   type MentionFieldChange,
   type MentionFieldHandle,
   mentionDisplay,
-  mentionOptions,
+  useMentionOptions,
 } from "./MentionField";
 import { ReplyQuote } from "./ReplyQuote";
 import {
@@ -92,7 +91,6 @@ import {
   survivingMentions,
   unedited,
 } from "./send-request";
-import { useAgents } from "./useAgents";
 import { useComposerSend } from "./useComposerSend";
 
 /** A draft as the composer holds it: the text, the mentions accepted in it, and, when it is a
@@ -420,18 +418,18 @@ export function MentionComposer({
   const [multiple, setMultiple] = useState(initial.ask?.multiple ?? false);
   const [urgency, setUrgency] = useState<AskUrgency>(initial.ask?.urgency ?? "med");
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
-  /** Whether the field's `@` picker is open: the agent registry is kept fresh while it is, and
-   *  a docked composer rises over the page under it. */
-  const [pickerOpen, setPickerOpen] = useState(false);
+  /** Everything the field's `@` picker needs (`useMentionOptions`): its options, and whether it
+   *  is open, which lifts a docked composer over the page under it. */
+  const { onPickerOpenChange, options, pickerOpen } = useMentionOptions(
+    owner.kind !== "session",
+    suppliedAgents
+  );
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   // Why the last kind pick was refused, kept with the mark it answered: the composer stays mounted
   // when a newer compose replaces the anchor, and a refusal about the old mark says nothing about
   // the new one.
   const [kindRefusal, setKindRefusal] = useState<{ markId: string; text: string }>();
-  const live = useAgents(suppliedAgents === undefined && owner.kind !== "session", pickerOpen);
-  const agents = suppliedAgents ?? live.agents;
-  const text = useAgentText();
-  const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
+
   /** Whether this draft takes mentions at all: an edit of a comment does not, and a message to
    *  one session already reaches it. */
   const mentionable = edit === undefined && owner.kind !== "session";
@@ -515,9 +513,6 @@ export function MentionComposer({
       focusAddedOption.current = false;
     }
   }, [askOptions.length]);
-  useEffect(() => {
-    if (suppliedAgents === undefined && pickerOpen) void live.refetch();
-  }, [live.refetch, pickerOpen, suppliedAgents]);
   useEffect(() => {
     // A mount that took a held send's draft keeps it: the prefill is for a new reply.
     const tookHeldDraft = mountedHeld.current;
@@ -1011,7 +1006,7 @@ export function MentionComposer({
         onPaste={
           uploadOwner === undefined ? undefined : (event) => upload.paste(event, uploadOwner)
         }
-        onPickerOpenChange={setPickerOpen}
+        onPickerOpenChange={onPickerOpenChange}
         options={mentionable ? options : undefined}
       />
       {plainNotice.length > 0 ? (

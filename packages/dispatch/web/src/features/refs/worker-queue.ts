@@ -41,14 +41,18 @@ export interface WorkerJob {
  */
 export type WorkerReply<Answered> = { ready: true } | ({ id: number } & Answered);
 
-/** One render's place on a job: the waiter its answer goes to, and whether the render that
- *  asked has gone while the worker held the job (`keepIfPosted`). A kept place is worth the
- *  worker's own answer, which is what `keepIfPosted` buys, and nothing else: the render was
- *  cancelled, so an answer the queue makes without the worker would be work nobody reads - for
- *  the parse, a parse of an abandoned body on the reader's own thread (sjawhar/legion#2519). */
+/** One render's place on a job: the waiter its answer goes to, whether the render that asked
+ *  has gone while the worker held the job (`keepIfPosted`), and whether it takes the worker's
+ *  own answer or none at all (`theWorkerOrNothing`). A kept place is worth the worker's own
+ *  answer and nothing else: the render was cancelled, so an answer the queue makes without the
+ *  worker would be work nobody reads - for the parse, a parse of an abandoned body on the
+ *  reader's own thread (sjawhar/legion#2519). A place that asked for the worker or nothing is
+ *  worth the same, and for the same reason, while its render is still there: what the queue
+ *  would make without the worker is work that surface has said it does not want. */
 interface Waiter<Answer> {
   readonly answer: (answer: Answer) => void;
   kept: boolean;
+  readonly theWorkerOrNothing: boolean;
 }
 
 /** One job in the queue: what its owner knows about it, the id it was posted under, and every
@@ -61,10 +65,20 @@ interface Queued<Job extends WorkerJob, Answer> {
   readonly waiters: Waiter<Answer>[];
 }
 
-/** Whether any render still waits on `entry` for an answer of whatever kind, rather than only
- *  for the worker's own (`Waiter`). */
+/** Whether any render still waits on `entry` at all, rather than only for the worker's own
+ *  answer after being cancelled (`Waiter`). A job this is true of is worth posting and worth
+ *  keeping in the queue. */
 function anyoneIsWaiting<Job extends WorkerJob, Answer>(entry: Queued<Job, Answer>): boolean {
   return entry.waiters.some((waiter) => !waiter.kept);
+}
+
+/** Whether any render on `entry` would take an answer the queue makes without the worker: a
+ *  cancelled render that kept its place is not one, nor is a surface that asked for the worker
+ *  or nothing (`Waiter`). */
+function anyoneTakesAnswersWithoutTheWorker<Job extends WorkerJob, Answer>(
+  entry: Queued<Job, Answer>
+): boolean {
+  return entry.waiters.some((waiter) => !waiter.kept && !waiter.theWorkerOrNothing);
 }
 
 /** What a queue does that its two owners do differently. */
@@ -154,22 +168,37 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
    * still waits on it (`anyoneIsWaiting`), and the places a cancel kept then take that answer
    * too; a job that only kept places wait on is answered by the worker or not at all, so a body
    * the page has moved on from is never worked on here instead.
+   *
+   * `theWorkerOrNothing` is for a surface that would rather go without an answer than have the
+   * queue make one on the page's own thread: its job is queued and posted as any other, and its
+   * place takes the worker's own answer, but a deadline, a crash or a worker that never runs
+   * leaves it with nothing at all rather than the policy's `withoutTheWorker` or
+   * `withoutAWorker`. The document preview asks that way (`features/doc/DocumentPreview.tsx`):
+   * the whole document is the one body whose on-page parse costs more than the wait it would
+   * end, and that surface already has its first screenful drawn and the editor arriving behind
+   * it. A job only such places wait on is still posted - they have not been cancelled - and the
+   * answer the worker gives still reaches them.
    */
   wait(
     key: string,
     make: () => Job,
     waiter: (answer: Answer) => void,
-    { keepIfPosted = false }: { keepIfPosted?: boolean } = {}
+    {
+      keepIfPosted = false,
+      theWorkerOrNothing = false,
+    }: { keepIfPosted?: boolean; theWorkerOrNothing?: boolean } = {}
   ): () => void {
     if (this.noWorker) {
-      waiter(this.policy.withoutAWorker(make()));
+      if (!theWorkerOrNothing) {
+        waiter(this.policy.withoutAWorker(make()));
+      }
       return () => undefined;
     }
     let entry = this.queued.find((queued) => queued.job.key === key);
     if (entry === undefined && this.inFlight?.job.key === key) {
       entry = this.inFlight;
     }
-    const place: Waiter<Answer> = { answer: waiter, kept: false };
+    const place: Waiter<Answer> = { answer: waiter, kept: false, theWorkerOrNothing };
     if (entry === undefined) {
       this.lastId += 1;
       entry = { id: this.lastId, job: make(), waiters: [place] };
@@ -212,15 +241,16 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
   /**
    * Terminates the worker and takes every job out of the queue: an answer the worker posted
    * before is dropped, and the next job starts a fresh one. `settleWith`, where it is given,
-   * answers every job the queue held, as the worker now never will; without it the jobs are
-   * simply forgotten, which is what a test resetting the page wants.
+   * answers every job the queue held, as the worker now never will - except the places that
+   * asked for the worker or nothing (`Waiter`), which take no answer the queue made; without it
+   * the jobs are simply forgotten, which is what a test resetting the page wants.
    */
   clear(settleWith?: (job: Job) => Answer): void {
     const held = this.stopWorker();
     this.queued = [];
     if (settleWith !== undefined) {
       for (const entry of held) {
-        this.settle(entry, settleWith(entry.job));
+        this.settle(entry, settleWith(entry.job), false);
       }
     }
     this.policy.settled?.();
@@ -304,7 +334,7 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     // waiter that asked to keep a posted job (`keepIfPosted`) is still one, so a streaming turn
     // is shown the frame the worker was holding.
     if (held.waiters.length > 0) {
-      this.settle(held, this.policy.answerOf(held.job, reply));
+      this.settle(held, this.policy.answerOf(held.job, reply), true);
     }
     this.policy.settled?.();
   }
@@ -317,13 +347,15 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
       return;
     }
     this.stopWorker();
-    // What the policy does without the worker is for a render still waiting on this job - for
-    // the parse, the reader's own thread, which is where a body must end formatted. A place
-    // kept on a posted job is not one (`Waiter`): the deadline of a body whose element has gone
-    // would otherwise park that parse on the thread of a reader who left it
-    // (sjawhar/legion#2519).
-    if (anyoneIsWaiting(held)) {
-      this.settle(held, this.policy.withoutTheWorker(held.job));
+    // What the policy does without the worker is for a render still waiting on this job and
+    // willing to take such an answer - for the parse, the reader's own thread, which is where a
+    // body must end formatted. A place kept on a posted job is not one, nor is a place that
+    // asked for the worker or nothing (`Waiter`): the deadline of a body whose element has gone
+    // would otherwise park that parse on the thread of a reader who left it, and the deadline
+    // of a whole document would park it on the thread of a reader waiting for that very
+    // document (sjawhar/legion#2519).
+    if (anyoneTakesAnswersWithoutTheWorker(held)) {
+      this.settle(held, this.policy.withoutTheWorker(held.job), false);
     }
     this.postNext();
     this.policy.settled?.();
@@ -336,16 +368,21 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     this.queued = [];
     this.policy.noWorkerFrom(error);
     for (const entry of held) {
-      if (anyoneIsWaiting(entry)) {
-        this.settle(entry, this.policy.withoutAWorker(entry.job));
+      if (anyoneTakesAnswersWithoutTheWorker(entry)) {
+        this.settle(entry, this.policy.withoutAWorker(entry.job), false);
       }
     }
     this.policy.settled?.();
   }
 
-  private settle(entry: Queued<Job, Answer>, answer: Answer): void {
+  /** Hands `answer` to every render waiting on `entry`. The worker's own answer reaches every
+   *  place, the ones a cancel kept included; an answer the queue made instead reaches no place
+   *  that asked for the worker or nothing (`Waiter`). */
+  private settle(entry: Queued<Job, Answer>, answer: Answer, fromTheWorker: boolean): void {
     for (const waiter of [...entry.waiters]) {
-      waiter.answer(answer);
+      if (fromTheWorker || !waiter.theWorkerOrNothing) {
+        waiter.answer(answer);
+      }
     }
   }
 

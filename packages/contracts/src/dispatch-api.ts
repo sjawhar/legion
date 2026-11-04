@@ -1184,10 +1184,21 @@ export interface AskAnswer {
   readonly user: string;
   /** The options the answer picked, as their labels. The wire schema is a nullish array: a server
    *  from before the fix that writes `[]` sends `null` for an answer that picked none, and an
-   *  older one sends no field at all, so every reader treats both as no option picked. */
+   *  older one sends no field at all, so every reader treats both as no option picked - through
+   *  `answerSelected`, rather than by coercing it again. */
   readonly selected?: string[] | null;
   readonly text: string | null;
   readonly at: string;
+}
+
+/**
+ * The options `answer` picked, as a list: the one reading of `AskAnswer.selected`, whose wire
+ * schema is a nullish array (see the field). Every reader goes through here, on the page and in
+ * the `dispatch` command alike - a reader that coerces it again is a reader that can forget to,
+ * and an answer whose `selected` is `null` then throws where it is read as a list.
+ */
+export function answerSelected(answer: Pick<AskAnswer, "selected">): readonly string[] {
+  return answer.selected ?? [];
 }
 
 export interface AskResolution {
