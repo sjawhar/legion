@@ -216,7 +216,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Tree == req.Issue && req.Role == claim.RoleArchitect {
-		if _, err := s.trees.OpenTreeLifecycle(ctx, s.project, req.Tree, treelifecycle.AuthorityOperator, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		if _, err := s.trees.OpenOperatorTreeLifecycle(ctx, s.project, req.Tree, s.drawMemory(req.Tree)); errors.Is(err, treelifecycle.ErrCleanupReserved) {
 			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("operator tree %s is waiting for durable cleanup: %v", req.Tree, err)))
 			return
 		} else if err != nil {
@@ -250,21 +250,14 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 }
 
 // drawMemory is the draw of tree's memory group, for the open that creates the tree's lifecycle
-// row to run in its own transaction (store.Store.OpenTreeLifecycle): the group this project's mode
-// gives the tree, recorded on the tree's root. An operator's tree usually has no issue record at
-// all, and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no
-// record is invented. A daemon with no workflow keeps no records to draw on, and draws nothing.
+// row to run in its own transaction (store.Store.OpenOperatorTreeLifecycle): the group this
+// project's mode gives the tree, recorded on the tree's root (memorygroup.DrawAndRecord, which
+// admission's own path draws through too). An operator's tree usually has no issue record at all,
+// and then the draw writes nothing (record.Store.DrawMemory) — nothing is refused and no record
+// is invented.
 func (s *server) drawMemory(tree string) func(ctx context.Context, tx pgx.Tx) error {
-	if s.records == nil {
-		return nil
-	}
 	return func(ctx context.Context, tx pgx.Tx) error {
-		group, err := memorygroup.Draw(s.memory.Mode, s.coin)
-		if err != nil {
-			return err
-		}
-		_, err = s.records.DrawMemory(ctx, tx, tree, string(group), string(s.memory.Word()), time.Now())
-		return err
+		return memorygroup.DrawAndRecord(ctx, tx, s.records, tree, s.memory, s.coin, s.now())
 	}
 }
 

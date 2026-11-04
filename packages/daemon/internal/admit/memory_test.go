@@ -285,6 +285,74 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 	}
 }
 
+// A child handed over from a tree nothing ever drew for is never drawn either: a root that leaves
+// another tree takes that tree's answer with it, and the answer of a tree opened before this
+// release is no draw at all. The carry has none to copy, and the draw its own first promotion
+// would make is refused by the record itself (record.Store.DrawMemory, which draws no root that
+// left another tree). The project here is at `on` with a coin nothing may flip, so a draw would be
+// loud: the child would carry `memory`, drawn as `on`, at the hour of its hand-over, where the
+// tree it left carries nothing at all.
+func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	admission := quiet(t, 2)
+	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
+	admission.coin = refusingCoin(t)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-1", "LEGION-2"
+	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root
+	// recorded with none of the three columns set.
+	inTx(t, pool, func(tx pgx.Tx) {
+		if _, err := treelifecycle.Open(ctx, tx, "legion", root, treelifecycle.AuthorityWorkflow); err != nil {
+			t.Fatalf("open the tree's lifecycle as the release found it: %v", err)
+		}
+	})
+	seedWaiting(t, pool, root, "A")
+
+	tick(t, pool, admission, "admit")
+
+	if got := memoryOf(t, pool, root); got != noDraw {
+		t.Fatalf("a root whose tree was open before the draw existed carries %s, want %s", got, noDraw)
+	}
+	parent := root
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1,
+		Status: "done", Rank: "B", LastDispatchSeq: 2})
+	// The root signs off and lingers; an hour later the child is handed to Legion as a root of its
+	// own, and the hand-over records which tree it left (record.Issue.HandedOverFrom).
+	linger(t, pool, root)
+	later := fixedNow.Add(time.Hour)
+	admission.now = func() time.Time { return later }
+
+	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
+		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: handed}, engine)
+
+	handedOver := issue(t, pool, child)
+	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
+		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
+	}
+	if got := drawnAs(handedOver.MemoryGroup, handedOver.MemoryDrawMode, handedOver.MemoryDrawnAt); got != noDraw {
+		t.Fatalf("the handed-over child carries %s, want %s: its old tree had none to give it", got, noDraw)
+	}
+
+	// And the pass that opens the child's own tree for the first time draws nothing for it: the
+	// row is created there, which is the one moment a draw is made, and this root is one that left
+	// another tree.
+	tick(t, pool, admission, "promote-the-handed-over-child")
+
+	var epoch int64
+	if err := pool.QueryRow(ctx, `select epoch from tree_lifecycles where project = 'legion' and tree = $1`, child).Scan(&epoch); err != nil {
+		t.Fatalf("read the lifecycle of the child's own tree: %v", err)
+	}
+	if got := memoryOf(t, pool, child); got != noDraw {
+		t.Fatalf("after its own tree opened at epoch %d the child carries %s, want %s", epoch, got, noDraw)
+	}
+	if got := memoryOf(t, pool, root); got != noDraw {
+		t.Fatalf("after the hand-over the old root carries %s, want %s", got, noDraw)
+	}
+}
+
 // linger signs key off and leaves it lingering with its slot given back, the state a root is in
 // when a person hands it to Legion again or its children are handed over as trees of their own.
 func linger(t *testing.T, pool *pgxpool.Pool, key string) {

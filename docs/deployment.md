@@ -438,7 +438,8 @@ provider_keys:
   The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
   root issue record with the mode it was drawn under and the time of the draw.
   A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
-  hands over as a tree of its own keeps its old tree's draw verbatim.
+  hands over as a tree of its own keeps its old tree's answer: that tree's draw verbatim where it
+  had one, and no draw at all where it had none.
   A tree first opened before this release has no group and runs without memory, nothing draws for
   it later, and a change of mode reaches only the trees opened after it.
   Every role of a memory-group tree names the memory overlays last in `PI_CONFIG_FILES`, after

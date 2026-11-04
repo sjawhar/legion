@@ -43,24 +43,39 @@ func readRoleConfigFiles(value *yaml.Node, key string) (map[claim.Role][]string,
 			return nil, fmt.Errorf("%s names %s twice", key, role)
 		}
 		field := key + "." + string(role)
-		list, err := readStrings(listNode, field)
+		list, err := readOverlayFiles(listNode, field, "the role's Oh My Pi", "the role")
 		if err != nil {
 			return nil, err
 		}
-		if len(list) == 0 {
-			return nil, fmt.Errorf("%s names no overlay: give the role at least one path, or leave it out", field)
-		}
-		for i, file := range list {
-			switch {
-			case !filepath.IsAbs(file) || filepath.Clean(file) != file:
-				return nil, fmt.Errorf("%s entry %q must be a clean absolute path: the role's Oh My Pi reads it from wherever it starts", field, file)
-			case strings.Contains(file, ":"):
-				return nil, fmt.Errorf("%s entry %q holds `:`, which separates the overlays PI_CONFIG_FILES names", field, file)
-			case slices.Contains(list[:i], file):
-				return nil, fmt.Errorf("%s names %s twice", field, file)
-			}
-		}
 		files[role] = list
+	}
+	return files, nil
+}
+
+// readOverlayFiles is one key's list of Oh My Pi settings overlays, the shape `role_config_files`
+// gives a role and a `memory` block gives a project: at least one clean absolute path, each named
+// once, none holding PI_CONFIG_FILES' separator `:`. An empty list is refused rather than taken as
+// no overlay, since a key that wants none is left out; a relative or unclean path would resolve
+// against wherever the Oh My Pi that loads it starts, which is no file of the operator's. reader
+// names that Oh My Pi and owner whom the key belongs to, the two words the two keys' refusals
+// differ in.
+func readOverlayFiles(value *yaml.Node, key, reader, owner string) ([]string, error) {
+	files, err := readStrings(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%s names no overlay: give %s at least one path, or leave it out", key, owner)
+	}
+	for index, file := range files {
+		switch {
+		case !filepath.IsAbs(file) || filepath.Clean(file) != file:
+			return nil, fmt.Errorf("%s entry %q must be a clean absolute path: %s reads it from wherever it starts", key, file, reader)
+		case strings.Contains(file, ":"):
+			return nil, fmt.Errorf("%s entry %q holds `:`, which separates the overlays PI_CONFIG_FILES names", key, file)
+		case slices.Contains(files[:index], file):
+			return nil, fmt.Errorf("%s names %s twice", key, file)
+		}
 	}
 	return files, nil
 }

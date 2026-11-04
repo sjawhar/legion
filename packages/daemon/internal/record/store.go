@@ -1380,9 +1380,15 @@ func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string)
 // itself, so a root that already carries one keeps the group, the mode and the time it was drawn
 // with, and a key with no record — an operator's spawn, whose tree's root the daemon never
 // recorded — takes none. Neither writes a row, and neither is an error.
+//
+// Nor is a root that left another tree (handed_over_from), which is drawn by nothing: such a root
+// takes its old tree's answer with it, which CarryMemory copies when that tree had a draw, and
+// which is no draw at all when it had none — a tree first opened before this release. Without the
+// condition, that child's own first OpenTreeLifecycle reports Created and would draw it under
+// whatever mode the project reads now.
 func (s *Postgres) DrawMemory(ctx context.Context, tx pgx.Tx, root, group, mode string, at time.Time) (bool, error) {
 	tag, err := tx.Exec(ctx, `update issues set memory_group = $2, memory_draw_mode = $3, memory_drawn_at = $4
-		where key = $1 and memory_drawn_at is null`, root, group, mode, at)
+		where key = $1 and memory_drawn_at is null and handed_over_from = ''`, root, group, mode, at)
 	if err != nil {
 		return false, fmt.Errorf("draw the memory group of %s: %w", root, err)
 	}

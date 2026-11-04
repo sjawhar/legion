@@ -979,9 +979,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
 	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
-	// It takes its old tree's memory group with it too, verbatim and with the time that tree was
-	// drawn: the work goes on running under the group it has been running under, and the draw its
-	// own promotion would make writes nothing, since the triple is already set.
+	// It takes its old tree's answer about memory with it too: the carry copies that tree's draw
+	// verbatim, with the time that tree was drawn, so the work goes on running under the group it
+	// has been running under. The carry is only half of it, because an old tree first opened
+	// before this release has no draw to copy: the record itself draws no root that left another
+	// tree (record.Store.DrawMemory reads handed_over_from, which stored.HandedOverFrom was just
+	// written with), so this child's own first promotion draws nothing either, whatever the
+	// project's mode reads now.
 	if oldTree != stored.Key {
 		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
 			return err
@@ -1256,11 +1260,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			// cleanup, and every re-admission — creates nothing and draws nothing, and the draw
 			// itself is written once (record.Store.DrawMemory).
 			if lifecycle.Created {
-				group, err := memorygroup.Draw(a.memory.Mode, a.coin)
-				if err != nil {
-					return admitted, returned, fmt.Errorf("draw the memory group of %s: %w", candidate.Tree, err)
-				}
-				if _, err := a.store.DrawMemory(ctx, tx, candidate.Tree, string(group), string(a.memory.Word()), a.now()); err != nil {
+				if err := memorygroup.DrawAndRecord(ctx, tx, a.store, candidate.Tree, a.memory, a.coin, a.now()); err != nil {
 					return admitted, returned, err
 				}
 			}

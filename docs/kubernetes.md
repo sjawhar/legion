@@ -4783,7 +4783,7 @@ each issue's pod (every role of it alike) and the image probe's.
   A re-admission, a new generation and the next epoch after a cleanup keep it, since none of them creates that row again, and a child its finished root hands over as a tree of its own takes a copy of its old tree's draw, the draw time included.
   Every issue of a tree carries its root's group, so a child is never drawn for.
   A tree first opened before this release has no group and runs without memory, and nothing draws for it later:
-  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change.
+  a change of a project's mode, and turning the block on at all, reach only the trees opened after the change, and a child handed over out of such a tree is never drawn for either, since a root that left another tree keeps that tree's answer whether it is a draw or none.
   An operator's spawn whose tree has no issue record records no draw and runs without memory; nothing is refused and no record is invented.
 
 - **What a memory-group role is given.**
@@ -4810,7 +4810,7 @@ each issue's pod (every role of it alike) and the image probe's.
   a tree already drawn into the memory group names them, which is why the mount check and the readability check hold at `off` too.
   A project with no block at all is the pod every deployment built before the block existed.
   Every issue of `GET /legion/v1/state` carries its tree's `memoryGroup` (`memory` or `none`), `memoryDrawMode` and `memoryDrawnAt`, the three absent together while nothing has drawn for the tree (daemon API contract 47);
-  `settings` carries the project's block; and `legion state` prints one `memory:` line counting the trees drawn under each group and mode, naming no issue, since the state names no tree.
+  `settings` carries the project's block; and `legion state` prints one `memory:` line counting the issues drawn under each group and mode, naming no issue, since the state names no tree and a handed-over tree carries its old tree's draw verbatim.
 
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker (the broker design's pod-enrollment plan), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only that pod generation's grants.
   `url` is the broker's base URL (https, or http to a loopback address;

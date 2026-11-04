@@ -264,10 +264,11 @@ type keptPod struct {
 	// name (heldRoleOverlays, roleOperatorEnv).
 	overlays []string
 	// memory are the project's memory overlay files (Options.MemoryConfigFiles) the pod's
-	// container actually holds, in configuration order, for a launch whose tree is in the memory
-	// group (runtime.SpawnSpec.Memory) and none for every other launch: the only ones its
-	// generation's PI_CONFIG_FILES may name after the role's own (heldRoleOverlays,
-	// roleOperatorEnv).
+	// container actually holds, in configuration order: what the pod holds for every role, as
+	// overlays is (heldRoleOverlays). Which launch is told them is a launch's own question, and
+	// launch.overlays asks it once — only a launch whose tree is in the memory group
+	// (runtime.SpawnSpec.Memory) names them in its generation's PI_CONFIG_FILES, after the role's
+	// own (roleOperatorEnv).
 	memory []string
 	// store is the session store this pod was built under (heldSessionStore), the kind alone: it
 	// is all a start command names, since the URL itself is in the file the pod projects or its
@@ -316,14 +317,17 @@ func (l launch) enrolls(r *Runtime) bool {
 // tree is in the memory group (runtime.SpawnSpec.Memory), the project's memory overlays, which
 // outrank them. They are the ones a kept pod holds, which may be fewer than role_config_files and
 // memory.config_files now name, and all of the configuration's for a launch that builds the pod.
+// This is the one place a launch's memory group decides what it is told, for a kept pod as for a
+// fresh one: the pod holds the memory overlays for every role of it (keptPod.memory).
 func (l launch) overlays(r *Runtime) []string {
+	own, memory := r.roleConfigFiles[l.spec.Role], r.memoryConfigFiles
 	if l.kept != nil {
-		return withMemoryOverlays(l.kept.overlays, l.kept.memory)
+		own, memory = l.kept.overlays, l.kept.memory
 	}
 	if !l.spec.Memory {
-		return r.roleConfigFiles[l.spec.Role]
+		return own
 	}
-	return withMemoryOverlays(r.roleConfigFiles[l.spec.Role], r.memoryConfigFiles)
+	return withMemoryOverlays(own, memory)
 }
 
 // withMemoryOverlays is one PI_CONFIG_FILES list: a role's own overlays and then the project's

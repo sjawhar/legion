@@ -1579,17 +1579,23 @@ func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
 	}
 }
 
-// An operator reading plain `legion state` is told how many trees were drawn into a memory group
-// and under which mode, on one line however many issues the state carries. The line names no
-// issue: every issue of a tree carries its root's draw and the state names no tree, so the keys
-// stay in `--json`, where a line per issue would print hundreds on a live deployment.
-func TestPlainStateCountsTheTreesDrawnIntoAMemoryGroup(t *testing.T) {
+// An operator reading plain `legion state` is told how many issues carry a memory draw and under
+// which group and mode, on one line however many issues the state carries. It counts issues
+// rather than trees because the state names no tree: every issue of a tree carries its root's
+// draw, and a tree handed over as one of its own carries its old tree's draw verbatim, so one
+// draw is two trees' and no draw is a tree's name. The line names no issue: the keys stay in
+// `--json`, where a line per issue would print hundreds on a live deployment.
+func TestPlainStateCountsTheIssuesDrawnIntoAMemoryGroup(t *testing.T) {
 	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
 		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
-	// A drawn root and a child of its tree, which carries the same draw: one tree, counted once.
+	// A drawn root and a child of its tree, which carries the same draw.
 	root := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
 		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
 	child := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"admitted","status":"in_progress",` +
+		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
+	// A tree of its own, handed over from that one: its draw is the old tree's verbatim, the
+	// instant included, which is why a count of distinct draws counted the two trees as one.
+	handedOver := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"planning","status":"in_progress",` +
 		`"memoryGroup":"memory","memoryDrawMode":"random","memoryDrawnAt":"2026-10-25T10:00:00Z"}`
 	// A second tree the same mode drew the other way, and a third an earlier mode drew.
 	second := `"LEGION-300":{"key":"LEGION-300","generation":1,"phase":"done","status":"done",` +
@@ -1602,15 +1608,16 @@ func TestPlainStateCountsTheTreesDrawnIntoAMemoryGroup(t *testing.T) {
 		name, issues, want string
 	}{
 		{
-			name:   "three trees under two modes",
-			issues: `{` + root + `,` + child + `,` + second + `,` + third + `,` + undrawn + `}`,
-			want:   "memory: 3 trees — 1 memory (on), 1 memory (random), 1 none (random)\n",
+			name:   "four trees under two modes, one of them handed over",
+			issues: `{` + root + `,` + child + `,` + handedOver + `,` + second + `,` + third + `,` + undrawn + `}`,
+			want:   "memory: 5 issues — 1 memory (on), 3 memory (random), 1 none (random)\n",
 		},
 		{
 			name:   "one tree, root and child",
 			issues: `{` + root + `,` + child + `}`,
-			want:   "memory: 1 tree — 1 memory (random)\n",
+			want:   "memory: 2 issues — 2 memory (random)\n",
 		},
+		{name: "one issue", issues: `{` + third + `}`, want: "memory: 1 issue — 1 memory (on)\n"},
 		{name: "nothing drawn", issues: `{` + undrawn + `}`, want: "memory: none\n"},
 		{name: "no issues", issues: `{}`, want: "memory: none\n"},
 	} {

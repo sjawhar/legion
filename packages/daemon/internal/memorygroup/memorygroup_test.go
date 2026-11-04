@@ -1,20 +1,25 @@
 package memorygroup
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
-// Each mode draws the group its word names: `off`, and the empty mode of a project whose file
-// names no `memory` block, draw none; `on` draws memory; and `random` draws what the coin says,
-// both ways, flipping it exactly once. A mode with a settled answer flips no coin at all, which is
-// why the coin those cases hand in fails the test when it is called. An unknown mode — one no
-// loader produces — is an error that names the word, and a coin that fails is the draw's failure.
+// Each word draws the group it names: `off` draws none; `on` draws memory; and `random` draws
+// what the coin says, both ways, flipping it exactly once. A word with a settled answer flips no
+// coin at all, which is why the coin those cases hand in fails the test when it is called. A word
+// the draw does not know — the empty mode of a project whose file names no `memory` block among
+// them, which config.Memory.Word turns into `off` before any draw reads it — is an error that
+// names it, and a coin that fails is the draw's failure.
 func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 	// refusing is the coin of a mode that must decide without one.
 	refusing := func() (bool, error) {
@@ -34,7 +39,6 @@ func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 		coin func() (bool, error)
 		want Group
 	}{
-		{name: "a project with no memory block", mode: "", coin: refusing, want: GroupNone},
 		{name: "off", mode: config.MemoryOff, coin: refusing, want: GroupNone},
 		{name: "on", mode: config.MemoryOn, coin: refusing, want: GroupMemory},
 		{name: "random, the coin memory", mode: config.MemoryRandom, coin: pinned(true), want: GroupMemory},
@@ -54,9 +58,11 @@ func TestEachMemoryModeDrawsTheGroupItsWordNames(t *testing.T) {
 		t.Fatalf("the random draws flipped the coin %d times, want one flip each", flips)
 	}
 
-	group, err := Draw("sometimes", refusing)
-	if err == nil || !strings.Contains(err.Error(), `"sometimes"`) {
-		t.Fatalf(`Draw under an unknown mode = %q, %v; want an error naming "sometimes"`, group, err)
+	for _, unknown := range []config.MemoryMode{"sometimes", ""} {
+		group, err := Draw(unknown, refusing)
+		if err == nil || !strings.Contains(err.Error(), `"`+string(unknown)+`"`) {
+			t.Fatalf("Draw under the unknown mode %q = %q, %v; want an error naming it", unknown, group, err)
+		}
 	}
 
 	refused := errors.New("the random source is closed")
@@ -108,6 +114,97 @@ func TestTheDefaultCoinReadsCryptoRandAndNotMathRand(t *testing.T) {
 		t.Fatalf("CryptoCoin over a refusing reader = %t, %v; want false and the reader's own error", got, err)
 	}
 }
+
+// DrawAndRecord is one call for both of the draw's halves: it draws the group the block's mode
+// gives the tree and writes it onto the tree's root with the mode as a draw records it and the
+// instant it was handed, in the caller's own transaction. A project whose file names no block is
+// written `off`, the word an operator could have written, and never the empty string. The draw's
+// failure — a coin that will not flip — is the call's, and so is the write's, and a write that
+// changed no row is neither: the record decides which roots are drawn, and the helper reports
+// what the record answers.
+func TestDrawAndRecordDrawsTheGroupAndWritesItOnTheTreesRoot(t *testing.T) {
+	at := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC)
+	refusing := func() (bool, error) {
+		t.Error("a mode that decides by itself flipped the coin")
+		return false, nil
+	}
+	for _, tc := range []struct {
+		name   string
+		memory config.Memory
+		coin   func() (bool, error)
+		want   drawn
+	}{
+		{name: "a project with no memory block", memory: config.Memory{}, coin: refusing,
+			want: drawn{root: "LEGION-1", group: string(GroupNone), mode: string(config.MemoryOff), at: at}},
+		{name: "off", memory: config.Memory{Mode: config.MemoryOff}, coin: refusing,
+			want: drawn{root: "LEGION-1", group: string(GroupNone), mode: string(config.MemoryOff), at: at}},
+		{name: "on", memory: config.Memory{Mode: config.MemoryOn}, coin: refusing,
+			want: drawn{root: "LEGION-1", group: string(GroupMemory), mode: string(config.MemoryOn), at: at}},
+		{name: "random, the coin memory", memory: config.Memory{Mode: config.MemoryRandom},
+			coin: func() (bool, error) { return true, nil },
+			want: drawn{root: "LEGION-1", group: string(GroupMemory), mode: string(config.MemoryRandom), at: at}},
+		{name: "random, the coin none", memory: config.Memory{Mode: config.MemoryRandom},
+			coin: func() (bool, error) { return false, nil },
+			want: drawn{root: "LEGION-1", group: string(GroupNone), mode: string(config.MemoryRandom), at: at}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := &recordingDraws{}
+			if err := DrawAndRecord(context.Background(), nil, records, "LEGION-1", tc.memory, tc.coin, at); err != nil {
+				t.Fatalf("DrawAndRecord under %+v: %v", tc.memory, err)
+			}
+			if len(records.draws) != 1 || records.draws[0] != tc.want {
+				t.Fatalf("DrawAndRecord under %+v wrote %+v, want one draw %+v", tc.memory, records.draws, tc.want)
+			}
+		})
+	}
+
+	refused := errors.New("the random source is closed")
+	records := &recordingDraws{}
+	err := DrawAndRecord(context.Background(), nil, records, "LEGION-1", config.Memory{Mode: config.MemoryRandom},
+		func() (bool, error) { return true, refused }, at)
+	if !errors.Is(err, refused) || !strings.Contains(err.Error(), "LEGION-1") {
+		t.Fatalf("DrawAndRecord with a failing coin = %v, want the coin's own error naming the tree", err)
+	}
+	if len(records.draws) != 0 {
+		t.Fatalf("DrawAndRecord with a failing coin wrote %+v, want nothing written", records.draws)
+	}
+
+	refusedWrite := errors.New("the transaction is gone")
+	records = &recordingDraws{err: refusedWrite}
+	if err := DrawAndRecord(context.Background(), nil, records, "LEGION-1", config.Memory{Mode: config.MemoryOn}, refusing, at); !errors.Is(err, refusedWrite) {
+		t.Fatalf("DrawAndRecord over a refusing record = %v, want the record's own error", err)
+	}
+
+	records = &recordingDraws{wroteNothing: true}
+	if err := DrawAndRecord(context.Background(), nil, records, "LEGION-1", config.Memory{Mode: config.MemoryOn}, refusing, at); err != nil {
+		t.Fatalf("DrawAndRecord over a record that wrote no row = %v, want no error: the record decides which roots are drawn", err)
+	}
+}
+
+// drawn is one call of the record's write, as the fake below keeps it.
+type drawn struct {
+	root, group, mode string
+	at                time.Time
+}
+
+// recordingDraws stands in for the record: it keeps every write, answers err when it is set, and
+// reports a row written unless wroteNothing says otherwise. It takes no transaction, since
+// DrawAndRecord hands its own straight through.
+type recordingDraws struct {
+	draws        []drawn
+	err          error
+	wroteNothing bool
+}
+
+func (r *recordingDraws) DrawMemory(_ context.Context, _ pgx.Tx, root, group, mode string, at time.Time) (bool, error) {
+	if r.err != nil {
+		return false, r.err
+	}
+	r.draws = append(r.draws, drawn{root: root, group: group, mode: mode, at: at})
+	return !r.wroteNothing, nil
+}
+
+var _ Records = (*recordingDraws)(nil)
 
 // countingReader stands in for crypto/rand.Reader: it serves give for every byte asked of it,
 // counts the reads, and refuses them all once err is set.

@@ -16,17 +16,27 @@ import (
 )
 
 // OpenTreeLifecycle is the explicit authority entry point. Workflow admission calls it inside its
-// fact transaction; the authenticated operator route calls it before its root claim is persisted.
-//
-// created, where one is given, runs in the same transaction as the open, and only where this call
-// created the tree's row (treelifecycle.Lifecycle.Created): the tree's memory group is drawn there
-// (internal/memorygroup), so no crash between the two can leave a lifecycle whose tree was never
-// drawn for. A failing created fails the open, and the row goes with the transaction. It is a
-// trailing optional rather than a plain parameter because most callers — every one that opens a
-// tree to seed or to test it — have nothing to run there, and a nil one of those is the same as
-// none.
-func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority,
-	created ...func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error) {
+// fact transaction; a test and a seed open a tree through this one too. The operator route has
+// one of its own (OpenOperatorTreeLifecycle), because its open runs the tree's draw.
+func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+	return s.openTreeLifecycle(ctx, project, tree, authority, runNothing)
+}
+
+// OpenOperatorTreeLifecycle is the authenticated operator route's open of a root's tree, before
+// its claim is persisted (internal/api's spawn). created runs in the same transaction as the open
+// and only where this call created the tree's row (treelifecycle.Lifecycle.Created): the tree's
+// memory group is drawn there (internal/memorygroup), so no crash between the two can leave a
+// lifecycle whose tree was never drawn for. A failing created fails the open, and the row goes
+// with the transaction.
+func (s *Store) OpenOperatorTreeLifecycle(ctx context.Context, project, tree string,
+	created func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error) {
+	return s.openTreeLifecycle(ctx, project, tree, treelifecycle.AuthorityOperator, created)
+}
+
+// openTreeLifecycle is the open both entry points share: one transaction holding the open and
+// whatever created runs where the open created the tree's row.
+func (s *Store) openTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority,
+	created func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error) {
 	var lifecycle treelifecycle.Lifecycle
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		opened, err := treelifecycle.Open(ctx, tx, project, tree, authority)
@@ -34,13 +44,8 @@ func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, aut
 			return err
 		}
 		if opened.Created {
-			for _, run := range created {
-				if run == nil {
-					continue
-				}
-				if err := run(ctx, tx); err != nil {
-					return err
-				}
+			if err := created(ctx, tx); err != nil {
+				return err
 			}
 		}
 		lifecycle = opened
@@ -51,6 +56,10 @@ func (s *Store) OpenTreeLifecycle(ctx context.Context, project, tree string, aut
 	}
 	return lifecycle, nil
 }
+
+// runNothing is the created of every open but the operator's: nothing is drawn or written beside
+// those opens, so there is nothing for the transaction to hold.
+func runNothing(context.Context, pgx.Tx) error { return nil }
 
 // AdmitClaim binds a new or reactivated claim to an open lifecycle and writes both in one short
 // globally serialized transaction. The caller receives the epoch it must carry through every later

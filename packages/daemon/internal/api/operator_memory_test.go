@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,20 +18,22 @@ import (
 )
 
 // The operator's spawn of a root draws its tree's memory group, in the transaction that creates
-// the tree's lifecycle row, under the project's own mode and coin. The draw reaches the tree's
-// root record where the daemon has one — a root the workflow recorded, which an operator spawned a
-// session on — and writes nothing at all where it has none, the ordinary operator case: a tree the
-// operator opens for work Dispatch never filed is not refused, and no issue record is invented
-// for it.
+// the tree's lifecycle row, under the project's own mode and coin and at the instant its clock
+// reads (Options.Now). The draw reaches the tree's root record where the daemon has one — a root
+// the workflow recorded, which an operator spawned a session on — and writes nothing at all where
+// it has none, the ordinary operator case: a tree the operator opens for work Dispatch never
+// filed is not refused, and no issue record is invented for it.
 func TestTheOperatorsSpawnDrawsTheMemoryGroupOfTheTreeItOpens(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	records := record.NewStore()
+	drawnAt := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Pool: h.store.Pool(), Record: records, Releaser: h.runtime, Trees: h.store,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Memory: config.Memory{Mode: config.MemoryRandom}, MemoryCoin: func() (bool, error) { return true, nil },
+		Now: func() time.Time { return drawnAt },
 	}).Handler
 	recorded := spawnBody()
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
@@ -51,9 +54,10 @@ func TestTheOperatorsSpawnDrawsTheMemoryGroupOfTheTreeItOpens(t *testing.T) {
 	if drawn == nil {
 		t.Fatalf("the spawn left no record of %s at all", recorded.Tree)
 	}
-	if drawn.MemoryGroup != string(memorygroup.GroupMemory) || drawn.MemoryDrawMode != string(config.MemoryRandom) || drawn.MemoryDrawnAt == nil {
-		t.Fatalf("the spawned root carries group %q drawn as %q at %v, want the coin's %q drawn as %q at a time",
-			drawn.MemoryGroup, drawn.MemoryDrawMode, drawn.MemoryDrawnAt, memorygroup.GroupMemory, config.MemoryRandom)
+	if drawn.MemoryGroup != string(memorygroup.GroupMemory) || drawn.MemoryDrawMode != string(config.MemoryRandom) ||
+		drawn.MemoryDrawnAt == nil || !drawn.MemoryDrawnAt.Equal(drawnAt) {
+		t.Fatalf("the spawned root carries group %q drawn as %q at %v, want the coin's %q drawn as %q at %s",
+			drawn.MemoryGroup, drawn.MemoryDrawMode, drawn.MemoryDrawnAt, memorygroup.GroupMemory, config.MemoryRandom, drawnAt)
 	}
 
 	// A tree the daemon has no record of: the spawn opens it, draws nothing, and answers as it

@@ -306,11 +306,6 @@ func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
 	if !readable {
 		return keptPod{}, false
 	}
-	// The memory overlays are a launch's, not a pod's: a pod holds them for every role, and only
-	// a launch whose tree is in the memory group is told them (launch.overlays).
-	if !l.spec.Memory {
-		memory = nil
-	}
 	kind, _, _ := heldSessionStore(spec)
 	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, memory: memory, store: kind}, true
 }

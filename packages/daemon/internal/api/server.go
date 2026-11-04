@@ -128,9 +128,11 @@ type Options struct {
 	// operator's spawn draws the memory group of a tree it opens for the first time
 	// (memorygroup.Draw). The zero block is a project that names none, which draws every tree
 	// `none`. MemoryCoin is the coin the `random` mode is drawn with; nil is
-	// memorygroup.CryptoCoin, and a test pins it.
+	// memorygroup.CryptoCoin, and a test pins it. Now is the clock that draw's instant is read
+	// from; nil is time.Now, and a test pins it.
 	Memory     config.Memory
 	MemoryCoin func() (bool, error)
+	Now        func() time.Time
 	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
@@ -159,7 +161,10 @@ type Options struct {
 	// workflow's tests import this package). The operator's retry of a failed phase worker applies
 	// its issue's held phase only when that phase's role is the claim's (retryClaim); nil retries no
 	// held phase, leaving every one to its architect.
-	RoleFor  func(phase.Phase) claim.Role
+	RoleFor func(phase.Phase) claim.Role
+	// Record is the issue record the routes read and write (record.NewStore()). Nil is defaulted
+	// to one: the Postgres implementation is stateless, so a server given none still draws an
+	// operator tree's memory group. A route that needs a database as well tests Pool.
 	Record   record.Store
 	Dispatch dispatch.Client
 	// ClaimReady is told of each claim whose agent's ready the claim took, on the session it
@@ -183,11 +188,11 @@ type Options struct {
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
 // an operator root opens its tree's lifecycle before its claim is stored, and the tree's close
 // reserves the tree's cleanup, then finishes it once every claim of the tree has retired. The
-// open's created callback runs in the open's own transaction where it created the tree's row, and
-// is where the tree's memory group is drawn (store.Store.OpenTreeLifecycle).
+// open's created runs in the open's own transaction where it created the tree's row, and is where
+// the tree's memory group is drawn (store.Store.OpenOperatorTreeLifecycle).
 type TreeLifecycles interface {
-	OpenTreeLifecycle(ctx context.Context, project, tree string, authority treelifecycle.Authority,
-		created ...func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error)
+	OpenOperatorTreeLifecycle(ctx context.Context, project, tree string,
+		created func(ctx context.Context, tx pgx.Tx) error) (treelifecycle.Lifecycle, error)
 	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
@@ -226,10 +231,11 @@ type server struct {
 	grants     *credential.Grants
 	releaser   store.TreeReleaser
 	trees      TreeLifecycles
-	// memory and coin are Options.Memory and Options.MemoryCoin: what the spawn's own draw of a
-	// tree it opens for the first time reads (drawMemory).
+	// memory, coin and now are Options.Memory, Options.MemoryCoin and Options.Now: what the
+	// spawn's own draw of a tree it opens for the first time reads (drawMemory).
 	memory     config.Memory
 	coin       func() (bool, error)
+	now        func() time.Time
 	pool       *pgxpool.Pool
 	handlers   []intake.Handler
 	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
@@ -283,6 +289,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		trees:              opts.Trees,
 		memory:             opts.Memory,
 		coin:               opts.MemoryCoin,
+		now:                opts.Now,
 		grants:             opts.Grants,
 		pool:               opts.Pool,
 		handlers:           opts.Handlers,
@@ -305,6 +312,12 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	}
 	if s.coin == nil {
 		s.coin = memorygroup.CryptoCoin
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if s.records == nil {
+		s.records = record.NewStore()
 	}
 	if s.grants == nil {
 		s.grants = credential.New(nil)

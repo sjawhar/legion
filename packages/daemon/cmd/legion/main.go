@@ -595,41 +595,29 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
 }
 
-// memoryDraw is one tree's memory draw as the state carries it (api.Issue.MemoryGroup): the group
-// the draw gave the tree, the project's mode it was drawn under, and the instant it was drawn.
-type memoryDraw struct {
-	group string
-	mode  string
-	at    string
-}
-
-// memorySummary is the one line an operator reads for the memory groups the project's trees were
-// drawn into: how many trees carry a draw at all, and how many of those under each group and mode,
-// in group and then mode order, so two runs over one state print one line. It names no issue: the
-// state names no tree, so a root and every issue under it carry one and the same draw and the
-// plain output cannot tell them apart. A draw is one per tree — its group, its mode and its
-// instant together, written once when the tree's lifecycle row is first created — so counting the
-// distinct draws counts the trees. The per-issue values are in `legion state --json`: a line per
-// issue would print hundreds on a live deployment.
+// memorySummary is the one line an operator reads for the memory groups the project's work was
+// drawn into: how many issues carry a draw at all, and how many of those under each group and
+// mode, in group and then mode order, so two runs over one state print one line.
+//
+// It counts issues, and not the trees the draw is made for, because the state carries no tree: a
+// draw would have to stand for its tree, and it cannot. Every issue of a tree carries its root's
+// draw, and a tree handed over as one of its own carries its old tree's draw verbatim — the
+// group, the mode and the instant alike — so two trees share one draw and no draw is a tree's
+// name. It names no issue either: the per-issue values are in `legion state --json`, where a line
+// per issue would print hundreds on a live deployment.
 func memorySummary(issues map[string]api.Issue) string {
-	trees := map[memoryDraw]struct{}{}
+	type groupMode struct{ group, mode string }
+	counts := map[groupMode]int{}
+	drawn := 0
 	for _, issue := range issues {
 		if issue.MemoryGroup == "" {
 			continue
 		}
-		drawn := ""
-		if issue.MemoryDrawnAt != nil {
-			drawn = issue.MemoryDrawnAt.UTC().Format(time.RFC3339Nano)
-		}
-		trees[memoryDraw{group: issue.MemoryGroup, mode: issue.MemoryDrawMode, at: drawn}] = struct{}{}
+		drawn++
+		counts[groupMode{group: issue.MemoryGroup, mode: issue.MemoryDrawMode}]++
 	}
-	if len(trees) == 0 {
+	if drawn == 0 {
 		return "memory: none"
-	}
-	type groupMode struct{ group, mode string }
-	counts := map[groupMode]int{}
-	for draw := range trees {
-		counts[groupMode{group: draw.group, mode: draw.mode}]++
 	}
 	kinds := slices.SortedFunc(maps.Keys(counts), func(a, b groupMode) int {
 		return cmp.Or(cmp.Compare(a.group, b.group), cmp.Compare(a.mode, b.mode))
@@ -638,11 +626,11 @@ func memorySummary(issues map[string]api.Issue) string {
 	for i, kind := range kinds {
 		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, kind.mode)
 	}
-	noun := "trees"
-	if len(trees) == 1 {
-		noun = "tree"
+	noun := "issues"
+	if drawn == 1 {
+		noun = "issue"
 	}
-	return fmt.Sprintf("memory: %d %s — %s", len(trees), noun, strings.Join(named, ", "))
+	return fmt.Sprintf("memory: %d %s — %s", drawn, noun, strings.Join(named, ", "))
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot

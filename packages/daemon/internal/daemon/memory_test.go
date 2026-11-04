@@ -89,23 +89,19 @@ func TestAProjectThatNamesOverlaysHandsThemToTheSandboxRuntimeAtEveryMode(t *tes
 }
 
 // memorySpecs is a spec builder for a project whose memory instructions boot materialized, over a
-// reader that answers memory for the tree LEGION-1 alone; a nil reader is a specs no boot builds,
-// which launches nothing with memory. The mode is no part of a launch's decision, so it is no
-// part of this builder either.
-func memorySpecs(t *testing.T, instructions string, reader bool) specs {
+// reader that answers memory for the tree LEGION-1 alone. The mode is no part of a launch's
+// decision, so it is no part of this builder either.
+func memorySpecs(t *testing.T, instructions string) specs {
 	t.Helper()
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
-	s := specs{
+	return specs{
 		stateDir: t.TempDir(), project: "test", prompts: composer, repositories: noRepositoriesView,
 		instructions: "/state/deployment-instructions.md", memoryInstructions: instructions,
+		memoryGroup: func(_ context.Context, tree string) (bool, error) { return tree == "LEGION-1", nil },
 	}
-	if reader {
-		s.memoryGroup = func(_ context.Context, tree string) (bool, error) { return tree == "LEGION-1", nil }
-	}
-	return s
 }
 
 // memorySpawn is the spec s builds for role on issue of tree.
@@ -128,7 +124,7 @@ func memorySpawn(t *testing.T, s specs, tree, issue string, role claim.Role) run
 // the daemon's controller, carry neither.
 func TestMemoryReachesOnlyTheRolesOfAMemoryTree(t *testing.T) {
 	const instructions = "/state/memory-instructions.md"
-	s := memorySpecs(t, instructions, true)
+	s := memorySpecs(t, instructions)
 	for _, role := range []claim.Role{claim.RoleArchitect, claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		spec := memorySpawn(t, s, "LEGION-1", "LEGION-2", role)
 		if !spec.Memory || spec.Prompt.MemoryInstructionsPath != instructions {
@@ -162,7 +158,7 @@ func TestAMemoryTreeKeepsItsFilesAfterTheProjectMovesToModeOff(t *testing.T) {
 	const instructions = "/state/memory-instructions.md"
 	// The mode reaches no launch at all, so the one builder serves every mode; what the tmux and
 	// Sandbox options hand over at off is the two tables above.
-	off := memorySpecs(t, instructions, true)
+	off := memorySpecs(t, instructions)
 	drawn := memorySpawn(t, off, "LEGION-1", "LEGION-1", claim.RoleTester)
 	if !drawn.Memory || drawn.Prompt.MemoryInstructionsPath != instructions {
 		t.Errorf("a recorded memory tree at mode off: Memory = %v, instructions = %q; want true and %q",
@@ -175,27 +171,17 @@ func TestAMemoryTreeKeepsItsFilesAfterTheProjectMovesToModeOff(t *testing.T) {
 	}
 }
 
-// A specs with no reader at all — which boot never builds, since the reader is the daemon's own
-// store (treeMemoryGroup) — launches nothing with memory.
-func TestMemoryReachesNoLaunchWithNoReader(t *testing.T) {
-	none := memorySpecs(t, "/state/memory-instructions.md", false)
-	spec := memorySpawn(t, none, "LEGION-1", "LEGION-2", claim.RoleTester)
-	if spec.Memory || spec.Prompt.MemoryInstructionsPath != "" {
-		t.Errorf("no reader: Memory = %v, instructions = %q; want false and \"\"", spec.Memory, spec.Prompt.MemoryInstructionsPath)
-	}
-}
-
 // A block with no instructions file is allowed: the tree's roles get the overlays and nothing is
 // appended to their prompt. A reader that cannot answer refuses the launch rather than running it
 // as a tree with no memory.
 func TestMemoryWithoutInstructionsAppendsNothingAndAFailedReadRefuses(t *testing.T) {
-	on := memorySpecs(t, "", true)
+	on := memorySpecs(t, "")
 	spec := memorySpawn(t, on, "LEGION-1", "LEGION-2", claim.RoleTester)
 	if !spec.Memory || spec.Prompt.MemoryInstructionsPath != "" {
 		t.Errorf("a block with no instructions: Memory = %v, instructions = %q; want true and \"\"", spec.Memory, spec.Prompt.MemoryInstructionsPath)
 	}
 
-	refused := memorySpecs(t, "/state/memory-instructions.md", true)
+	refused := memorySpecs(t, "/state/memory-instructions.md")
 	refused.memoryGroup = func(context.Context, string) (bool, error) { return false, errors.New("the store is down") }
 	token, err := claim.NewToken("test", "LEGION-2", claim.RoleTester)
 	if err != nil {

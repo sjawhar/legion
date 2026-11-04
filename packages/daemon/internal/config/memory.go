@@ -5,7 +5,6 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -94,28 +93,12 @@ func readMemory(value *yaml.Node, key string) (Memory, error) {
 	return memory, nil
 }
 
-// readMemoryConfigFiles is a `memory` block's `config_files`: at least one clean absolute path,
-// each named once, none holding PI_CONFIG_FILES' separator. An empty list is refused rather than
-// taken as no overlay, since a block that wants none leaves the key out.
+// readMemoryConfigFiles is a `memory` block's `config_files`, which `role_config_files` and this
+// key read the same way (readOverlayFiles): at least one clean absolute path, each named once,
+// none holding PI_CONFIG_FILES' separator. The overlays are a project's, and a memory-group
+// role's Oh My Pi is what loads them.
 func readMemoryConfigFiles(value *yaml.Node, key string) ([]string, error) {
-	files, err := readStrings(value, key)
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("%s names no overlay: give the project at least one path, or leave it out", key)
-	}
-	for index, file := range files {
-		switch {
-		case !filepath.IsAbs(file) || filepath.Clean(file) != file:
-			return nil, fmt.Errorf("%s entry %q must be a clean absolute path: a memory-group role's Oh My Pi reads it from wherever it starts", key, file)
-		case strings.Contains(file, ":"):
-			return nil, fmt.Errorf("%s entry %q holds `:`, which separates the overlays PI_CONFIG_FILES names", key, file)
-		case slices.Contains(files[:index], file):
-			return nil, fmt.Errorf("%s names %s twice", key, file)
-		}
-	}
-	return files, nil
+	return readOverlayFiles(value, key, "a memory-group role's Oh My Pi", "the project")
 }
 
 // checkMemory refuses what a project's `memory` block asks for that no tree could run as asked,
@@ -134,7 +117,7 @@ func checkMemory(cfg Config) error {
 	for _, name := range slices.Sorted(maps.Keys(cfg.Projects)) {
 		memory := cfg.Projects[name].Memory
 		field := "projects." + name + ".memory"
-		if memory.Mode != "" && memory.Mode != MemoryOff && len(memory.ConfigFiles) == 0 {
+		if memory.Word() != MemoryOff && len(memory.ConfigFiles) == 0 {
 			return fmt.Errorf("%s is %s and names no config_files: a memory-group tree's roles read their memory overlays from that key, so name at least one, or set mode: off", field, memory.Mode)
 		}
 		if len(memory.ConfigFiles) == 0 {

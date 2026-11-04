@@ -385,7 +385,8 @@ What each part is for:
   The draw is made once, when the tree's lifecycle row is first created, and is kept on the tree's
   root issue record with the mode it was drawn under and the time of the draw.
   A re-admission, a new generation and the next epoch after a cleanup keep it, and a child its root
-  hands over as a tree of its own keeps its old tree's draw.
+  hands over as a tree of its own keeps its old tree's answer: that tree's draw where it had one,
+  and no draw at all where it had none.
   A tree first opened before this release has no group and runs without memory, nothing draws for
   it later, and a change of mode reaches only the trees opened after it.
   The launch follows the record, not the mode: a tree the daemon drew into the memory group keeps
@@ -397,7 +398,9 @@ What each part is for:
   Code — hold whatever the mode is.
   The controller is in no memory group, a tree drawn `none` runs exactly as it ran before the block
   existed, and a block with no `instructions` appends nothing.
-  `legion state` prints one `memory:` line counting the trees drawn under each group and mode, and
+  `legion state` prints one `memory:` line counting the issues drawn under each group and mode —
+  the state names no tree, and a tree handed over as one of its own carries its old tree's draw
+  verbatim, so trees cannot be counted from it — and
   `legion state --json` shows each issue its tree's group, the mode it was drawn under and when.
 - **`repository_renames`** (optional) tells the daemon that two names are one repository, for a
   repository that moved: after a transfer GitHub's events name the new repository while every tree
