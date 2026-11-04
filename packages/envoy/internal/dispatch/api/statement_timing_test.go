@@ -183,8 +183,15 @@ func TestStatementTimings(t *testing.T) {
 	runner.Pair(t, "searchQuery, keywords only",
 		benchtime.Statement{SQL: mainSearchQuery, Args: searchArguments},
 		benchtime.Statement{SQL: searchQuery, Args: searchArguments})
+	// The before side is this release's own meaning body over main's document arm
+	// (searchQueryMeaningOverMainsDocumentArm), not main's frozen meaning text: this release
+	// moved meaning search to one vector per window and deletes the whole-text rows four of
+	// main's five meaning arms read, so that text would measure a statement whose arms find
+	// nothing and the gate would compare two designs rather than the one arm this change
+	// rewrote. Main's own text still measures the pre-release schema, in the Before branch
+	// above, where the window kinds and the covers column do not exist.
 	runner.Pair(t, "searchQueryMeaning",
-		benchtime.Statement{SQL: mainSearchQueryMeaning, Args: searchMeaningArguments},
+		benchtime.Statement{SQL: searchQueryMeaningOverMainsDocumentArm, Args: searchMeaningArguments},
 		benchtime.Statement{SQL: searchQueryMeaning, Args: searchMeaningArguments})
 	// relatedKeywordQuery and relatedMeaningQuery are gated on the document arm they share
 	// rather than on either whole statement. The arm is the piece whose text differs, and it is
@@ -216,7 +223,7 @@ func TestStatementTimings(t *testing.T) {
 		benchtime.Statement{SQL: mainRelatedKeywordQuery, Args: relatedKeywordArguments},
 		benchtime.Statement{SQL: relatedKeywordQuery, Args: relatedKeywordArguments})
 	runner.Report(t, "relatedMeaningQuery, the whole statement",
-		benchtime.Statement{SQL: mainRelatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup},
+		benchtime.Statement{SQL: relatedMeaningQueryOverMainsDocumentArm, Args: relatedMeaningArguments, Setup: meaningSetup},
 		benchtime.Statement{SQL: relatedMeaningQuery, Args: relatedMeaningArguments, Setup: meaningSetup})
 
 	runner.Pair(t, "relatedProbeSQL",
