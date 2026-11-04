@@ -79,10 +79,11 @@ const OBSERVATIONS: readonly Observation[] = [
   { issue: "ACME-5", field: "phase", value: '"admitted"', ago: "70 minutes" },
 ];
 
-/** The project, its five issues, its daemon at `stateUrl`, one good read, and every observation
- *  that read found. The issues are Dispatch's own, which is where each card's title and priority
- *  come from. */
-export async function seedLegionFixture(stateUrl: string): Promise<void> {
+/** The project, its five issues, one good read and every observation that read found — everything
+ *  the board draws except the `legion_settings` row that names the daemon. A spec that is about
+ *  the person naming the daemon seeds this and nothing more. The issues are Dispatch's own, which
+ *  is where each card's title and priority come from. */
+export async function seedLegionProject(): Promise<void> {
   await sql(
     `INSERT INTO projects (key, name) VALUES ('${LEGION_PROJECT}', 'Acme') ON CONFLICT DO NOTHING`,
     `INSERT INTO people (email) VALUES ('alice') ON CONFLICT DO NOTHING`,
@@ -92,14 +93,39 @@ export async function seedLegionFixture(stateUrl: string): Promise<void> {
        ('ACME-3', '${LEGION_PROJECT}', 3, 'Queued behind the widgets', 'todo', 2, ${SEED_ACTOR}, 'W'),
        ('ACME-4', '${LEGION_PROJECT}', 4, 'Queued first by the daemon', 'todo', 3, ${SEED_ACTOR}, 'X'),
        ('ACME-5', '${LEGION_PROJECT}', 5, 'Held by a blocker', 'todo', 3, ${SEED_ACTOR}, 'Y')`,
-    `INSERT INTO legion_settings (project, state_url, created_by, updated_at)
-       VALUES ('${LEGION_PROJECT}', '${stateUrl}', ${SEED_ACTOR}, now())`,
     `INSERT INTO legion_reads (project, read_at, ok, error, bytes)
        VALUES ('${LEGION_PROJECT}', now() - interval '20 seconds', true, null, 4096)`,
     `INSERT INTO legion_observations (project, issue_key, field, value, observed_at) VALUES ${OBSERVATIONS.map(
       (observation) =>
         `('${LEGION_PROJECT}', '${observation.issue}', '${observation.field}', '${observation.value.replaceAll("'", "''")}'::jsonb, now() - interval '${observation.ago}')`
     ).join(", ")}`
+  );
+}
+
+/** `seedLegionProject` with the project's daemon named at `stateUrl`, which is what every spec
+ *  but the one about naming it reads. */
+export async function seedLegionFixture(stateUrl: string): Promise<void> {
+  await seedLegionProject();
+  await sql(
+    `INSERT INTO legion_settings (project, state_url, created_by, updated_at)
+       VALUES ('${LEGION_PROJECT}', '${stateUrl}', ${SEED_ACTOR}, now())`
+  );
+}
+
+/** What a read of the daemon a minute later leaves behind: the value it found for one field, and
+ *  the announcement on `legion.StateChannel` that wakes every open board of the project
+ *  (`packages/envoy/internal/dispatch/legion/store.go`). `value` is the field's JSON. */
+export async function pushLegionObservation(
+  issue: string,
+  field: string,
+  value: string
+): Promise<void> {
+  await sql(
+    `INSERT INTO legion_reads (project, read_at, ok, error, bytes)
+       VALUES ('${LEGION_PROJECT}', now(), true, null, 4096)`,
+    `INSERT INTO legion_observations (project, issue_key, field, value, observed_at)
+       VALUES ('${LEGION_PROJECT}', '${issue}', '${field}', '${value.replaceAll("'", "''")}'::jsonb, now())`,
+    `SELECT pg_notify('dispatch_legion_state', '${LEGION_PROJECT}')`
   );
 }
 
