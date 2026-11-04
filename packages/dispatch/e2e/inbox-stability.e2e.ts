@@ -428,6 +428,161 @@ async function seedTravellingPointerBand() {
   await seedAsks("Travelling pointer", 6);
 }
 
+/**
+ * The reader's hand, travelling across the list in the page's own time.
+ *
+ * `page.mouse.move` moves the pointer only when the test's next round trip reaches the browser,
+ * so between two of them the page sees a pointer standing perfectly still. On a loaded machine
+ * that stillness is long enough to end the travel this row is about in two ways, both measured
+ * here: `useMotionHold`'s own settle (`web/src/features/inbox/motion-hold.ts`, 400 ms with no
+ * `pointermove` on the list root) adopts the arrival mid-journey, and a rest of
+ * `REF_PREVIEW_OPEN_DELAY_MS` (300 ms) over a row opens that row's reference card over the
+ * pointer, whose `pointerleave` on the same root drops the hold outright.
+ *
+ * A hand that is actually travelling does neither, so the travel is driven from inside the
+ * page: a timer walks the pointer along the segment the test is driving it through and
+ * dispatches a real `pointermove` at each step, on the element at that point, so it bubbles to
+ * the same root listener `useMotionHold` binds - counted there, and asserted by the caller, so
+ * a move that stopped short of that root cannot pass for travel. The real pointer still makes
+ * the journey, since it alone hovers rows and answers `elementFromPoint`; it only comes to
+ * rest between two rows, where no card can open under it.
+ */
+declare global {
+  interface Window {
+    /** The travel `startTravelling` runs until `stopTravelling` ends it. */
+    __travellingPointer?: {
+      /** The keeper's own moves that reached the list root. */
+      arrived: number;
+      /** The keeper's moves, wherever they landed. */
+      dispatched: number;
+      headFor: (y: number) => void;
+      stop: () => void;
+    };
+  }
+}
+
+/** How far the hand travels between two moves, and how often it moves: about a short row every
+ *  half second, which is a hand crossing the list rather than flicking across it. */
+const TRAVEL_STEP_PX = 4;
+const TRAVEL_EVERY_MS = 16;
+
+/** Starts the travel at `from`, heading down the column at `x` for `to`, sweeping that segment
+ *  until it is pointed somewhere else or stopped. */
+async function startTravelling(page: Page, x: number, from: number, to: number): Promise<void> {
+  await page.evaluate(
+    ({ every, from, step, to, x }) => {
+      const root = document.querySelector('[data-testid="inbox-list"]')?.firstElementChild;
+      if (!(root instanceof HTMLElement)) throw new Error("the Inbox list has no motion-hold root");
+      let y = from;
+      let aim = to;
+      let origin = from;
+      const travel = {
+        arrived: 0,
+        dispatched: 0,
+        headFor: (next: number) => {
+          origin = y;
+          aim = next;
+        },
+        stop: () => {
+          window.clearInterval(timer);
+          root.removeEventListener("pointermove", count);
+        },
+      };
+      // Only the keeper's own moves: a real one the test made is the browser's, and trusted.
+      const count = (event: Event) => {
+        if (!event.isTrusted) travel.arrived += 1;
+      };
+      root.addEventListener("pointermove", count);
+      const timer = window.setInterval(() => {
+        const left = aim - y;
+        if (Math.abs(left) <= step) {
+          // The end of this leg: the hand sweeps back along it rather than coming to rest.
+          y = aim;
+          [aim, origin] = [origin, aim];
+        } else {
+          y += Math.sign(left) * step;
+        }
+        const under = document.elementFromPoint(x, y) ?? root;
+        under.dispatchEvent(
+          new PointerEvent("pointermove", {
+            bubbles: true,
+            clientX: x,
+            clientY: y,
+            isPrimary: true,
+            pointerId: 1,
+            pointerType: "mouse",
+            view: window,
+          })
+        );
+        travel.dispatched += 1;
+      }, every);
+      window.__travellingPointer = travel;
+    },
+    { every: TRAVEL_EVERY_MS, from, step: TRAVEL_STEP_PX, to, x }
+  );
+}
+
+/** Points the travel at a new end, so it follows the journey the test is driving. */
+async function travelTowards(page: Page, to: number): Promise<void> {
+  await page.evaluate((y) => {
+    const travel = window.__travellingPointer;
+    if (travel === undefined) throw new Error("no travel to point anywhere");
+    travel.headFor(y);
+  }, to);
+}
+
+/** Ends the travel, and says how many moves it made and how many of them reached the root the
+ *  hold listens on. Ending one that is already over is nothing to do. */
+async function stopTravelling(page: Page): Promise<{ arrived: number; dispatched: number }> {
+  return page.evaluate(() => {
+    const travel = window.__travellingPointer;
+    if (travel === undefined) return { arrived: 0, dispatched: 0 };
+    travel.stop();
+    window.__travellingPointer = undefined;
+    return { arrived: travel.arrived, dispatched: travel.dispatched };
+  });
+}
+
+/** How many answers to `GET /api/v1/inbox` the page has finished reading: the arrival's own
+ *  answer is in the page from the moment this grows, whether or not the list has adopted it. */
+async function inboxAnswersRead(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      performance
+        .getEntriesByType("resource")
+        .filter((entry) => new URL(entry.name).pathname === "/api/v1/inbox").length
+  );
+}
+
+/**
+ * Where in a row a hand can come to rest with no reference card opening under it.
+ *
+ * A row's owner link is a reference trigger (`features/inbox/AskOwnerLink.tsx`), and a pointer
+ * resting on one opens a card that is `fixed` over the page, outside the list: once it covers
+ * the pointer the list root sees `pointerleave` and the hold ends there and then, which is a
+ * mechanism of its own and not the one this row measures. Scanned outwards from the row's own
+ * centre, so the hand still arrives in the middle of the row it was travelling to.
+ */
+async function restWithoutACard(page: Page, rowID: string): Promise<{ x: number; y: number }> {
+  const point = await page.evaluate((id) => {
+    const row = document.querySelector(`[data-inbox-row="${id}"]`);
+    if (row === null) return null;
+    const box = row.getBoundingClientRect();
+    const middle = box.x + box.width / 2;
+    for (const y of [box.y + box.height / 2, box.y + box.height / 4, box.y + (box.height * 3) / 4])
+      for (let out = 0; out * 12 < box.width / 2; out += 1)
+        for (const x of [middle + out * 12, middle - out * 12]) {
+          const under = document.elementFromPoint(x, y);
+          if (under === null || under.closest("[data-inbox-row]") !== row) continue;
+          if (under.closest("[data-dispatch-ref],[data-dispatch-href]") !== null) continue;
+          return { x, y };
+        }
+    return null;
+  }, rowID);
+  if (point === null) throw new Error("the destination row has nowhere for a hand to rest");
+  return point;
+}
+
 async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   const rows = page.locator("[data-inbox-row]");
   await expect(rows).toHaveCount(8);
@@ -441,17 +596,22 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
     height: Math.ceil(initialSixthBox.y + initialSixthBox.height + 40),
     width: viewport.width,
   });
+  const third = await rows.nth(2).boundingBox();
   const fourth = await rows.nth(3).boundingBox();
   const fifth = await rows.nth(4).boundingBox();
   const sixthBox = await sixth.boundingBox();
-  if (fourth === null || fifth === null || sixthBox === null)
+  if (third === null || fourth === null || fifth === null || sixthBox === null)
     throw new Error("Inbox row has no box");
   const sixthID = await sixth.getAttribute("data-inbox-row");
   if (sixthID === null) throw new Error("sixth row has no id");
   const destination = page.locator(`[data-inbox-row="${sixthID}"]`);
   const sixthBefore = await topOf(destination);
   const x = sixthBox.x + sixthBox.width / 2;
+  // Every place the real pointer comes to rest: the two gaps between rows, which carry nothing
+  // to hover, and the place in the destination row where the journey ends.
+  const gapAbove = (third.y + third.height + fourth.y) / 2;
   const gap = (fourth.y + fourth.height + fifth.y) / 2;
+  const rest = await restWithoutACard(page, sixthID);
   const requested = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const delivered = Promise.withResolvers<void>();
@@ -471,33 +631,37 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
   });
 
   try {
-    for (const y of [fourth.y - 20, fourth.y + fourth.height / 2, gap]) {
-      await page.mouse.move(x, y);
-      await nextFrame(page);
-    }
+    // The hand sets out above the arrival's landing place and travels across the fourth row,
+    // on its way down to the destination, and it keeps travelling from here to the last
+    // assertion the hold has to survive.
+    await page.mouse.move(x, gapAbove);
+    await startTravelling(page, x, gapAbove, gap);
+    const answersBefore = await inboxAnswersRead(page);
 
     const urgent = await createIssue({ project: "CORE", title: "Travelling pointer P0" });
     await patchIssue(urgent.key, { priority: 0 });
     const p0 = await createAsk(urgent.key, { question: "Travelling pointer arrival" }, session);
     await requested.promise;
-    // Seeding can outlast the hold; this last move puts the refetch inside the pointer's travel.
-    await page.mouse.move(x, gap + 1);
-    await nextFrame(page);
+    // Seeding can outlast a round trip, so the real pointer crosses the fourth row in one
+    // journey of its own, and the refetch lands inside that travel.
+    await page.mouse.move(x, gap, { steps: 16 });
     release.resolve();
     await delivered.promise;
-    // Keep travelling inside the gap while the released response renders. Each move is still pointer
-    // motion, but none rests on a row the viewport anchor could hold.
-    for (let step = 0; step < 10; step += 1) {
-      await page.mouse.move(x, gap + (step % 2));
-      await nextFrame(page);
-      await page.waitForTimeout(25);
-    }
 
-    const targetY = sixthBox.y + sixthBox.height / 2;
-    for (let step = 1; step <= 5; step += 1) {
-      await page.mouse.move(x, gap + ((targetY - gap) * step) / 5);
-      await nextFrame(page);
-    }
+    // The answer carrying the arrival is in the page, and the list is still showing the eight
+    // rows the reader was travelling across: the hold is holding, which is the whole row.
+    await expect.poll(() => inboxAnswersRead(page)).toBeGreaterThan(answersBefore);
+    await nextFrame(page);
+    expect(await rows.count()).toBe(8);
+
+    // The last leg, down across the fifth row to the destination the hand set out for.
+    await travelTowards(page, rest.y);
+    await page.mouse.move(rest.x, rest.y, { steps: 24 });
+    const travel = await stopTravelling(page);
+    // What the keeper dispatched is what the hold heard: every one of its moves reached the
+    // root `useMotionHold` listens on, and there were moves to hear.
+    expect(travel.dispatched).toBeGreaterThan(0);
+    expect(travel.arrived).toBe(travel.dispatched);
 
     await expect(page.locator(`[data-inbox-row="${p0.id}"]`)).toBeAttached();
     await expect(rows).toHaveCount(9);
@@ -507,11 +671,12 @@ async function travelPointerAcrossIncomingRow(page: Page): Promise<void> {
           .elementFromPoint(x, y)
           ?.closest("[data-inbox-row]")
           ?.getAttribute("data-inbox-row"),
-      { x, y: targetY }
+      rest
     );
     expect(underPointer).toBe(sixthID);
     expect(Math.abs((await topOf(destination)) - sixthBefore)).toBeLessThanOrEqual(2);
   } finally {
+    await stopTravelling(page);
     release.resolve();
     await page.unroute("**/api/v1/inbox");
   }

@@ -459,18 +459,31 @@ func markAllOnPlan(t *testing.T, deps Deps, plan storetest.Plan) http.Handler {
 
 // unreadAgain puts Alice's rows back behind their newest reply, which is the state a press
 // marks, and lays them out in the heap in descending thread_id order, which is what gives the
-// two presses two scan orders to disagree about. An update writes each row's new version where
-// its scan reaches it, so the order of this statement's own scan - the sort below, driving the
-// join - is the heap order the press on the sequential pool then reads. A plain
-// `thread_id = any($1)` would be planned as an index scan on the primary key and lay the rows
-// out in ascending order, which is the order the other press takes: the two would agree and
-// the race would prove nothing.
+// two presses two scan orders to disagree about.
+//
+// It deletes the rows and inserts them again rather than updating them in place. An update
+// writes each new row version where its own scan reaches it only while the page has room
+// elsewhere; once these rows have been rewritten a few times each new version fits in the slot
+// its old one left, so the heap settles into whatever order it is already in - ascending,
+// after the first press reads them through the primary key - and no re-lay moves it again.
+// An insert appends in the order it is given, so the layout is this statement's to decide.
+// `unread` is generated, so it is not written.
 func unreadAgain(t *testing.T, database *store.Store, threads []string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
-		update user_threads u set read_through = u.replied_at - interval '1 second'
-		from (select id from unnest($1::uuid[]) as id order by id desc) ordered
-		where u.login = 'alice' and u.thread_id = ordered.id
+		with lifted as (
+			delete from user_threads
+			where login = 'alice' and thread_id = any($1::uuid[])
+			returning login, thread_id, kind, project_key, issue_key, artifact_id, replied_at,
+			          last_reply_id
+		)
+		insert into user_threads (
+			login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at,
+			last_reply_id
+		)
+		select login, thread_id, kind, project_key, issue_key, artifact_id,
+		       replied_at - interval '1 second', replied_at, last_reply_id
+		from lifted order by thread_id desc
 	`, threads); err != nil {
 		t.Fatalf("leave the threads unread again: %v", err)
 	}
@@ -498,6 +511,15 @@ func heapOrder(t *testing.T, database *store.Store, threads []string) []string {
 	return heap
 }
 
+// raceGateAttempts is how many times raceGate re-lays the rows looking for a layout the two
+// presses disagree about. One update usually leaves the heap in descending thread id order, but
+// a row whose new version fits in its own page keeps its place, so a round can come back in
+// ascending order, where no crossing set exists. Ten attempts: the layout that defeats the gate
+// turned up about one round in seven, so ten independent re-lays leave a failure this test
+// cannot cause in any run anyone will see, and a layout that never crosses in ten is a real
+// answer rather than a flake.
+const raceGateAttempts = 10
+
 // raceGate picks the row both presses wait on and the threads this round leaves unread for
 // them to mark. The gate has to be the lowest thread id of that set, so the press reading
 // through the primary key reaches it holding nothing, and it has to sit behind rows of the set
@@ -506,30 +528,42 @@ func heapOrder(t *testing.T, database *store.Store, threads []string) []string {
 // whenever the lowest id is not the first row of the heap.
 //
 // The layout is read each round rather than arranged: an update writes a row's new version
-// wherever its page has room, so a round that rewrote the rows can have reordered them.
+// wherever its page has room, so a round that rewrote the rows can have reordered them - and a
+// round that left them in ascending thread id order offers no cycle at all. That is not a
+// failure of the change under test, so this re-lays the rows and reads the heap again rather
+// than failing the round, and gives up only when no attempt crosses.
 func raceGate(t *testing.T, database *store.Store, threads []string) (string, []string) {
 	t.Helper()
-	heap := heapOrder(t, database, threads)
-	gate, marked := "", []string(nil)
-	for position, candidate := range heap {
-		above, behind := []string{candidate}, 0
-		for other, thread := range heap {
-			if thread > candidate {
-				above = append(above, thread)
-				if other < position {
-					behind++
+	for attempt := range raceGateAttempts {
+		if attempt > 0 {
+			unreadAgain(t, database, threads)
+		}
+		heap := heapOrder(t, database, threads)
+		gate, marked := "", []string(nil)
+		for position, candidate := range heap {
+			above, behind := []string{candidate}, 0
+			for other, thread := range heap {
+				if thread > candidate {
+					above = append(above, thread)
+					if other < position {
+						behind++
+					}
 				}
 			}
+			if behind > 0 && len(above) > len(marked) {
+				gate, marked = candidate, above
+			}
 		}
-		if behind > 0 && len(above) > len(marked) {
-			gate, marked = candidate, above
+		if gate != "" {
+			slices.Sort(marked)
+			return gate, marked
 		}
 	}
-	if gate == "" {
-		t.Fatalf("the heap holds the threads in thread id order, so the two presses would agree")
-	}
-	slices.Sort(marked)
-	return gate, marked
+	t.Fatalf(
+		"after %d re-lays the heap still holds the threads in thread id order, so the two presses would agree",
+		raceGateAttempts,
+	)
+	return "", nil
 }
 
 // markThreadsRead takes the threads this round leaves out past their newest reply, so neither
