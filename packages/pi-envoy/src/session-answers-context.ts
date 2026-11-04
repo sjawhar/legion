@@ -222,13 +222,41 @@ const placements =
   placementsGlobal[PLACEMENTS_KEY] ?? new WeakMap<object, Map<string, Placement>>();
 placementsGlobal[PLACEMENTS_KEY] = placements;
 
+/** `text` without the line naming the read that produced it, which `renderShown` writes under the
+ *  marker when it answers from the cache. Two texts whose rest is the same show the same items. */
+function withoutReadLine(text: string): string {
+  const lines = text.split("\n");
+  return lines[1]?.startsWith("As read at ") === true
+    ? [lines[0], ...lines.slice(2)].join("\n")
+    : text;
+}
+
 /** Whether `next` shows something `shown` did not: an item, or an answer or comment a person
  *  changed. Without both reads' words (a list an older copy of this extension placed), any change
- *  in the text counts. */
+ *  in the text counts, except the line naming the read itself. */
 function showsNew(shown: CarriedAnswers, next: CarriedAnswers): boolean {
-  if (shown.words === undefined || next.words === undefined) return shown.text !== next.text;
+  if (shown.words === undefined || next.words === undefined) {
+    return withoutReadLine(shown.text) !== withoutReadLine(next.text);
+  }
   const before = new Set(shown.words);
   return next.words.some((word) => !before.has(word));
+}
+
+/** `messages` with the list already placed for this session put back where it sits, or undefined
+ *  when none is placed or its place left the conversation. */
+function keepPlaced(
+  messages: readonly unknown[],
+  request: SessionAnswersRequest
+): unknown[] | undefined {
+  const placed = placements.get(request.session)?.get(request.id);
+  if (placed === undefined) return undefined;
+  const index = messages.findLastIndex((message) => messageKey(message) === placed.after);
+  if (index < 0) return undefined;
+  return [
+    ...messages.slice(0, index + 1),
+    userTextMessage(placed.carried.text),
+    ...messages.slice(index + 1),
+  ];
 }
 
 /**
@@ -260,14 +288,8 @@ function placeList(
   placements.set(request.session, sessions);
   const placed = sessions.get(request.id);
   if (placed !== undefined && !showsNew(placed.carried, carried)) {
-    const index = messages.findLastIndex((message) => messageKey(message) === placed.after);
-    if (index >= 0) {
-      return [
-        ...messages.slice(0, index + 1),
-        userTextMessage(placed.carried.text),
-        ...messages.slice(index + 1),
-      ];
-    }
+    const kept = keepPlaced(messages, request);
+    if (kept !== undefined) return kept;
   }
   sessions.set(request.id, { after: messageKey(messages.at(-1)), carried });
   return [...messages, userTextMessage(carried.text)];
@@ -351,7 +373,16 @@ export async function withSessionAnswers(
     return undefined;
   }
   const carried = await request.read();
-  if (carried === undefined) return undefined;
+  // A read that gives no text (an empty answer list, a server with no answers route and nothing
+  // cached) must not take a placed list out of the conversation: removing its bytes changes the
+  // request from that place on, exactly as changing them would, and the next read that carries
+  // the cached list would put them back. A list already placed stays until a new item moves it.
+  if (carried === undefined) {
+    const kept =
+      request.compacting() || previous === "cut" ? undefined : keepPlaced(messages, request);
+    if (kept !== undefined) decided.add(kept);
+    return kept;
+  }
   const placed = placeList(messages, carried, request, previous === "cut" || request.compacting());
   decided.add(placed);
   return placed;

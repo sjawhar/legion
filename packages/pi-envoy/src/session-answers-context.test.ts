@@ -279,6 +279,31 @@ test("an item written after a kept place moves the list, with the text of that r
   ).toEqual([...turn, grepCall, grepResult, later]);
 });
 
+// A read gives no text when the answer list is empty, or when a server with no answers route has
+// nothing cached. Taking the placed list out of the conversation changes the request from its
+// place on, as changing its bytes would, and the next read that answers from the cache puts it
+// back: the pair alternates, and every request pays for it.
+test("a read with no text leaves a placed list where it is", async () => {
+  const session = {};
+  const read = readingEach(LIST, "", LIST);
+  const empty = async (): Promise<CarriedAnswers | undefined> => {
+    const next = await read();
+    return next?.text === "" ? undefined : next;
+  };
+  await withSessionAnswers([skill, ask], requestOf(empty, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn], requestOf(empty, noBranch, session))).toEqual([
+    skill,
+    ask,
+    list,
+    readCall,
+    readResult,
+  ]);
+  expect(
+    await withSessionAnswers([...turn, grepCall, grepResult], requestOf(empty, noBranch, session))
+  ).toEqual([skill, ask, list, readCall, readResult, grepCall, grepResult]);
+});
+
 test("a list whose place left the conversation, as a compaction leaves it, goes after the last message again", async () => {
   const session = {};
   const read = readingEach(LIST);
