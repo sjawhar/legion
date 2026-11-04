@@ -129,18 +129,22 @@ func (v *issueView) claims(index int) []Span {
 // waitingOnPersonSpans is segment 1: "the daemon recorded the root in `awaiting_person`, or an ask
 // a session of the tree opened was on the person's turn (`ask.opened` or `ask.handed_back`, until
 // `ask.answered`, `ask.resolved`, or `waitingOn.answeredAt`)".
+//
+// The ask half is the issue's own `AskTurns` and no other issue's: the spec's "Whose ask counts
+// as waiting on a person" is two conditions, "opened **on that issue** by any Legion session of
+// the issue's tree", and `keepTreeAsks` has already applied the tree test and attached each turn
+// it kept to the issue the ask was opened on. Reading the tree again here would count one child's
+// ask for its root and for every sibling.
 func waitingOnPersonSpans(view *issueView) []Span {
 	spans := markSpans(view.root.Observed[legion.FieldPhase], view.population.issueEnd(view.root), func(value string) bool {
 		return legion.JSONString([]byte(value)) == phaseAwaitingPerson
 	})
 	answered := answeredAts(view.root)
-	for _, issue := range view.tree() {
-		for _, turn := range issue.AskTurns {
-			if at, found := answeredWithin(answered, turn); found {
-				turn.To = at
-			}
-			spans = append(spans, turn)
+	for _, turn := range view.issue.AskTurns {
+		if at, found := answeredWithin(answered, turn); found {
+			turn.To = at
 		}
+		spans = append(spans, turn)
 	}
 	return spans
 }
@@ -201,18 +205,6 @@ func waitingOnChildrenSpans(view *issueView) []Span {
 		spans = append(spans, intersect(inPhase, view.childWorked[child.Key])...)
 	}
 	return spans
-}
-
-// tree is the issue's root and every child of it, which is whose asks stand for the whole tree.
-func (v *issueView) tree() []*Issue {
-	tree := make([]*Issue, 0, len(v.children)+1)
-	tree = append(tree, v.root)
-	// No child is its own root: linkTrees records a key under its root only where the two differ.
-	tree = append(tree, v.children...)
-	if !slices.ContainsFunc(tree, func(one *Issue) bool { return one.Key == v.issue.Key }) {
-		tree = append(tree, v.issue)
-	}
-	return tree
 }
 
 // requiresChecks reads the daemon's `requiresChecks` without assuming its shape: no daemon

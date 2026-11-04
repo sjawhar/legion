@@ -43,13 +43,14 @@ func TestNoQueueOrParkedHourEntersTheWorkTime(t *testing.T) {
 // no bar of phase time: an hour in `backlog` or `icebox`, an hour back in the queue, and any hour
 // before the issue's first worker event. So the bars of an issue add up to its work time, and the
 // two cards agree" (the spec's "Rule details — Parked and pre-work hours in phase time"). Both
-// timelines are read: the fallback, whose implementing phase a status opens three hours before
-// the first worker event and whose handoff leaves an hour on no phase at all, and the observed
-// one, which goes back to the queue mid-life.
+// timelines are read: the fallback, whose first phase is the tester's own event because the
+// `in_progress` of admission starts none, and whose handoff leaves an hour on no phase at all,
+// and the observed one, which goes back to the queue mid-life.
 func TestTheSevenBarsOfAnIssueAddUpToItsWorkTime(t *testing.T) {
-	// The fallback: implementing from the status at hour -3, the tester's own event at hour 2 —
-	// the first worker event, where the work time starts — testing ended by its handoff at hour
-	// 3, the reviewer's own event an hour later, and two parked hours from hour 5.
+	// The fallback: an `in_progress` at hour -3 that starts no phase, the tester's own event at
+	// hour 2 — the first worker event, where the work time and the first phase both start —
+	// testing ended by its handoff at hour 3, the reviewer's own event an hour later, and two
+	// parked hours from hour 5.
 	fallback := newIssue("INFRA-1").
 		statusAt(hour(-3), "in_progress").
 		worked("tester", hour(2)).
@@ -360,8 +361,11 @@ func TestAfterASendBackTheDispatchStatusSetsThePhase(t *testing.T) {
 		statusAt(hour(8), "done").
 		closedAt(hour(8))
 	population := fixture(hour(-24), hour(24), issue)
+	// The admission's `in_progress` at hour -1 starts no phase ("A status write such as the
+	// `in_progress` of admission starts no phase", the spec's "What starts planning"), and this
+	// issue has no planner event, so its timeline opens at its implementer's first event.
 	want := []string{
-		"planning -1-0", "implementing 0-1", "testing 1-2", "reviewing 2-3", "implementing 3-4",
+		"implementing 0-1", "testing 1-2", "reviewing 2-3", "implementing 3-4",
 		"testing 4-5", "reviewing 5-6", "accepting 6-8",
 	}
 	if got := timelineOf(population, issue); !reflect.DeepEqual(got, want) {
@@ -374,7 +378,7 @@ func TestAfterASendBackTheDispatchStatusSetsThePhase(t *testing.T) {
 		hoursPerBar[bar.Role] = bar.Hours
 		whole += bar.Hours
 	}
-	// The planning hour the admission wrote is before the first worker event, so it is on no bar.
+	// The hour before the first worker event is on no bar, whatever phase named it.
 	want2 := map[string]float64{
 		"architect": 2, "planner": 0, "implementer": 2, "tester": 2, "reviewer": 2, "merger": 0, barNoRole: 0,
 	}
@@ -391,6 +395,125 @@ func TestAfterASendBackTheDispatchStatusSetsThePhase(t *testing.T) {
 	if row.ImplementingHoursAfterFirst != 1 || row.TestingHoursAfterFirst != 1 {
 		t.Fatalf("after the first review: %g implementing and %g testing hours, want the hour of each the second round holds",
 			row.ImplementingHoursAfterFirst, row.TestingHoursAfterFirst)
+	}
+}
+
+// TestPlanningStartsAtTheFirstPlannerEventAndNotTheAdmissionWrite: "For an issue with no design
+// phase, [planning] starts at the first planner event, as every other role's phase starts at its
+// role's first event. A status write such as the `in_progress` of admission starts no phase" (the
+// spec's "What starts planning"). The issue below has no architect event, so it has no design
+// phase, and the workflow's admission write two hours before its planner spoke opens nothing: its
+// first phase is the planning its planner's own first event starts.
+func TestPlanningStartsAtTheFirstPlannerEventAndNotTheAdmissionWrite(t *testing.T) {
+	issue := newIssue("INFRA-1").
+		statusAt(hour(-2), "in_progress").
+		worked("planner", hour(0)).
+		worked("implementer", hour(2)).
+		statusAt(hour(4), "done").
+		closedAt(hour(4))
+	population := fixture(hour(-24), hour(24), issue)
+	want := []string{"planning 0-2", "implementing 2-4"}
+	if got := timelineOf(population, issue); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the fallback timeline is %v, want %v", got, want)
+	}
+	report := Compute(population, ScopeAll, hour(24))
+	hoursPerBar := map[string]float64{}
+	var whole float64
+	for _, bar := range report.PhaseTime.Bars {
+		hoursPerBar[bar.Role] = bar.Hours
+		whole += bar.Hours
+	}
+	want2 := map[string]float64{
+		"architect": 0, "planner": 2, "implementer": 2, "tester": 0, "reviewer": 0, "merger": 0, barNoRole: 0,
+	}
+	if !reflect.DeepEqual(hoursPerBar, want2) {
+		t.Fatalf("the bars are %v, want %v", hoursPerBar, want2)
+	}
+	if row := report.WorkTime.Issues[0]; whole != row.Hours {
+		t.Fatalf("the seven bars hold %g hours against a work time of %g", whole, row.Hours)
+	}
+}
+
+// TestWorkHoursBeforeTheFirstPhaseMarkAreOnThatPhasesBar: "When an issue's first worker event
+// comes before the start of its first phase, the work hours in between go on the bar of that
+// first phase. So every work-time hour stays on a bar" (the spec's "Work hours before any phase
+// mark"). The issue below opens its work time with a handoff record whose word names no phase —
+// retro, the merger's READY and the architect's sign-off write none — an hour before its planner
+// speaks, and the admission's `in_progress` before that opens nothing, so its first phase starts
+// after its work time does.
+func TestWorkHoursBeforeTheFirstPhaseMarkAreOnThatPhasesBar(t *testing.T) {
+	issue := newIssue("INFRA-1").
+		statusAt(hour(-2), "in_progress").
+		handedOff("retro", hour(0)).
+		worked("planner", hour(1)).
+		worked("implementer", hour(3)).
+		closedAt(hour(5))
+	population := fixture(hour(-24), hour(24), issue)
+	// The planning the planner's event starts at hour 1 reaches back to the handoff that opened
+	// the work time, so the hour between them is on the planner's bar and not on none.
+	want := []string{"planning 0-3", "implementing 3-5"}
+	if got := timelineOf(population, issue); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the fallback timeline is %v, want %v", got, want)
+	}
+	report := Compute(population, ScopeAll, hour(24))
+	hoursPerBar := map[string]float64{}
+	var whole float64
+	for _, bar := range report.PhaseTime.Bars {
+		hoursPerBar[bar.Role] = bar.Hours
+		whole += bar.Hours
+	}
+	want2 := map[string]float64{
+		"architect": 0, "planner": 3, "implementer": 2, "tester": 0, "reviewer": 0, "merger": 0, barNoRole: 0,
+	}
+	if !reflect.DeepEqual(hoursPerBar, want2) {
+		t.Fatalf("the bars are %v, want %v", hoursPerBar, want2)
+	}
+	row := report.WorkTime.Issues[0]
+	if row.Hours != 5 {
+		t.Fatalf("the work time = %g hours, want the five from the handoff that opened it to the close", row.Hours)
+	}
+	if whole != row.Hours {
+		t.Fatalf("the seven bars hold %g hours against a work time of %g: an hour of the work time is on no bar",
+			whole, row.Hours)
+	}
+}
+
+// TestWorkHoursBeforeTheFirstObservedMarkAreOnThatPhasesBar: the same rule on the other timeline.
+// The sampler reads a daemon once a minute and records a phase only when it changes, so an issue
+// whose first worker event comes before the sampler ever saw it has work hours ahead of every
+// observation. They are on the bar of the phase it is first seen in, as the fallback's are, or
+// the seven bars would not add up to the work time for any issue the sampler met late.
+func TestWorkHoursBeforeTheFirstObservedMarkAreOnThatPhasesBar(t *testing.T) {
+	issue := newIssue("INFRA-1").
+		worked("implementer", hour(0)).
+		observeString(legion.FieldPhase, hour(2), "implementing").
+		observeString(legion.FieldPhase, hour(4), "testing").
+		closedAt(hour(6))
+	population := fixture(hour(-24), hour(24), issue)
+	want := []string{"implementing 0-4", "testing 4-6"}
+	if got := timelineOf(population, issue); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the observed timeline is %v, want %v", got, want)
+	}
+	report := Compute(population, ScopeAll, hour(24))
+	hoursPerBar := map[string]float64{}
+	var whole float64
+	for _, bar := range report.PhaseTime.Bars {
+		hoursPerBar[bar.Role] = bar.Hours
+		whole += bar.Hours
+	}
+	want2 := map[string]float64{
+		"architect": 0, "planner": 0, "implementer": 4, "tester": 2, "reviewer": 0, "merger": 0, barNoRole: 0,
+	}
+	if !reflect.DeepEqual(hoursPerBar, want2) {
+		t.Fatalf("the bars are %v, want %v", hoursPerBar, want2)
+	}
+	row := report.WorkTime.Issues[0]
+	if row.Hours != 6 {
+		t.Fatalf("the work time = %g hours, want the six from the first worker event to the close", row.Hours)
+	}
+	if whole != row.Hours {
+		t.Fatalf("the seven bars hold %g hours against a work time of %g: an hour of the work time is on no bar",
+			whole, row.Hours)
 	}
 }
 

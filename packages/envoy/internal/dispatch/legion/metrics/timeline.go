@@ -74,11 +74,6 @@ const (
 // read by.
 var sentBackStatuses = []string{statusTesting, statusNeedsReview}
 
-// queuedStatuses are the statuses an issue waits in before the daemon admits it, which is what
-// tells the workflow's admission write of `in_progress` from its send-back write of the same
-// word (statusPhase).
-var queuedStatuses = []string{"todo", "triage"}
-
 // phaseOrder is the workflow's order of the phases a fallback timeline names, the order the
 // daemon's table moves an issue through. One rule reads it: a role's first event starts that
 // role's phase only where the issue has not reached that phase already (phaseSteps).
@@ -169,6 +164,13 @@ func (p *Population) observedPhases(issue *Issue) []PhaseSpan {
 		}
 	}
 	slices.SortFunc(timeline, func(a, b PhaseSpan) int { return a.Span.From.Compare(b.Span.From) })
+	// The same rule the fallback keeps, for the same reason: an hour of the work time before the
+	// first phase starts is on that phase's bar (the spec's "Work hours before any phase mark"),
+	// so no work hour is off every bar. A sampler that first saw the issue after its first worker
+	// event would otherwise leave those hours on none.
+	if at, worked := firstWorkerEvent(issue); worked && len(timeline) > 0 && at.Before(timeline[0].Span.From) {
+		timeline[0].Span.From = at
+	}
 	return timeline
 }
 
@@ -272,7 +274,7 @@ func (p *Population) fallbackMarks(issue *Issue) []phaseMark {
 		if mark.Value == previous {
 			continue
 		}
-		if phase, named := statusPhase(previous, mark.Value, hasArchitect); named {
+		if phase, named := statusPhase(previous, mark.Value); named {
 			add(sourceStatus, mark.At, phase)
 		}
 		previous = mark.Value
@@ -336,7 +338,14 @@ func phaseRank(phase string) int {
 // The statuses that name no phase of their own — `todo`, `triage`, `backlog`, `icebox` and
 // `done` — leave the phase as it was. The hours they stand for are the queue's and the parked
 // ones, which the work time drops whatever phase the issue was in.
-func statusPhase(previous, status string, hasArchitect bool) (string, bool) {
+//
+// Neither does the `in_progress` of admission: "A status write such as the `in_progress` of
+// admission starts no phase" and "Design runs once, to the first planner event: an issue parked
+// and admitted again goes back into the phase it left, not into design" (the spec's "What starts
+// planning"). The design mark is `fallbackMarks`' own, from the issue's first slot or its
+// architect's first event, and planning starts at the first planner event, so an `in_progress`
+// here names the send-back alone.
+func statusPhase(previous, status string) (string, bool) {
 	switch status {
 	case statusTesting:
 		return phaseTesting, true
@@ -348,16 +357,12 @@ func statusPhase(previous, status string, hasArchitect bool) (string, bool) {
 		// The workflow writes `in_progress` twice over: once where it admits an issue out of the
 		// queue or out of parked, and once for every send-back to implementing, whatever phase
 		// the issue comes back from (workflow/table.go's TriggerTesterFailed,
-		// TriggerReviewRejected and TriggerChecksRed all write it). The admission is the issue
-		// entering its own work, which is its design phase where it has architect events and its
-		// planning phase where it has none; every later one is the send-back.
-		if previous == "" || slices.Contains(queuedStatuses, previous) || slices.Contains(parkedStatuses, previous) {
-			if hasArchitect {
-				return phaseDesign, true
-			}
-			return phasePlanning, true
+		// TriggerReviewRejected and TriggerChecksRed all write it). Only the send-back, a move
+		// out of `testing` or `needs_review`, names a phase.
+		if slices.Contains(sentBackStatuses, previous) {
+			return phaseImplementing, true
 		}
-		return phaseImplementing, true
+		return "", false
 	}
 	return "", false
 }
