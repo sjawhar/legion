@@ -1192,9 +1192,8 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
-    // The Decisions tab is a view of the issue's decisions.md, so its page names that document,
-    // whatever its fragment.
-    if (page === "decisions") return `dispatch://${key}/artifact/decisions-md`;
+    // The Decisions graph view names its issue. Each result names its own source node.
+    if (page === "decisions") return `dispatch://${key}`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;

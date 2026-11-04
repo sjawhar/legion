@@ -63,13 +63,24 @@ func BlockPointers(tree *Node) []BlockPointer {
 			held[id] = struct{}{}
 		}
 		for _, name := range schemaPointerAttributes[node.Type] {
-			refs, _ := stringSlice(node.Attrs[name])
-			for _, ref := range refs {
-				target, canonical := text.CanonicalBlockRef(ref)
-				if !canonical {
-					continue
-				}
-				declared := typ.Attributes.Get(name)
+      declared := typ.Attributes.Get(name)
+      values, _ := stringSlice(node.Attrs[name])
+      if declared.Kind != BlockAttributeBlockList {
+        if value, ok := node.Attrs[name].(string); ok { values = []string{value} }
+      }
+      for _, ref := range values {
+        var target text.Ref
+        var canonical bool
+        switch declared.Kind {
+        case BlockAttributeBlockList:
+          target, canonical = text.CanonicalBlockRef(ref)
+        case BlockAttributeAsk:
+          target, canonical = text.ParseRef(ref, "")
+          canonical = canonical && target.Kind == "ask"
+        case BlockAttributePerson:
+          target, canonical = text.Ref{Kind:"person", ID:ref}, ref != ""
+        }
+        if !canonical { continue }
 				pointers = append(pointers, BlockPointer{
 					Block: id, BlockType: node.Type, Attribute: name, Ref: ref, Target: target,
 					Targets: declared.Targets, Scope: declared.Scope,

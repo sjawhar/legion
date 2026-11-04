@@ -61,9 +61,8 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * document block's fragment beside it, so the fragment there is never a block of the item. Any
  * other fragment leaves the document or item, and so does a document's version page whatever its
  * fragment, a version's stored text holding no block ids: the version of an issue's spec
- * (`/spec?v=N`) is the spec's artifact at that version. The Decisions tab
- * (`/issues/<key>/decisions`) is a view of the issue's `decisions.md`, so its page names that
- * document, whatever its fragment.
+ * (`/spec?v=N`) is the spec's artifact at that version. The Decisions graph view
+ * (`/issues/<key>/decisions`) names its issue; each result links its own source node.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
@@ -71,11 +70,11 @@ export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] 
   { href: "/issues/CORE-1/artifacts/notes-md", ref: "dispatch://CORE-1/artifact/notes-md" },
   {
     href: "/issues/CORE-1/decisions",
-    ref: "dispatch://CORE-1/artifact/decisions-md",
+    ref: "dispatch://CORE-1",
   },
   {
     href: "/issues/CORE-1/decisions#b-ship-it",
-    ref: "dispatch://CORE-1/artifact/decisions-md",
+    ref: "dispatch://CORE-1",
   },
   {
     href: "/issues/CORE-1/comments/11111111-1111-4111-8111-111111111111",

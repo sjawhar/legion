@@ -78,6 +78,8 @@ const (
 	BlockAttributeEnum       BlockAttributeKind = "enum"
 	BlockAttributeStringList BlockAttributeKind = "string[]"
 	BlockAttributeBlockList  BlockAttributeKind = "block[]"
+	BlockAttributeAsk        BlockAttributeKind = "ask"
+	BlockAttributePerson     BlockAttributeKind = "person"
 	BlockAttributeActor      BlockAttributeKind = "actor"
 	BlockAttributeTimestamp  BlockAttributeKind = "timestamp"
 )

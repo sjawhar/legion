@@ -1298,10 +1298,10 @@ export class DispatchApiClient {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
 
-  /** An issue's decision records: its decisions.md, the open questions its spec holds, and each
-   *  decision with the spec blocks it shaped. */
-  getIssueDecisions(key: string): Promise<IssueDecisions> {
-    return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions`);
+  /** Decision/ask nodes in the issue's documents, with their shaped spec passages. */
+  getIssueDecisions(key: string, at?: { artifact: string; version: number }): Promise<IssueDecisions> {
+    const query = at === undefined ? "" : `?${new URLSearchParams({ artifact: at.artifact, version: String(at.version) })}`;
+    return this.json<IssueDecisions>(`/api/v1/issues/${pathSegment(key)}/decisions${query}`);
   }
 
   /** Record that the caller agrees with the decision that heading block opens, as the text they

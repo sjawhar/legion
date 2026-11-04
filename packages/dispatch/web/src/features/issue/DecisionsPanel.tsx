@@ -27,7 +27,7 @@ import {
 } from "../../theme/classes";
 import { blockFragment } from "../refs/block-reference";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath, DECISIONS_DOCUMENT_SLUG, documentItemPath } from "../refs/routes";
+import { buildIssuePath, documentItemPath, parseDispatchReference } from "../refs/routes";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 /** The paragraphs of a decision's markdown below its heading, each marked unsure or not. A
@@ -190,6 +190,30 @@ function ChangeComposer({
   );
 }
 
+function PersonAnswer({ askId }: { askId: string }): ReactNode {
+  const read = useQuery({ queryFn: () => api.getAsk(askId), queryKey: ["ask", askId] });
+  if (read.isPending) return <LoadingSkeleton label="Decision answer loading" />;
+  if (read.isError) return <QueryError message="Could not load the person's answer." onRetry={() => void read.refetch()} retrying={read.isFetching} />;
+  const { ask } = read.data;
+  return (
+    <div className="space-y-2">
+      <ul>{ask.options.map((option) => <li key={option.label}>{option.label}{option.description ? `: ${option.description}` : ""}</li>)}</ul>
+      {ask.answer === null ? null : <>
+        <p className={`text-xs ${textSecondaryOnSurface}`}>{ask.answer.user} chose:</p>
+        {ask.answer.selected.map((label) => <p key={label}>{label}</p>)}
+        <div className="whitespace-pre-wrap" data-testid="decision-answer">{ask.answer.text}</div>
+      </>}
+    </div>
+  );
+}
+
+function decisionDocument(artifacts: readonly Artifact[], decision: Decision): Artifact | undefined {
+  const route = parseDispatchReference(decision.ref);
+  return artifacts.find((artifact) => artifact.kind === "doc" && (
+    route?.kind === "spec" ? artifact.primary : route?.kind === "artifact" && artifact.slug === route.slug
+  ));
+}
+
 function DecisionCard({
   actions,
   decision,
@@ -204,7 +228,8 @@ function DecisionCard({
   return (
     <li className={`space-y-2 rounded-lg border p-3 ${card}`} data-decision={decision.block_id}>
       <h3 className={`text-[15px] font-medium ${textPrimaryOnSurface}`}>{decision.heading}</h3>
-      {decisionParagraphs(decision.text).map((paragraph, index) =>
+      <p className={`text-xs ${textSecondaryOnSurface}`}>{decision.kind === "person" ? "A person's decision" : "Agent's decision"}</p>
+      {decision.kind === "person" && decision.asks[0] !== undefined ? <PersonAnswer askId={decision.asks[0]} /> : decisionParagraphs(decision.text).map((paragraph, index) =>
         paragraph.unsure ? (
           <div
             className={`border-l-2 pl-2 ${decisionUnsureAccent}`}
@@ -382,9 +407,6 @@ export function DecisionsPanel({
     );
   }
   const spec = artifacts.find((artifact) => artifact.primary && artifact.kind === "doc");
-  const documentId = artifacts.find(
-    (artifact) => artifact.slug === DECISIONS_DOCUMENT_SLUG && artifact.kind === "doc"
-  )?.id;
   const { decisions, open_questions: questions } = view.data;
   const waiting = decisions.filter((decision) => decision.waiting_review);
   // Yours: the ones a person decided, and the agent's that the reader kept — a Keep takes a
@@ -395,9 +417,7 @@ export function DecisionsPanel({
   const replaced = decisions.filter((decision) => decision.replaced);
   return (
     <div className="space-y-4">
-      {view.data.document === null ? (
-        <p className={`text-sm ${textMutedOnSurface}`}>This issue has no decisions.md yet.</p>
-      ) : null}
+      {decisions.length === 0 && questions.length === 0 ? <p className={`text-sm ${textMutedOnSurface}`}>No decision nodes in this issue's documents.</p> : null}
       <Section empty="No open questions." title="Open questions">
         {questions.map((ask) => (
           <OpenQuestion ask={ask} issueKey={issueKey} key={ask.id} spec={spec} />
@@ -407,10 +427,10 @@ export function DecisionsPanel({
         {waiting.map((decision) => (
           <WaitingDecision
             decision={decision}
-            documentId={documentId}
+            documentId={decisionDocument(artifacts, decision)?.id}
             isClosed={isClosed}
             issueKey={issueKey}
-            key={decision.block_id}
+            key={decision.ref}
             spec={spec}
           />
         ))}
@@ -420,7 +440,7 @@ export function DecisionsPanel({
           <DecisionCard
             decision={decision}
             issueKey={issueKey}
-            key={decision.block_id}
+            key={decision.ref}
             spec={spec}
           />
         ))}
@@ -430,7 +450,7 @@ export function DecisionsPanel({
           <DecisionCard
             decision={decision}
             issueKey={issueKey}
-            key={decision.block_id}
+            key={decision.ref}
             spec={spec}
           />
         ))}

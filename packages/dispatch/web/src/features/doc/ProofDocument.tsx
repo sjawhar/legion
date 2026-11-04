@@ -58,6 +58,7 @@ import { installTypedBlocks } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { setDecisionNotes } from "./decision-notes";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -75,7 +76,7 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
-import { readLineText, useSpecMarks } from "./spec-marks";
+import { issueDecisionsQuery, readLineText, useSpecMarks } from "./spec-marks";
 import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
@@ -366,6 +367,17 @@ export function ProofDocument({
     issueKey: owner.kind === "issue" ? owner.key : "",
     shownVersion: versions[0]?.number,
   });
+  const decisionView = useQuery({
+    ...issueDecisionsQuery(owner.kind === "issue" ? owner.key : "", owner.kind === "issue"),
+    queryKey: version === undefined ? ["decisions", owner.kind === "issue" ? owner.key : ""] : ["decisions", owner.kind === "issue" ? owner.key : "", artifact.id, version],
+    queryFn: () => api.getIssueDecisions(owner.kind === "issue" ? owner.key : "", version === undefined ? undefined : { artifact: artifact.id, version }),
+  });
+  const decisions = useMemo(() => decisionView.data?.decisions ?? [], [decisionView.data]);
+  const decisionsRef = useRef(decisions);
+  decisionsRef.current = decisions;
+  useEffect(() => {
+    if (editorRef.current !== undefined) setDecisionNotes(editorRef.current.view, artifact.id, decisions);
+  }, [artifact.id, decisions]);
   // The editor takes the marks when it binds, and every set after that, through its handle:
   // a class Dispatch wrote into the editor's DOM would be read back as an edit.
   const blockMarksRef = useRef(specMarks.marks);
@@ -552,6 +564,7 @@ export function ProofDocument({
         watchPicturePath(queryClient, route, onPicture)
       );
       handle.setBlockMarks(blockMarksRef.current);
+      setDecisionNotes(handle.view, artifact.id, decisionsRef.current);
       // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
       // or leaves a re-run behind for it.
       let bound = true;
@@ -1072,6 +1085,7 @@ export function ProofDocument({
         <div data-testid="version-view">
           <VersionView
             artifactId={artifact.id}
+            decisions={decisions}
             asks={blockAsks}
             blockSchema={blockSchema}
             createdAt={versions.find((item) => item.number === version)?.created_at}

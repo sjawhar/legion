@@ -28,6 +28,9 @@ type subcommand struct {
 // subcommands are every argument envoy-dispatch takes in place of serving: runSubcommand both
 // dispatches on this table and names it, in this order, when it refuses an argument.
 var subcommands = []subcommand{
+  {"convert-decisions", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+    return convertDecisions(ctx, args, env.get("DATABASE_URL"), stdout)
+  }},
 	{"backfill-block-ids", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
 		return backfillBlockIDs(ctx, env.get("DATABASE_URL"), stdout)
 	}},

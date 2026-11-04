@@ -93,5 +93,7 @@ export type BlockAttributeKind =
   | "enum"
   | "string[]"
   | "block[]"
+  | "ask"
+  | "person"
   | "actor"
   | "timestamp";
