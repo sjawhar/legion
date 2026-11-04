@@ -4343,13 +4343,15 @@ export interface LegionBoardColumn {
   readonly cards: readonly LegionBoardCard[];
 }
 
-/** The board's header: the slots in use against the cap, the queue's length, and the last read of
- *  the daemon. `slot_cap` is null until a read recorded the daemon's admission block; `read_at` is
+/** The board's header: the slots in use against the cap, the live trees, the queue's length, and
+ *  the last read of the daemon. `slot_cap` is null until a read recorded the daemon's admission
+ *  block, `trees` is 0 until a daemon that reports its live trees has answered, and `read_at` is
  *  null for a project whose daemon has never answered, which shows the board with empty columns
  *  and the failure in its header. */
 export interface LegionBoardHeader {
   readonly slots_in_use: number;
   readonly slot_cap: number | null;
+  readonly trees: number;
   readonly queue_length: number;
   readonly read_at: string | null;
   readonly read_ok: boolean;

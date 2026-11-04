@@ -113,13 +113,16 @@ type legionBoardResponse struct {
 	ComputedAt     time.Time                  `json:"computed_at"`
 }
 
-// legionBoardHeader is what the view's header shows: the slots in use against the cap, the queue's
-// length, and the last read of the daemon — when it was made, whether it succeeded and why it did
-// not. SlotCap is null until a read records the daemon's admission block, and ReadAt is null for a
-// project whose daemon has never answered at all, which shows the board with empty columns.
+// legionBoardHeader is what the view's header shows: the slots in use against the cap, the live
+// trees, the queue's length, and the last read of the daemon — when it was made, whether it
+// succeeded and why it did not. SlotCap is null until a read records the daemon's admission
+// block, Trees is 0 until a daemon that reports its live trees does (dispatch://INFRA-980), and
+// ReadAt is null for a project whose daemon has never answered at all, which shows the board with
+// empty columns.
 type legionBoardHeader struct {
 	SlotsInUse  int        `json:"slots_in_use"`
 	SlotCap     *int       `json:"slot_cap"`
+	Trees       int        `json:"trees"`
 	QueueLength int        `json:"queue_length"`
 	ReadAt      *time.Time `json:"read_at"`
 	ReadOK      bool       `json:"read_ok"`
@@ -543,13 +546,25 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 	}
 
 	header := legionBoardHeader{QueueLength: len(cards[legionColumnQueue])}
-	for _, issue := range p.issues {
-		if issue.slot != nil {
-			header.SlotsInUse++
+	// Slots in use are the daemon's own count where it reports one. dispatch://INFRA-980 makes
+	// admission.active list every issue that holds a slot, children included, so it is the
+	// authority; before that release the daemon lists roots there and only a root carries a slot,
+	// so the two agree. A read that recorded no admission block falls back to the issues whose own
+	// slot the sampler saw.
+	if p.admission != nil && len(p.admission.Active) > 0 {
+		header.SlotsInUse = len(p.admission.Active)
+	} else {
+		for _, issue := range p.issues {
+			if issue.slot != nil {
+				header.SlotsInUse++
+			}
 		}
 	}
 	if p.admission != nil {
 		header.SlotCap = p.admission.Cap
+		// Trees is the live trees' roots, which only a daemon on dispatch://INFRA-980 reports; it
+		// is 0 for an older one, where the view shows no tree count rather than a wrong one.
+		header.Trees = len(p.admission.Trees)
 	}
 	if read := p.read; read != nil {
 		at := read.at.UTC()

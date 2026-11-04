@@ -108,13 +108,20 @@ export function LegionBoardView({
   readonly board: LegionBoardResponse;
   readonly nowMs: number;
 }): ReactNode {
-  const { queue_length: queued, slot_cap: cap, slots_in_use: used } = board.header;
+  const { queue_length: queued, slot_cap: cap, slots_in_use: used, trees } = board.header;
   return (
     <>
       <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm" data-legion-header>
         <span className={textSecondaryOnCanvas} data-legion-slots>
           {used} of {cap === null ? "an unknown number of" : cap} slots in use
         </span>
+        {/* A daemon that reports no live trees sends 0, and the header then says nothing of them
+            rather than claiming there are none. */}
+        {trees > 0 ? (
+          <span className={textSecondaryOnCanvas} data-legion-trees>
+            {trees} {trees === 1 ? "tree" : "trees"} running
+          </span>
+        ) : null}
         <span className={textSecondaryOnCanvas} data-legion-queue-length>
           {queued} waiting in the queue
         </span>

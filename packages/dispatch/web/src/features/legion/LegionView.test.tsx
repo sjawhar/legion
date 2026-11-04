@@ -79,6 +79,7 @@ function board(
       read_ok: true,
       slot_cap: 4,
       slots_in_use: 2,
+      trees: 2,
     },
     project: "ACME",
     setting_sources: {},
@@ -207,6 +208,7 @@ test("the header counts the slots in use against the cap and the queue's length"
           read_ok: true,
           slot_cap: 4,
           slots_in_use: 2,
+          trees: 2,
         },
       }
     )
@@ -230,6 +232,7 @@ test("a daemon that has never answered shows the view with empty columns and the
           read_ok: false,
           slot_cap: null,
           slots_in_use: 0,
+          trees: 0,
         },
       }
     )
@@ -258,6 +261,7 @@ test("a read that failed after a good one keeps the board and says why the last 
           read_ok: false,
           slot_cap: 4,
           slots_in_use: 1,
+          trees: 1,
         },
       }
     )
