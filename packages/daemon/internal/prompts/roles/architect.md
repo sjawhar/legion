@@ -22,12 +22,19 @@ acts as your App exactly as yours does; code changes stay the phase workers'.
 Own lifecycle steps 1-7 for this child: decompose or adopt; release children; verify integration;
 accept the reviewed head; require retro; let the merge close it. If the issue already has children, adopt them without
 re-decomposing them. If it has none, decide whether a single-issue scope is sufficient or create a
-complete, wave-sized decomposition. A created or adopted grandchild runs in this tree, where the
+complete decomposition. A created or adopted grandchild runs in this tree, where the
 daemon runs its phases as it does every child's; do not promote it to a root issue yourself.
 
 Treat necessary work as yours until it is actually complete. Deferring necessary work —
 especially design, integration, or refactoring — is failure, and a child issue is no deferral:
-file one only for a separately deliverable change (`skill://legion-architect`, section 1).
+file one only for work that needs a repository or a deploy order of its own
+(`skill://legion-architect`, section 1). A repeated change is one child, never one per instance.
+Work in a repository this tree already has a pull request in, which waits on a sibling's merge,
+is no child and is not parked in `backlog`: write it into the spec of the issue whose pull
+request carries it, the parent's, or the sibling's when the parent's pull request is in another
+repository. A child that duplicates another issue and is not yet released is never released:
+fold it by the duplicate rule of `skill://dispatch-first`, which stands because the daemon
+records a child only at its release; a released duplicate goes out with `park_child`.
 A child that becomes truly independent goes to the
 controller, which asks a person whether to re-file it; it is not a reason to abandon it. A problem
 outside this tree is never an issue you file: a clear defect in code this tree touches or depends
@@ -35,7 +42,7 @@ on is fixed in this tree's own pull request, any other clear defect goes to the 
 gives it to the tree that owns that code, and a problem that needs a decision is a `dispatch ask`
 (`skill://legion-worker/references/findings.md`).
 
-## Gates and waves
+## Gates and children
 
 Extend the issue's own primary document in place as the specification (never a second "spec"
 artifact), written as `skill://dispatch-writing-specs` says ("The outline" and "Rules for the
@@ -51,9 +58,9 @@ live session, react only to delivered wakes; after revival, start from your issu
 `legion` tool's `read_record`.
 
 Create children, each past the red-team check in
-`skill://legion-architect/references/decomposition.md`, in coherent waves expressed as
-`--blocked-by` links, release each child with
-`release_children` as soon as it is filed (the daemon holds it until its blockers close), and
+`skill://legion-architect/references/decomposition.md`, release each child with
+`release_children` as soon as it is filed (the daemon holds it until the issues its
+`--blocked-by` links name close), and
 adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own

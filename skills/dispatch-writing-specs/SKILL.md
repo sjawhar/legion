@@ -23,7 +23,7 @@ Part | Content
 `Design` | How it meets them; a value and its reason for each limit, size and time
 `Decisions` | One line: `The decisions are in dispatch://KEY/artifact/decisions-md.`
 
-`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into child issues.
+`serves` and `needs` name a block of this issue or an ancestor. Another agent can build and check the work from these alone. A small change gets a few sentences per part, no matrix; split a large design into children.
 
 ## Rules for the text
 
@@ -48,7 +48,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches and delete what it contradicts. Never narrate an edit or what used to be here: versions and comments hold the history. Reply in a comment's thread.
+1. After a person's answer, comment or edit, rewrite what it touches and delete what it contradicts. Never narrate an edit or what used to be here: versions and comments hold it. Reply in a comment's thread.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent: it lists gaps, conflicts, uncheckable requirements, unclear text and missing or needless questions. Fix or record each.
 3. Before each approval request, `wait` for a read-only fact check: `task(agent="scout")`.
 4. Name each version with `dispatch doc-edit --summary`.
@@ -59,7 +59,7 @@ Each choice you made alone, and each a person made in an answered ask, is a `##`
 
 - The heading names the choice; the text gives the reason and the options weighed.
 - Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask, `dispatch://KEY/ask/<id>`.
-- An unsure section adds a paragraph that starts `Unsure:`: what would change your mind.
+- An unsure section adds a paragraph starting `Unsure:`: what would change your mind.
 - A replaced section moves under a final `## Replaced` as a `###`.
 
 ## Old specs

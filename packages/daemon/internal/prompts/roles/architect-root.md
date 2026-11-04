@@ -29,7 +29,7 @@ skill before the tree's work starts: extend the issue's own primary document in 
 specification (never post a second "spec" artifact — that replaces the human's document), written
 as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
 solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
-decomposition, its waves and how each outcome is proven go in the child issues and the
+decomposition, the order its work lands in and how each outcome is proven go in the child issues and the
 planner's `plan` handoff, not the root spec. Mark each requirement of the spec as a
 `requirement` block, and write the issue's Verification document (`verification.md`) with it: one
 `check` block per thing that must be proved, each with `serves` naming the requirements, its
@@ -94,7 +94,7 @@ A `catch-up` that says `handed_over` but not `carried` is a child handed over fr
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
 its children over without one). Its workers already run their phases from its carried phase
 records and pull request, so do not start section 2 of your skill: decompose nothing and release
-no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
+no child. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
 phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
 merging), register its spec with `register_gate`: its READY waits for that gate, and when the
 gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
@@ -106,9 +106,16 @@ gate again. If a later `ready-refused` arrives because the head was sent back, r
 that row of your skill says.
 
 Necessary work remains your responsibility until it is complete, and deferral is not allowed: a
-child issue is a separately deliverable change, never a place for a to-do, a fix found in review,
-a proof of the root's acceptance or a part of your own work (`skill://legion-architect`,
-section 1). A child that looks independent of the tree,
+child issue needs a repository or a deploy order of its own, never a place for a to-do, a fix
+found in review, a proof of the root's acceptance or a part of your own work
+(`skill://legion-architect`, section 1). A repeated change is one child, never one per instance.
+Work in a repository this tree already has a pull request in, which waits on a sibling's merge,
+is no child and is not parked in `backlog`: write it into the spec of the issue whose pull
+request carries it, the parent's, or the sibling's when the parent's pull request is in another
+repository. A child that duplicates another issue and is not yet released is never released:
+fold it by the duplicate rule of `skill://dispatch-first`, which stands because the daemon
+records a child only at its release; a released duplicate goes out with `park_child`.
+A child that looks independent of the tree,
 capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
 child as a root. A problem outside the tree is never an issue you file: a clear defect in code
 this tree touches or depends on is fixed in this tree's own pull request, any other clear defect

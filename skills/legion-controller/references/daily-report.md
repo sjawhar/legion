@@ -70,6 +70,13 @@ every issue by its `dispatch://` link and what it does for the reader, every pul
   name, its `detail`, and a deployment row's `configLine`. Say who acts on it, as
   `skill://legion-controller/references/wakes.md` says for `tick`. With none open, say nothing of
   them.
+- **The week** (on the report of your first turn of each UTC week only, from
+  `skill://legion-controller/references/weekly-audit.md`): the window's two times; the forced
+  creates by filer with the no-answer creates apart; the tree sizes in the five buckets with the
+  parked descendants; each nudge you sent, by its tree; and the duplicate audit's pairs, those
+  you folded and those you skipped with the event that settles each. Name beside each number the
+  command that recounts it. When you lead a stream that keeps a scoreboard, the same two measures
+  go on it under `forced_creates_by_filer` and `tree_sizes`.
 
 A day with nothing finished says so in one sentence. When the lists do not fit, give each list's
 count and name its issues of `--priority 0` and `--priority 1`, in board rank order.

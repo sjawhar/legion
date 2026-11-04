@@ -9,7 +9,7 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives its rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`); give object and list fields as JSON.
-- Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
+- Exit 1 is a refusal, 2 a usage error. A refusal lists every problem: fix all, then call once.
 
 ## Asks and ask blocks
 
@@ -34,14 +34,14 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 ## Choosing what to work on
 
-- When you finish an issue, take the top ready one: `todo`, by priority then board rank, per project.
+- When you finish an issue, take the top `todo` one, by priority then board rank, per project.
 - `todo` means specced and waiting on nothing; one that waits goes in `backlog`, saying on what.
 - Hold at most three issues in flight; move the rest to `backlog`, saying where each is.
 - Never reorder the board: one agent keeps each project's order (`issue-update --before`/`--after`). If the top looks wrong, tell `notifications.role.legion-<project>-controller`.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree, even when its claim reads `· not running`: an outside claim can take the tree out of the workflow. A status write is set back or stands.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. Never write or route the status of an issue with the `legion` label or under one, and claim one only as a role of its tree, even when its claim reads `· not running`: an outside claim can take the tree out of the workflow.
 
 A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no quiet event.
 

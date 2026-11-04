@@ -13,7 +13,7 @@ and an earlier one with `--version <n>`. The child's Conversation lists every ve
 
 ## Adopting children
 
-Put every adopted child into the first wave and release it with
+Release every adopted child at once with
 `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. The daemon runs nothing on
 a child until it is released. Once it is released, the daemon moves it to `todo` and, while the
 root's design gate is open, starts its phases itself. It starts no sub-architect, and you start no
@@ -43,18 +43,24 @@ EOF
   that each child should not exist. Name every child that is a to-do, a fix found in review, a
   proof of the root's acceptance, or a part of the architect's own work, and say where it folds:
   the root's pull request or an open child's."* `wait` for its verdict, since it runs as a job of
-  its own. A child survives only when it cannot ride in the
-  root's pull request or an open child's: its code is in a repository no open pull request of this
-  tree is in, or it is its own deploy: it must be applied on its own before other work of the tree
-  can build on it.
-  A repeated change — the same edit per program, directory or wave of this tree's own work —
-  survives as one child, never one per instance, and a deletion of what this tree replaced rides
-  in the pull request of the last change it waits on, never a child of its own: a wave is an order
-  of merges, not a deliverable.
-  Post the verdict, with the folds you made, as one `dispatch comment` on your own issue (the root,
-  in a root session): the architect
-  who wrote the list reads every child on it as needed, and the comment stops a later session
-  filing the same children again.
+  its own. A child survives it only when it needs a repository or a deploy order of its own: its
+  code is in a repository no open pull request of this tree is in, or it must be applied on its
+  own before other work of the tree can build on it. A repeated change — the same edit per
+  program, directory or instance of this tree's own work — is one child, never one per instance.
+  Work in a repository this tree already has a pull request in, which waits on a sibling's merge,
+  is no child and is not parked in `backlog`: write it into the spec of the issue whose pull
+  request carries it — the parent's, or the sibling's when the parent's pull request is in another
+  repository — so one pull request lands it in order, and a deletion of what this tree replaced
+  rides in the pull request of the last change it waits on the same way.
+  Post the verdict, with the folds you made, as one `dispatch comment` on your own issue (the
+  root, in a root session). Its first line is exactly `Red-team verdict for <root key>:`, so a
+  reader can find it among the issue's comments; the controller's weekly audit matches that
+  prefix. The architect who wrote the list reads every child on it as needed, and the comment
+  stops a later session filing the same children again.
+- A child that duplicates another issue and is not yet released is never released: fold it by the
+  duplicate rule of `skill://dispatch-first`. The daemon records a child at its release and
+  re-asserts a status only on an issue it has recorded, so that close stands. A released duplicate
+  goes out with `park_child` instead.
 - Then paste each survivor's whole spec into a fresh `task(agent="plan-gap-analyst")` to check it
   against `skill://dispatch-writing-specs`, `wait` for its result, and fix what it flags: your own
   reread misses the terms
@@ -66,9 +72,11 @@ EOF
 - `--project` is the issue key's prefix before `-<n>` (`LEGSMOKE-3` → `LEGSMOKE`).
 - In a root session `$LEGION_ISSUE` is the root (it equals `$LEGION_TREE`): pass it as `--parent`.
   The daemon makes the sub-issue link from `--parent`.
-- Order the returned keys into waves with `--blocked-by` links (a later wave's child blocked by the
-  children it builds on), then release every child at once with `release_children`: Legion holds a
-  released child until its last blocker closes, and a child is inert only until it is released.
+- Give a child `--blocked-by` only for an issue outside this tree's own repositories, or one whose
+  deploy another child builds on, then release every child at once with `release_children`:
+  Legion holds a released child until its last blocker closes, and a child is inert only until it
+  is released. No child waits on a sibling's merge in a repository this tree already has a pull
+  request in; that work is written into the spec of the issue whose pull request carries it.
 - Never release a child `--blocked-by` its own parent: the parent now merges last, so that child
   would wait forever.
 - Do not pass `--assignee`, because the default keeps the tree's questions in one Inbox: under the

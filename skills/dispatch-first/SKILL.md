@@ -10,14 +10,14 @@ Dispatch holds the open issues, their specs and people's answers. A duplicate is
 ## Search before you act
 
 - Before you plan, file an issue, ask, post a finding or start work, run `dispatch search`.
-- Each query word must match. Use two or three words: the thing and what is wrong with it. Never paste a draft.
+- Each query word must match. Use two or three: the thing and what is wrong with it. Never paste a draft.
 
 ```bash
 dispatch search --query 'broadcast send order'
 dispatch search --query 'reviewer threads OR review comments'
 ```
 
-- No hits: remove a word before you add one. Try two or three wordings before you decide nothing exists.
+- No hits: remove a word before you add one. Try two or three wordings before deciding nothing exists.
 - Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`).
 
 ## What to do with what you find
@@ -27,6 +27,7 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
 - **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
+- **A likely duplicate a create names:** read it, then fold by the rule above.
 - In Legion, file no finding outside your issue (`skill://legion-worker/references/findings.md`).
 
 ## Reach a person only through Dispatch

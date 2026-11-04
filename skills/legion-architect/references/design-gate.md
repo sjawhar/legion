@@ -127,7 +127,7 @@ root question handed to the human does ("Every turn" in `skill://legion-architec
 live to read the human's comments and replies. Their approval or changes request delivers your next
 task, and so does a newer spec version once Dispatch shows the request back on your turn. While the
 root waits on a question instead, the human's approval or changes request of the spec answers that
-wait too, and the task says how the spec stands. Release no wave until a delivered wake shows
+wait too, and the task says how the spec stands. Release no child until a delivered wake shows
 `design-approved` on the root, or a task says its design gate is open: the daemon sends a root
 waiting on a person no `design-approved` notice, and "this resume is your design-approved wake" is
 that wake. On `design-changes-requested`: revise the spec as the human's reason asks, run step 3's
@@ -160,13 +160,13 @@ to the version it writes. Once they have answered:
 
 - When the answer is the whole change, request nothing: the document's chip reads Approved at the
   new version, its reviews dialog shows the review in their name, and the `design-approved` the
-  daemon sent opens nothing new. Carry on, and release no wave because of it.
+  daemon sent opens nothing new. Carry on, and release no child because of it.
 - When the answer changes the Summary, a requirement, a check or the tree's scope, rewrite that text and
   repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed since
   the earlier approval, then the reviews' sentence (the card shows that approval, `Approved at
   version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
   closes the gate until they approve;
-  work the daemon started at the answer keeps running. Release no new wave until the `design-approved`
+  work the daemon started at the answer keeps running. Release no further child until the `design-approved`
   after the rewrite; work already in flight continues. Every merger's `READY` in the tree is
   refused until a human approves the latest version.
 
@@ -187,7 +187,7 @@ are unchanged,
 the plan is the record and the tree carries on; otherwise change the root spec and request
 approval again.
 
-Later waves and re-scoping open children toward the same requirements need no spec edit and no new
+Later children and re-scoping open children toward the same requirements need no spec edit and no new
 approval. A child issue's spec is never gated, and the child's own Verification document is
 written by its architect.
 
