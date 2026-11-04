@@ -110,7 +110,7 @@ func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 // target's uuid expression breaks its exact-expression match with that table's anchor index.
 func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
 	database := storetest.Open(t)
-	for _, target := range recordedMarkTargets {
+	for _, target := range anchorTargets {
 		t.Run(target.table, func(t *testing.T) {
 			ctx := context.Background()
 			tx, err := database.Pool.Begin(ctx)

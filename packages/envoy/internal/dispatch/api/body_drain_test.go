@@ -786,7 +786,7 @@ func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
 			name: "an unkeyed multipart upload", target: "/api/v1/issues/" + issue.Key + "/artifacts",
 			contentType: contentType, body: upload.Bytes(),
 			written: func() int {
-				return countRows(t, database, `select count(*) from artifact_versions v
+				return countIssueRows(t, database, `select count(*) from artifact_versions v
 					join artifacts a on a.id = v.artifact_id where a.issue_key = $1`, issue.Key)
 			},
 		},
@@ -794,7 +794,7 @@ func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
 			name: "a JSON comment", target: "/api/v1/issues/" + issue.Key + "/comments",
 			contentType: "application/json", body: []byte(`{"body":"refused when it asked its units back"}`),
 			written: func() int {
-				return countRows(t, database, `select count(*) from comments where issue_key = $1`, issue.Key)
+				return countIssueRows(t, database, `select count(*) from comments where issue_key = $1`, issue.Key)
 			},
 		},
 	} {
@@ -816,8 +816,8 @@ func TestAWriteRefusedWhenItAsksItsUnitsBackCommitsNothing(t *testing.T) {
 	}
 }
 
-// countRows is the one count query answers for the issue key it takes.
-func countRows(t *testing.T, database *store.Store, query, issueKey string) int {
+// countIssueRows is the one count query answers for the issue key it takes.
+func countIssueRows(t *testing.T, database *store.Store, query, issueKey string) int {
 	t.Helper()
 	var rows int
 	if err := database.Pool.QueryRow(context.Background(), query, issueKey).Scan(&rows); err != nil {

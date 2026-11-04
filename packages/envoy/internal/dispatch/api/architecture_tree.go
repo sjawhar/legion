@@ -142,19 +142,25 @@ type treeIssue struct {
 	Components model.IssueComponents
 }
 
-// loadTreeIssues reads every issue of the project — icebox and closed included — with its
-// effective attachment resolved, in the issue list's order (lifecycle status, then rank).
-func loadTreeIssues(ctx context.Context, q queryer, project string) ([]treeIssue, error) {
-	rows, err := q.Query(ctx, `
+// treeIssuesQuery is the architecture tree's read of a project's issues with their components.
+// The text is built once, at start, for the reason issueWithProgressQuery gives.
+var treeIssuesQuery = `
+		with recursive subjects as (select i.key from issues i where i.project_key = $1),
+		` + issueComponentsTerms + `
 		select i.key, i.title, i.status, i.priority, i.parent_key, i.updated_at,
 		       coalesce((select json_agg(json_build_object('url', l.url, 'kind', l.kind) order by l.url)
 		                 from issue_external_links l where l.issue_key = i.key), '[]'),
-		       `+issueComponentsColumns+`
+		       ` + issueComponentsColumns + `
 		from issues i
-		`+issueComponentsLateral+`
+		` + issueComponentsJoin + `
 		where i.project_key = $1
-		order by `+issueStatusCase+`, i.rank asc, i.created_at asc
-	`, project)
+		order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
+	`
+
+// loadTreeIssues reads every issue of the project — icebox and closed included — with its
+// effective attachment resolved, in the issue list's order (lifecycle status, then rank).
+func loadTreeIssues(ctx context.Context, q queryer, project string) ([]treeIssue, error) {
+	rows, err := q.Query(ctx, treeIssuesQuery, project)
 	if err != nil {
 		return nil, err
 	}
