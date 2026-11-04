@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import type { Server, Subprocess } from "bun";
 
 import type { DispatchProcess } from "../harness-processes";
@@ -37,6 +38,12 @@ interface Seen {
   readonly pin: string | null;
 }
 
+/** The comments `/compressed` answers: a kibibyte and more of JSON, as an issue's comment list
+ *  is, so the answer is one Dispatch's own layer compresses. */
+const compressedComments = Array.from({ length: 200 }, (_, index) => ({
+  body: `comment ${index} says the deploy is green and the migration has landed.`,
+}));
+
 /** A Bun server standing in for one Dispatch process: it records every request it is sent and
  *  answers with its own name; a test hook answers the status the test sets, `/events` is an event
  *  stream the test writes to, and `/socket` a websocket that names the process, echoes, and
@@ -72,6 +79,21 @@ function startUpstream(name: DispatchProcess) {
       }
       if (url.pathname.includes("/_test/")) {
         return new NativeResponse(`hook on ${name}`, { status: upstream.hookStatus });
+      }
+      if (url.pathname === "/compressed") {
+        // Dispatch gzips an answer for a caller that takes gzip
+        // (api/response_compression.go), so the proxy must forward one.
+        const body = JSON.stringify({ comments: compressedComments, from: name });
+        if (!(request.headers.get("accept-encoding") ?? "").includes("gzip")) {
+          return new NativeResponse(body, { headers: { "Content-Type": "application/json" } });
+        }
+        return new NativeResponse(gzipSync(Buffer.from(body)), {
+          headers: {
+            "Content-Encoding": "gzip",
+            "Content-Type": "application/json",
+            Vary: "Accept-Encoding",
+          },
+        });
       }
       if (url.pathname === "/events") {
         const body = new ReadableStream<Uint8Array>({
@@ -194,6 +216,18 @@ describe("round-robin proxy", () => {
     for (const seen of [...a.seen, ...b.seen]) {
       expect([seen.host, seen.origin]).toEqual([`127.0.0.1:${proxyPort}`, origin]);
     }
+  });
+
+  test("an answer the upstream gzipped reaches the caller whole", async () => {
+    // Dispatch compresses an answer for a caller that takes gzip, and `fetch` decodes that body
+    // while leaving `content-encoding: gzip` and the compressed `content-length` on the Response
+    // it answers with. A proxy that hands those headers on with the decoded body describes bytes
+    // that are no longer the body, and the caller's own inflate fails.
+    const read = await Bun.fetch(`${origin}/compressed`, {
+      headers: { "Accept-Encoding": "gzip, deflate", "X-Dispatch-E2E-Process": "a" },
+    });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ comments: compressedComments, from: "a" });
   });
 
   test("a pin header beats a pin cookie, a cookie pins on its own, and pins take no turn", async () => {
