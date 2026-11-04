@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -44,7 +45,7 @@ func TestACommentEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": long}, "alice")
 	if comment.Body != long {
 		t.Fatalf("the stored comment is %d units, want the %d sent: the event's share is not the item's",
-			len16(comment.Body), len16(long))
+			itemblocks.Units16(comment.Body), itemblocks.Units16(long))
 	}
 	whole := createThreadComment(t, handler, issue.Key,
 		map[string]any{"body": strings.Repeat("b", contracts.DispatchEventBodyMax)}, "alice")
@@ -61,14 +62,14 @@ func TestACommentEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 	wantCut := paragraphBody(2, 15_000)
 	if cut["body"] != wantCut {
 		t.Fatalf("the event of a three-paragraph comment carries %d units, want its first two paragraphs (%d units)",
-			len16(cut["body"].(string)), len16(wantCut))
+			itemblocks.Units16(cut["body"].(string)), itemblocks.Units16(wantCut))
 	}
 	if cut["body_truncated"] != true {
 		t.Fatalf("the event of a cut comment body does not say it was cut: body_truncated=%v", cut["body_truncated"])
 	}
 	if intact["body"] != strings.Repeat("b", contracts.DispatchEventBodyMax) {
 		t.Fatalf("the event of a comment at the event's share carries %d units, want all %d",
-			len16(intact["body"].(string)), contracts.DispatchEventBodyMax)
+			itemblocks.Units16(intact["body"].(string)), contracts.DispatchEventBodyMax)
 	}
 	if _, said := intact["body_truncated"]; said {
 		t.Fatalf("the event of a whole comment body carries body_truncated=%v, want no such key", intact["body_truncated"])
@@ -88,7 +89,7 @@ func TestAMessageEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 	}
 	message := decodeBody[model.Message](t, created)
 	if message.Body != long {
-		t.Fatalf("the stored message is %d units, want the %d sent", len16(message.Body), len16(long))
+		t.Fatalf("the stored message is %d units, want the %d sent", itemblocks.Units16(message.Body), itemblocks.Units16(long))
 	}
 
 	payloads := eventPayloads(t, handler, issue.Key, "message.created")
@@ -98,7 +99,7 @@ func TestAMessageEventCarriesALongBodyInPartAndSaysSo(t *testing.T) {
 	wantCut := paragraphBody(2, 15_000)
 	if payloads[0]["body"] != wantCut || payloads[0]["body_truncated"] != true {
 		t.Fatalf("the event of a three-paragraph message carries %d units (body_truncated=%v), want its first two paragraphs (%d units) and true",
-			len16(payloads[0]["body"].(string)), payloads[0]["body_truncated"], len16(wantCut))
+			itemblocks.Units16(payloads[0]["body"].(string)), payloads[0]["body_truncated"], itemblocks.Units16(wantCut))
 	}
 }
 
@@ -137,6 +138,6 @@ func TestAnAnchorRefreshCarriesTheCutBody(t *testing.T) {
 	wantCut := paragraphBody(2, 15_000)
 	if refreshed["body"] != wantCut || refreshed["body_truncated"] != true {
 		t.Fatalf("the refresh carries %d units (body_truncated=%v), want the first two paragraphs (%d units) and true",
-			len16(refreshed["body"].(string)), refreshed["body_truncated"], len16(wantCut))
+			itemblocks.Units16(refreshed["body"].(string)), refreshed["body_truncated"], itemblocks.Units16(wantCut))
 	}
 }

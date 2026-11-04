@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -28,7 +29,7 @@ func TestACommentIsBoundedBlockByBlockRatherThanAsAWhole(t *testing.T) {
 	long := paragraphBody(6, 20_000)
 	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": long}, "alice")
 	if comment.Body != long {
-		t.Fatalf("the comment written back is %d units, want the %d sent", len16(comment.Body), len16(long))
+		t.Fatalf("the comment written back is %d units, want the %d sent", itemblocks.Units16(comment.Body), itemblocks.Units16(long))
 	}
 	listed := decodeBody[model.ItemBlocks](t, dispatchRequest(t, handler,
 		http.MethodGet, "/api/v1/comments/"+comment.ID+"/blocks", nil, "alice"))
@@ -94,7 +95,7 @@ func TestBodiesAreBoundedOnEveryWriteRoute(t *testing.T) {
 				Body string `json:"body"`
 			}](t, sent).Body
 			if written != accepted {
-				t.Fatalf("the body written back is %d units, want the %d sent", len16(written), len16(accepted))
+				t.Fatalf("the body written back is %d units, want the %d sent", itemblocks.Units16(written), itemblocks.Units16(accepted))
 			}
 			if route.settle != nil {
 				route.settle(t, sent)

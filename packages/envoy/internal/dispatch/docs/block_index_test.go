@@ -2098,9 +2098,79 @@ func TestAnItemWrittenBeforeThisChangeGetsWindowsFromOnePass(t *testing.T) {
 	}
 }
 
-// A whole-text row stays while its owner's window has no vector of its current text, and is
-// deleted once it has one: the release before this one keeps finding the item until this one
-// can. An issue's row is never retired, its trigger and its kind both standing.
+// An edit a build without the window path makes during the deploy re-indexes an item's blocks
+// and writes no window, and the migrations have dropped the trigger that would have noticed.
+// The windows left behind hold the old text and cover blocks the item may no longer have, and
+// the tick would delete the whole-text row standing behind them. The drift arm therefore lists
+// an owner whose blocks moved on from the state its windows were written from, not only one
+// holding no window at all, and one tick rewrites them. Skipping the window path is how that
+// older build is driven here: the item is re-indexed with the stamp of its windows put back as
+// it was, which is the row the arm reads.
+func TestABuildThatWritesNoWindowLeavesWindowsTheTickRewrites(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	comment, _, _ := seedItemsWithBlocks(t, database)
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 3 {
+		t.Fatalf("first tick = %#v, want the three items indexed", tick)
+	}
+	owner := "comment/" + comment
+	before := windowsOf(t, database, "comment_block", owner)
+	if len(before) == 0 {
+		t.Fatalf("the comment holds no window after its own index")
+	}
+	var stamped string
+	if err := database.Pool.QueryRow(ctx, `
+		select block_state from embedding_window_states where kind = 'comment_block' and owner_key = $1
+	`, owner).Scan(&stamped); err != nil {
+		t.Fatalf("read the block state the comment's windows were written from: %v", err)
+	}
+
+	// The edit the older build makes: a new body, its blocks indexed again, and its windows and
+	// their stamp left as they were.
+	if _, err := database.Pool.Exec(ctx, `
+		update comments set body = E'One paragraph only, rewritten.', edited_at = now() where id = $1::uuid
+	`, comment); err != nil {
+		t.Fatalf("edit the comment: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.ItemBlocks != 1 {
+		t.Fatalf("the tick that indexed the edit = %#v, want the comment's blocks indexed", tick)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update embedding_window_states set block_state = $2 where kind = 'comment_block' and owner_key = $1
+	`, owner, stamped); err != nil {
+		t.Fatalf("put the comment's window stamp back as the older build leaves it: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update embeddings set text_snapshot = $2, content_hash = encode(sha256(convert_to($2, 'UTF8')), 'hex')
+		where kind = 'comment_block' and split_part(id, '#', 1) = $1
+	`, owner, "The first paragraph.\n\nThe second paragraph."); err != nil {
+		t.Fatalf("leave the comment's windows holding its old text: %v", err)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Windows != 1 {
+		t.Fatalf("the window arm gave windows to %d owners (%#v), want the comment whose blocks moved on", tick.Windows, tick)
+	}
+	var text string
+	if err := database.Pool.QueryRow(ctx, `
+		select string_agg(text_snapshot, '\n' order by id) from embeddings
+		where kind = 'comment_block' and split_part(id, '#', 1) = $1
+	`, owner).Scan(&text); err != nil {
+		t.Fatalf("read the comment's windows: %v", err)
+	}
+	if !strings.Contains(text, "One paragraph only, rewritten.") || strings.Contains(text, "The second paragraph.") {
+		t.Fatalf("the comment's windows hold %q, want the text the edit left", text)
+	}
+	if next := reconcileBlockIndex(t, service, ""); next.Windows != 0 {
+		t.Fatalf("the next tick windowed %d owners (%#v), want none left", next.Windows, next)
+	}
+}
+
+// A whole-text row stays while its owner's window holds no vector of its current text, and is
+// deleted once it holds one: the release before this one keeps finding the item until this one
+// can. A window the queue settled as nothing to embed (embedqueue's settledNothingToEmbed: its
+// embedded_hash set, its embedding null) is current and stands for nothing, so it retires no
+// row either. An issue's row is never retired, its trigger and its kind both standing.
 func TestRetirementWaitsForACurrentWindow(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx := context.Background()
@@ -2113,17 +2183,35 @@ func TestRetirementWaitsForACurrentWindow(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `select embeddings_enqueue('comment', $1, 'The first paragraph.')`, comment); err != nil {
 		t.Fatalf("write the whole-text row of the comment: %v", err)
 	}
+	countWholeText := func(stage string, want int) {
+		t.Helper()
+		var left int
+		if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'comment'`).Scan(&left); err != nil || left != want {
+			t.Fatalf("%s: whole-text comment rows = %d (%v), want %d", stage, left, err, want)
+		}
+	}
 
 	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 0 {
 		t.Fatalf("tick with no embedded window retired %d rows (%#v), want none", tick.Retired, tick)
 	}
-	var left int
-	if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'comment'`).Scan(&left); err != nil || left != 1 {
-		t.Fatalf("whole-text comment rows = %d (%v), want the one still there", left, err)
+	countWholeText("no embedded window", 1)
+
+	// The window settled with no vector, as the queue settles one whose text has nothing to
+	// embed: embedded at its current text, and standing for nothing in a meaning search.
+	if _, err := database.Pool.Exec(ctx, `
+		update embeddings set embedding = null, embedded_hash = content_hash, model = 'dev:words-v1', embedded_at = now()
+		where kind = 'comment_block'
+	`); err != nil {
+		t.Fatalf("settle the comment's windows with no vector: %v", err)
 	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 0 {
+		t.Fatalf("tick behind a window settled with no vector retired %d rows (%#v), want none", tick.Retired, tick)
+	}
+	countWholeText("a window settled with no vector", 1)
 
 	if _, err := database.Pool.Exec(ctx, `
-		update embeddings set embedded_hash = content_hash, model = 'dev:words-v1', embedded_at = now()
+		update embeddings set embedding = array_fill(0.1::real, array[1536])::vector,
+		       embedded_hash = content_hash, model = 'dev:words-v1', embedded_at = now()
 		where kind = 'comment_block'
 	`); err != nil {
 		t.Fatalf("embed the comment's windows: %v", err)
@@ -2131,10 +2219,9 @@ func TestRetirementWaitsForACurrentWindow(t *testing.T) {
 	if tick := reconcileBlockIndex(t, service, ""); tick.Retired != 1 {
 		t.Fatalf("tick after the window was embedded retired %d rows (%#v), want the comment's one", tick.Retired, tick)
 	}
-	if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'comment'`).Scan(&left); err != nil || left != 0 {
-		t.Fatalf("whole-text comment rows = %d (%v), want none behind a current window", left, err)
-	}
-	if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'issue'`).Scan(&left); err != nil || left != 2 {
-		t.Fatalf("issue rows = %d (%v), want CORE-1's and CORE-2's, which no window replaces", left, err)
+	countWholeText("a window embedded at its text", 0)
+	var issues int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from embeddings where kind = 'issue'`).Scan(&issues); err != nil || issues != 2 {
+		t.Fatalf("issue rows = %d (%v), want CORE-1's and CORE-2's, which no window replaces", issues, err)
 	}
 }

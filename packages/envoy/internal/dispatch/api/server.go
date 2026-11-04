@@ -1136,7 +1136,8 @@ func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Act
 }
 
 // capExceededError names how far a text field is over its cap so one trim lands:
-// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units (len16).
+// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units
+// (itemblocks.Units16).
 func capExceededError(field string, length, limit int) *apiError {
 	return errorf(http.StatusBadRequest, "CAP_EXCEEDED",
 		"%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
@@ -1178,17 +1179,6 @@ func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 		return false
 	}
 	return true
-}
-
-func len16(value string) int {
-	length := 0
-	for _, rune := range value {
-		length++
-		if rune > 0xffff {
-			length++
-		}
-	}
-	return length
 }
 
 const maxJSONRequestBytes int64 = 1 << 20

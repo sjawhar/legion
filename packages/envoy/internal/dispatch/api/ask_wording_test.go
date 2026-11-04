@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -36,7 +37,7 @@ func TestAnAsksWordingIsBoundedWhereverItIsWritten(t *testing.T) {
 
 	// The edit sends options alone, so what it is held to is the question already stored plus
 	// the options it sends: one unit past the bound between them.
-	room := contracts.DispatchEventBodyMax + 1 - len16(ask.Question)
+	room := contracts.DispatchEventBodyMax + 1 - itemblocks.Units16(ask.Question)
 	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
 		"options": []map[string]string{{"label": "Ship", "description": strings.Repeat("c", room-len("Ship"))}},
 		"actor":   sessionActor(),

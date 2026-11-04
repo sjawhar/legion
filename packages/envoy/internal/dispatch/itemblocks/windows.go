@@ -1,4 +1,4 @@
-package embed
+package itemblocks
 
 import (
 	"slices"
@@ -10,22 +10,24 @@ import (
 )
 
 const (
-	// windowTextChars is the most characters of block text one window holds: about 300 tokens at
-	// the 4-characters-a-token rate EstimateTokens uses, which is a passage a reader would call
-	// one point rather than one document. Small enough that a hit names a place in a long item,
-	// large enough that a paragraph is rarely cut.
-	windowTextChars = 1200
-	// windowOverlapChars is how much of a long block's previous text each of its pieces after
+	// WindowTextChars is the most characters of block text one window holds: about 300 tokens at
+	// the 4-characters-a-token rate the embedder's EstimateTokens uses, which is a passage a
+	// reader would call one point rather than one document. Small enough that a hit names a
+	// place in a long item, large enough that a paragraph is rarely cut.
+	WindowTextChars = 1200
+	// WindowOverlapChars is how much of a long block's previous text each of its pieces after
 	// the first carries in front of it, so a sentence a piece boundary cuts stands whole in one
 	// of the two pieces.
-	windowOverlapChars = 200
+	WindowOverlapChars = 200
 	// headingType is the node type of a heading, which always starts a window: a heading opens a
 	// section, and a window that began under the heading before it would carry text from two.
 	headingType = "heading"
 )
 
-// Block is one block of one owner, as the indexer that has just written it holds it.
-type Block struct {
+// WindowBlock is one block of one owner, as the indexer that has just written it holds it: a
+// block of an item's body (Block, under the id its row keeps) or of a document. It is what a
+// window is built from, where Block is what a body splits into.
+type WindowBlock struct {
 	// ID is the block's id, stable across edits, which is what a window's id is anchored on.
 	ID string
 	// Type is the block's node type, as the document parser names it ("heading", "paragraph",
@@ -56,20 +58,22 @@ type Window struct {
 // their meaning (the owner's title and the nearest heading above for a document, the issue's
 // title for a comment or a message, the question for an ask's parts).
 //
-// A window is a run of neighbouring blocks holding at most windowTextChars characters of block
+// A window is a run of neighbouring blocks holding at most WindowTextChars characters of block
 // text; a heading always starts a new one; and a block longer than that budget on its own
-// becomes pieces of at most windowTextChars characters, each after the first carrying the
-// previous windowOverlapChars characters of the block in front of it. Characters are runes, as
-// the rest of this package counts them, and no cut falls inside one.
+// becomes pieces of at most WindowTextChars characters, each after the first carrying the
+// previous WindowOverlapChars characters of the block in front of it. Characters are runes, as
+// the embedder counts them, and no cut falls inside one.
 //
 // Each window's text is the context, then its blocks' text, a blank line between each. The
 // context is part of what is hashed, which is how a window notices that its context changed: an
 // edited heading moves the hash of every window under it and of no other. It is cut to
-// windowTextChars runes, so a window of a heading as long as a block may be holds the blocks
-// whole all the same; with that cut no window passes 4,800 runes, far inside MaxInputRunes.
-func Windows(context string, blocks []Block) []Window {
+// WindowTextChars runes, so a window of a heading as long as a block may be holds the blocks
+// whole all the same; with that cut no window passes 4,800 runes, far inside what the embedder
+// reads whole (embed.MaxInputRunes, which embed's TestEveryWindowFitsTheEmbedder holds these
+// windows to).
+func Windows(context string, blocks []WindowBlock) []Window {
 	var windows []Window
-	var run []Block
+	var run []WindowBlock
 	runChars := 0
 	flush := func() {
 		if len(run) > 0 {
@@ -79,12 +83,12 @@ func Windows(context string, blocks []Block) []Window {
 	}
 	for _, block := range blocks {
 		chars := utf8.RuneCountInString(block.Text)
-		if chars > windowTextChars {
+		if chars > WindowTextChars {
 			flush()
 			windows = append(windows, pieces(context, block)...)
 			continue
 		}
-		if block.Type == headingType || runChars+chars > windowTextChars {
+		if block.Type == headingType || runChars+chars > WindowTextChars {
 			flush()
 		}
 		run = append(run, block)
@@ -105,9 +109,9 @@ func Windows(context string, blocks []Block) []Window {
 // The heading's own text is in the context of its section and in the first window of it, which
 // covers the heading block: a query matching the heading's words finds that window, and an edit
 // of the heading moves the content hash of every window of its section and of no other.
-func DocumentWindows(title string, blocks []Block) []Window {
+func DocumentWindows(title string, blocks []WindowBlock) []Window {
 	var windows []Window
-	section, context := []Block(nil), title
+	section, context := []WindowBlock(nil), title
 	flush := func() {
 		if len(section) > 0 {
 			windows = append(windows, Windows(context, section)...)
@@ -129,7 +133,7 @@ func DocumentWindows(title string, blocks []Block) []Window {
 }
 
 // wholeBlocks is the window a run of neighbouring blocks makes, named for the first of them.
-func wholeBlocks(context string, run []Block) Window {
+func wholeBlocks(context string, run []WindowBlock) Window {
 	covers := make([]string, len(run))
 	texts := make([]string, len(run))
 	for i, block := range run {
@@ -139,14 +143,14 @@ func wholeBlocks(context string, run []Block) Window {
 }
 
 // pieces cuts a block longer than one window's budget into the windows that cover it: each
-// piece holds the next windowTextChars characters of the block and repeats the
-// windowOverlapChars before them, so the pieces together hold every character of the block and
+// piece holds the next WindowTextChars characters of the block and repeats the
+// WindowOverlapChars before them, so the pieces together hold every character of the block and
 // a sentence a boundary cuts is whole in the piece after it.
-func pieces(context string, block Block) []Window {
+func pieces(context string, block WindowBlock) []Window {
 	runes := []rune(block.Text)
-	windows := make([]Window, 0, (len(runes)+windowTextChars-1)/windowTextChars)
-	for start := 0; start < len(runes); start += windowTextChars {
-		piece := string(runes[max(start-windowOverlapChars, 0):min(start+windowTextChars, len(runes))])
+	windows := make([]Window, 0, (len(runes)+WindowTextChars-1)/WindowTextChars)
+	for start := 0; start < len(runes); start += WindowTextChars {
+		piece := string(runes[max(start-WindowOverlapChars, 0):min(start+WindowTextChars, len(runes))])
 		windows = append(windows, Window{
 			IDSuffix: block.ID + "/p" + strconv.Itoa(len(windows)+1),
 			Covers:   []string{block.ID},
@@ -156,12 +160,12 @@ func pieces(context string, block Block) []Window {
 	return windows
 }
 
-// windowText is what one window embeds: the context, cut to windowTextChars runes, and then
+// windowText is what one window embeds: the context, cut to WindowTextChars runes, and then
 // each text that holds anything, a blank line between them. A block holding no text is covered
 // by its window and adds nothing to what is embedded.
 func windowText(context string, texts ...string) string {
 	parts := make([]string, 0, len(texts)+1)
-	parts = append(parts, text.HeadRunes(context, windowTextChars))
+	parts = append(parts, text.HeadRunes(context, WindowTextChars))
 	parts = append(parts, texts...)
 	parts = slices.DeleteFunc(parts, func(part string) bool { return part == "" })
 	return strings.Join(parts, "\n\n")

@@ -27,42 +27,28 @@ const coverageStatementRows = 500
 // rather than wait out ten minutes.
 var identityRecheckInterval = 10 * time.Minute
 
-// coverageSource is one kind of row meaning search ranks: its FROM clause (from), and the
-// expressions for its id, its text and when it was written.
-// For a kind with a source table - the issue - id and text are the kind's write-time trigger's
-// own (0073, as 0140 replaced it), byte for byte, so a row the coverage pass writes is the row
-// the trigger would have written, and a row the trigger wrote is never seen as stale; from is
-// the items search ranks (api/search.go's meaning candidate CTEs), which the trigger can
-// exceed.
+// coverageSource is one kind of row meaning search ranks whose rows this pass builds from a
+// source table: its FROM clause (from), and the expressions for its id, its text and when it
+// was written. id and text are the kind's write-time trigger's own (0073, as 0140 replaced
+// it), byte for byte, so a row the coverage pass writes is the row the trigger would have
+// written, and a row the trigger wrote is never seen as stale; from is the items search ranks
+// (api/search.go's meaning candidate CTEs), which the trigger can exceed.
 //
-// A kind that declares no source table (from empty) is one whose rows the indexers own: the
-// window kinds, whose rows are written by the indexer of the owner's blocks and by the
-// block-index tick's window arm (refs.writeWindows). Its items are its own rows, so the pass
-// adds none and repairs none and the report counts the windows that exist. owned reads that.
+// The issue is the only such kind (coverageSources). The window kinds
+// (windowCoverageKinds) have no source table at all: their rows are the indexers' own, so no
+// statement of this pass builds one.
 type coverageSource struct {
 	kind, from, id, text, writtenAt string
 }
 
-// owned reports whether the indexers own which rows of the kind exist, so the coverage pass
-// runs its identity steps over the kind and nothing else (coverPass).
-func (s coverageSource) owned() bool { return s.from == "" }
-
-// coverageSources is the single list of what meaning search covers, read by the coverage pass
-// (Cover) and the coverage report (Coverage) alike. An item whose text has nothing to embed
-// (nothingToEmbed: the empty string, or only white space) is not covered: it matches nothing by
-// meaning, so items leaves it out and the queue settles its row with no vector.
+// coverageSources is every kind whose rows this pass builds and repairs, which since the move
+// to windows is the issue alone: 0073's trigger, as 0140 replaced it, and 0140's trigger on a
+// new version of the issue's primary document enqueue new.key and
+// issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
 //
-//   - issue: 0073's trigger, as 0140 replaced it, and 0140's trigger on a new version of the
-//     issue's primary document enqueue new.key and
-//     issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
-//   - document_block, comment_block, message_block, ask_part: one row per window of a
-//     document's, a comment's, a message's blocks or of an ask's parts (INFRA-370). Migration
-//     20261102233626 and the three after it dropped the whole-text triggers these replace, so
-//     every such row is written by the indexer that wrote the blocks it covers, in that write's
-//     own transaction, or by the block-index tick for an owner written before this build. No
-//     statement of this pass may invent one: the pass has no way to window an owner, and a row
-//     it inserted for a window that no longer exists would be embedded for ever at a text no
-//     reader can reach.
+// An item whose text has nothing to embed (nothingToEmbed: the empty string, or only white
+// space) is not covered: it matches nothing by meaning, so items leaves it out and the queue
+// settles its row with no vector.
 var coverageSources = []coverageSource{
 	{
 		kind:      "issue",
@@ -71,36 +57,49 @@ var coverageSources = []coverageSource{
 		text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
 		writtenAt: "i.created_at",
 	},
-	{kind: "document_block"},
-	{kind: "comment_block"},
-	{kind: "message_block"},
-	{kind: "ask_part"},
 }
+
+// windowCoverageKinds is every kind whose rows the indexers own: one row per window of a
+// document's, a comment's, a message's blocks or of an ask's parts (INFRA-370). Migration
+// 20261102233626 and the three after it dropped the whole-text triggers these replace, so
+// every such row is written by the indexer that wrote the blocks it covers, in that write's
+// own transaction, or by the block-index tick for an owner written before this build. No
+// statement of this pass may invent one: the pass has no way to window an owner, and a row it
+// inserted for a window that no longer exists would be embedded for ever at a text no reader
+// can reach. So a window kind declares no source table, takes the identity steps alone
+// (coverPass), and is counted in the report from its own rows (windowRows).
+var windowCoverageKinds = []string{"document_block", "comment_block", "message_block", "ask_part"}
 
 // items renders the kind's searchable items, those whose text has something to embed (not
 // nothingToEmbed), as a query of (id, text, hash, written_at). hash is embeddings_enqueue's own
 // content_hash expression (0072, 0118) over the trigger's text, so an item's hash equals the
 // content_hash its trigger would store.
 func (s coverageSource) items() string {
-	return s.allItems() + " where not " + nothingToEmbed("s.text")
+	return searchableItems(s.allItems())
 }
 
 // allItems is items with the ones whose text has nothing to embed kept in: repairStale needs
 // them, so a row whose item's text became empty with the trigger off takes that text and the
 // queue settles it, dropping the vector of the text the item no longer holds.
-//
-// A kind the indexers own has its own rows as its items: a window exists only while the
-// indexer that wrote it says so, and its text and hash are the ones that indexer wrote. Such a
-// kind's items are therefore read from embeddings itself, which is what makes the report count
-// the windows of the database rather than items it has no way to window.
 func (s coverageSource) allItems() string {
-	if s.owned() {
-		return fmt.Sprintf(`select s.id, s.text, s.hash, s.written_at from (
-			select e.id, e.text_snapshot as text, e.content_hash as hash, e.pending_since as written_at
-			from embeddings e where e.kind = '%s') s`, s.kind)
-	}
 	return fmt.Sprintf(`select s.id, s.text, encode(sha256(convert_to(s.text, 'UTF8')), 'hex') as hash, s.written_at
 		from (select %s as id, %s as text, %s as written_at from %s) s`, s.id, s.text, s.writtenAt, s.from)
+}
+
+// windowRows is a window kind's items, in the shape allItems gives a built kind's: its own
+// rows, since a window exists only while the indexer that wrote it says so, and its text and
+// hash are the ones that indexer wrote. Reading them from embeddings itself is what makes the
+// report count the windows of the database rather than items the pass has no way to window.
+func windowRows(kind string) string {
+	return fmt.Sprintf(`select s.id, s.text, s.hash, s.written_at from (
+		select e.id, e.text_snapshot as text, e.content_hash as hash, e.pending_since as written_at
+		from embeddings e where e.kind = '%s') s`, kind)
+}
+
+// searchableItems holds a kind's items (allItems, windowRows) to those whose text has something
+// to embed.
+func searchableItems(items string) string {
+	return items + " where not " + nothingToEmbed("s.text")
 }
 
 // insertMissing adds a pending row for up to $2 items of the kind that have none, exactly as the
@@ -225,14 +224,15 @@ const foreignRowsLeft = `
 	       count(*) filter (where dead and dead_model is distinct from $2)
 	from embeddings where kind = any($1)`
 
-// coverageKinds is every kind coverageSources lists, the argument foreignRows and
-// foreignRowsLeft take.
+// coverageKinds is every kind meaning search covers, the ones this pass builds
+// (coverageSources) and the window kinds the indexers own (windowCoverageKinds), and the
+// argument foreignRows and foreignRowsLeft take.
 var coverageKinds = func() []string {
-	kinds := make([]string, len(coverageSources))
-	for i, source := range coverageSources {
-		kinds[i] = source.kind
+	kinds := make([]string, 0, len(coverageSources)+len(windowCoverageKinds))
+	for _, source := range coverageSources {
+		kinds = append(kinds, source.kind)
 	}
-	return kinds
+	return append(kinds, windowCoverageKinds...)
 }()
 
 // coverStep is one statement of the coverage pass, run until it changes nothing.
@@ -331,20 +331,21 @@ func runIdentitySteps(ctx context.Context, deps Deps, identity string) (identity
 	return result, nil
 }
 
-// Cover is the coverage pass: for every kind in coverageSources it settles each dead row whose
-// text has nothing to embed and, for a kind with a source table, adds a row for each item that
-// has none and repairs each row whose text is stale; then, once the configured embedder has
-// answered (decideIdentitySteps), it drops each vector another identity made and re-admits each
-// other row dead under another identity; and it logs one line with what it changed, whether it
-// skipped those two steps, and the coverage that leaves (Coverage). Every step is a statement of
-// at most coverageStatementRows rows in its own short transaction, repeated until one changes
-// nothing, and each is safe beside a live write and beside another process's pass, so it takes
-// no lease: two envoy-dispatch processes may run it at once, as both do at boot during a rolling
-// deploy, and a lease would let an old-configuration process's pass stand in for the new one's.
-// One deployment configures one identity; two processes configured differently would each drop
-// the other's vectors, which is why every replica gets the same settings.
+// Cover is the coverage pass: for every covered kind (coverageKinds) it settles each dead row
+// whose text has nothing to embed and, for a kind it builds (coverageSources), adds a row for
+// each item that has none and repairs each row whose text is stale; then, once the configured
+// embedder has answered (decideIdentitySteps), it drops each vector another identity made and
+// re-admits each other row dead under another identity; and it logs one line with what it
+// changed, whether it skipped those two steps, and the coverage that leaves (Coverage). Every
+// step is a statement of at most coverageStatementRows rows in its own short transaction,
+// repeated until one changes nothing, and each is safe beside a live write and beside another
+// process's pass, so it takes no lease: two envoy-dispatch processes may run it at once, as both
+// do at boot during a rolling deploy, and a lease would let an old-configuration process's pass
+// stand in for the new one's. One deployment configures one identity; two processes configured
+// differently would each drop the other's vectors, which is why every replica gets the same
+// settings.
 //
-// A kind the indexers own (coverageSource.owned: the window kinds) takes the identity steps
+// A kind the indexers own (windowCoverageKinds) takes the settling and the identity steps
 // alone. The pass has no way to window an owner, so a row it added would name a window nothing
 // wrote, and every whole-text row the block-index tick retires would come back at the next
 // boot, be embedded again, and be retired again, for ever.
@@ -357,14 +358,20 @@ func Cover(ctx context.Context, deps Deps) error {
 func coverPass(ctx context.Context, deps Deps) (identityRun, error) {
 	identity := deps.Embedder.Identity()
 	var added, repaired, settled int64
-	for _, source := range coverageSources {
-		statements := []coverStep{{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}}}
-		if !source.owned() {
-			statements = append(statements,
-				coverStep{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
-				coverStep{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}})
+	// Every covered kind settles its dead rows with nothing to embed; only a kind this pass
+	// builds (coverageSources) takes the other two steps, since no statement here may invent a
+	// window.
+	for _, kind := range coverageKinds {
+		step := coverStep{&settled, settleDeadNothingToEmbed, []any{kind, identity, coverageStatementRows}}
+		if err := step.run(ctx, deps, kind); err != nil {
+			return identityRun{}, err
 		}
-		for _, step := range statements {
+	}
+	for _, source := range coverageSources {
+		for _, step := range []coverStep{
+			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
+			{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}},
+		} {
 			if err := step.run(ctx, deps, source.kind); err != nil {
 				return identityRun{}, err
 			}
@@ -445,14 +452,22 @@ func runCoverage(ctx context.Context, deps Deps) {
 	}
 }
 
-// coverageQuery counts, per kind, coverageSources' items left-joined to their embeddings rows, in
-// one statement so every count reads one snapshot. $1 is the configured identity, the empty string
-// when there is none, and then no item is current. greatest ignores a null, so an item with no row
-// ages from when it was written; the oldest age is null when nothing of the kind lacks.
+// coverageQuery counts, per covered kind, its items left-joined to their embeddings rows, in
+// one statement so every count reads one snapshot: a built kind's items are its source table's
+// (coverageSource.items), a window kind's its own rows (windowRows). $1 is the configured
+// identity, the empty string when there is none, and then no item is current. greatest ignores
+// a null, so an item with no row ages from when it was written; the oldest age is null when
+// nothing of the kind lacks.
 var coverageQuery = func() string {
-	arms := make([]string, len(coverageSources))
-	for i, source := range coverageSources {
-		arms[i] = fmt.Sprintf("select '%s'::text as kind, item.id, item.hash, item.written_at from (%s) item", source.kind, source.items())
+	arm := func(kind, items string) string {
+		return fmt.Sprintf("select '%s'::text as kind, item.id, item.hash, item.written_at from (%s) item", kind, items)
+	}
+	arms := make([]string, 0, len(coverageSources)+len(windowCoverageKinds))
+	for _, source := range coverageSources {
+		arms = append(arms, arm(source.kind, source.items()))
+	}
+	for _, kind := range windowCoverageKinds {
+		arms = append(arms, arm(kind, searchableItems(windowRows(kind))))
 	}
 	return `
 		with items as (` + strings.Join(arms, "\n union all ") + `),

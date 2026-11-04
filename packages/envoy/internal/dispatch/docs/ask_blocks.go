@@ -13,10 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -474,74 +472,6 @@ func validateEditedAskBlocks(before, after *pmdoc.Node) error {
 	return refuseChangedAsks(before, after, readableAskBlock, nodeToken)
 }
 
-// readableAskBlock is why one ask block may not be written, nil where it may: its content rule
-// (pmdoc.AskContentError), then what settlement reads of it (parseAskBlock), then the bound its
-// question and options share (askWordingTooLong). A document may not carry in a wording the ask
-// routes would refuse: a decision block opens an ask like any other, whose ask.answered event
-// carries that wording, so a wording that cannot be answered must not be stored.
-func readableAskBlock(ask *pmdoc.Node) error {
-	if err := pmdoc.AskContentError(ask); err != nil {
-		return err
-	}
-	block, err := parseAskBlock(ask)
-	if err != nil {
-		return err
-	}
-	return askWordingTooLong(block)
-}
-
-// validateWrittenAskBlocks is why the asks of tree may not be written, nil where they may: the
-// content rule over every ask in it, then each ask's wording against the bound it shares. It is
-// what a write of whole markdown is held to - an upload, a repair, a rebuild - so every door
-// into a document refuses the wording a route refuses, and none of them can leave an ask nobody
-// may answer. The wording is read leniently (parseAskBlockLeniently): an ask with no question is
-// the content rule's refusal and the parse's, not this bound's.
-func validateWrittenAskBlocks(tree *pmdoc.Node) error {
-	if err := pmdoc.AskContentError(tree); err != nil {
-		return err
-	}
-	var refusal error
-	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		if refusal != nil {
-			return false
-		}
-		if node.Type != "ask" {
-			return true
-		}
-		block, err := parseAskBlockLeniently(node)
-		if err != nil {
-			return true
-		}
-		refusal = askWordingTooLong(block)
-		return refusal == nil
-	})
-	return refusal
-}
-
-// AskWordingUnits is how much of its bound an ask's wording spends: its question and every
-// option's label and description, in UTF-16 units, each part's own text with nothing counted
-// between them. An ask written in a document and one opened through a route are measured the
-// same way, so neither can carry a wording the other would refuse.
-func AskWordingUnits(question string, options []model.AskOption) int {
-	units := itemblocks.Units16(question)
-	for _, option := range options {
-		units += itemblocks.Units16(option.Label) + itemblocks.Units16(option.Description)
-	}
-	return units
-}
-
-// askWordingTooLong is why block's wording passes contracts.DispatchEventBodyMax, nil where it
-// stands inside it. A decision block opens an ask like any other, and its ask.answered event
-// carries the same wording, so a document writes none a route would refuse.
-func askWordingTooLong(block askBlock) error {
-	units := AskWordingUnits(block.question, block.options)
-	if units <= contracts.DispatchEventBodyMax {
-		return nil
-	}
-	return fmt.Errorf("ask block %q is %d characters over the %d-character limit on its question and options (%d/%d)",
-		block.id, units-contracts.DispatchEventBodyMax, contracts.DispatchEventBodyMax, units, contracts.DispatchEventBodyMax)
-}
-
 // refuseChangedAsks is the first reason check gives against an ask in after that before does not
 // hold as it is - an ask after wrote or changed - or nil. Two asks are the same when fingerprint
 // gives both the same value. An ask a browser edit already left unreadable,
@@ -751,17 +681,29 @@ func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) 
 }
 
 // readAskBlockStrictly is why node is unreadable as settlement reads it, nil when it is readable:
-// parseAskBlock, then the content rule the browser editor holds an ask to (pmdoc.AskContentError).
+// parseAskBlock, the content rule the browser editor holds an ask to (pmdoc.AskContentError),
+// then the bound its question and options share (askWordingTooLong).
 // Settlement calls it on each ask its collector (collectAskBlocksForSettlement) reads. An ask
 // breaking the rule - which concurrent edits can leave, and the browser keeps - is unreadable even
 // where the parse reads it: the browser's card takes its question from its first child and its
 // options from its last, where the parse joins them all, so settlement marks it `invalid` and
 // leaves its row as it was.
+//
+// The wording bound is read here for the same reason: a browser edit reaches a document through
+// the Yjs room and settlement, where no route's check runs, so without it a person could open an
+// ask whose wording every ask route refuses. Its row would then take no PATCH at all, an
+// urgency-only edit included, because the ask routes hold the merged ask to that bound
+// (api.validateAskWording). Settlement marks such a block `invalid` with a block.invalid event
+// naming the bound, and leaves its row as it was, until an edit shortens the wording.
 func readAskBlockStrictly(node *pmdoc.Node) error {
-	if _, err := parseAskBlock(node); err != nil {
+	block, err := parseAskBlock(node)
+	if err != nil {
 		return err
 	}
-	return pmdoc.AskContentError(node)
+	if err := pmdoc.AskContentError(node); err != nil {
+		return err
+	}
+	return askWordingTooLong(block)
 }
 
 // parseAskBlock is the ask settlement reads in node, or why it cannot be read: a block no

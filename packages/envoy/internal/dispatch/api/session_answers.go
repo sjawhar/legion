@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/sessionanswers"
 )
@@ -88,7 +89,7 @@ func parseSessionAnswersSince(query url.Values, now time.Time) (time.Time, error
 func sessionAnswersWithin(items []model.SessionAnswer, maxChars int) []model.SessionAnswer {
 	sum := 0
 	for index, item := range items {
-		sum += len16(item.Text)
+		sum += itemblocks.Units16(item.Text)
 		if sum > maxChars {
 			return items[:index+1]
 		}

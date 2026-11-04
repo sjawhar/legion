@@ -564,12 +564,26 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		send.fenced = errors.Is(err, bus.ErrWindowDeadline)
 		switch {
 		case err == nil:
+			if send.standIn != nil {
+				// Logged here, where the stand-in is answered, rather than where it was made:
+				// only now has it reached NATS.
+				slog.Warn("dispatch outbox: a stand-in went out with the payload left out",
+					"event_id", send.event.event.ID, "topic", send.dest.subject)
+			}
 			send.state = reached
 		case errors.Is(err, bus.ErrRefused):
 			// Refused the same way however often it is retried (the envelope is past the server's
 			// max payload, or its subject past NATS's limit or holding whitespace, as an unbounded
 			// document slug or a bearer's session id can make it). It did not reach NATS, so it is
-			// counted a refusal and logged once.
+			// counted a refusal and logged once per event: a stand-in refused in its turn is the
+			// same event's one refusal, already counted when NATS refused the payload it was made
+			// of, and counting it again would count one event twice.
+			if send.standIn != nil {
+				slog.Error("dispatch outbox: the stand-in was refused too",
+					"event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
+				send.state = reached
+				break
+			}
 			deps.countPublishFailure("refused")
 			slog.Error("dispatch outbox: destination refused", "event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
 			// An event whose payload NATS will not take still has readers waiting on it, so the
@@ -577,11 +591,9 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			// reader learns which event it is and reads the item itself. A stand-in refused in
 			// its turn, one this batch can no longer send, and an envelope no stand-in can be
 			// made of count as reached, as every refusal did before stand-ins.
-			if send.standIn == nil && !stopped && ctx.Err() == nil {
+			if !stopped && ctx.Err() == nil {
 				if item, ok := standInEnvelope(send.event.item); ok {
 					send.standIn = &item
-					slog.Warn("dispatch outbox: a stand-in went out with the payload left out",
-						"event_id", send.event.event.ID, "topic", send.dest.subject)
 					issue(c)
 					return
 				}

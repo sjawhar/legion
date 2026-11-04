@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -256,7 +257,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	// Before the open approval request is looked for: a reason answers that request, so it
 	// rides the ask.answered event, and the review it writes carries it too.
 	if reason != nil {
-		if length := len16(*reason); length > contracts.DispatchEventBodyMax {
+		if length := itemblocks.Units16(*reason); length > contracts.DispatchEventBodyMax {
 			capExceeded(w, "reason", length, contracts.DispatchEventBodyMax)
 			return
 		}
@@ -631,7 +632,7 @@ func approvalQuestion(name string, version int, summary string) (string, error) 
 	// through a move or otherwise.
 	fixed := docs.AskWordingUnits(docs.ApprovalQuestion(name, maxApprovalVersion, ""), approvalAskOptions)
 	left := max(0, contracts.DispatchEventBodyMax-fixed-1)
-	if length := len16(summary); length > left {
+	if length := itemblocks.Units16(summary); length > left {
 		return "", capExceededError("summary", length, left)
 	}
 	return question, nil

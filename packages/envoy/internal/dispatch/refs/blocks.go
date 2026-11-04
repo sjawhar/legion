@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -187,6 +187,48 @@ const DocumentWindowKind = "document_block"
 // whatever a parameter holds (writeWindows).
 const windowKinds = `('document_block', 'comment_block', 'message_block', 'ask_part')`
 
+// BlockEmbeddingStates is where meaning search stands on each block of the owner whose windows
+// are kind kind under ownerKey: model.BlockEmbedded for a block every window covering it holds
+// a vector of its current text for, model.BlockEmbeddingPending while one of them waits for its
+// vector. A block no window covers is in no entry of the map, which a reader of one block reads
+// as model.BlockNotEmbedded - a block the indexer puts in no window, and every block of an owner
+// whose windows are not written yet. The read names the window kinds as literals beside the
+// parameter, as every read and write of a window does (writeWindows), so the planner can prove
+// embeddings_window_owner's partial predicate and reach the owner's rows through that index.
+//
+// It lives here, with the writes of the rows it reads, so the list of window kinds is held in
+// one place: this package's windowKinds, migration 20261102233625's index predicate and the
+// column the two of them name.
+func BlockEmbeddingStates(ctx context.Context, q Queryer, kind, ownerKey string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `
+		select covered.block_id, bool_and(e.embedded_hash is not distinct from e.content_hash)
+		from embeddings e cross join unnest(e.covers) as covered(block_id)
+		where e.kind = $1 and e.kind in `+windowKinds+`
+		  and split_part(e.id, '#', 1) = $2
+		group by covered.block_id
+	`, kind, ownerKey)
+	if err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	defer rows.Close()
+	states := map[string]string{}
+	for rows.Next() {
+		var blockID string
+		var current bool
+		if err := rows.Scan(&blockID, &current); err != nil {
+			return nil, fmt.Errorf("scan the embedding state of a block of %s %s: %w", kind, ownerKey, err)
+		}
+		states[blockID] = model.BlockEmbeddingPending
+		if current {
+			states[blockID] = model.BlockEmbedded
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the embedding state of the blocks of %s %s: %w", kind, ownerKey, err)
+	}
+	return states, nil
+}
+
 // WriteDocumentWindows writes the windows of document artifactID's blocks, as the version write
 // writes them (IndexBlocks), for the block-index tick's window arm: blocks are the document's
 // blocks in document order, each parent before its children, and markdown the text they index
@@ -197,15 +239,20 @@ func WriteDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown s
 }
 
 // writeDocumentWindows writes the windows of the document's blocks (nodes, as uniqueBlocks keeps
-// them) in the caller's transaction, which holds the document's owner row. The owner key of a
-// document's windows is its artifact id, and the context of each is the document's own title and
-// the heading above the window (embed.DocumentWindows).
+// them) in the caller's transaction, which holds the document's owner row, and stamps the state
+// those blocks are in beside them (stampDocumentWindowState), so the window arm can tell these
+// windows from ones an older build left behind. The owner key of a document's windows is its
+// artifact id, and the context of each is the document's own title and the heading above the
+// window (itemblocks.DocumentWindows).
 func writeDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown string, nodes []model.ArtifactBlock) error {
 	var title string
 	if err := tx.QueryRow(ctx, `select name from artifacts where id = $1::uuid`, artifactID).Scan(&title); err != nil {
 		return fmt.Errorf("read the title of %s for its windows: %w", artifactID, err)
 	}
-	return writeWindows(ctx, tx, DocumentWindowKind, artifactID, embed.DocumentWindows(title, documentBlockTexts(markdown, nodes)))
+	if err := writeWindows(ctx, tx, DocumentWindowKind, artifactID, itemblocks.DocumentWindows(title, documentBlockTexts(markdown, nodes))); err != nil {
+		return err
+	}
+	return stampDocumentWindowState(ctx, tx, artifactID)
 }
 
 // documentBlockTexts is each block of nodes holding text of its own, in document order, with
@@ -213,15 +260,15 @@ func writeDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown s
 // parent already holds its text and no window should embed one passage twice. nodes are in
 // document order, each parent before its children, so a block starting before the last kept one
 // ended is inside it.
-func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []embed.Block {
-	blocks := make([]embed.Block, 0, len(nodes))
+func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []itemblocks.WindowBlock {
+	blocks := make([]itemblocks.WindowBlock, 0, len(nodes))
 	end := 0
 	for _, node := range nodes {
 		if node.To <= node.From || node.From < end {
 			continue
 		}
 		end = node.To
-		blocks = append(blocks, embed.Block{ID: node.ID, Type: node.Type, Text: markdown[node.From:node.To]})
+		blocks = append(blocks, itemblocks.WindowBlock{ID: node.ID, Type: node.Type, Text: markdown[node.From:node.To]})
 	}
 	return blocks
 }
@@ -238,7 +285,7 @@ func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []embed.Bl
 // twice, as the parameter and in the literal list of every window kind, because a generic plan
 // knows nothing of what the parameter holds: the literal list is what lets the planner prove
 // embeddings_window_owner's partial predicate and read the owner's rows through that index.
-func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows []embed.Window) error {
+func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows []itemblocks.Window) error {
 	type row struct {
 		Suffix string   `json:"suffix"`
 		Text   string   `json:"text"`
@@ -272,30 +319,62 @@ func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows
 	return nil
 }
 
-// DocumentsWithoutWindows lists at most limit documents whose blocks the index holds and whose
-// windows it does not, in artifact id order past after (empty: from the start), for the
-// block-index tick's window arm. A document written before meaning search moved to windows has
-// blocks and no window; one whose version write failed after its blocks were written has the
-// same, and both are repaired by windowing the document again. The read walks
-// document_block_versions, one row per document, and probes the other two tables through their
-// keys.
-func DocumentsWithoutWindows(ctx context.Context, q Queryer, after string, limit int) ([]string, error) {
+// documentBlockState is the state of a document's blocks that its windows are stamped with
+// (stampDocumentWindowState) and read back against (DocumentsOwedWindows): the version they are
+// indexed at, over document_block_versions v. A document owed its first block index holds a
+// null version, which stamps and compares as the empty string, so windowing it once settles it
+// until the index that gives it a version writes its windows again.
+const documentBlockState = `coalesce(v.version::text, '')`
+
+// stampDocumentWindowState records the state of document artifactID's blocks beside the windows
+// this transaction has just written them (writeDocumentWindows). The state is read from
+// document_block_versions in the statement that writes it, so what is stamped is the version
+// the blocks these windows cover are indexed at.
+func stampDocumentWindowState(ctx context.Context, tx pgx.Tx, artifactID string) error {
+	if _, err := tx.Exec(ctx, `
+		insert into embedding_window_states (kind, owner_key, block_state, written_at)
+		select '`+DocumentWindowKind+`', v.artifact_id::text, `+documentBlockState+`, now()
+		  from document_block_versions v where v.artifact_id = $1::uuid
+		on conflict (kind, owner_key) do update
+		  set block_state = excluded.block_state, written_at = excluded.written_at
+	`, artifactID); err != nil {
+		return fmt.Errorf("record the block state the windows of %s were written from: %w", artifactID, err)
+	}
+	return nil
+}
+
+// DocumentsOwedWindows lists at most limit documents whose blocks the index holds and whose
+// windows do not stand for those blocks, in artifact id order past after (empty: from the
+// start), for the block-index tick's window arm. A document written before meaning search moved
+// to windows has blocks and no window, and one whose version write failed after its blocks were
+// written has the same. One a build without this change re-indexed during the deploy is the
+// harder case: it keeps the windows of its old text, so holding a window says nothing. The read
+// therefore asks both whether the state its windows were written from
+// (embedding_window_states, migration 20261104010400) is the state its blocks are in now, and
+// whether it holds a window at all, so a window row lost by any other route is written again
+// too. The read walks document_block_versions, one row per document, and probes the other
+// three tables through their keys.
+func DocumentsOwedWindows(ctx context.Context, q Queryer, after string, limit int) ([]string, error) {
 	rows, err := q.Query(ctx, `
 		select v.artifact_id::text from document_block_versions v
 		where v.artifact_id > $1::uuid
 		  and exists (select 1 from document_blocks b where b.artifact_id = v.artifact_id)
-		  and not exists (
+		  and (not exists (
+			select 1 from embedding_window_states w
+			where w.kind = '`+DocumentWindowKind+`' and w.owner_key = v.artifact_id::text
+			  and w.block_state = `+documentBlockState+`
+		  ) or not exists (
 			select 1 from embeddings e
 			where e.kind = '`+DocumentWindowKind+`' and split_part(e.id, '#', 1) = v.artifact_id::text
-		  )
+		  ))
 		order by v.artifact_id limit $2
 	`, uuidAfter(after), limit)
 	if err != nil {
-		return nil, fmt.Errorf("list the documents whose blocks hold no window: %w", err)
+		return nil, fmt.Errorf("list the documents whose windows do not stand for their blocks: %w", err)
 	}
 	documents, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, fmt.Errorf("list the documents whose blocks hold no window: %w", err)
+		return nil, fmt.Errorf("list the documents whose windows do not stand for their blocks: %w", err)
 	}
 	return documents, nil
 }

@@ -759,7 +759,7 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 	// document holds and no window covers - a block inside another, whose text its parent's
 	// window already holds, and every block of a version the indexer has not windowed yet -
 	// reads as model.BlockNotEmbedded.
-	embedding, err := blockEmbeddingStates(r.Context(), s.deps.Store.Pool, refs.DocumentWindowKind, artifact.ID)
+	embedding, err := refs.BlockEmbeddingStates(r.Context(), s.deps.Store.Pool, refs.DocumentWindowKind, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

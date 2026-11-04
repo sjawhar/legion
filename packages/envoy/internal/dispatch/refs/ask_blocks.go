@@ -265,12 +265,11 @@ func askForParts(ctx context.Context, q Queryer, askID string) (model.Ask, time.
 	return ask, writtenAt, true, nil
 }
 
-// indexAskIfOwed is indexItemBlocksIfOwed for an ask: it indexes the ask's parts when they are
-// owed, which is when its state row is missing (a build older than the part index wrote the
-// ask), owed (owed_at set by such a build's write, or by rebuild-refs), or indexed from other
-// parts than the ask holds now, and whatever its state says when always is set. The caller
-// holds the ask row.
-func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string, always bool) (bool, error) {
+// indexAskIfOwed is IndexItemIfOwed for an ask: it indexes the ask's parts when they are owed,
+// which is when its state row is missing (a build older than the part index wrote the ask),
+// owed (owed_at set by such a build's write, or by rebuild-refs), or indexed from other parts
+// than the ask holds now. The caller holds the ask row.
+func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bool, error) {
 	var stated, owed bool
 	var sum *string
 	ask, writtenAt, err := scanAskForParts(tx.QueryRow(ctx, `
@@ -283,7 +282,7 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string, alw
 	}
 	parts := AskParts(ask)
 	partsSum := askPartsSum(parts)
-	if !always && stated && !owed && sum != nil && *sum == partsSum {
+	if stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
 	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, serverURL, writtenAt); err != nil {

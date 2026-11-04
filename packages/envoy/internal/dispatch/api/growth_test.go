@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -252,7 +253,7 @@ func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
 		response := edit(description.text)
 		runtime.ReadMemStats(&after)
 		assertCapExceeded(t, "an option description of "+description.name, response, "question and options",
-			len16(description.text)+len("Question 0?")+len("A"), contracts.DispatchEventBodyMax, "")
+			itemblocks.Units16(description.text)+len("Question 0?")+len("A"), contracts.DispatchEventBodyMax, "")
 		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
 			t.Errorf("refusing an option description of %s allocated %d MiB, want at most 160 MiB", description.name, allocated>>20)
 		}

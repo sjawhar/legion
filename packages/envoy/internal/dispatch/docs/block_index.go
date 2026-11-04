@@ -161,11 +161,11 @@ type liveAheadDocuments map[string]owedDocument
 // with the block grammar, oldest first (refs.ReindexOwedItem), one batch of the comments,
 // messages and asks owed a block index of their own blocks, oldest owed_at first
 // (refs.IndexOwedItemBlocks), each in its own transaction taking the item row then its state
-// row, never an owner row, then one batch of the owners whose blocks hold no embedding window
-// (windowDrift) and one of the whole-text embeddings rows the windows have replaced
-// (retireWholeText). The item blocks run before the windows, so an item the grammar batch
-// indexed, windows included, is no longer listed. The documents are listed by keyset, so a
-// document it skips never holds back the ones past it: the tick's Cursor moves past every
+// row, never an owner row, then one batch of the owners whose embedding windows do not stand
+// for their blocks (windowDrift) and one of the whole-text embeddings rows the windows have
+// replaced (retireWholeText). The item blocks run before the windows, so an item the grammar
+// batch indexed, windows included, is no longer listed. The documents are listed by keyset, so
+// a document it skips never holds back the ones past it: the tick's Cursor moves past every
 // document its batch lists, indexed or not, and goes back to the start once a batch lists fewer
 // than a full one, and the window arm walks its owners the same way. A document or item it
 // cannot index for a reason of its own is logged and left owed, so one never holds back the rest
@@ -273,76 +273,118 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 	return tick, nil
 }
 
-// windowOwnerKinds is the order the window arm serves the item kinds in, after the documents,
-// all four sharing one batch.
-var windowOwnerKinds = []refs.ItemKind{refs.ItemComment, refs.ItemMessage, refs.ItemAsk}
+// windowOwner is one kind of owner the window arm walks: name keys its cursor and names it in a
+// log line, batch is the most of one tick's shared batch its kind may take, list lists at most
+// limit owners of the kind whose windows do not stand for their blocks, in id order past after,
+// and window writes one owner's windows and reports whether it wrote them. One loop serves them
+// all, so the reset, the fullness rule and the cursor are written once and every key is this
+// name.
+type windowOwner struct {
+	name   string
+	batch  int
+	list   func(ctx context.Context, after string, limit int) ([]string, error)
+	window func(ctx context.Context, id string) (bool, error)
+}
 
-// windowDrift gives windows to at most blockIndexWindowBatch owners whose blocks hold none:
-// every document, comment, message and ask written before meaning search moved to windows, and
-// any whose write wrote its blocks and failed before its windows. It counts them in tick.Windows,
-// leaves each kind's cursor in tick.Cursor.Windows and reports whether a batch was full.
+// windowItemKinds is the item kinds whose blocks carry embedding windows, in the order the
+// window arm serves them after the documents.
+var windowItemKinds = []refs.ItemKind{refs.ItemComment, refs.ItemMessage, refs.ItemAsk}
+
+// windowOwners is the owners the window arm serves, in order: the documents, then the comments,
+// the messages and the asks. The documents are held to blockIndexDocumentBatch of the shared
+// batch, the bound the owed-document arm reads under, because a document's windows cost the
+// same read of the document that arm makes; an item's windows are one transaction of its own,
+// so its kind may take the whole batch.
+func (s *Service) windowOwners() []windowOwner {
+	owners := []windowOwner{{
+		name:  "document",
+		batch: blockIndexDocumentBatch,
+		list: func(ctx context.Context, after string, limit int) ([]string, error) {
+			return refs.DocumentsOwedWindows(ctx, s.store.Pool, after, limit)
+		},
+		window: s.windowDocument,
+	}}
+	for _, kind := range windowItemKinds {
+		owners = append(owners, windowOwner{
+			name:  string(kind),
+			batch: blockIndexWindowBatch,
+			list: func(ctx context.Context, after string, limit int) ([]string, error) {
+				return refs.ItemsOwedWindows(ctx, s.store.Pool, kind, after, limit)
+			},
+			window: func(ctx context.Context, id string) (bool, error) {
+				return s.windowItem(ctx, kind, id)
+			},
+		})
+	}
+	return owners
+}
+
+// windowDrift gives windows to at most blockIndexWindowBatch owners whose windows do not stand
+// for their blocks: every document, comment, message and ask written before meaning search
+// moved to windows, any whose write wrote its blocks and failed before its windows, and any a
+// build without this change re-indexed while the deploy rolled, which left the windows of its
+// old text behind (refs.DocumentsOwedWindows, refs.ItemsOwedWindows). It counts them in
+// tick.Windows, leaves each kind's cursor in tick.Cursor.Windows and reports whether a batch
+// was full.
 //
-// Each owner is windowed as its own indexer windows it: an item is indexed again
-// (refs.ReindexItemBlocks), which writes the windows beside the blocks, and a document is read
-// as the server serves it and windowed under its owner row (windowDocument). The documents are
-// held to blockIndexDocumentBatch of the shared batch, the bound the owed-document arm reads
-// under, because a document's windows cost the same read of the document that arm makes.
+// Each owner is windowed as its own indexer windows it, and nothing else is written: a document
+// is read as the server serves it and windowed under its owner row (windowDocument), an item is
+// read as the blocks routes read it and windowed under its own row (windowItem). Either way the
+// write stamps the state the owner's blocks are in, so an owner this arm has served is no
+// longer listed.
 func (s *Service) windowDrift(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) (bool, error) {
-	next := make(map[string]string, len(windowOwnerKinds)+1)
+	owners := s.windowOwners()
+	next := make(map[string]string, len(owners))
 	tick.Cursor.Windows = next
 	budget, full := blockIndexWindowBatch, false
-	asked := min(budget, blockIndexDocumentBatch)
-	documents, err := refs.DocumentsWithoutWindows(ctx, s.store.Pool, cursors["document"], asked)
-	if err != nil {
-		return false, err
-	}
-	for _, artifactID := range documents {
-		windowed, err := s.windowDocument(ctx, artifactID)
-		switch {
-		case ctx.Err() != nil:
-			return false, ctx.Err()
-		case err != nil:
-			slog.Error("dispatch: block index skipped a document it could not window",
-				"artifact", artifactID, "error", err)
-		case windowed:
-			tick.Windows++
-		}
-		next["document"] = artifactID
-	}
-	budget -= len(documents)
-	full = len(documents) == asked
-	if len(documents) < asked {
-		next["document"] = ""
-	}
-
-	for _, kind := range windowOwnerKinds {
+	for _, owner := range owners {
 		if budget <= 0 {
 			break
 		}
-		asked = budget
-		items, err := refs.ItemsWithoutWindows(ctx, s.store.Pool, kind, cursors[string(kind)], asked)
+		asked := min(budget, owner.batch)
+		ids, err := owner.list(ctx, cursors[owner.name], asked)
 		if err != nil {
 			return false, err
 		}
-		for _, item := range items {
-			if err := refs.ReindexItemBlocks(ctx, s.store.Pool, item, s.serverURL); err != nil {
-				if ctx.Err() != nil {
-					return false, ctx.Err()
-				}
-				slog.Error("dispatch: block index skipped an item it could not window",
-					"kind", item.Kind, "id", item.ID, "error", err)
-			} else {
+		for _, id := range ids {
+			windowed, err := owner.window(ctx, id)
+			switch {
+			case ctx.Err() != nil:
+				return false, ctx.Err()
+			case err != nil:
+				slog.Error("dispatch: block index skipped an owner it could not window",
+					"owner", owner.name, "id", id, "error", err)
+			case windowed:
 				tick.Windows++
 			}
-			next[string(kind)] = item.ID
+			next[owner.name] = id
 		}
-		budget -= len(items)
-		full = full || len(items) == asked
-		if len(items) < asked {
-			next[string(kind)] = ""
+		budget -= len(ids)
+		full = full || len(ids) == asked
+		if len(ids) < asked {
+			next[owner.name] = ""
 		}
 	}
 	return full, nil
+}
+
+// windowItem writes the windows of one comment, message or ask whose windows do not stand for
+// its blocks, in a transaction of its own: it takes the item row, reads the text its blocks
+// were split from and writes the windows of those blocks (refs.WriteItemWindows). It writes no
+// block row and no reference: the index of this item's blocks stands, and only its windows are
+// missing. An item whose stored text no longer splits into the blocks the index holds is marked
+// owed a block index instead, which the transaction commits for the owed arm to act on.
+func (s *Service) windowItem(ctx context.Context, kind refs.ItemKind, id string) (bool, error) {
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	windowed, err := refs.WriteItemWindows(ctx, tx, kind, id)
+	if err != nil {
+		return false, err
+	}
+	return windowed, tx.Commit(ctx)
 }
 
 // windowDocument writes the windows of one document whose blocks hold none, in a transaction of
@@ -411,7 +453,7 @@ type wholeTextOwner struct{ kind, windowKind, ownerKey string }
 // is its title and the head of its spec, which no block indexer writes, and its trigger stands.
 var wholeTextOwners = func() []wholeTextOwner {
 	owners := []wholeTextOwner{{kind: "document", windowKind: refs.DocumentWindowKind, ownerKey: "e.id"}}
-	for _, kind := range windowOwnerKinds {
+	for _, kind := range windowItemKinds {
 		owners = append(owners, wholeTextOwner{
 			kind:       string(kind),
 			windowKind: kind.WindowKind(),
@@ -422,11 +464,14 @@ var wholeTextOwners = func() []wholeTextOwner {
 }()
 
 // retire deletes up to $1 of the kind's whole-text rows whose owner already holds a window of
-// the matching kind embedded at its current text. The release before this one's meaning search
-// reads exactly these rows, so an item leaves that search only once this one's windows can find
-// it, and the two builds overlap for one deploy. The kinds are written as literals, not
-// parameters, so the planner can prove embeddings_window_owner's partial predicate and find the
-// owner's windows through that index.
+// the matching kind carrying a vector of its current text. The release before this one's meaning
+// search reads exactly these rows, so an item leaves that search only once this one's windows
+// can find it, and the two builds overlap for one deploy. The vector is read as well as the
+// hash: the queue settles a window whose text has nothing to embed with no vector and its
+// embedded_hash set (embedqueue's settledNothingToEmbed), and such a window stands for nothing
+// in a meaning search, so a row behind it would be deleted with no vector left for the item at
+// all. The kinds are written as literals, not parameters, so the planner can prove
+// embeddings_window_owner's partial predicate and find the owner's windows through that index.
 func (owner wholeTextOwner) retire() string {
 	return fmt.Sprintf(`
 		with picked as (
@@ -434,6 +479,7 @@ func (owner wholeTextOwner) retire() string {
 			where e.kind = '%s' and exists (
 				select 1 from embeddings w
 				where w.kind = '%s' and split_part(w.id, '#', 1) = %s
+				  and w.embedding is not null
 				  and w.embedded_hash is not null and w.embedded_hash = w.content_hash
 			)
 			limit $1

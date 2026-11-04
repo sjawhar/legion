@@ -1,5 +1,8 @@
 // Package itemblocks holds the blocks of comments, messages and asks: how a body splits into
-// blocks, and how an edit keeps their ids, which an ask's parts take through Align too.
+// blocks, and how an edit keeps their ids, which an ask's parts take through Align too. It also
+// builds the windows a block index embeds its owner's blocks in (Windows), for a document as
+// much as for an item: a window is text alone, so it lives here, where neither the embedder nor
+// anything it dials is in the package's closure.
 package itemblocks
 
 import (

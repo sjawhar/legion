@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
@@ -45,6 +47,15 @@ const (
 	markStart          = "\uE000" // private-use sentinels: ts_headline writes them, markSnippet turns them into <mark>
 	markEnd            = "\uE001"
 	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
+	// searchWindowCandidates is how many nearest windows one window arm takes before its
+	// `distinct on (id)` keeps the nearest window of each item. Every arm is held to
+	// contracts.SearchKindDepth items afterwards (ranked), but a window is not an item: one
+	// long document holds hundreds of them, and at a candidate depth of SearchKindDepth its
+	// windows alone fill the arm, which then yields that one document and every other document
+	// the query matches is lost. Ten times the depth leaves room for a thousand windows, which
+	// is the one document's hundreds and the rest of the page's items beside them, and the arm
+	// still reads them through embeddings_cosine, nearest first.
+	searchWindowCandidates = 10 * contracts.SearchKindDepth
 )
 
 // searchKeywordLegs is the five-kind keyword-ranked union - issue, document, comment, ask,
@@ -275,10 +286,35 @@ totals as (
 ` + searchPageAndTailSQL("legs")
 }
 
+// searchWindowLimit is the LIMIT a window arm's candidate CTE takes, searchWindowCandidates as
+// SQL. It is written into the statement rather than bound, so that the two queries built from
+// searchQueryMeaningBody keep the parameters they have: the number is this build's own, never a
+// caller's.
+var searchWindowLimit = "limit " + strconv.Itoa(searchWindowCandidates)
+
+// searchMeaningScan is what a meaning query's transaction sets before it runs, both statements
+// local to that transaction and no other:
+//
+//   - hnsw.ef_search: how many nearest vectors the HNSW index walks before the kind, project
+//     and model filters run. pgvector's default, 40, is spent on whichever kind holds the most
+//     vectors - the document windows, tens of thousands of them against one row per issue - so
+//     the issue and message arms are left with few candidates or none, and the project filter
+//     can take the rest. 400 keeps them, at a wider walk of the index paid once per query.
+//   - hnsw.iterative_scan: with it off, an arm whose kind filter rejects every one of those 400
+//     answers nothing at all; relaxed_order keeps scanning until the arm's own LIMIT is met or
+//     hnsw.max_scan_tuples (20,000) is reached. Relaxed rather than strict: every arm re-ranks
+//     its rows by r (distinct on, then ranked), so nothing downstream reads the index's order.
+//
+// The related-item check sets the same two for the same reasons (relatedMeaningSearch).
+var searchMeaningScan = []string{
+	`set local hnsw.ef_search = 400`,
+	`set local hnsw.iterative_scan = relaxed_order`,
+}
+
 // searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
 // to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
 // (0072_embeddings_core.up.sql), rather than ts_rank_cd. Each kind's meaning candidates are their
-// own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit $7`
+// own CTE (meaning_issue_candidates and so on) doing plainly `order by embedding <=> $9 limit n`
 // - pgvector's HNSW index serves that shape directly (confirmed by
 // TestSearchMeaningLegsUseTheHNSWIndexNotASequentialScan) - rather than joining meaning rows into
 // one shared window spanning every kind, which would force a sequential scan of embeddings once
@@ -300,7 +336,10 @@ totals as (
 // whole-text row. A window's id is "<owner key>#<suffix>", so the item it belongs to is
 // split_part(id, '#', 1) - the artifact id for a document, "<kind>/<uuid>" for a comment, a
 // message or an ask - and each arm projects the item's own kind and id, so fusion still ranks
-// one row per item however many of its windows the index hands back. Each arm keeps the item's
+// one row per item however many of its windows the index hands back. A window arm takes
+// searchWindowCandidates of them, ten times the items any arm keeps, because one long
+// document's windows would otherwise fill an arm of contracts.SearchKindDepth and leave every
+// other document of the page out. Each arm then keeps the item's
 // nearest window alone (distinct on (id), the highest cosine first) and carries that window's
 // id and covers, the blocks its vector holds, on to legs_unique and the page, which names the
 // one of them that matched (searchPageAndTailSQL).
@@ -354,7 +393,7 @@ meaning_document_candidates as (
     join lateral (select created_at from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1) v on true
    where e.kind = 'document_block' and a.kind = 'doc' and e.embedding is not null and e.model = $11 and ($2 = '' or p.key = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_document as (
   select distinct on (meaning_document_candidates.id) 'document' as kind, 'meaning' as list, issue_key, case when issue_key is null then id else null::uuid end, id, id::text, null::text,
@@ -375,7 +414,7 @@ meaning_comment_candidates as (
     left join projects p on p.key = a.project_key
    where e.kind = 'comment_block' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_comment as (
   select distinct on (meaning_comment_candidates.id) 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
@@ -397,7 +436,7 @@ meaning_ask_candidates as (
     left join projects p on p.key = a.project_key
    where e.kind = 'ask_part' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_ask as (
   select distinct on (meaning_ask_candidates.id) 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
@@ -416,7 +455,7 @@ meaning_message_candidates as (
     join issues i on i.key = m.issue_key
    where e.kind = 'message_block' and e.embedding is not null and e.model = $11 and ($2 = '' or i.project_key = $2)
    order by e.embedding <=> $9::vector
-   limit $7
+   ` + searchWindowLimit + `
 ),
 meaning_message as (
   select distinct on (meaning_message_candidates.id) 'message' as kind, 'meaning' as list, issue_key, null::uuid, null::uuid, id::text, null::text,
@@ -469,7 +508,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	// sends is never refused here, and a project must be a key (an empty one searches every
 	// project). Both ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps
 	// it short.
-	if length := len16(searchText); length > contracts.SearchQueryMax {
+	if length := itemblocks.Units16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
 		return
@@ -575,10 +614,23 @@ func (s *server) runFusedSearchQuery(ctx context.Context, q, project string, lim
 // shape, searchQueryMeaning in place of searchQuery. Its only caller, runSearch, has already run
 // the numnode check before ever reaching here (so it never pays for an embedding it would throw
 // away); this function assumes nodes > 0.
+//
+// It runs in a read transaction of its own, the one place searchMeaningScan's settings apply:
+// `set local` holds them to this transaction, so a pooled connection carries neither of them
+// back to the next request.
 func (s *server) runMeaningSearch(ctx context.Context, q, project string, limit, offset int, vector []float32) (model.SearchResponse, error) {
-
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
+	tx, err := s.deps.Store.Pool.Begin(ctx)
+	if err != nil {
+		return model.SearchResponse{}, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	for _, setting := range searchMeaningScan {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			return model.SearchResponse{}, err
+		}
+	}
+	rows, err := tx.Query(ctx, searchQueryMeaning, q, project, limit, firstTerm(q), headlineOptions,
 		offset, contracts.SearchKindDepth, searchFusionK, embed.Literal(vector), searchMeaningFloor, s.deps.Embedder.Identity())
 	if err != nil {
 		return model.SearchResponse{}, err

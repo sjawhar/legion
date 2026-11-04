@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -190,7 +191,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	// Before the transition opens its own transaction: an answer's text rides the ask.answered
 	// event beside the ask's wording, so it takes the same bound.
 	if input.Text != nil {
-		if length := len16(*input.Text); length > contracts.DispatchEventBodyMax {
+		if length := itemblocks.Units16(*input.Text); length > contracts.DispatchEventBodyMax {
 			capExceeded(w, "text", length, contracts.DispatchEventBodyMax)
 			return
 		}
@@ -302,7 +303,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	// A resolution's reason rides the ask.resolved event, so it takes the event's bound; before
 	// the transition opens its transaction, so nothing is written.
-	if length := len16(reason); length > contracts.DispatchEventBodyMax {
+	if length := itemblocks.Units16(reason); length > contracts.DispatchEventBodyMax {
 		capExceeded(w, "reason", length, contracts.DispatchEventBodyMax)
 		return
 	}

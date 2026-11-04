@@ -129,9 +129,9 @@ func processAllPending(t *testing.T, database *store.Store, embedder embed.Embed
 
 // windowTexts is the text each window of the owner whose key is ownerKey holds, of kind kind, by
 // the window's id suffix: the first block it covers, or "<block id>/p<n>" for one piece of a
-// block too long to hold in one window. A test reads what the indexers built (embed.Windows: the
-// owner's context, then its blocks' text) rather than spelling it out, and maps the text it finds
-// to the vector the fake embedder should answer for it.
+// block too long to hold in one window. A test reads what the indexers built
+// (itemblocks.Windows: the owner's context, then its blocks' text) rather than spelling it out,
+// and maps the text it finds to the vector the fake embedder should answer for it.
 func windowTexts(t *testing.T, database *store.Store, kind, ownerKey string) map[string]string {
 	t.Helper()
 	rows, err := database.Pool.Query(context.Background(),
@@ -533,11 +533,11 @@ func maxBlock(word string) string {
 // TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole: a comment and a message of one
 // block at DISPATCH_BLOCK_UNITS, written through the API, reach the embedder whole once the
 // queue drains. A block longer than one window's budget is embedded as the pieces that cover it
-// (embed.Windows), so "whole" is now across those pieces rather than in one text: every stretch
-// of the block stands in a piece the embedder was given, and no tail of a block the server
-// accepted goes unsearched. Before windows the block reached the embedder as one text, which
-// held because the block bound and the embedder's input bound (embed.MaxInputRunes) agree; a
-// block past either bound had no vector for its tail at all, which is what windows fix.
+// (itemblocks.Windows), so "whole" is now across those pieces rather than in one text: every
+// stretch of the block stands in a piece the embedder was given, and no tail of a block the
+// server accepted goes unsearched. Before windows the block reached the embedder as one text,
+// which held because the block bound and the embedder's input bound (embed.MaxInputRunes)
+// agree; a block past either bound had no vector for its tail at all, which is what windows fix.
 func TestACommentAndMessageOfOneLongestBlockReachTheEmbedderWhole(t *testing.T) {
 	embedder := &recordingEmbedder{fakeEmbedder: &fakeEmbedder{}}
 	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
@@ -835,4 +835,60 @@ func TestAnOptionIsTheHitThroughTheWindowHoldingItsQuestion(t *testing.T) {
 	if hit.BlockID == nil || *hit.BlockID != option {
 		t.Fatalf("block_id = %v, want the option's part %q rather than the question's %q", hit.BlockID, option, question)
 	}
+}
+
+// uploadSearchDocument uploads one markdown document to the issue and answers its artifact.
+func uploadSearchDocument(t *testing.T, handler http.Handler, issueKey, name, body string) model.Artifact {
+	t.Helper()
+	uploaded := multipartRequest(t, handler, "/api/v1/issues/"+issueKey+"/artifacts", map[string]string{"name": name},
+		"body.md", "text/markdown", []byte(body), "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload %s: status=%d body=%.200s", name, uploaded.Code, uploaded.Body.String())
+	}
+	return decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+}
+
+// TestMeaningSearchFindsOtherItemsPastOneLongDocumentsWindows is why a window arm takes
+// searchWindowCandidates candidates rather than the contracts.SearchKindDepth items it keeps.
+// One document of more than that many windows, every one of them matching the query more
+// closely than anything else, fills the document arm on its own; the arm's `distinct on (id)`
+// then yields that one document, and every other document the query matches by meaning is
+// lost. A comment, whose arm is its own, stands beside them as the rest of the page.
+func TestMeaningSearchFindsOtherItemsPastOneLongDocumentsWindows(t *testing.T) {
+	embedder := &fakeEmbedder{vectors: map[string][]float32{"wibbleflorp": queryVector()}}
+	handler, database, _ := newTestServer(t, testServerOptions{embedder: embedder})
+	issue := createInteractionIssue(t, handler, "CROWD", "Crowded windows", "Body text.")
+	// One block per window: a block of exactly the most block text a window holds
+	// (embed's windowTextChars) leaves no room for the one after it.
+	const windowChars = 1200
+	paragraphs := make([]string, contracts.SearchKindDepth+1)
+	for index := range paragraphs {
+		line := fmt.Sprintf("Passage %04d of the long document. ", index)
+		paragraphs[index] = strings.Repeat(line, 1+windowChars/len(line))[:windowChars]
+	}
+	long := uploadSearchDocument(t, handler, issue.Key, "long.md", strings.Join(paragraphs, "\n\n")+"\n")
+	short := uploadSearchDocument(t, handler, issue.Key, "short.md", "A short note on the same subject.\n")
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "One remark on the same subject."}, "alice")
+
+	windows := windowTexts(t, database, "document_block", long.ID)
+	if len(windows) <= contracts.SearchKindDepth {
+		t.Fatalf("the long document holds %d windows, want more than the %d items an arm keeps", len(windows), contracts.SearchKindDepth)
+	}
+	// The long document's windows are the nearest rows of the document arm, so at a candidate
+	// depth of SearchKindDepth they are all of it.
+	embedWindowsAs(t, database, embedder, "document_block", long.ID, angledVector(0.9, 2))
+	embedWindowsAs(t, database, embedder, "document_block", short.ID, angledVector(0.5, 3))
+	embedWindowsAs(t, database, embedder, "comment_block", "comment/"+comment.ID, angledVector(0.5, 4))
+	processAllPending(t, database, embedder)
+
+	requireNoKeywordHit(t, "q=wibbleflorp")
+	response := searchResponse(t, handler, "q=wibbleflorp")
+	if response.Degraded != "" {
+		t.Fatalf("Degraded = %q, want empty", response.Degraded)
+	}
+	searchHit(t, response, "document", long.ID)
+	searchHit(t, response, "document", short.ID)
+	searchHit(t, response, "comment", comment.ID)
 }

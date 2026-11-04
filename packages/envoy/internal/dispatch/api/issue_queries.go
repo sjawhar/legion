@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -171,7 +172,7 @@ func normalizeIssueLabels(values []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		label := strings.TrimSpace(value)
-		if length := len16(label); length == 0 || length > maxIssueLabel16 {
+		if length := itemblocks.Units16(label); length == 0 || length > maxIssueLabel16 {
 			return nil, errorf(http.StatusBadRequest, "LABELS_INPUT", "each label must be 1 to %d characters", maxIssueLabel16)
 		}
 		key := strings.ToLower(label)

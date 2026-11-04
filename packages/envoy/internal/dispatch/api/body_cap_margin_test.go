@@ -2,6 +2,8 @@ package api
 
 import (
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 )
 
 // What bounds an anchored comment is its document's margin budgets, not any bound on the length
@@ -23,7 +25,7 @@ func TestAnchoredCommentOfManyBlocksReachesTheMarginWhole(t *testing.T) {
 		"anchor": map[string]any{"artifact": "spec", "quote": "quick brown fox"},
 	}, "alice")
 	if comment.Body != body {
-		t.Fatalf("the comment written back is %d units, want the %d sent", len16(comment.Body), len16(body))
+		t.Fatalf("the comment written back is %d units, want the %d sent", itemblocks.Units16(comment.Body), itemblocks.Units16(body))
 	}
 
 	projection := loadMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID)
@@ -33,6 +35,6 @@ func TestAnchoredCommentOfManyBlocksReachesTheMarginWhole(t *testing.T) {
 	}
 	if text != body {
 		t.Fatalf("the margin record holds %d UTF-16 units, want the body of %d sent whole; a margin holding a summary instead would spend less of its 256 KiB record budget than the bounds allow",
-			len16(text), len16(body))
+			itemblocks.Units16(text), itemblocks.Units16(body))
 	}
 }

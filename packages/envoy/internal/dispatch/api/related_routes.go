@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -48,7 +49,7 @@ func (s *server) getRelated(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "keywords_only must be true or false")
 		return
 	}
-	if length := len16(request.checkText()); length > contracts.SearchQueryMax {
+	if length := itemblocks.Units16(request.checkText()); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("title and text", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; send a longer text with POST")
 		return
@@ -68,7 +69,7 @@ func (s *server) postRelated(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if length := len16(request.Title); length > contracts.IssueTitleMax {
+	if length := itemblocks.Units16(request.Title); length > contracts.IssueTitleMax {
 		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}

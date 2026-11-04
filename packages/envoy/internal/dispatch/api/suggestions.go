@@ -66,12 +66,6 @@ const (
 	decisionBlockCheckLimit = 5
 )
 
-// relatedEFSearch sets hnsw.ef_search for the meaning query's transaction: how many nearest
-// vectors the HNSW index hands back before the project, kind and model filters run. pgvector's
-// default, 40, can be spent entirely on other projects' vectors, leaving out the project's own
-// nearest items; 400 keeps them at the cost of a wider index walk, paid once per check.
-const relatedEFSearch = `set local hnsw.ef_search = 400`
-
 var (
 	// relatedKeywordLegs is search's keyword legs (searchKeywordLegs) ranked by the chosen
 	// lexemes' weights (relatedCoordinationRank).
@@ -596,8 +590,10 @@ func (s *server) relatedMeaningStage(ctx context.Context, project, text string, 
 	return relatedStage{response: response}
 }
 
-// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own, the one place
-// relatedEFSearch applies.
+// relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own, so that the
+// check's meaning query reads the index as search's own does: it runs the same arms, and
+// searchMeaningScan is what either of them needs of the index scan (search's runMeaningSearch
+// sets the same two there, and says what each is for).
 func (s *server) relatedMeaningSearch(
 	ctx context.Context, project string, picked relatedTerms, vector []float32,
 ) (model.SearchResponse, error) {
@@ -606,8 +602,10 @@ func (s *server) relatedMeaningSearch(
 		return model.SearchResponse{}, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if _, err := tx.Exec(ctx, relatedEFSearch); err != nil {
-		return model.SearchResponse{}, err
+	for _, setting := range searchMeaningScan {
+		if _, err := tx.Exec(ctx, setting); err != nil {
+			return model.SearchResponse{}, err
+		}
 	}
 	return s.relatedSearch(ctx, tx, relatedMeaningQuery, project, picked, embed.Literal(vector),
 		searchMeaningFloor, s.deps.Embedder.Identity())
