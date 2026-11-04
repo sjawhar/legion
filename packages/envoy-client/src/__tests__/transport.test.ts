@@ -1252,6 +1252,31 @@ describe("EnvoyClient", () => {
     expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
     expect(recorded.requests).toHaveLength(1);
   });
+
+  // The deadline is AbortSignal.timeout's, on the platform's clock, which no fake timer moves: the
+  // case holds the request until its signal aborts and checks that a short deadline gave up first.
+  test("gives up a replay at the deadline its caller names", async () => {
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: async (_input, init) => {
+        const signal = init?.signal;
+        if (signal === undefined || signal === null) throw new Error("no deadline was set");
+        const aborted = Promise.withResolvers<never>();
+        signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+        return aborted.promise;
+      },
+    });
+    const started = performance.now();
+    const failure = await client
+      .replay({
+        sessionID: "ses_a",
+        subjects: [{ subject: "notifications.agent.ses_a" }],
+        timeoutMs: 50,
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
 });
 
 describe("newClientInstanceID", () => {
