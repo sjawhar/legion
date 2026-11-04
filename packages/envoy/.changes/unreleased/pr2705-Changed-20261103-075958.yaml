@@ -1,0 +1,5 @@
+kind: Changed
+body: 'Each broker pod now sizes its reread limit by the pods it counts, instead of by a constant written for two. It counts the beating `broker_serving` rows at each beat of its serving clock and divides the store''s whole reread budget by the square of that count, so a rolling deploy, which runs three and sometimes four pods, no longer lets the fleet spend more of the secret store than one pod was ever allowed: one reread a second at two pods, one every 2.25 s at three and one every 4 s at four on the default store, and one every 4 s, 9 s and 16 s on Google Secret Manager. A refused reread''s `Retry-After` follows the rate the pod runs at now. Each pod logs `broker reread rate` with the count, the rate and the burst at its first beat and whenever the count changes, and above four pods it also logs `broker reread rate above the replica count this sizing supports` with what a whole burst would then cost the store.'
+time: 2026-11-03T07:59:58.563211777Z
+custom:
+    Issue: pr2705

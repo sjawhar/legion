@@ -190,6 +190,7 @@ on:
       - 'packages/envoy/internal/broker/enroll/*'
       - 'packages/envoy/internal/broker/exchange/*'
       - 'packages/envoy/internal/broker/helper/*'
+      - 'packages/envoy/internal/broker/leasetime/*'
       - 'packages/envoy/internal/broker/machine/*'
       - 'packages/envoy/internal/broker/oauth/*'
       - 'packages/envoy/internal/broker/oauthstore/*'

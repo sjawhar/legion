@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/leasetime"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/redact"
 )
@@ -219,36 +220,58 @@ func TestLoadReadsTheDrainSeconds(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesALeaseThreeSweepsCanRunOut pins that a lease must be more than four and a half
-// sweeps: the broker tolerates a gap of three sweeps before it gives back the time no broker was
-// serving, so three sweeps must fall short of the two thirds of a lease a live session holds. The
-// defaults pass; a lease of 22 seconds with a 5-second sweep is refused naming both settings and
-// their values, and 23 passes.
-func TestLoadRefusesALeaseThreeSweepsCanRunOut(t *testing.T) {
-	if _, err := Load(env(validEnv())); err != nil {
-		t.Fatalf("Load(defaults) = %v, want the default lease and sweep accepted", err)
-	}
-	for _, c := range []struct {
-		lease, sweep string
-		refused      bool
-	}{{"22", "5", true}, {"23", "5", false}, {"900", "60", false}, {"270", "60", true}, {"271", "60", false}} {
+// TestLoadRefusesALeaseAnOutageCanRunOut pins the exact boundary of the lease refusal at the two
+// sweeps the documents and the tests name, from the model of the renewers' own retry schedules
+// (internal/broker/leasetime): the largest refused lease is refused naming both settings, the
+// gap and the floor, and one second more is accepted. The defaults pass, and so does the pair
+// cmd/broker's outage test runs at, so no deployment and no test stops on this refusal.
+func TestLoadRefusesALeaseAnOutageCanRunOut(t *testing.T) {
+	model := leasetime.Production()
+	for _, sweep := range []int{5, 60} {
+		floor := int(model.Shortest(time.Duration(sweep)*time.Second) / time.Second)
+		refused, accepted := strconv.Itoa(floor-1), strconv.Itoa(floor)
 		e := validEnv()
-		e["BROKER_LEASE_SECONDS"], e["BROKER_SWEEP_SECONDS"] = c.lease, c.sweep
-		cfg, err := Load(env(e))
-		if !c.refused {
-			if err != nil || strconv.Itoa(cfg.LeaseSeconds) != c.lease || strconv.Itoa(cfg.SweepSeconds) != c.sweep {
-				t.Fatalf("Load(lease %s, sweep %s) = lease %d sweep %d, %v; want both accepted", c.lease, c.sweep, cfg.LeaseSeconds, cfg.SweepSeconds, err)
+		e["BROKER_LEASE_SECONDS"], e["BROKER_SWEEP_SECONDS"] = refused, strconv.Itoa(sweep)
+		_, err := Load(env(e))
+		if err == nil {
+			t.Fatalf("Load(lease %s, sweep %d) accepted a lease an outage of %d sweeps can run out", refused, sweep, leasetime.NotServingSweeps)
+		}
+		for _, want := range []string{
+			"BROKER_LEASE_SECONDS (" + refused + ")",
+			"BROKER_SWEEP_SECONDS (" + strconv.Itoa(sweep) + ")",
+			"a gap of " + strconv.Itoa(leasetime.NotServingSweeps*sweep) + " s",
+			"the time its renewer then takes to renew",
+			"The shortest lease that survives both renewers at this sweep is " + accepted + " s.",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Load(lease %s, sweep %d) = %q, want it to name %q", refused, sweep, err, want)
 			}
+		}
+		t.Logf("lease %s at a sweep of %d is refused: %v", refused, sweep, err)
+		e["BROKER_LEASE_SECONDS"] = accepted
+		if cfg, err := Load(env(e)); err != nil || cfg.LeaseSeconds != floor || cfg.SweepSeconds != sweep {
+			t.Fatalf("Load(lease %s, sweep %d) = lease %d sweep %d, %v; want the shortest lease that survives accepted", accepted, sweep, cfg.LeaseSeconds, cfg.SweepSeconds, err)
+		}
+		t.Logf("lease %s at a sweep of %d is accepted", accepted, sweep)
+	}
+	// The defaults, and the lease and sweep TestABrokerOutageLongerThanALease runs at, which it
+	// takes from the same model.
+	outageLease := int(model.Shortest(time.Second) / time.Second)
+	for _, c := range []struct{ lease, sweep string }{
+		{"", ""},
+		{strconv.Itoa(outageLease), "1"},
+		{"900", "60"},
+	} {
+		e := validEnv()
+		if c.lease != "" {
+			e["BROKER_LEASE_SECONDS"], e["BROKER_SWEEP_SECONDS"] = c.lease, c.sweep
+		}
+		cfg, err := Load(env(e))
+		if err != nil {
+			t.Errorf("Load(lease %q, sweep %q) = %v, want it accepted", c.lease, c.sweep, err)
 			continue
 		}
-		if err == nil {
-			t.Fatalf("Load(lease %s, sweep %s) accepted a lease three sweeps can run out", c.lease, c.sweep)
-		}
-		for _, want := range []string{"BROKER_LEASE_SECONDS (" + c.lease + ")", "BROKER_SWEEP_SECONDS (" + c.sweep + ")", "two thirds of its lease", "three sweeps"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("Load(lease %s, sweep %s) = %q, want it to name %q", c.lease, c.sweep, err, want)
-			}
-		}
+		t.Logf("lease %d at a sweep of %d is accepted", cfg.LeaseSeconds, cfg.SweepSeconds)
 	}
 }
 

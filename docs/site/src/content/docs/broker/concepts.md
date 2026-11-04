@@ -114,10 +114,29 @@ the gap gives the gap back to every such lease that was not revoked, at most
 (`packages/envoy/internal/broker/enroll/serving.go`, `ServingClock`). The session's renewer then
 renews as before. A revoked enrollment stays ended, and so does one whose lease ran out while a
 broker was serving. A renewal with another pod's or service account's token is still refused
-`POD_IDENTITY_MISMATCH`. A live session renews with at least two thirds of its lease left, so the
-broker refuses to start unless `BROKER_LEASE_SECONDS` is more than four and a half times
-`BROKER_SWEEP_SECONDS`: a lease that runs out inside a gap of three sweeps, which still counts as
-serving, would otherwise be ended. This covers only an outage of the broker itself:
+`POD_IDENTITY_MISMATCH`. A gap of three sweeps is given back to nobody, so a lease has to
+outlive one and then the retries its renewer takes to renew once a broker serves again. The
+broker refuses to start on a `BROKER_LEASE_SECONDS` too short for its `BROKER_SWEEP_SECONDS`,
+and names the shortest lease that is long enough: 91 seconds at a sweep of 1 or 5 seconds, 105
+at a sweep of 10, 225 at 30 and 360 at 60.
+It walks both renewers' own retry schedules
+(`packages/envoy/internal/broker/leasetime`), counting each renewal the outage refuses as
+failing at whatever instant costs the renewer most: anywhere from at once, when the connection
+is refused, to the 30-second client timeout, when nothing behind a front door ever answers,
+with a proxy that gives up or a terminating pod that resets ending one between the two.
+Each renewer waits from the instant its failure comes back, so that instant is what decides
+where its next renewal falls.
+Which renewer sets the floor changes with the sweep: `agent-secrets renew`'s floor grows steadily
+with the sweep, while `agent-secrets-helper`, which waits at least 30 seconds after any failed
+renewal, stays at 91 seconds up to a 10-second sweep, where an outage can refuse only its first
+renewal, and rises faster after that. So `agent-secrets renew` is the stricter of the two only
+at sweeps of 7 to 10 seconds, and the helper at every other.
+The default lease
+of 900 seconds passes at every sweep the broker takes.
+A deployment whose `BROKER_LEASE_SECONDS` is below its sweep's floor has to raise it before it
+rolls a broker carrying this refusal, since each new pod exits at boot instead of serving.
+This covers only an outage of the broker
+itself:
 
 - A broker that runs but that sessions cannot reach (ingress, DNS, a NetworkPolicy, a stale
   `AGENT_SECRETS_URL`) still counts as serving, so a lease that runs out then ends as before.

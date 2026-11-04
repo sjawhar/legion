@@ -515,7 +515,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Rolling back | Roll forward past a broker that serves kind secrets, never back. A broker before kinds reads no `kind` tag and would serve a kind secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes `mint-service-account: kind-secret` beside every kind, which every broker from legion-envoy-v13.19.0 to the release before kinds refuses as `mint-target-malformed`; a broker older than legion-envoy-v13.19.0 reads no such tag and serves the value. A kind secret written without the guard (by hand, or by a deployment that does not set it) is served by every earlier broker. To go back anyway, first disable every kind secret's versions. |
 | The secret store | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS tags, or Secret Manager annotations), encrypted with the agent-secrets key, and holding a current value. A `kind` tag makes the broker mint a release from that value. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the tags, the name each secret is asked for by, and how often the broker rereads them. `BROKER_SECRETS_STORE` names which store, and the two rows below say what each needs. |
 | AWS Secrets Manager (`aws-secrets-manager`) | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key (`BROKER_SECRETS_KMS_KEY_ARN`), `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
-| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one reread every 4 seconds across all callers of **each process** (at two processes that is the same 120 metadata reads a minute for the fleet, which is what the per-process figure is derived from — see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
+| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, bounded across all callers of **each process** at one reread every `N² × 1 second`, where `N` is the pods that process counted at its last beat and never fewer than two — one every 4 seconds at two pods, one every 9 at three, one every 16 at four — which holds the whole fleet at the same 120 metadata reads a minute whatever `N` is (see [Running more than one pod](#running-more-than-one-pod)); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, a kind secret's among them, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete made outside `agent-secrets secret` stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent; `agent-secrets secret delete` rereads the name, and the broker then releases nothing more). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
 | Kind secrets | A `github-app` secret needs outbound HTTPS access to `api.github.com`, and a `github-owners` tag naming the GitHub accounts it mints for, which the deployment sets when it creates the secret. A `google-login` secret needs outbound HTTPS access to `oauth2.googleapis.com`. The broker reads the stored value for each release, as it reads any secret, and returns only the minted token. It needs no IAM permission to mint these values. A mint GitHub or Google refuses answers the session `502 MINT_FAILED`, naming their reason, and logs `broker: mint failed` (below). A narrowing the secret cannot serve, an account its tag does not list or one GitHub refuses, answers `403 NARROWING_OWNER_NOT_LISTED` or `422 NARROWING_REFUSED` instead and logs `broker: narrowing refused`. |
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's account routes as its own ServiceAccount: it lists the requests and machine logins waiting on the signed-in person, each secret request with its page on the broker (`approve_url`), which its Inbox links to, and relays a person's machine-login decisions and revokes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. Deploy a broker with the approval page before a Dispatch whose Inbox links it ([Approval sign-in](#approval-sign-in)). |
@@ -565,31 +565,37 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   only that no agent secret has the name, says it only to an enrolled session, and never separates a
   secret that does not exist from one the broker refuses; it is what anyone allowed to list the
   namespace reads from the secrets' own names and tags (or annotations).
-  Rereads are limited twice, by fixed limits rather than settings (`RereadLimitFor`,
-  `DefaultRereadOverallLimit` and `GCPRereadOverallLimit` in
-  `packages/envoy/internal/broker/api/limits.go`): each source address gets a burst of 30,
-  refilled one every twice the broker-wide bucket this process mounts — 2 seconds on the default
-  store — and the broker as a whole takes one a second, burst 10, however
-  many addresses the rereads come from — each one takes the policy's writer lock while it reads
-  the secret, so that lock, not the caller, is what the second limit bounds. On Google Secret
-  Manager, where a reread spends two reads of the project's shared metadata quota, that
-  broker-wide limit is one reread every 4 seconds, burst 10, and an address's own is one every 8
-  seconds there. A reread counts against either limit
+  Rereads are limited twice, by limits each pod derives rather than by settings
+  (`RereadOverallFor` and `RereadLimitFor` in
+  `packages/envoy/internal/broker/api/limits.go`): the broker as a whole takes one reread every
+  `N² × 250 ms` on the default store, burst 10, however many addresses the rereads come from —
+  each one takes the policy's writer lock while it reads the secret, so that lock, not the
+  caller, is what this limit bounds — and each source address gets a burst of 30, refilled one
+  every twice that. `N` is how many broker pods the pod serving the call counted at its last
+  beat, never fewer than two, so a two-pod fleet allows one reread a second and an address one
+  every 2 seconds, a three-pod fleet one every 2.25 seconds and an address one every 4.5, and a
+  four-pod fleet one every 4 seconds and an address one every 8. On Google Secret Manager,
+  where a reread spends two reads of the project's shared metadata quota, the same arithmetic
+  runs over a budget four times smaller: one reread every `N² × 1 second` broker-wide, burst
+  10, and an address's own one every twice that — 4 and 8 seconds at two pods, 16 and 32 at
+  four. A reread counts against either limit
   only when both let it run, so one address flooding past its own limit leaves the broker-wide
   one to everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After`
-  header naming the limit that refused: 1 second for the broker-wide limit, 4 seconds for Secret
-  Manager's, and for an address's own twice whichever of those this process mounted — 2 seconds on
-  the default store, 8 under Secret Manager.
-  Each of these buckets is one process's, and the broker-wide pair is sized from what the whole
-  fleet spends of the secret store, which is not the same as what it spends in HTTP rereads: one
-  reread the broker accepts costs the store **one read per pod**, because the pod that served it
-  rereads the secret and then tells every other pod to reread it too. So the fleet reads the
-  store `replicas × this rate × replicas` times a second, and each bucket is the fleet's whole
-  budget divided by the replica count **squared**. At two pods: `2 pods × 1 reread/s × 2 store
-  reads = 4 store reads a second`, which is what one pod alone was allowed, and on Secret
-  Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a second`, the same 120
-  metadata reads a minute as before. Read those as the arithmetic rather than as the number two:
-  a third replica divides the fleet's budget by nine, not by four.
+  header naming the limit that refused, at the rate that limit runs at now: at two pods, 1
+  second for the broker-wide limit, 4 seconds for Secret Manager's, and for an address's own
+  twice whichever of those this process mounted — 2 seconds on the default store, 8 under
+  Secret Manager.
+  Each of these buckets is one process's, and the broker-wide pair is derived from what the
+  whole fleet spends of the secret store, which is not the same as what it spends in HTTP
+  rereads: one reread the broker accepts costs the store **one read per pod**, because the pod
+  that served it rereads the secret and then tells every other pod to reread it too. So the
+  fleet reads the store `replicas × this rate × replicas` times a second, and each bucket is
+  the fleet's whole budget divided by the replica count **squared**. At two pods: `2 pods × 1
+  reread/s × 2 store reads = 4 store reads a second`, which is what one pod alone was allowed,
+  and on Secret Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a
+  second`, the same 120 metadata reads a minute as before. Read those as the arithmetic rather
+  than as the number two: a third replica divides the fleet's budget by nine, not by four, and
+  the pod does that division itself.
   Their **burst** is not divided at all: it stays at the budget's ten. A burst is a depth and
   what it has to admit is one person's write burst, a hard floor that the replica count does not
   change, while what it guards — each pod's own transient, its own burst plus every peer's — is a
@@ -602,7 +608,9 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   on either store and without tightening a deployment for a bucket it does not mount. That
   ordering matters because the route takes no credential and a refusal costs a caller nothing,
   so a caller that merely keeps succeeding at the shared refill rate would otherwise starve the
-  fan-out for everyone. All three are re-derived together when the replica count changes.
+  fan-out for everyone. Each pod re-derives all three whenever the number of pods it counts
+  changes, and logs the rate it moved to (`broker reread rate`,
+  [Health and logs](#health-and-logs)).
   A reread one pod's notification drives on another spends nothing from either bucket, since the
   pod that served the original call already paid for it — which is what makes the figures above
   the whole of the fleet's store traffic rather than a floor under it
@@ -712,6 +720,8 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped) while a broker was serving; the sweep ended it, revoking its grants and cancelling its pending requests. A lease that ran out while no broker was serving is not ended ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). |
 | `broker: gave back the time no broker was serving to every lease still running when the last broker served gap=… last_serving_at=… enrollments=…` | At INFO, on the first beat after more than three sweeps in which no broker beat: every broker process was down, or none could reach the database. Each enrollment not revoked whose lease was still running at `last_serving_at` had its lease moved on by `gap`, but no further than `BROKER_LEASE_SECONDS` from now; `enrollments` counts them. Their sessions renew as before. |
 | `broker: the serving clock could not beat; it retries every interval and logs again once it beats error=… timed_out=…` | At WARN: this process could not record its beat, usually because the database is out of reach. A beat may take at most one `BROKER_SWEEP_SECONDS`; `timed_out=true` says it ran out of that (its deadline, or a lock or statement past it), as when another transaction holds this process's row, while the other brokers go on beating. It retries every `BROKER_SWEEP_SECONDS` and logs `broker: the serving clock beats again` once it does. |
+| `broker reread rate replicas=<n> every=<interval> burst=10` | At INFO, at this pod's first beat of the serving clock and then each time the number of pods it counts changes: the limits it now serves `POST /v1/secrets/{name}/reread` at. `every` is how often the broker-wide bucket takes one reread back, and an address's own bucket takes one back every twice that. A pod that has not beaten yet serves at the two-pod rate ([Running more than one pod](#running-more-than-one-pod)). |
+| `broker reread rate above the replica count this sizing supports replicas=<n> every=<interval> store_reads_at_burst=<reads>` | At WARN, beside the line above when a pod counts more than four: the rate is derived the same way, but the burst of 10 is not divided, so a burst at that count reads the secret store `store_reads_at_burst` times at once, which this sizing was not chosen for. A pod logs it once, when its own count first goes above four, and again only if that count changes while it stays above four. A fleet that stays larger has outgrown the budget `limits.go` divides, which is where to change it. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, end the login that made the line's enrollment, which ends every enrollment it made, once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check) gives the query and both ways to end it); never pick a machine-login row by its machine name. |
 | `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and a launcher credential that enrolls pods can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below). If that pod runs an older image, the copy's rows are the marked rows of that pod UID: end each one's login once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check)), never picking a machine-login row by its machine name, and replace the pod with a current image. Otherwise the copy is the line's own enrollment, as that section says. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
 | `broker: machine session renewal refused: its machine login has ended enrollment=…` | At WARN: a machine's own session asked to renew while the launcher credential its Google identity token minted was no longer live — revoked, past the hour's expiry that token gave it, or its account no longer listed for its service in `BROKER_VM_SERVICES`. The renewal is answered `401 ENROLLMENT_NOT_LIVE` and the session lapses within one `BROKER_LEASE_SECONDS`. It is expected after a fleet is taken out of the settings and after a machine stops trading. A line for a machine that is still running and still listed means something holding that session's key is renewing after its box's login has ended, which is what this refusal is for: see [a copied machine token](#a-copied-machine-token). |
@@ -783,13 +793,18 @@ five-minute reload. The promise is therefore "within seconds, except while a pod
 redialing, where the next five-minute reload is the backstop". A reread a notification drives
 spends no rate-limit token: the pod that served the original call already paid for it.
 
-**The reread limits are three numbers derived from one budget, not one number halved.** One
-reread the broker accepts costs the secret store one read on every pod — the pod that served it,
-and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the per-pod rate`,
-and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at two pods
-one reread a second, or one every 4 seconds against Google Secret Manager, which leaves the store
-exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that one pod
-alone was allowed. Their **burst** is not divided at all and stays at ten, because a burst is a
+**The reread limits are three numbers each pod derives from one budget, not one number halved.**
+One reread the broker accepts costs the secret store one read on every pod — the pod that served
+it, and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the per-pod
+rate`, and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at
+two pods one reread a second, or one every 4 seconds against Google Secret Manager, which leaves
+the store exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that
+one pod alone was allowed. At three pods it is one every 2.25 seconds, or one every 9; at four,
+one every 4 seconds, or one every 16. Each pod does that division itself: its serving clock
+counts the pods beating in `broker_serving` at each beat, a count below two counts as two, and a
+pod whose count changed logs `broker reread rate` and moves both of its buckets without
+emptying or refilling either ([Health and logs](#health-and-logs)).
+Their **burst** is not divided at all and stays at ten, because a burst is a
 depth and what it admits is one person's write burst, which the replica count does not change,
 while what it guards is a transient on each pod's own writer lock — latency, spent once, and
 re-bounded by the rate. A burst momentarily lets the fleet accept `replicas × burst` rereads and
@@ -797,13 +812,34 @@ each costs a read on every pod, so the store sees `replicas² × burst`: 40, 90 
 two, three and four pods, twice that in metadata reads under Secret Manager (80, 180, 320), which
 is 8, 18 and 32 seconds of its 600 a minute — transients, re-bounded immediately by the rate.
 That cost grows with the square of the replica count while the rate is already divided by it, so
-a fleet much larger than two re-derives the burst against the quota rather than carrying ten
-forward unexamined. The **per-address** bucket is derived from them in turn — it refills at half
-the rate of the bucket this process mounts, 2 seconds on the default store and 8 under Secret
-Manager — so no single address can hold the
+four pods is the largest count this sizing was chosen for. Above it the rates are derived the
+same way and every pod logs a warning naming the count and the store reads a burst then costs,
+because a fleet that stays that large wants its budget re-derived against the quota rather than
+carrying ten forward unexamined. The **per-address** bucket is derived from them in turn — it
+refills at half the rate of the bucket this process mounts, 2 seconds on the default store and 8
+under Secret Manager at two pods — so no single address can hold the
 fleet's budget at zero on a route that takes no credential. Every other limiter is per process, so
-a fleet of N pods allows N times each ([Network and trust](#network-and-trust)). All three are
-re-derived together when the replica count changes.
+a fleet of N pods allows N times each ([Network and trust](#network-and-trust)).
+
+**A rolling deploy counts one pod more than the Deployment runs.** The pod a surge adds beats
+beside the pod it replaces, and a pod that has stopped goes on being counted until its row is
+three sweeps old, so a roll of two pods holds the fleet at the three-pod rate for the length of
+the roll and can reach the four-pod rate while a stopped pod's row is still live. Nothing has to
+be set for that: each pod follows the count it sees and goes back to the two-pod rate within a
+few sweeps of the roll finishing. A roll of a four-pod fleet counts five, which is past what this
+sizing was chosen for, and each pod logs the warning above once, when its count first goes above
+four.
+
+**Before you roll a broker, read the lease refusal.** A broker whose `BROKER_LEASE_SECONDS` is
+too short for its `BROKER_SWEEP_SECONDS` exits at boot instead of serving, and that rule is
+stricter than it was: it walks each renewer's own retry schedule rather than counting two thirds
+of the lease, so the shortest lease it accepts is 91 s at a sweep of 1 or 5 seconds, 105 s at
+10, 225 s at 30 and 360 s at 60.
+A pair below that boots a broker of an earlier release and does not boot this one — a 60-second
+lease at the default sweep, or anything from 271 s to 359 s at a sixty-second sweep — so raise
+`BROKER_LEASE_SECONDS` to at least the figure for your sweep and roll that first.
+The refusal prints the figure itself
+([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)).
 
 ## The renew token check
 

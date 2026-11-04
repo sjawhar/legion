@@ -1,4 +1,4 @@
--- packages/envoy/internal/broker/store/migrations/0024_drop_vm_enrollment_kind.up.sql
+-- packages/envoy/internal/broker/store/migrations/0026_drop_vm_enrollment_kind.up.sql
 -- A machine no longer enrolls itself as a kind of its own. It presents its Google identity token
 -- to the RFC 8693 token exchange, which mints the launcher credential it then enrols a session
 -- under, so an enrollment is a session or a pod and nothing else. This retires every vm
