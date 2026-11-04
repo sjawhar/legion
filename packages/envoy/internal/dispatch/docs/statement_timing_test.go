@@ -28,10 +28,11 @@ const anchoredMarkTimingLimit = 20
 // Both indexes the new texts reach were already there - comments_anchor_artifact is migration
 // 0032 and asks_anchor_artifact_id migration 0148, both below this change's ten migrations,
 // 20261101182419 to 20261101182522 - and what each read gained is the uuid comparison beside
-// its text comparison, which is what makes the index eligible at all. One schema therefore
-// holds both sides, and the pair is the committed regression check: the before text cannot use
-// the index, so the day a read loses that comparison its median goes back to the before text's
-// and the pair fails.
+// its text comparison, which is what makes the index eligible at all; the two mutation.go
+// pairs' before texts also take main's `for share`, which the new texts dropped. One schema
+// therefore holds both sides, and the pair is the committed regression check: the before text
+// cannot use the index, so the day a read loses that comparison its median goes back to the
+// before text's and the pair fails.
 //
 // Each pair's before text is the oracle anchor_reads_test.go already holds - the text the
 // release before this change ran - read from there rather than copied a second time: two copies

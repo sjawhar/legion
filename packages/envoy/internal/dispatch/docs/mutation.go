@@ -1286,9 +1286,8 @@ func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string)
 // anchored on the document bound to $1 and records one of the marks bound to $2. Each finds its
 // rows through its table's anchor index (anchorTarget.anchoredOn), so the read goes by the
 // document's anchors rather than by the table; the text of each is built once, as the edit
-// validation's statements are. Neither takes a row lock, which a share lock would: the caller
-// holds the document owner's lock, and every writer of an anchored ask or comment takes that
-// lock first, so what these read holds still until the edit commits.
+// validation's statements are. Their caller's doc says why they take no row lock
+// (checkTableAnchorRows).
 var (
 	tableAskAnchorsQuery = `
 		select id::text, anchor->>'mark_id', state

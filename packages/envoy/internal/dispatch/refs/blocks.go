@@ -514,7 +514,7 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 }
 
 // BlockChange is when a block of a document last changed: the version its text last changed in
-// and that version's time, as document_blocks records them (IndexBlocks).
+// and that version's time, as document_blocks records them (BlockIndexing.Queue).
 type BlockChange struct {
 	Version int
 	At      time.Time

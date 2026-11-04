@@ -146,8 +146,8 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			stored.State, stored.Answer = ask.State, answer
 			// The seed's transaction joins no write phase of anyone's, so it reads the index the
 			// ask holds - none, its row having just been inserted - plans the parts against it
-			// and runs the plan's statements at once, as a batch of their own, the way a caller
-			// outside the document service indexes an item it wrote (refs.ReindexOwedItem).
+			// and runs the plan's statements at once, as a batch of their own, the way a writer
+			// that queues no write phase indexes an item it wrote (refs.IndexItem).
 			partIndex, err := refs.ReadItemIndex(ctx, tx, refs.ItemAsk, ask.ID)
 			if err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
