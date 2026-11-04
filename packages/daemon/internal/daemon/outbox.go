@@ -1019,6 +1019,24 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				r.log.Info("outbox boot rule-resume finished: its claim spent the launch budget", "row", row.ID, "issue", issue.Key, "role", payload.Role)
 				return nil
 			}
+			// The relaunch half of a start brings the worker's session back while the task of
+			// the same start waits for the issue's admission slot (workflow.StartOrOwe marks it
+			// Relaunch). A failed claim keeps the task it was working, and a retry delivers that
+			// task again as the claim comes back (supervise's RequestRetry), so retrying one
+			// here would put the held worker to work with no slot — and the task row behind it
+			// would then find a claim no longer failed and deliver its own task as a second
+			// prompt for the same phase. The retry belongs to the row that carries the task: it
+			// comes when the slot does, its own delivery is held back while the claim still
+			// works that phase's task (the guard below), and so exactly one task reaches the
+			// worker, at the moment the cap allows it. A start that is nobody's half — a tree
+			// architect's, which takes no slot of its own, or a role relaunched beside the
+			// phase's worker (admit's startMidPhaseMembers) — has no task row behind it, so it
+			// retries its claim here or that session never comes back.
+			if payload.Relaunch {
+				r.log.Info("outbox relaunch of a failed claim left for the row that carries its task",
+					"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", payload.Phase)
+				return nil
+			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}

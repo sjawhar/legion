@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -21,6 +22,12 @@ func RankLess(a, b Issue) bool {
 	}
 	return a.Rank < b.Rank
 }
+
+// DoneStatus is the one Dispatch status that finishes an issue. Nothing else does: an issue
+// moved to backlog or icebox has stopped, not finished, and an issue waiting on it still waits
+// (blockers.Unfinished). It lives here because the rules that read a record's own status for
+// the same question are here too (cycleAncestor).
+const DoneStatus = "done"
 
 // OutOfWorkflow says whether a Dispatch status takes an issue out of the workflow: every status
 // but todo that no phase writes. Admission holds no slot for such an issue, and the engine leaves
@@ -59,45 +66,77 @@ func InWorkflow(issue Issue) bool {
 // todo there (AcceptedAncestor, read by Waiting).
 var AcceptedPhases = []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge}
 
-// AcceptedAncestor is the nearest issue strictly above issue, on the chain of recorded parents in
-// byKey and then the root of issue's own tree, that the daemon has already accepted
-// (AcceptedPhases), and "" when no ancestor has been. byKey is the records of the issue's own
-// project the caller already holds, which is where the chain is read.
+// Ancestors is every issue above issue inside its own tree, nearest first and the tree's own
+// root last: the one parent-chain walk every rule that reads "above" is written over, so that
+// no two of them answer differently about the same chain. AcceptedAncestor, Above, descends and
+// cycleAncestor all read it. byKey is the records the caller holds the chain in — a tree's
+// members for a reader of one tree, the project's own for a reader of a whole pass.
 //
-// A parent outside byKey does not end the walk, and neither does a chain that ends short of the
-// tree's own root or loops back on itself: the walk goes on at that root, which stands above
-// every member of the tree whatever each member's record says it hangs under — the same reading
-// Beneath gives a root, whose descendants are every other member of its tree. Without that the
-// judgement would depend on which records the caller holds, and the callers do not hold the same
-// ones: the waiting line is read over the project's live records (Store.LiveIssues, which leaves
-// out an issue already done), while the two doors that refuse work beneath an accepted ancestor
-// are read over the whole tree (Store.TreeIssues, AcceptedAncestorOf, OpenBeneath). A done issue
-// in the middle of the chain is a gap in it, not the end of it, and the daemon must not start
-// beneath an ancestor it has accepted merely because it cannot see every step of the way up to
-// it. The two now answer alike, which is what keeps the rules from deadlocking: OpenBeneath
-// leaves out the issues this hold has stopped, so an issue the line holds is an issue the
-// ancestor's own close does not wait for.
+// The walk ends at the tree's own root, which stands above every member of the tree whatever
+// each member's record says it hangs under — the same reading Beneath gives a root, whose
+// descendants are every other member of its tree. A chain that leaves byKey, or loops back on
+// itself, ends there and the root is read next: a gap in the chain is a gap, not the end of it,
+// and the daemon must not judge an issue by how much of the way up to its root it can see.
+// Nothing above the root is read at all, because every rule here is a rule about one tree, and
+// a root's own Dispatch parent belongs to another: a root has no ancestors here.
 //
-// A parent already done does not end the walk either: the spec's grandchild under a done parent
-// is held by whichever issue above that parent is still merging, which is what the walk goes on
-// to find. A done ancestor holds nothing itself — its merge has happened, so there is no order
-// left to keep.
-func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
+// Which records the caller holds is therefore the one thing that can still make two readers
+// disagree, and the callers do not hold the same ones: the waiting line is read over the
+// project's live records (Store.LiveIssues, which leaves out an issue already done), while the
+// two doors that refuse work beneath an accepted ancestor are read over the whole tree
+// (Store.TreeIssues, AcceptedAncestorOf, OpenBeneath). So the line's pass reads the records of
+// the ancestors its live read leaves out and walks the chain over both (LineFacts.Parents,
+// Store.AncestorsOf): without them a parent already done hid every issue above it, and
+// admission offered a first-phase slot to a child the doors hold.
+func Ancestors(issue Issue, byKey map[string]Issue) []Issue {
+	above := make([]Issue, 0, 4)
 	seen := map[string]bool{issue.Key: true}
-	for _, start := range []*string{issue.Parent, &issue.Tree} {
-		for key := start; key != nil && !seen[*key]; {
-			seen[*key] = true
-			above, recorded := byKey[*key]
-			if !recorded {
-				break
-			}
-			if slices.Contains(AcceptedPhases, above.Phase) {
-				return above.Key
-			}
-			key = above.Parent
+	for key := issue.Parent; key != nil && !seen[*key]; {
+		seen[*key] = true
+		parent, recorded := byKey[*key]
+		if !recorded {
+			break
+		}
+		above = append(above, parent)
+		if parent.Key == issue.Tree {
+			return above
+		}
+		key = parent.Parent
+	}
+	if root, recorded := byKey[issue.Tree]; recorded && !seen[issue.Tree] {
+		above = append(above, root)
+	}
+	return above
+}
+
+// AcceptedAncestor is the nearest issue above issue (Ancestors) that the daemon has already
+// accepted (AcceptedPhases), and "" when no ancestor has been.
+//
+// A parent already done does not end the walk: the spec's grandchild under a done parent is held
+// by whichever issue above that parent is still merging, which is what the walk goes on to find.
+// A done ancestor holds nothing itself — its merge has happened, so there is no order left to
+// keep. The hold and the acceptance rules answer alike, which is what keeps them from
+// deadlocking: OpenBeneath leaves out the issues this hold has stopped, so an issue the line
+// holds is an issue the ancestor's own close does not wait for, and the linger of the tree that
+// held it hands it over as a root of its own (workflow's unfinishedHandOvers).
+func AcceptedAncestor(issue Issue, byKey map[string]Issue) string {
+	for _, above := range Ancestors(issue, byKey) {
+		if slices.Contains(AcceptedPhases, above.Phase) {
+			return above.Key
 		}
 	}
 	return ""
+}
+
+// HeldUnderAccepted says whether the daemon is itself holding issue where it stands because an
+// ancestor of it has already been accepted (AcceptedAncestor): it stands at phase.Admitted, so
+// nothing of it has started, and the line will offer it no slot until that ancestor closes
+// (Waiting). It is one rule with two readers that must agree exactly. OpenBeneath leaves such an
+// issue out, so the ancestor's own acceptance and close are not deadlocked by the issue its hold
+// stopped; the linger of a closed root hands it to Legion as a root of its own
+// (workflow's unfinishedHandOvers), so the hold never outlives the ancestor that caused it.
+func HeldUnderAccepted(issue Issue, byKey map[string]Issue) bool {
+	return issue.Phase == phase.Admitted && AcceptedAncestor(issue, byKey) != ""
 }
 
 // LineKind is why an issue stands in the waiting line, which is also what its promotion does with
@@ -132,11 +171,12 @@ type LineEntry struct {
 }
 
 // LineFacts is everything the waiting line and the set of live trees are read from beyond the
-// project's own issue records: the tree lifecycles, the roots' design gates, and the worker starts
-// the project already owes. They are gathered once per admission pass (ReadLineFacts) and handed
-// to every judgement that pass makes, because each of them is read under the one fact lock
-// (intake.ApplyFact) on every fact of every consumer: a read per tree, per gate or per slot would
-// cost the daemon a round trip for each of them on each fact.
+// project's own issue records: the tree lifecycles, the roots' design gates, the records above
+// the pass's own that its live read leaves out, and the worker starts the project already owes.
+// They are gathered once per admission pass (ReadLineFacts) and handed to every judgement that
+// pass makes, because each of them is read under the one fact lock (intake.ApplyFact) on every
+// fact of every consumer: a read per tree, per gate or per slot would cost the daemon a round
+// trip for each of them on each fact.
 type LineFacts struct {
 	// Lifecycles is the lifecycle of each tree root of the records, by root key. A tree with no
 	// row has no entry, which reads as a tree nothing has opened.
@@ -149,6 +189,11 @@ type LineFacts struct {
 	// that has outlived its fences walks (admit's finishFencedStarts).
 	Owed     map[string]OwedStart
 	OwedRows []OwedStart
+	// Parents is the record of each issue on a parent chain above the pass's own records that
+	// those records leave out — an ancestor already done — by key, so that the one chain walk
+	// (Ancestors) crosses a done parent rather than stopping at it. A pass whose records hold
+	// every parent they name reads nothing for it and has no entry here.
+	Parents map[string]Issue
 	// Held is the set of issues a Dispatch blocker holds where they stand, by key: the issues
 	// whose first phase the line must not offer a slot to, however long they have waited. Only
 	// the caller can fill it — the judgement is blockers.Holds over the project's mirror rows,
@@ -208,15 +253,54 @@ func ReadLifecycles(ctx context.Context, tx pgx.Tx, store Store, project string,
 	return store.TreeLifecycles(ctx, tx, token, treeRoots(issues))
 }
 
+// ReadParents is the record of each issue on a parent chain above issues that issues itself
+// leaves out, by key (LineFacts.Parents): the pass's live read holds no issue already done, and
+// a done parent in the middle of a chain would otherwise hide every issue above it from the one
+// chain walk (Ancestors). It is one read whatever the depth of the chains — the store walks them
+// in the database (Store.AncestorsOf) — and no read at all for the ordinary pass, whose records
+// hold every parent they name.
+func ReadParents(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (map[string]Issue, error) {
+	held := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		held[issue.Key] = struct{}{}
+	}
+	var missing []string
+	for _, issue := range issues {
+		if issue.Parent == nil {
+			continue
+		}
+		if _, inHand := held[*issue.Parent]; !inHand && !slices.Contains(missing, *issue.Parent) {
+			missing = append(missing, *issue.Parent)
+		}
+	}
+	if len(missing) == 0 {
+		return map[string]Issue{}, nil
+	}
+	rows, err := store.AncestorsOf(ctx, tx, project, missing)
+	if err != nil {
+		return nil, err
+	}
+	parents := make(map[string]Issue, len(rows))
+	for _, row := range rows {
+		parents[row.Key] = row
+	}
+	return parents, nil
+}
+
 // ReadLineFacts reads the facts of one admission pass for issues: one tree-lifecycle read
-// (ReadLifecycles), one gate read and one read of the starts the project owes, whatever the
-// number of trees, gates and issues involved. project is the Dispatch project key.
+// (ReadLifecycles), one gate read, one read of the records above the pass's own (ReadParents)
+// and one read of the starts the project owes, whatever the number of trees, gates and issues
+// involved. project is the Dispatch project key.
 func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (LineFacts, error) {
 	lifecycles, err := ReadLifecycles(ctx, tx, store, project, issues)
 	if err != nil {
 		return LineFacts{}, err
 	}
 	gates, err := store.Gates(ctx, tx, treeRoots(issues))
+	if err != nil {
+		return LineFacts{}, err
+	}
+	parents, err := ReadParents(ctx, tx, store, project, issues)
 	if err != nil {
 		return LineFacts{}, err
 	}
@@ -232,13 +316,13 @@ func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, 
 			owed[row.Issue] = row
 		}
 	}
-	return LineFacts{Lifecycles: lifecycles, Gates: gates, Owed: owed, OwedRows: rows}, nil
+	return LineFacts{Lifecycles: lifecycles, Gates: gates, Parents: parents, Owed: owed, OwedRows: rows}, nil
 }
 
-// gateOpen is whether a person's approval stands on the gate's current document version. It is
-// classify.DesignGateOpen's rule written out rather than called, as PutGate's own copy of it is:
-// internal/classify reads this package, so this package may not read it back.
-func gateOpen(gate DesignGate) bool {
+// GateOpen is whether a person's approval stands on the gate's current document version: the one
+// statement of it, which classify.DesignGateOpen and Store.PutGate's own write both call.
+// internal/classify reads this package, so the rule lives here, where every reader can reach it.
+func GateOpen(gate DesignGate) bool {
 	return gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
 }
 
@@ -251,7 +335,7 @@ func gateOpen(gate DesignGate) bool {
 // knows its work came back and not when, and the alternative, dropping it to the back by rank,
 // loses what it does know.
 func gateReturn(gate DesignGate) time.Time {
-	if !gateOpen(gate) {
+	if !GateOpen(gate) {
 		return time.Time{}
 	}
 	return gate.ApprovedMark.At
@@ -288,6 +372,28 @@ func AtWork(issue Issue, gate DesignGate) bool {
 	default:
 		return false
 	}
+}
+
+// NeedsSlot says whether issue must hold one of the cap's slots now: a worker of it has work
+// (AtWork), its tree is running — live, with a root that does not linger after its close — and
+// Dispatch still shows it in the workflow. Nothing of a tree that has left the workflow works
+// until its re-admission runs it again, and an issue that only waits — for its merge, in
+// accepting, on a person, on a blocker — holds none, so the cap bounds the issues at work
+// rather than the trees that are open.
+//
+// The Dispatch status is asked because a person's park, close or icebox takes the issue out of
+// the workflow before anything moves its phase: the workflow's own leave records the linger in
+// the same fact, but a pass that reads the record between the two would otherwise count a
+// parked root's slot against the cap for good.
+//
+// It is the one statement of the rule, and the two readers that must never disagree both call
+// it: admission releases the slot of every issue it answers false for (admit's releaseSlots),
+// and the waiting line's first part offers a slot to exactly the issues it answers true for
+// (Waiting). root is the record of the issue's tree root and gate that root's design gate; live
+// is whether the tree is live (LiveRoots). The slot is accounting only: taking one away
+// suspends no claim, moves no phase and writes no Dispatch status.
+func NeedsSlot(issue, root Issue, gate DesignGate, live bool) bool {
+	return live && !root.Lingers() && !OutOfWorkflow(issue.Status) && AtWork(issue, gate)
 }
 
 // Waiting is the line of issues that wait for an admission slot, in the order admission gives
@@ -360,6 +466,14 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
 	}
+	// The parent chain is walked over the records above these as well (LineFacts.Parents): a
+	// parent already done is no part of the live read, and a walk that stopped at it would hide
+	// every issue above it, so the line would offer a slot to a child the acceptance rules hold
+	// (AcceptedAncestor). They are kept apart from the records of the pass itself, which say
+	// what runs and what each issue ranks against: a done ancestor says neither.
+	chain := make(map[string]Issue, len(issues)+len(facts.Parents))
+	maps.Copy(chain, byKey)
+	maps.Copy(chain, facts.Parents)
 	queued := queuedRoots(issues, facts)
 	live := liveRoots(issues, facts, queued)
 	queuedKeys := make(map[string]struct{}, len(queued))
@@ -402,12 +516,14 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 			// promotion opens the tree, and the starts of a run it carries are queued then.
 			continue
 		}
-		// A worker of it must have work in the phase it stands in now (AtWork), the same
-		// question the release of a slot asks: an issue that owes a start its phase has moved
-		// past — a run that ended before its slot came, whose row the repair pass finishes
-		// (admit's finishFencedStarts) — waits for nothing and must not take a slot from an
-		// issue that does.
-		if OutOfWorkflow(issue.Status) || !runs(issue) || !AtWork(issue, facts.Gates[issue.Tree]) {
+		// The issue must need a slot where it stands (NeedsSlot), the same question the release
+		// of one asks, so that no issue the release would free is offered one here: an issue
+		// that owes a start its phase has moved past — a run that ended before its slot came,
+		// whose row the repair pass finishes (admit's finishFencedStarts) — waits for nothing
+		// and must not take a slot from an issue that does.
+		root, recorded := byKey[issue.Tree]
+		_, running := live[issue.Tree]
+		if !recorded || !NeedsSlot(issue, root, facts.Gates[issue.Tree], running) {
 			continue
 		}
 		owed, owes := facts.Owed[issue.Key]
@@ -449,7 +565,7 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 			continue
 		}
 		gate, registered := facts.Gates[issue.Tree]
-		if !registered || !gateOpen(gate) {
+		if !registered || !GateOpen(gate) {
 			continue
 		}
 		// A child an unfinished Dispatch issue holds where it stands waits for that issue, not
@@ -468,10 +584,12 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 			continue
 		}
 		// An issue beneath an ancestor the daemon has already accepted waits for that ancestor
-		// to close (AcceptedAncestor): starting it would let the ancestor merge work its own
+		// to close (HeldUnderAccepted): starting it would let the ancestor merge work its own
 		// head does not carry. A person's move of such an issue to todo records it here at
-		// admitted and leaves it here; the architect is told why when it enters.
-		if AcceptedAncestor(issue, byKey) != "" {
+		// admitted and leaves it here; the architect is told why when it enters. The chain is
+		// walked over the records above this pass's own as well, so that a parent already done
+		// does not hide the merging issue above it.
+		if HeldUnderAccepted(issue, chain) {
 			continue
 		}
 		entry := LineEntry{Issue: issue, Kind: LineFirstPhase}
@@ -523,30 +641,37 @@ func WaitingIssues(line []LineEntry) []Issue {
 }
 
 // queuedRoots is every root handed to Legion whose tree has not been opened and which may take a
-// slot: one that never ran, a re-admitted one and a handed-over one. It is read before the
-// ancestry hold, because the hold is read against the live trees these same roots make
-// (liveRoots). A root whose own record says its generation already runs (ran) is not one of
-// them, whatever Dispatch now shows.
+// slot: one that never ran, a re-admitted one and a handed-over one (QueuedRoot). It is read
+// before the ancestry hold, because the hold is read against the live trees these same roots
+// make (liveRoots).
+func queuedRoots(issues []Issue, facts LineFacts) []Issue {
+	queued := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if QueuedRoot(issue, facts.Gates[issue.Key]) {
+			queued = append(queued, issue)
+		}
+	}
+	return queued
+}
+
+// QueuedRoot says whether issue is a root handed to Legion that waits in the line for its tree
+// to be opened: a root that never ran, a re-admitted one and a handed-over one, each standing in
+// todo, not waiting on a person (whose answer resumes it where it stands) and with a record that
+// does not already say this generation runs (ran). It is the one statement of the rule, read by
+// the line itself, by the set of live trees (liveRoots), by the set of running ones (TreeRuns)
+// and by the relay of a person's decision (WaitsForSlot), so that no two of them disagree about
+// a root that has still to start.
 //
 // The tree's lifecycle does not answer this, though it is what says the tree is live
 // (liveRoots): a lifecycle that stands open says the tree once opened, not that this generation
 // of the root is running, and a root whose tree ran and ended queues again with that row still
 // standing until its cleanup confirms. The slot does not answer it either, now that a running
 // root holds none while it waits for its merge or in accepting.
-func queuedRoots(issues []Issue, facts LineFacts) []Issue {
-	queued := make([]Issue, 0, len(issues))
-	for _, issue := range issues {
-		if !issue.HandedOver || !claim.IsTreeRoot(issue.Key, issue.Tree) {
-			continue
-		}
-		if ran(issue, facts.Gates[issue.Key]) {
-			continue
-		}
-		if !issue.AwaitingPerson() && issue.Status == "todo" {
-			queued = append(queued, issue)
-		}
+func QueuedRoot(issue Issue, gate DesignGate) bool {
+	if !issue.HandedOver || !claim.IsTreeRoot(issue.Key, issue.Tree) || ran(issue, gate) {
+		return false
 	}
-	return queued
+	return !issue.AwaitingPerson() && issue.Status == "todo"
 }
 
 // ran says whether this root's own record shows the generation it carries already running under
@@ -558,12 +683,31 @@ func queuedRoots(issues []Issue, facts LineFacts) []Issue {
 // A re-admission clears the gate with the rest of the generation, so a tree Legion takes back
 // queues again as a root that never ran, which is what it is.
 //
-// The one record that carries a run and has still to run here is a root that arrived from
-// another tree with the phase it ran there (Issue.HandedOverFrom): that run belonged to the tree
-// it left, and the tree of its own it becomes has yet to be opened, so its promotion opens it
-// and starts the role of whatever phase it carries.
+// The one record that carries a run and has still to run here is a root that has just arrived
+// from another tree with the phase it ran there (Issue.HandedOverFrom): that run belonged to the
+// tree it left, and the tree of its own it becomes has yet to be opened, so its promotion opens
+// it and starts the role of whatever phase it carries. The mark is the arrival and not the
+// root's whole life: the promotion that opens its tree clears it (admit's promoteHolds), because
+// from then on the run the record carries is this tree's own. Without that a person's todo on
+// such a root, running and holding no slot in accepting or awaiting_merge, would queue it here
+// again and promote it a second time, moving its awaiting_merge to merging where its merge
+// closes nothing.
 func ran(issue Issue, gate DesignGate) bool {
 	return issue.HandedOverFrom == "" && (issue.CarriesRun() || gate.EverOpened)
+}
+
+// treeLive is TreeLive over the facts of one root already in hand: its tree's lifecycle and its
+// own design gate. It is the one statement of the rule; the pass that judges many trees reads it
+// through liveRoots and the one that judges a single root through TreeLive, so no reader of
+// "this tree is live" can answer differently from another.
+func treeLive(root Issue, lifecycle treelifecycle.Lifecycle, gate DesignGate) bool {
+	switch {
+	case root.Lingers():
+		return false
+	case root.AwaitingPerson():
+		return true
+	}
+	return lifecycle.OpenUnderWorkflow() || QueuedRoot(root, gate)
 }
 
 // TreeLive says whether root's tree is live: its lifecycle stands open under the workflow's own
@@ -575,11 +719,12 @@ func ran(issue Issue, gate DesignGate) bool {
 //
 // The lifecycle is what says a tree runs, not the slot rows: a slot now counts one issue at work,
 // so a tree runs with every one of its issues waiting for a slot, and a slotted child is no tree
-// of its own. It reads that one lifecycle and nothing else; whether a root with no open lifecycle
-// waits for one is its own record's to say (queuedRoots), so no other issue is read, and not even
-// its gate: a root with no open lifecycle whose gate has opened is a tree that has already ended
-// under it, which the linger above answers. A pass that judges many trees reads them all at once
-// instead (LiveRoots over ReadLineFacts).
+// of its own. A pass that judges many trees reads them all at once instead (LiveRoots over
+// ReadLineFacts).
+//
+// Live is wider than running (TreeRuns): a root still waiting in the line for its tree to be
+// opened is live, so that a todo child recorded under it joins the tree its promotion opens,
+// and runs nothing yet.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
 	if root.Lingers() {
 		return false, nil
@@ -587,18 +732,87 @@ func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, er
 	if root.AwaitingPerson() {
 		return true, nil
 	}
-	project, err := claim.ProjectToken(root.Project)
+	lifecycle, gate, err := rootFacts(ctx, store, tx, root)
 	if err != nil {
 		return false, err
+	}
+	return treeLive(root, lifecycle, gate), nil
+}
+
+// TreeRuns says whether this generation of root's tree is running under the workflow: its
+// lifecycle stands open under the workflow's own authority, the root does not linger after its
+// close, and the root is not itself waiting in the line for that tree to be opened (QueuedRoot).
+//
+// It is the one statement of "the tree runs", and the three readers that must agree all call it:
+// the claims nothing will wake (workflow.Stranded), the boot's resume of a suspended phase
+// worker (workflow's booted) and the question whether a session's status write lands on a
+// running tree (workflow's admittedRoot). Each of them acts on the tree as it stands now, and a
+// root waiting in the line runs nothing yet: its architect's first task comes with its
+// promotion, so a claim of it is not stranded, a suspended worker of it is not resumed, and a
+// status write on it is a person's move. The last clause is what a re-admission inside a linger
+// needs: readmit clears the linger while the lifecycle of the run that ended still stands open,
+// so the lifecycle alone would call such a root running.
+func TreeRuns(root Issue, lifecycle treelifecycle.Lifecycle, gate DesignGate) bool {
+	return lifecycle.OpenUnderWorkflow() && !root.Lingers() && !QueuedRoot(root, gate)
+}
+
+// TreeRunning is TreeRuns for a caller holding one root and no facts of a pass: it reads that
+// root's tree lifecycle and its design gate, and asks the one rule.
+func TreeRunning(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
+	if !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() {
+		return false, nil
+	}
+	lifecycle, gate, err := rootFacts(ctx, store, tx, root)
+	if err != nil {
+		return false, err
+	}
+	return TreeRuns(root, lifecycle, gate), nil
+}
+
+// RunningRoots is the set of keys whose trees are running (TreeRuns), read from the records and
+// the pass's own facts already in hand.
+func RunningRoots(issues []Issue, facts LineFacts) map[string]struct{} {
+	running := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) && TreeRuns(issue, facts.Lifecycles[issue.Key], facts.Gates[issue.Key]) {
+			running[issue.Key] = struct{}{}
+		}
+	}
+	return running
+}
+
+// ReadRunningRoots is RunningRoots for a caller that holds no facts of the pass: the lifecycles
+// and the gates of the roots among issues, in two reads whatever the number of trees, and then
+// the one rule. project is the Dispatch project key.
+func ReadRunningRoots(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (map[string]struct{}, error) {
+	lifecycles, err := ReadLifecycles(ctx, tx, store, project, issues)
+	if err != nil {
+		return nil, err
+	}
+	gates, err := store.Gates(ctx, tx, treeRoots(issues))
+	if err != nil {
+		return nil, err
+	}
+	return RunningRoots(issues, LineFacts{Lifecycles: lifecycles, Gates: gates}), nil
+}
+
+// rootFacts is one root's tree lifecycle and design gate, for the single-root readings of the
+// two rules above (TreeLive, workflow's admittedRoot): a pass that judges many trees reads them
+// in bulk instead (ReadLineFacts).
+func rootFacts(ctx context.Context, store Store, tx pgx.Tx, root Issue) (treelifecycle.Lifecycle, DesignGate, error) {
+	project, err := claim.ProjectToken(root.Project)
+	if err != nil {
+		return treelifecycle.Lifecycle{}, DesignGate{}, err
 	}
 	lifecycle, _, err := store.TreeLifecycle(ctx, tx, project, root.Key)
 	if err != nil {
-		return false, err
+		return treelifecycle.Lifecycle{}, DesignGate{}, err
 	}
-	if lifecycle.OpenUnderWorkflow() {
-		return true, nil
+	gate, err := store.Gate(ctx, tx, root.Key)
+	if err != nil || gate == nil {
+		return lifecycle, DesignGate{}, err
 	}
-	return len(queuedRoots([]Issue{root}, LineFacts{})) == 1, nil
+	return lifecycle, *gate, nil
 }
 
 // LiveRoots is the set of keys whose trees are live (TreeLive), read from the records and the
@@ -608,26 +822,25 @@ func LiveRoots(issues []Issue, facts LineFacts) map[string]struct{} {
 }
 
 // liveRoots is LiveRoots over queued, the roots waiting for their tree to be opened already read
-// from the same records: a tree is live while its lifecycle stands open under the workflow and
-// its root does not linger, while its root waits in the line, or while its root waits on a person
-// (TreeLive). A root the ancestry hold keeps out of the line is still among queued, so the hold is
-// read against these same trees and a todo child of such a root records into its tree.
+// from the same records: a root among them is live by treeLive's own last clause, and reading
+// them once keeps the ancestry hold and the line judged against the same set of trees, so a todo
+// child of such a root records into its tree.
 func liveRoots(issues []Issue, facts LineFacts, queued []Issue) map[string]struct{} {
 	live := make(map[string]struct{}, len(issues))
 	for _, issue := range issues {
-		if claim.IsTreeRoot(issue.Key, issue.Tree) && facts.Lifecycles[issue.Key].OpenUnderWorkflow() {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) && treeLive(issue, facts.Lifecycles[issue.Key], facts.Gates[issue.Key]) {
 			live[issue.Key] = struct{}{}
 		}
 	}
 	for _, issue := range queued {
 		live[issue.Key] = struct{}{}
 	}
+	// A root of a tree that lingers is live in no reading of it, whatever its own record says it
+	// waits for: its re-admission is what opens the tree again, and it is that write, not this,
+	// that ends the linger.
 	for _, issue := range issues {
-		switch {
-		case issue.Lingers():
+		if issue.Lingers() {
 			delete(live, issue.Key)
-		case issue.AwaitingPerson():
-			live[issue.Key] = struct{}{}
 		}
 	}
 	return live

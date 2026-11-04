@@ -629,7 +629,8 @@ func (e *Engine) artifactIgnored(gate record.DesignGate, fact intake.DispatchArt
 // wants it run, whoever parked it and whether or not it ran before. An unrecorded root is queued
 // by the write; a recorded root whose tree finished is re-admitted by it as a new generation, as a
 // person's own todo re-admits one today, and its tree lingering or long closed makes no
-// difference. A root whose tree is live — it holds a slot, waits for one, or waits on a person —
+// difference. A root whose tree is live — its lifecycle stands open under the workflow, or it
+// waits in the line for its tree to be opened, or it waits on a person —
 // is not queued, whatever Dispatch shows: its gate takes the approval as today, and the park's own
 // event, when the daemon applies it, takes the tree out (leave).
 //

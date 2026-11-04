@@ -485,6 +485,19 @@ type SuperviseRequest struct {
 	// a row of its own that carries no task at all (workflow.StartOrOwe), so the worker's session
 	// is relaunched and answering questions while its next task waits in the line.
 	NeedsSlot bool `json:"needsSlot,omitempty"`
+	// Relaunch marks that other half: the row workflow.StartOrOwe writes to bring a phase
+	// worker's session back at once, with no task and none of a task's marks, while the row
+	// above waits for the slot. It is what tells the outbox that a task of this start is still
+	// to come, so a claim that failed holding that phase's task is left failed here rather than
+	// retried: a retry sends the kept task back to the worker (supervise's RequestRetry) before
+	// the issue holds a slot, and the task row behind it would then find a claim no longer
+	// failed and deliver a second prompt for the same phase. Every other start carries its own
+	// task or none at all and is answered where it stands, the tree architect's among them.
+	//
+	// A row the previous release wrote and a deploy finds still in the outbox decodes with the
+	// mark false, which is that release's own behaviour: it retries a failed claim. Such a row
+	// lives seconds, and the pair this mark separates is written only by a daemon that reads it.
+	Relaunch bool `json:"relaunch,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -935,6 +948,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.NeedsSlot && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise start held for an admission slot requires a start with a task and a phase")
+		}
+		if value.Relaunch && (value.Op != "start" || value.Task != "" || value.Phase == "" || value.NeedsSlot) {
+			return fmt.Errorf("the relaunch half of a start carries a phase and no task, and waits for no slot")
 		}
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")

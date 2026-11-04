@@ -326,7 +326,7 @@ func TestTheWaitingLineLeavesOutAParentWhoseChildrenAreOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the line facts: %v", err)
 		}
-		waits, err := record.ChildWaitsOf(context.Background(), tx, record.NewStore(), testProject, issues, facts.Gates)
+		waits, err := record.ChildWaitsOf(context.Background(), tx, record.NewStore(), testProject, issues, facts)
 		if err != nil {
 			t.Fatalf("judge the child waits: %v", err)
 		}

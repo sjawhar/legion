@@ -38,11 +38,27 @@ const (
 	RelayNotParked
 )
 
-// WaitsForSlot says whether root is a root handed to Legion that waits in `todo` for an admission
-// slot, with no architect running for its tree yet: not lingering, not waiting on a person (whose
-// answer resumes it with a task of its own, workflow's ResumeAwaitedRoot), and holding no slot.
+// WaitsForSlot says whether root is a root handed to Legion that waits in the line for its tree
+// to be opened, with no architect running for it yet: the one queued-root rule (QueuedRoot),
+// read with the root's own design gate, not lingering, and holding no slot of its own.
+//
+// It is that rule and no other reading of it. "Status todo and no slot" used to say the same
+// thing and no longer does: a running root holds none while it waits for its merge, in
+// accepting or for its children, so a person's todo on such a root read here as a root with no
+// architect, and every decision a person made on its tree was kept for a start that is never
+// queued instead of reaching the architect that is running (RelayParkedDecision, workflow's
+// CatchUpTheTreesOwed). The slot is still asked, after the rule rather than instead of it: a
+// root at admitted whose gate has never opened is a queued root by its record and holds the
+// slot its architect is writing the spec in, and that architect hears a decision itself.
 func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool, error) {
-	if !root.HandedOver || root.Status != "todo" || root.Lingers() || root.AwaitingPerson() || !claim.IsTreeRoot(root.Key, root.Tree) {
+	if root.Lingers() || !claim.IsTreeRoot(root.Key, root.Tree) {
+		return false, nil
+	}
+	gate, err := store.Gate(ctx, tx, root.Key)
+	if err != nil {
+		return false, err
+	}
+	if !QueuedRoot(root, gateValue(gate)) {
 		return false, nil
 	}
 	slots, err := store.Slots(ctx, tx)
@@ -50,6 +66,15 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 		return false, err
 	}
 	return !slices.ContainsFunc(slots, func(slot Slot) bool { return slot.Issue == root.Key }), nil
+}
+
+// gateValue is the gate a root carries, the zero gate for a root with none registered, which is
+// a root whose architect has still to write its spec.
+func gateValue(gate *DesignGate) DesignGate {
+	if gate == nil {
+		return DesignGate{}
+	}
+	return *gate
 }
 
 // RelayParkedDecision is the one rule for a decision made where nobody in its tree hears it, which

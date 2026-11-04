@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 
@@ -31,10 +32,15 @@ func ChildrenFirstCandidates(issues []Issue, gates map[string]DesignGate) []stri
 	}
 	keys := make([]string, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Phase != phase.Admitted || !InWorkflow(issue) || byKey[issue.Tree].Lingers() {
+		// The root must be among the records and must not linger. A root whose tree has left the
+		// workflow is no part of a live read at all — its phase is done and its status is not
+		// todo (Store.LiveIssues) — so an unrecorded root is a tree that has gone, and reading
+		// the zero record's linger would answer false for exactly the case this test is for.
+		root, recorded := byKey[issue.Tree]
+		if issue.Phase != phase.Admitted || !InWorkflow(issue) || !recorded || root.Lingers() {
 			continue
 		}
-		if gate, registered := gates[issue.Tree]; !registered || !gateOpen(gate) {
+		if gate, registered := gates[issue.Tree]; !registered || !GateOpen(gate) {
 			continue
 		}
 		keys = append(keys, issue.Key)
@@ -111,11 +117,17 @@ func ChildOpen(child DispatchIssueRow, recorded *Issue) bool {
 // project's issues and such a child has none it has applied. So a daemon that has not listed
 // since the child was filed does not see it, and the children-first wait is complete only from
 // the first boot listing after the child exists.
-func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records map[string]Issue) map[string]ChildWait {
+//
+// above is the records of the issues over the pass's own that it leaves out (LineFacts.Parents),
+// so that the cycle's own walk of the parent chain crosses an ancestor already done.
+func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records, above map[string]Issue) map[string]ChildWait {
 	byKey := make(map[string]Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
 	}
+	chain := make(map[string]Issue, len(byKey)+len(above))
+	maps.Copy(chain, byKey)
+	maps.Copy(chain, above)
 	waits := make(map[string]ChildWait, len(children))
 	for key, rows := range children {
 		parent, recorded := byKey[key]
@@ -133,7 +145,7 @@ func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records 
 			if !ChildOpen(row, child) {
 				continue
 			}
-			open = append(open, OpenChild{Key: row.Key, Status: row.Status, Cycle: cycleAncestor(row, parent, byKey)})
+			open = append(open, OpenChild{Key: row.Key, Status: row.Status, Cycle: cycleAncestor(row, parent, chain)})
 		}
 		if len(open) > 0 {
 			waits[key] = ChildWait{Parent: key, Open: open}
@@ -142,27 +154,30 @@ func ChildWaits(issues []Issue, children map[string][]DispatchIssueRow, records 
 	return waits
 }
 
-// cycleAncestor is the issue a Dispatch blocked_by link of child names that stands above child on
-// its own Dispatch parent chain — its parent itself, or one above that — and "" when no link
-// does. Such a link is a cycle: the child waits for an issue that is waiting for the child, and
-// neither can ever start. The chain is walked over the recorded parents the pass already holds
-// (AcceptedAncestor walks the same one), starting at the child's parent, which is every
-// ancestor inside the tree.
+// cycleAncestor is the issue a Dispatch blocked_by link of child names that stands above child
+// on its own parent chain — its parent itself, or one above that, up to the tree's own root —
+// and is not finished, and "" when no link does. Such a link is a cycle: the child waits for an
+// issue that is waiting for the child, and neither can ever start. The chain is the one every
+// rule that reads "above" walks (Ancestors), over the records the pass already holds, so a gap
+// in it is crossed here exactly as AcceptedAncestor crosses one.
 //
-// The daemon names it and does nothing else. Taking the link off is a decision about what the
-// work depends on, which is a person's to make, and the alternative — the daemon dropping a
+// A link to an ancestor already done holds nothing — a blocker is a wait until that issue is
+// done (blockers.Unfinished), and this one is — so it is no cycle and is not named: the child
+// waits for nothing and its parent waits only for the child. The ancestor's own record is what
+// says so, which this walk has in hand.
+//
+// The daemon names a cycle and does nothing else. Taking the link off is a decision about what
+// the work depends on, which is a person's to make, and the alternative — the daemon dropping a
 // Dispatch link of its own accord — would lose a fact nobody asked it to lose.
 func cycleAncestor(child DispatchIssueRow, parent Issue, byKey map[string]Issue) string {
-	above := map[string]bool{parent.Key: true}
-	seen := map[string]bool{child.Key: true, parent.Key: true}
-	for key := parent.Parent; key != nil && !seen[*key]; {
-		seen[*key] = true
-		above[*key] = true
-		next, recorded := byKey[*key]
-		if !recorded {
-			break
+	above := map[string]bool{}
+	if parent.Status != DoneStatus {
+		above[parent.Key] = true
+	}
+	for _, ancestor := range Ancestors(parent, byKey) {
+		if ancestor.Key != child.Key && ancestor.Status != DoneStatus {
+			above[ancestor.Key] = true
 		}
-		key = next.Parent
 	}
 	for _, blocker := range child.Blockers {
 		if above[blocker] {
@@ -177,9 +192,10 @@ func cycleAncestor(child DispatchIssueRow, parent Issue, byKey map[string]Issue)
 // parents, because every judgement the daemon makes about children-first runs inside a
 // transaction that performs no I/O of its own and under the one fact lock every fact takes
 // (intake.ApplyFact): a read per parent would cost a round trip per unstarted issue on every fact
-// of every consumer.
-func ChildWaitsOf(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue, gates map[string]DesignGate) (map[string]ChildWait, error) {
-	children, err := store.DispatchChildren(ctx, tx, project, ChildrenFirstCandidates(issues, gates))
+// of every consumer. facts are the pass's own, which carry the gates each candidate is read
+// against and the records above the pass that its cycle walk crosses.
+func ChildWaitsOf(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue, facts LineFacts) (map[string]ChildWait, error) {
+	children, err := store.DispatchChildren(ctx, tx, project, ChildrenFirstCandidates(issues, facts.Gates))
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +222,7 @@ func ChildWaitsOf(ctx context.Context, tx pgx.Tx, store Store, project string, i
 	for _, row := range rows {
 		records[row.Key] = row
 	}
-	return ChildWaits(issues, children, records), nil
+	return ChildWaits(issues, children, records, facts.Parents), nil
 }
 
 // ChildWaitRows is the children-first waits as the rows the state's `blocked` and a tick

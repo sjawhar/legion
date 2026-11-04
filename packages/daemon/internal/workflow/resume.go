@@ -35,10 +35,16 @@ import (
 // a drain made before the upgrade, so both are left as they are.
 //
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the
-// workflow whose tree is live — its lifecycle stands open under the workflow (record.LiveRoots) —
-// and does not linger: a lingering tree's claims stay suspended until re-admission runs the tree
-// again. Liveness is the lifecycle rather than the root's slot because a slot now counts one
-// issue at work, and a running tree holds none of its own while its issues wait in the line.
+// workflow whose tree is running — this generation of it, by the one rule every reader of that
+// question asks (record.RunningRoots, record.TreeRuns): its lifecycle stands open under the
+// workflow, its root does not linger, and its root is not itself waiting in the line for the
+// tree to be opened. A lingering tree's claims stay suspended until re-admission runs the tree
+// again, and a queued root's members are started by the promotion that opens the tree, which
+// gives each mid-phase member its own start (admit's startMidPhaseMembers): a start queued here
+// instead would re-point the claim at a tree with no lifecycle, and would put the member in the
+// line's first part ahead of its own root. It is the lifecycle rather than the root's slot
+// because a slot now counts one issue at work, and a running tree holds none of its own while
+// its issues wait in the line.
 // Accepting's owner is the tree's architect, which admission starts with the tree, so no issue
 // there is given one. Each owner is given the start admission gives a re-admitted tree's
 // mid-phase child, through the outbox's start like every other start (StartOrOwe): its claim is
@@ -78,7 +84,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	if err != nil {
 		return intake.Result{}, err
 	}
-	live := record.LiveRoots(own, facts)
+	running := record.RunningRoots(own, facts)
 	for _, issue := range issues {
 		role := RoleFor(issue.Phase)
 		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
@@ -88,7 +94,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		if !ok || root.Lingers() {
 			continue
 		}
-		if _, running := live[root.Key]; !running {
+		if _, runs := running[root.Key]; !runs {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)

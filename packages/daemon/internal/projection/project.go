@@ -232,13 +232,25 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	// The roots of the live trees, which no slot says any more: a slot counts one issue at work,
 	// so a running tree holds none while its root waits for its children and they wait for a
 	// slot. The pass's own facts already name every lifecycle, so this costs no further read.
-	trees := record.LiveRoots(issues, facts)
+	//
+	// It is read over this project's records alone. The state lists every project's issues, for
+	// the sake of a claim on an issue of another, but a lifecycle is keyed by the project token
+	// (record.ReadLifecycles) and this pass reads them all under this daemon's: another
+	// project's root would be judged against a lifecycle that is not its own, and would reach
+	// this list as a queued or awaiting root of a tree this daemon neither runs nor admits.
+	own := make([]record.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Project == project {
+			own = append(own, issue)
+		}
+	}
+	trees := record.LiveRoots(own, facts)
 	projected.Admission.Trees = slices.Sorted(maps.Keys(trees))
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	projected.Admission.Blocked = blockers.Blocked(rows, issues, waiting, record.ChildWaitRows(facts.ChildWaits))
+	projected.Admission.Blocked = blockers.Blocked(rows, issues, line, record.ChildWaitRows(facts.ChildWaits))
 	projected.PendingStatusWrites = make([]api.PendingStatusWrite, 0, len(pending))
 	for _, row := range pending {
 		if _, known := knownIssues[row.Issue]; !known {

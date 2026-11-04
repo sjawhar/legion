@@ -66,7 +66,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 	for _, issue := range issues {
 		recorded[issue.Key] = issue
 	}
-	lifecycles, err := record.ReadLifecycles(ctx, tx, s, project, issues)
+	running, err := record.ReadRunningRoots(ctx, tx, s, project, issues)
 	if err != nil {
 		return nil, err
 	}
@@ -89,13 +89,15 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, project string, cl
 		if !ok || root.Lingers() || root.AwaitingPerson() {
 			continue
 		}
-		// The tree must be one the workflow has opened and not closed: that, rather than any
-		// slot, is what says it runs. A root still waiting in the line for its tree to be opened
-		// — one that never ran, a re-admitted one — is live for the ancestry hold's purposes
-		// (record.TreeLive) but runs nothing yet, and its architect's task comes with its
-		// promotion, so nothing of it is stranded. Nor is anything of a root waiting on a person,
-		// whose architect its answer resumes.
-		if !lifecycles[root.Key].OpenUnderWorkflow() {
+		// The tree must be running — this generation of it, by the one rule every reader of that
+		// question asks (record.TreeRuns): the workflow has opened its lifecycle and not closed
+		// it, and its root is not itself waiting in the line for the tree to be opened. A root
+		// that waits there — one that never ran, a re-admitted one, one reopened inside its own
+		// linger, whose readmit cleared the linger while the ended run's lifecycle still stands
+		// open — is live for the ancestry hold's purposes (record.TreeLive) but runs nothing
+		// yet, and its architect's task comes with its promotion, so nothing of it is stranded.
+		// Nor is anything of a root waiting on a person, whose architect its answer resumes.
+		if _, runs := running[root.Key]; !runs {
 			continue
 		}
 		// current is the phase the start that would wake the claim names; the architect's names none.

@@ -157,8 +157,13 @@ func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) 
 	}
 
 	expireLinger(t, pool, admission, engine)
-	if got := handOvers(t, pool); len(got) != 0 {
-		t.Fatalf("hand-overs once the linger ended = %v, want none: no child was left mid-run", got)
+	// The child the exclusion kept out of the close is the child the linger hands over. It is
+	// the other half of the departure above: leaving it where it stands would leave it todo at
+	// admitted in a closed tree for ever, with nobody told, though its architect was told it
+	// starts once this root closed. Nothing else of this tree is handed over — every member
+	// that ran was parked before the close.
+	if got := handOvers(t, pool); len(got) != 1 || got[0] != unstarted {
+		t.Fatalf("hand-overs once the linger ended = %v, want %s alone: the child this root's close left at admitted runs as a root of its own, and every member that ran was parked", got, unstarted)
 	}
 }
 

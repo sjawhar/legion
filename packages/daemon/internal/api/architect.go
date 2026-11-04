@@ -209,6 +209,25 @@ func (s *server) acceptedAncestor(ctx context.Context, tree, key, parent string)
 	return ancestor, tx.Commit(ctx)
 }
 
+// treeMembers is every record of tree, read in one short read-only transaction: what a handler
+// answering for a whole wave of children reads once and asks record.AcceptedAncestorIn of each
+// of them, rather than opening a transaction and reading the tree again per child.
+func (s *server) treeMembers(ctx context.Context, tree string) ([]record.Issue, error) {
+	if s.pool == nil || s.records == nil {
+		return nil, errors.New("record dependencies are unavailable")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	members, err := s.records.TreeIssues(ctx, tx, tree)
+	if err != nil {
+		return nil, err
+	}
+	return members, tx.Commit(ctx)
+}
+
 // childUnderAcceptedParent is what release_children and rerun_child answer for an issue whose
 // ancestor the daemon has already accepted, naming the ancestor and what undoes the refusal.
 // Both routes say one sentence, because they refuse for one reason: a parent's head proves its
@@ -806,17 +825,22 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	// "Children first"). The whole wave is refused rather than part of it, as every other
 	// refusal here is, so the architect retries one call. The chain is read from the records of
 	// the architect's tree, starting at the Dispatch parent of a child the records do not hold
-	// yet, and walks past a parent already done to whichever issue above it still merges.
-	for _, child := range children {
-		parent := intake.ObservedIssue(child.view).Parent
-		ancestor, err := s.acceptedAncestor(r.Context(), grant.Tree, child.view.Key, parent)
+	// yet, and walks past a parent already done to whichever issue above it still merges. The
+	// tree is read once for the whole wave, as every other read of this request is cached for
+	// its life: one wave's children share their ancestors, and a transaction and a read of every
+	// record of the tree per child bought nothing.
+	if len(children) > 0 {
+		members, err := s.treeMembers(r.Context(), grant.Tree)
 		if err != nil {
 			writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree of the children to release")
 			return
 		}
-		if ancestor != "" {
-			writeFailure(w, http.StatusConflict, "CHILD_UNDER_ACCEPTED_PARENT", childUnderAcceptedParent(child.view.Key, ancestor, "release it again"))
-			return
+		for _, child := range children {
+			parent := intake.ObservedIssue(child.view).Parent
+			if ancestor := record.AcceptedAncestorIn(members, grant.Tree, child.view.Key, parent); ancestor != "" {
+				writeFailure(w, http.StatusConflict, "CHILD_UNDER_ACCEPTED_PARENT", childUnderAcceptedParent(child.view.Key, ancestor, "release it again"))
+				return
+			}
 		}
 	}
 	if !s.adoptReleasedChildren(w, r, grant.Tree, children) {

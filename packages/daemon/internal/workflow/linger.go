@@ -278,7 +278,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // again in that phase. A child finished or parked has no run to carry on.
 //
 // A child still admitted never started under its tree's design, so it is left where it is — with
-// one exception: one the mirror still shows waiting on an unfinished issue (blockers.Holds)
+// two exceptions. One the mirror still shows waiting on an unfinished issue (blockers.Holds)
 // is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
 // back as a root of its own once they close. A never-gated child of a finishing tree, which waits
 // on nothing, would instead take an admission slot for work its tree's design never opened. The
@@ -288,6 +288,26 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // re-admission is another tree's work arriving rather than its own coming back, so it is no tree
 // taken back either — it is checked, which is what the blocked-root rule reads when the child comes
 // up for admission (blockers.Exempt).
+//
+// The second exception is the child the daemon itself held at admitted under this root while the
+// root was accepted (record.HeldUnderAccepted): a person moved it to todo under an ancestor in
+// retro, merging or awaiting_merge, the daemon recorded it at admitted and told the architect it
+// starts once that ancestor closes (ChildUnderAcceptedParentNotice), and the same hold is what
+// let the root close at all, since record.OpenBeneath leaves such a child out of the wait its
+// merge keeps. Nothing else would ever start it: its tree has closed, the line offers a slot to
+// nothing of a closed tree, and a status it already carries moves nobody. So the root's close
+// hands it to Legion as a root of its own, which is the promise the notice made.
+//
+// It is read as the root's own merge rather than by walking the chain again, because by now the
+// root is done and no ancestor of the child stands in an accepted phase: a root whose pull
+// request merged is a root that was accepted, and a child left at admitted in the workflow under
+// such a root is exactly a child that hold stopped — children-first refuses the sign-off of a
+// root with any other issue beneath it in the workflow (record.OpenBeneath), so no released
+// child of its own can be standing there. A root a person closed by hand, and one closed at
+// admitted before any phase started (closeRoot), merged nothing, so their admitted children are
+// left where they are, as before. An ancestor below the root needs none of this: when it closes,
+// the child's hold is read again and finds no accepted ancestor, so the line starts it inside the
+// tree that is still running.
 func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) ([]record.Issue, error) {
 	if root.Status != "done" {
 		return nil, nil
@@ -306,9 +326,17 @@ func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return nil, err
 	}
+	accepted := false
+	if len(admitted) > 0 {
+		pr, err := e.store.PullRequest(ctx, tx, root.Key)
+		if err != nil {
+			return nil, err
+		}
+		accepted = pr != nil && pr.State == record.PullRequestMerged
+	}
 	var handed []record.Issue
 	for _, member := range unfinished {
-		if member.Phase == phase.Admitted && len(blockers.Holds(rows, member)) == 0 {
+		if member.Phase == phase.Admitted && !accepted && len(blockers.Holds(rows, member)) == 0 {
 			continue
 		}
 		handed = append(handed, member)

@@ -91,10 +91,9 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	waiting := record.WaitingIssues(line)
 	var keys []string
 	seen := make(map[string]struct{})
-	for _, blocked := range blockers.Blocked(rows, issues, waiting, record.ChildWaitRows(facts.ChildWaits)) {
+	for _, blocked := range blockers.Blocked(rows, issues, line, record.ChildWaitRows(facts.ChildWaits)) {
 		for _, blocker := range blocked.BlockedBy {
 			if _, repeated := seen[blocker]; repeated {
 				continue

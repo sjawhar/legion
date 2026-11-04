@@ -7,7 +7,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 // Beneath is the members of issue's tree that lie under it. For a tree root that is every other
@@ -17,16 +16,13 @@ import (
 // of recorded parents reaches that child, which is what "beneath" means for an issue that is not
 // the tree's own root.
 func Beneath(issue Issue, members []Issue) []Issue {
-	byKey := make(map[string]Issue, len(members))
-	for _, member := range members {
-		byKey[member.Key] = member
-	}
+	records := byKey(members)
 	under := make([]Issue, 0, len(members))
 	for _, member := range members {
 		if member.Key == issue.Key {
 			continue
 		}
-		if claim.IsTreeRoot(issue.Key, issue.Tree) || descends(member, issue.Key, byKey) {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) || descends(member, issue.Key, records) {
 			under = append(under, member)
 		}
 	}
@@ -35,51 +31,30 @@ func Beneath(issue Issue, members []Issue) []Issue {
 
 // Above is the members of issue's tree that issue lies beneath, nearest first and the tree's own
 // root last: the mirror of Beneath, so a member is in Above(issue) exactly where issue is in
-// Beneath(member). The chain of recorded parents gives the rest, and the root is always there,
-// whatever that chain shows, for the reason Beneath gives a root every other member.
+// Beneath(member). It is the one parent-chain walk (Ancestors) over the tree's own members, so
+// a gap in the chain is handled here exactly as every other reader of "above" handles it.
 //
 // It is what a departure reads to find whose wait it may have ended: a merged issue stands in
 // awaiting_merge until the last issue beneath it leaves (OpenBeneath, workflow's closeMerged),
 // and that wait is no longer a tree root's alone, so the leave of one issue re-reads the wait of
 // every merged ancestor it stood beneath (workflow's leave).
 func Above(issue Issue, members []Issue) []Issue {
-	byKey := make(map[string]Issue, len(members))
-	for _, member := range members {
-		byKey[member.Key] = member
-	}
-	above := make([]Issue, 0, len(members))
-	seen := map[string]bool{issue.Key: true}
-	for key := issue.Parent; key != nil && !seen[*key]; {
-		seen[*key] = true
-		parent, recorded := byKey[*key]
-		if !recorded {
-			break
-		}
-		above = append(above, parent)
-		key = parent.Parent
-	}
-	if root, recorded := byKey[issue.Tree]; recorded && !seen[issue.Tree] {
-		above = append(above, root)
-	}
-	return above
+	return Ancestors(issue, byKey(members))
 }
 
-// descends says whether member hangs under key, through the chain of recorded parents in byKey.
-// A chain that leaves the records, or loops back on itself, ends the walk.
+// descends says whether member hangs under key, through the one parent-chain walk (Ancestors)
+// over byKey.
 func descends(member Issue, key string, byKey map[string]Issue) bool {
-	seen := map[string]bool{member.Key: true}
-	for parent := member.Parent; parent != nil && !seen[*parent]; {
-		if *parent == key {
-			return true
-		}
-		seen[*parent] = true
-		above, recorded := byKey[*parent]
-		if !recorded {
-			return false
-		}
-		parent = above.Parent
+	return slices.ContainsFunc(Ancestors(member, byKey), func(above Issue) bool { return above.Key == key })
+}
+
+// byKey indexes members by their key, which every rule here reads the parent chain over.
+func byKey(members []Issue) map[string]Issue {
+	indexed := make(map[string]Issue, len(members))
+	for _, member := range members {
+		indexed[member.Key] = member
 	}
-	return false
+	return indexed
 }
 
 // OpenBeneath is the sorted keys of the issues Beneath issue that are still in the workflow
@@ -90,30 +65,30 @@ func descends(member Issue, key string, byKey map[string]Issue) bool {
 // head that carries its children's merges, so a parent that is accepted or closed first would
 // merge work its own head does not carry.
 //
-// One kind of issue beneath is left out: one standing at phase.Admitted that the daemon is
-// itself holding there, because an ancestor of it has already been accepted
-// (AcceptedAncestor). Without that exclusion the three rules deadlock. A child held at
-// admitted under a root in awaiting_merge is InWorkflow — a recorded member at admitted with
-// status todo is — so it keeps that root open through this set for ever, while the child itself
-// is pinned at admitted until the root closes; a child held under an ancestor above an issue in
-// accepting deadlocks that issue's sign-off the same way. Neither moves, and no act of a person
-// short of parking the child breaks it. Excluding exactly the issues the daemon's own hold has
-// stopped costs nothing else: every other issue beneath still refuses the sign-off and still
-// holds the merged root open, and the held issue still holds every ancestor that has not been
-// accepted, because the hold is what the exclusion is read from. This is the one recorded
-// departure from the spec of dispatch://INFRA-980, decided by that tree's architect
+// One kind of issue beneath is left out: one the daemon is itself holding at phase.Admitted,
+// because an ancestor of it has already been accepted (HeldUnderAccepted). Without that
+// exclusion the three rules deadlock. A child held at admitted under a root in awaiting_merge is
+// InWorkflow — a recorded member at admitted with status todo is — so it keeps that root open
+// through this set for ever, while the child itself is pinned at admitted until the root closes;
+// a child held under an ancestor above an issue in accepting deadlocks that issue's sign-off the
+// same way. Neither moves, and no act of a person short of parking the child breaks it.
+// Excluding exactly the issues the daemon's own hold has stopped costs nothing else: every other
+// issue beneath still refuses the sign-off and still holds the merged root open, and the held
+// issue still holds every ancestor that has not been accepted, because the hold is what the
+// exclusion is read from.
+//
+// The close this exclusion allows does not strand the issue it excluded: the linger of the
+// closed tree hands every member the daemon held under an accepted ancestor to Legion as a root
+// of its own (workflow's unfinishedHandOvers), exactly as it hands over a never-started child a
+// blocker holds, so the work a person asked for runs once the ancestor that held it has closed,
+// which is what the architect's notice says it does. This is the one recorded departure from
+// the spec of dispatch://INFRA-980, decided by that tree's architect
 // (dispatch://INFRA-980/comment/d642164a-31d2-4d6c-ae5e-4da5dd0b9104).
 func OpenBeneath(issue Issue, members []Issue) []string {
-	byKey := make(map[string]Issue, len(members))
-	for _, member := range members {
-		byKey[member.Key] = member
-	}
+	records := byKey(members)
 	open := []string{}
 	for _, member := range Beneath(issue, members) {
-		if !InWorkflow(member) {
-			continue
-		}
-		if member.Phase == phase.Admitted && AcceptedAncestor(member, byKey) != "" {
+		if !InWorkflow(member) || HeldUnderAccepted(member, records) {
 			continue
 		}
 		open = append(open, member.Key)
@@ -137,16 +112,20 @@ func AcceptedAncestorOf(ctx context.Context, store Store, tx pgx.Tx, tree, key, 
 	if err != nil {
 		return "", err
 	}
-	byKey := make(map[string]Issue, len(members))
-	for _, member := range members {
-		byKey[member.Key] = member
-	}
-	issue, recorded := byKey[key]
+	return AcceptedAncestorIn(members, tree, key, parent), nil
+}
+
+// AcceptedAncestorIn is AcceptedAncestorOf over members the caller has already read: a handler
+// that answers for a whole wave of children reads the tree once and asks this of each of them,
+// rather than reading every record of the tree again per child (api's release_children).
+func AcceptedAncestorIn(members []Issue, tree, key, parent string) string {
+	records := byKey(members)
+	issue, recorded := records[key]
 	if !recorded {
 		if parent == "" {
-			return "", nil
+			return ""
 		}
 		issue = Issue{Key: key, Tree: tree, Parent: &parent}
 	}
-	return AcceptedAncestor(issue, byKey), nil
+	return AcceptedAncestor(issue, records)
 }

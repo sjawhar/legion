@@ -139,13 +139,13 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	now := projectedAt
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Phase: phase.Done, Status: "done", Rank: "00000"},
-			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Phase: phase.Admitted, Status: "backlog", Rank: "00001"},
-			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+			{Key: "LEGION-210", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Phase: phase.Done, Status: "done", Rank: "00000"},
+			{Key: "LEGION-211", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Phase: phase.Admitted, Status: "backlog", Rank: "00001"},
+			{Key: "LEGION-212", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
 			// A root another tree handed over carrying the phase it ran there waits for its tree
 			// to be opened like any other: its promotion opens it and starts that phase's role.
-			{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true, HandedOverFrom: "LEGION-200"},
-			{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-214", Phase: phase.Admitted, Status: "todo", Rank: "00002", HandedOver: true},
+			{Key: "LEGION-213", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true, HandedOverFrom: "LEGION-200"},
+			{Key: "LEGION-214", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-214", Phase: phase.Admitted, Status: "todo", Rank: "00002", HandedOver: true},
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
@@ -269,7 +269,7 @@ func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{
-		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
+		issues: []record.Issue{{Key: "LEGION-208", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
 		},
@@ -296,7 +296,7 @@ func TestProjectShowsTheHandoffRecordAWorkerNamed(t *testing.T) {
 	const record1 = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b"
 	tester, implementer, reviewer := claim.Token("legion-208-tester"), claim.Token("legion-208-implementer"), claim.Token("legion-208-reviewer")
 	store := projectionStore{
-		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing}},
+		issues: []record.Issue{{Key: "LEGION-208", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing}},
 		phases: map[string][]record.PhaseRow{"LEGION-208": {
 			{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: implementer, HandoffCommit: "head", HandoffRecord: "implement-record", HandoffVersion: 2, Rounds: 1},
 			{Issue: "LEGION-208", Role: claim.RoleTester, Claim: tester, HandoffRecord: record1, HandoffVersion: 3},
@@ -329,8 +329,8 @@ func TestProjectShowsTheHandoffRecordAWorkerNamed(t *testing.T) {
 func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
-			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-208", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-209", Project: "LEGION", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
 		},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer",
@@ -363,9 +363,9 @@ func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
 	woke := projectedAt.Add(-time.Hour)
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Tree: "LEGION-208", Status: "done", Phase: phase.Done},
-			{Key: "LEGION-209", Tree: "LEGION-209", Status: "done", Phase: phase.Done},
-			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Phase: phase.Done},
+			{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Status: "done", Phase: phase.Done},
+			{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Status: "done", Phase: phase.Done},
+			{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Status: "done", Phase: phase.Done},
 		},
 		checks: []record.ProductionCheck{
 			{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "merge-208", OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour),
@@ -440,7 +440,7 @@ func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
 	start := record.OutboxRow{ID: 802, Kind: record.OutboxKindSupervise, Issue: "LEGION-208", NextAt: projectedAt.Add(-150 * time.Second)}
 	removal := record.OutboxRow{ID: 804, Kind: record.OutboxKindWorkspaceRemove, Issue: "LEGION-209", NextAt: projectedAt.Add(time.Minute)}
 	store := projectionStore{
-		issues: []record.Issue{{Key: "LEGION-208", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing}},
+		issues: []record.Issue{{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing}},
 		held:   []record.HeldRow{{OutboxRow: start, WaitsOn: 801}, {OutboxRow: removal, WaitsOn: 803}},
 	}
 	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
@@ -471,13 +471,13 @@ func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
 func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing},
-			{Key: "LEGION-209", Tree: "LEGION-208", Status: "todo", Phase: phase.Admitted},
-			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Phase: phase.Admitted, Rank: "00012", HandedOver: true},
+			{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing},
+			{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-208", Status: "todo", Phase: phase.Admitted},
+			{Key: "LEGION-212", Project: "LEGION", Tree: "LEGION-212", Status: "todo", Phase: phase.Admitted, Rank: "00012", HandedOver: true},
 			// A root another tree handed over, waiting for a slot with its run already under
 			// way: promotion admits it whatever its links say, so the state reports no wait for
 			// it either.
-			{Key: "LEGION-211", Tree: "LEGION-211", Status: "todo", Phase: phase.Testing, Rank: "00011", HandedOver: true, HandedOverFrom: "LEGION-200"},
+			{Key: "LEGION-211", Project: "LEGION", Tree: "LEGION-211", Status: "todo", Phase: phase.Testing, Rank: "00011", HandedOver: true, HandedOverFrom: "LEGION-200"},
 		},
 		slots: []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: projectedAt}},
 		mirror: []record.DispatchIssueRow{

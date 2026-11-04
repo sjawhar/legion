@@ -326,14 +326,17 @@ func (e *Engine) started(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 // back-to-back transitions.
 //
 // Which mark rides on which row follows from that split. The relaunch row keeps only what names
-// the run it brings back — the op, the tree, the role, the generation and the phase — and the
-// task row keeps everything that describes the task: the task itself, the assignment the
-// transition minted, the decisions the task names (Kept), ResumeTask, which says the outbox must
-// not deliver it to a claim already working that phase's task, and RuleResume, which says a
-// claim that spends its launch budget on it is left failed for the boot report rather than
-// retried. RuleResume therefore rides on the row that carries the task and not on the relaunch
-// before it; the boot only ever resumes a suspended claim, which the relaunch resumes by rule
-// without spending a launch budget, so the row that could spend one is the row still marked.
+// the run it brings back — the op, the tree, the role, the generation and the phase — plus
+// Relaunch, which says a task of this start is still to come, so that a claim that failed
+// holding that phase's task is left for the task row to retry rather than put back to work with
+// no slot (the daemon's outbox start case). The task row keeps everything that describes the
+// task: the task itself, the assignment the transition minted, the decisions the task names
+// (Kept), ResumeTask, which says the outbox must not deliver it to a claim already working that
+// phase's task, and RuleResume, which says a claim that spends its launch budget on it is left
+// failed for the boot report rather than retried. RuleResume therefore rides on the row that
+// carries the task and not on the relaunch before it; the boot only ever resumes a suspended
+// claim, which the relaunch resumes by rule without spending a launch budget, so the row that
+// could spend one is the row still marked.
 //
 // Re-running the relaunch half when the task row is finally claimed is safe and is the reason the
 // two rows can be the same request: the claim is found, recording the start only notes the newer
@@ -342,7 +345,7 @@ func (e *Engine) started(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 func StartOrOwe(ctx context.Context, tx pgx.Tx, store record.Store, issue string, payload record.SuperviseRequest, at time.Time) error {
 	relaunch := payload
 	relaunch.Task, relaunch.Assignment, relaunch.Kept = "", "", nil
-	relaunch.ResumeTask, relaunch.RuleResume, relaunch.NeedsSlot = false, false, false
+	relaunch.ResumeTask, relaunch.RuleResume, relaunch.NeedsSlot, relaunch.Relaunch = false, false, false, true
 	row, err := record.NewOutboxRow(issue, relaunch, at)
 	if err != nil {
 		return err

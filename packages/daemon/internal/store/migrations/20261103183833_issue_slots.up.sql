@@ -16,18 +16,26 @@
 -- Every existing gate is read from what the record still shows. An approval that stands is an
 -- opening, and covers both the gate open now and one a newer document version closed, since only a
 -- changes request nulls the approval. A gate whose approval a changes request cleared shows
--- nothing of itself, so the tree says it instead: a member recorded in a phase the workflow only
--- reaches after the gate opened is a gate that opened. phase done is not one of them, and is the
--- one phase past admitted that proves nothing: workflow's leave records any non-root member a
--- person moves to backlog, icebox, triage or done at done whatever the gate was doing, and the
--- children of a live tree are recorded before any release, so a root still writing its first spec
--- can already have a parked child. A gate that shows neither never opened, and keeps the default,
--- which leaves its root at work (record.AtWork) and its slot where it is.
+-- nothing of itself, so the tree below it says it instead: a member recorded in a phase the
+-- workflow only reaches after the gate opened is a gate that opened. The root's own row is not
+-- one of those members, though its tree is its own key: before this release a root whose first
+-- spec waits on a person stands in awaiting_person, and can be held from it, neither of which is
+-- admitted or done, so reading the root would mark every root waiting for its first approval as
+-- opened — and then a changes request would answer it, slotFor would give it no slot
+-- (record.AtWork is false once a gate has opened), and its architect would rewrite the spec
+-- outside the cap with the catch-up's hold passing over it. phase done is not one of them
+-- either, and is the one phase past admitted that proves nothing: workflow's leave records any
+-- non-root member a person moves to backlog, icebox, triage or done at done whatever the gate
+-- was doing, and the children of a live tree are recorded before any release, so a root still
+-- writing its first spec can already have a parked child. A gate that shows neither never
+-- opened, and keeps the default, which leaves its root at work (record.AtWork) and its slot
+-- where it is.
 alter table design_gates add column ever_opened boolean not null default false;
 
 update design_gates set ever_opened = true
   where approved_version is not null
      or exists (select 1 from issues m where m.tree = design_gates.issue
+                  and m.key <> design_gates.issue
                   and m.phase not in ('admitted', 'done'));
 
 -- dispatch_issues.parent is the key of the issue's Dispatch parent, null for none. Admission and
@@ -72,6 +80,14 @@ on conflict do nothing;
 -- before this migration is the whole of "a live tree": only a root holds a slot. index continues
 -- the existing sequence because the column is unique across every project's slots (0004_record).
 -- The insert never deletes, so a root that holds a row and still needs one keeps the row it has.
+--
+-- This insert and the lifecycle insert above act on every project in the database, not only on
+-- the project of the daemon that runs the migration: the issues, the slots and the tree
+-- lifecycles are one table each, shared by every daemon of the database (docs/kubernetes.md,
+-- "Rolling back this release"). A daemon still on the earlier release that shares it counts the
+-- new child slots against its own cap and admits nothing until they drain, so every daemon of
+-- one database moves to this release together. The deploy note says so where an operator reads
+-- it.
 insert into slots (issue, index, admitted_at)
 select i.key,
        row_number() over (order by i.key) + coalesce((select max(index) from slots), -1),

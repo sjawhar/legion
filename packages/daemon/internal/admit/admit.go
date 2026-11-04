@@ -99,8 +99,7 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 // handler runs first: it records every live-tree child, leaving admission to record only a
 // still-unrecorded root or orphan. A release's adoption of children it cannot adopt
 // (adoptChildren) is the one fact admission refuses. A Dispatch issue fact's Reread is written
-// first (applyReread), and a fact whose Reread changed a record releases and promotes even when it
-// records nothing itself.
+// first (applyReread), before anything of the fact itself is recorded or promoted.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	released, refusal, err := a.applyFact(ctx, tx, fact)
 	if err != nil {
@@ -142,7 +141,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		_, returned, err := a.promote(ctx, tx)
 		return returned, nil, err
 	}
-	if _, err := a.applyReread(ctx, tx, observation.Reread); err != nil {
+	if err := a.applyReread(ctx, tx, observation.Reread); err != nil {
 		return nil, nil, err
 	}
 
@@ -252,37 +251,35 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 
 // applyReread writes each Dispatch chain the preparation of an unrecorded or re-parented issue's
 // event read again (intake.DispatchIssue.Reread) to its root's record while that record is still
-// a todo root, as the engine's Ancestry takes it, and says whether any record changed. The read
-// was taken outside the fact lock, so a root adopted or moved on meanwhile is left as it now
-// stands.
-func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string][]string) (bool, error) {
-	changed := false
+// a todo root, as the engine's Ancestry takes it. The read was taken outside the fact lock, so a
+// root adopted or moved on meanwhile is left as it now stands.
+func (a *Admission) applyReread(ctx context.Context, tx pgx.Tx, reread map[string][]string) error {
 	for _, key := range slices.Sorted(maps.Keys(reread)) {
 		stored, err := a.store.Issue(ctx, tx, key)
 		if err != nil {
-			return false, fmt.Errorf("read admission issue %s: %w", key, err)
+			return fmt.Errorf("read admission issue %s: %w", key, err)
 		}
 		if stored == nil || stored.Status != "todo" || !claim.IsTreeRoot(stored.Key, stored.Tree) {
 			continue
 		}
 		ancestry, err := a.engine.Ancestry(ctx, tx, *stored, reread[key])
 		if err != nil {
-			return false, fmt.Errorf("read whether %s ran as a tree of its own: %w", key, err)
+			return fmt.Errorf("read whether %s ran as a tree of its own: %w", key, err)
 		}
 		if slices.Equal(stored.Ancestry, ancestry) {
 			continue
 		}
 		stored.Ancestry = ancestry
 		if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
-			return false, fmt.Errorf("record the Dispatch chain of %s: %w", key, err)
+			return fmt.Errorf("record the Dispatch chain of %s: %w", key, err)
 		}
-		changed = true
 	}
-	return changed, nil
+	return nil
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
-// free: a tree finished or left the workflow and no waiting root took its place. The controller
+// free: an issue stopped having work of its own, or left the workflow, and nothing waiting in
+// the line took its place. The controller
 // names the free slot in its summary and takes no issue for it (skill://legion-controller, "Free
 // slots"). It is one `slot-free` notice on the first issue whose slot was released, under the same
 // rules as every slot wake: a slot free by slotFree, a registered controller, none already unsent
@@ -306,11 +303,16 @@ const todoWakeDelay = 30 * time.Second
 // slotFree says whether an admission slot stands free: fewer issues holding one than the cap,
 // counting a slot a waiting issue will take as taken. The cap counts the issues at work, so the
 // line it counts against is a line of issues, children included. A candidate promotion passes
-// over because it waits on an unfinished Dispatch issue (candidateWaitsOn) will take none, and
-// neither will one whose promotion starts no worker (slotFor), so neither hides free capacity
-// from the project: the controller hears of the slot and may hand Legion work that can actually
-// run. The controller is woken about it and takes nothing for it; only a person hands Legion
-// work (skill://legion-controller, "Free slots").
+// over because it waits on an unfinished Dispatch issue (blockers.LineWaitsOn) will take none,
+// and neither will one whose promotion starts no worker (slotFor), so neither hides free
+// capacity from the project: the controller hears of the slot and may hand Legion work that can
+// actually run. The controller is woken about it and takes nothing for it; only a person hands
+// Legion work (skill://legion-controller, "Free slots").
+//
+// The line is the one the promotion itself would read (blockers.JudgeLine), held by the same
+// blocker hold and the same children-first wait: a line built here from its own reads would
+// answer differently from the pass that acts, and a slot this said was free would then go to
+// nobody.
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if a.cap <= 0 {
 		return false, nil
@@ -328,17 +330,13 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 		return false, err
 	}
 	own := ownSlots(issues, slots)
-	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, a.store, a.project, issues, facts.Gates); err != nil {
-		return false, err
-	}
-	line := record.Waiting(issues, own, facts)
-	rows, err := blockers.Load(ctx, tx, a.store, a.project, blockers.Judged(issues, record.WaitingIssues(line)))
+	rows, facts, line, err := blockers.JudgeLine(ctx, tx, a.store, a.project, issues, own, facts, nil)
 	if err != nil {
 		return false, err
 	}
 	taking := 0
 	for _, candidate := range line {
-		if len(candidateWaitsOn(rows, candidate)) == 0 && slotFor(candidate, facts.Gates[candidate.Issue.Tree]) {
+		if len(blockers.LineWaitsOn(rows, candidate)) == 0 && slotFor(candidate, facts.Gates[candidate.Issue.Tree]) {
 			taking++
 		}
 	}
@@ -424,7 +422,7 @@ func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIss
 	if err != nil {
 		return nil, err
 	}
-	return blockers.Blocked(rows, issues, record.WaitingIssues(line), record.ChildWaitRows(facts.ChildWaits)), nil
+	return blockers.Blocked(rows, issues, line, record.ChildWaitRows(facts.ChildWaits)), nil
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
@@ -1014,28 +1012,9 @@ func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string
 	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
 }
 
-// needsSlot says whether issue must hold one of the cap's slots now: a worker of it has work
-// (atWork), its tree is running — live, with a root that does not linger after its close — and
-// Dispatch still shows it in the workflow. Nothing of a tree that has left the workflow works
-// until its re-admission runs it again, and an issue that only waits — for its merge, in
-// accepting, on a person, on a blocker — holds none, so the cap bounds the issues at work
-// rather than the trees that are open.
-//
-// The Dispatch status is asked because a person's park, close or icebox takes the issue out of
-// the workflow before anything moves its phase: the workflow's own leave records the linger in
-// the same fact, but a pass that reads the record between the two would otherwise count a
-// parked root's slot against the cap for good.
-//
-// root is the record of the issue's tree root and gate that root's design gate, both from the
-// one read the pass makes of each (record.LineFacts); live is whether the tree is live, from the
-// same facts (record.LiveRoots). The slot is accounting only: taking one away suspends no claim,
-// moves no phase and writes no Dispatch status.
-func needsSlot(issue, root record.Issue, gate record.DesignGate, live bool) bool {
-	return live && !root.Lingers() && !record.OutOfWorkflow(issue.Status) && record.AtWork(issue, gate)
-}
-
 // releaseSlots releases the slot of every issue of this project that no longer needs one
-// (needsSlot) and reports those issues in slot order. Each release is logged once the fact
+// (record.NeedsSlot, the one statement of the rule, which the waiting line's first part reads
+// too) and reports those issues in slot order. Each release is logged once the fact
 // commits. It is the one release the daemon makes: a tree leaving the workflow, a root finishing,
 // an issue reaching a phase that only waits and a linger all read the same predicate, so there is
 // one rule and one place a slot can go.
@@ -1064,7 +1043,7 @@ func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, issues []record
 		// A slotted issue whose root the live records do not hold belongs to a tree that has
 		// finished: LiveRoots does not name it either, so the predicate releases it.
 		_, running := live[issue.Tree]
-		if needsSlot(issue, byKey[issue.Tree], facts.Gates[issue.Tree], running) {
+		if record.NeedsSlot(issue, byKey[issue.Tree], facts.Gates[issue.Tree], running) {
 			continue
 		}
 		if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
@@ -1201,10 +1180,10 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			// A candidate that waits on an unfinished Dispatch issue is passed over and keeps
 			// its place: the next pass promotes it once the last issue it waits on is done.
 			// That is a decided skip rather than a hold — the pass knows enough to decide it —
-			// so the line moves on. record.Waiting still carries it, deliberately: dropped from
-			// the line, a root would make record.TreeLive false for itself and its children
-			// would be recorded as orphans admitted as roots of their own.
-			if waits := candidateWaitsOn(rows, candidate); len(waits) > 0 {
+			// so the line moves on. The rule is read per kind, as the state's own `blocked`
+			// reads it (blockers.LineWaitsOn), so no issue is reported waiting on a link this
+			// loop would start anyway.
+			if waits := blockers.LineWaitsOn(rows, candidate); len(waits) > 0 {
 				a.log.Info("admission waits for what this issue waits on", "issue", issue.Key, "blockers", waits)
 				continue
 			}
@@ -1310,6 +1289,17 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 				// holds (workflow's Ancestry), so the chain it queued under goes now: a root
 				// coming back to the line later is never held by a chain left from before it ran.
 				issue.Ancestry = nil
+				// The hand-over mark goes with it, for the same reason and with the same reach:
+				// it says a root arrived from another tree and has still to open a tree of its
+				// own, and this is the write that opens it. Left standing it would make the
+				// record say for ever that this generation never ran (record.QueuedRoot, ran),
+				// so a person's todo on the running root — which holds no slot in accepting or
+				// awaiting_merge — would queue it again and promote it a second time, moving its
+				// awaiting_merge to merging, where its merge closes nothing. Nothing else reads
+				// the mark after the tree is open: a root with an opened lifecycle is no tree's
+				// to adopt whatever the mark says (workflow's RanAsRoot), and its own record
+				// says it is a root (record.ChildOpen).
+				issue.HandedOverFrom = ""
 				if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 					return admitted, released, fmt.Errorf("record admitted issue %s: %w", issue.Key, err)
 				}
@@ -1387,25 +1377,6 @@ func (a *Admission) reread(ctx context.Context, tx pgx.Tx) ([]record.Issue, []re
 	}
 	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
 	return issues, slots, facts, err
-}
-
-// candidateWaitsOn is what a candidate of the line still waits on among the Dispatch issues its
-// mirror row names, under the rule its kind is judged by. A root whose tree is not open yet is
-// judged by blockers.WaitsOn, which exempts a tree Legion takes back. An issue whose first phase
-// would start is judged by blockers.Holds, which exempts nothing and answers nothing at all for
-// a root: a root at admitted inside a running tree starts whatever its links say, since they
-// were read when its own tree was opened and a blocker added to a tree already running never
-// re-checks it. An issue whose work is already under way — a return, an answered root's resume —
-// waits on nothing here, for that same reason.
-func candidateWaitsOn(rows map[string]blockers.Row, entry record.LineEntry) []string {
-	switch entry.Kind {
-	case record.LineQueuedRoot:
-		return blockers.WaitsOn(rows, entry.Issue)
-	case record.LineFirstPhase:
-		return blockers.Holds(rows, entry.Issue)
-	default:
-		return nil
-	}
 }
 
 // slotFor says whether promoting this candidate puts a worker of it to work, so that it must
@@ -1487,6 +1458,12 @@ func (a *Admission) catchingUpFor(key string) bool {
 // waits, and the state names what for — and a re-admission, which opens a new generation, tells
 // it anew, because that run's architect has not heard it.
 //
+// The run is the tree root's generation, not the waiting issue's own: re-admission raises the
+// root's and leaves every member's where it stands (workflow's linger), so a sub-parent that
+// waited for its unreleased children before the park would be marked told for ever and the new
+// run's architect would never hear of that wait. The mark's own table says the generation means
+// the run (20261104004500_children_first_notices).
+//
 // The parents are told in key order so that one pass's rows read the same whatever order the
 // judgement's map iterated in.
 func (a *Admission) tellChildrenFirst(ctx context.Context, tx pgx.Tx, issues []record.Issue, facts record.LineFacts) error {
@@ -1503,7 +1480,7 @@ func (a *Admission) tellChildrenFirst(ctx context.Context, tx pgx.Tx, issues []r
 		if !recorded {
 			continue
 		}
-		told, err := a.store.TellChildrenFirst(ctx, tx, key, parent.Generation, now)
+		told, err := a.store.TellChildrenFirst(ctx, tx, key, byKey[parent.Tree].Generation, now)
 		if err != nil {
 			return err
 		}
@@ -1541,10 +1518,17 @@ func (a *Admission) waitsForChildren(waits map[string]record.ChildWait, issue re
 // or waiting for its children holds none while its tree works perfectly well. Every one of those
 // is a tree whose lifecycle stands open under the workflow, or whose root waits in the line or on
 // a person, which is exactly record.LiveRoots: so liveness is the term that replaces the old slot
-// test, and it covers the slots, the line and the awaiting_person wait together. The blocker hold
-// and the children-first wait are asked of the issue as well, so that a later rule which holds an
-// issue somewhere liveness does not reach cannot silently have its work taken out of the
-// workflow.
+// test, and it covers the slots, the line and the awaiting_person wait together. The
+// children-first wait is asked of the issue as well, so that a later rule which holds an issue
+// somewhere liveness does not reach cannot silently have its work taken out of the workflow.
+//
+// What a root's own Dispatch links say is not asked, though it reads as a wait of the same
+// kind. A root the line holds behind an unfinished link is in todo, which this rule has already
+// passed over, and the links of a root at a running status are read by nothing: its tree was
+// opened under whatever they said then, and a link added since re-checks nothing (the line's
+// own candidateWaitsOn). Asking blockers.WaitsOn here answered from the mirror rows this pass
+// happened to read for other issues, so whether the safety net spared a root turned on whether
+// something else had named it.
 //
 // What is left is a root whose tree nothing will ever open again, recorded at a running status.
 // The workflow takes a root out on a status out of the workflow (its leave) but does nothing on a
@@ -1564,7 +1548,7 @@ func (a *Admission) unslotted(issue record.Issue, live map[string]struct{}, rows
 	if _, running := live[issue.Key]; running {
 		return false
 	}
-	if a.waitsForChildren(waits, issue) || len(blockers.WaitsOn(rows, issue)) > 0 {
+	if a.waitsForChildren(waits, issue) {
 		return false
 	}
 	return true
@@ -1594,7 +1578,7 @@ func (a *Admission) releaseUnslotted(ctx context.Context, tx pgx.Tx, issues []re
 		if !awaiting && !a.unslotted(issue, live, rows, waits) {
 			continue
 		}
-		reason := fmt.Sprintf("%s was %s with no admission slot, a status only a running tree has, so no slot would ever reach it", issue.Key, issue.Status)
+		reason := fmt.Sprintf("%s was %s, a status only a running tree has, while no tree of it runs: its lifecycle is not open, it waits in no line and on no person, so nothing would ever start it", issue.Key, issue.Status)
 		if why != "" {
 			reason = fmt.Sprintf("%s awaits a person without an admission slot, but %s", issue.Key, why)
 		}
@@ -1616,7 +1600,7 @@ func (a *Admission) releaseUnslotted(ctx context.Context, tx pgx.Tx, issues []re
 // awaitingUnresumable returns why an awaiting root of this project may not resume (workflow's
 // Unresumable, the one rule ReconcileAwaiting also asks) and whether this pass must remove it. It
 // asks nothing of the slots: a root waiting on a person holds none by the release rule itself
-// (needsSlot), so a slot test here would never answer anything.
+// (record.NeedsSlot), so a slot test here would never answer anything.
 func (a *Admission) awaitingUnresumable(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, bool, error) {
 	if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() || !record.InWorkflow(issue) || !issue.AwaitingPerson() {
 		return "", false, nil
@@ -1926,11 +1910,20 @@ func (a *Admission) resumeSlottedWorkers(ctx context.Context, tx pgx.Tx, issues 
 }
 
 // finishFencedStarts is the repair of a held start row that has outlived the fences the outbox
-// would have run it under: its issue has left the workflow, its tree lingers, or the issue has
-// moved past the phase or the generation the row names. The outbox applies those fences when it
-// runs a row, but a row waiting for a slot may never be run at all, and one that could never act
-// would keep its issue in the waiting line for ever and take a slot from work that could use it.
-// Finishing the row deletes it, exactly as the outbox's own fence would.
+// would have run it under: its issue has left the workflow, its tree lingers or has left, or the
+// issue has moved past the phase or the generation the row names. The outbox applies those
+// fences when it runs a row, but a row waiting for a slot may never be run at all, and one that
+// could never act would keep its issue in the waiting line for ever and take a slot from work
+// that could use it. Finishing the row deletes it, exactly as the outbox's own fence would.
+//
+// A tree that lingers is read by the absence of its root rather than by its root's deadline: a
+// lingering root is in phase done at a status that is not todo, which is exactly what the
+// project's live read leaves out (record.Store.LiveIssues), so its record is not here to carry
+// a linger at all. Reading the zero record's deadline answered false for every parked tree,
+// which is the one case this repair exists for: the members of a parked tree keep their phase
+// and their generation, so the row passed every other fence, and at the tree's re-admission its
+// issue stood in the line's first part with the old row's place and took a slot ahead of its
+// own root.
 func (a *Admission) finishFencedStarts(ctx context.Context, tx pgx.Tx, issues []record.Issue, facts record.LineFacts) error {
 	byKey := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
@@ -1938,8 +1931,8 @@ func (a *Admission) finishFencedStarts(ctx context.Context, tx pgx.Tx, issues []
 	}
 	for _, owed := range facts.OwedRows {
 		issue, recorded := byKey[owed.Issue]
-		root := byKey[issue.Tree]
-		if recorded && !record.OutOfWorkflow(issue.Status) && !root.Lingers() &&
+		root, rooted := byKey[issue.Tree]
+		if recorded && rooted && !record.OutOfWorkflow(issue.Status) && !root.Lingers() &&
 			owed.Generation == issue.Generation && owed.Phase == issue.Phase {
 			continue
 		}

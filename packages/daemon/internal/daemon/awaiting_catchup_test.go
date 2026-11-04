@@ -810,6 +810,41 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 	})
 }
 
+// The boot's catch-up reads an admitted root only while the root's own architect is the worker
+// at work: its design gate has never opened (record.AtWork) and it holds the slot that work
+// takes. Both ends matter, and this seeds a root that fails each one.
+//
+// CAPTURE-100's gate has opened, so under the children-first rule it is waiting for its
+// children rather than working, and ReconcileAwaiting can start no wait on a person for it
+// (workflow's decideAwait, rule 0); the slot it still holds is one admission's next pass takes
+// back. CAPTURE-200 waits in line for its first slot, so its architect has never run and has
+// handed nothing back. Reading either one's event log would hold it out of admission for a
+// window that can decide nothing, and replay, for the root that never ran, history older than
+// the handout its own admission will be.
+func TestTheCatchUpReadsNoRootWhoseArchitectDoesNotHoldTheWork(t *testing.T) {
+	cursor := catchUpHandout
+	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3, ApprovedVersion: new(3),
+		ApprovedMark: record.EventMark{Seq: 5}}
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
+		events: []json.RawMessage{askOpened(7, "ask-q1"), askClosed(9, "answered", "ask-q1", "question", alice)}}
+	pool, w := catchUpRig(t, client, 1)
+	slottedCapture(t, pool, opened, &cursor)
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if len(client.afters) != 0 {
+		t.Fatalf("event log read after %v, want no read: neither root's own architect holds its tree's work", client.afters)
+	}
+	assertCaptureKeptItsSlot(t, pool)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
+		if err != nil || !set || got != cursor {
+			t.Fatalf("catch-up cursor = %d (set %t, %v), want the cursor %d a root the boot passed over keeps", got, set, err, cursor)
+		}
+		return nil
+	})
+}
+
 // A question its architect opened and a person answered while the daemon was down is applied at
 // the boot with the root held out of admission's decision until the whole window is in: one pass
 // then finds nothing still with the person and takes the hand-back in, so the running architect,

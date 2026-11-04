@@ -28,7 +28,7 @@ func TestAChildParkedInAnotherTreeHoldsNothing(t *testing.T) {
 	records := map[string]Issue{parkedElsewhere: {Key: parkedElsewhere, Tree: otherTree, Parent: &parentKey,
 		Project: "LEGION", Phase: phase.Done, Status: "backlog"}}
 
-	waits := ChildWaits(issues, children, records)
+	waits := ChildWaits(issues, children, records, nil)
 	wait, waiting := waits[parent]
 	if !waiting {
 		t.Fatalf("the judgement of %s = %+v, want it waiting on the child no tree records", parent, waits)

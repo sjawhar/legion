@@ -1348,7 +1348,9 @@ func ApprovalFollows(gate record.DesignGate, version int, mark record.EventMark)
 	return approved > version || approved == version && !mark.After(gate.ApprovedMark)
 }
 
-// DesignGateOpen reports whether a human approved the gate's current document version.
+// DesignGateOpen reports whether a human approved the gate's current document version. It is
+// record.GateOpen, where the rule lives because the record package needs it too and may not read
+// this one, and it keeps its name here because every decision in this file is named this way.
 func DesignGateOpen(gate record.DesignGate) bool {
-	return gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
+	return record.GateOpen(gate)
 }

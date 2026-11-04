@@ -170,7 +170,7 @@ func (a *adoptionHarness) waiting() []string {
 			return err
 		}
 		facts.Held = blockers.HeldIssues(rows, issues)
-		if facts.ChildWaits, err = record.ChildWaitsOf(context.Background(), tx, a.records, testProject, issues, facts.Gates); err != nil {
+		if facts.ChildWaits, err = record.ChildWaitsOf(context.Background(), tx, a.records, testProject, issues, facts); err != nil {
 			return err
 		}
 		for _, issue := range record.Waiting(issues, slots, facts) {

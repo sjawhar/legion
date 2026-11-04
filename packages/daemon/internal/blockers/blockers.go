@@ -109,16 +109,39 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 	return unfinished
 }
 
+// LineWaitsOn is what one candidate of the waiting line still waits on among the Dispatch
+// issues its mirror row names, under the rule its kind is judged by. A root whose tree is not
+// open yet is judged by WaitsOn, which exempts a tree Legion takes back. An issue whose first
+// phase would start is judged by Holds, which exempts nothing and answers nothing at all for a
+// root: a root at admitted inside a running tree starts whatever its links say, since they were
+// read when its own tree was opened and a blocker added to a tree already running never
+// re-checks it. An issue whose work is already under way — a return, an answered root's resume
+// — waits on nothing here, for that same reason.
+//
+// It is the one statement of the rule, and both the promotion that skips a candidate (admit's
+// promoteHolds) and the state's own report of what Legion waits for (Blocked) read it, so no
+// issue is reported blocked by a link the promotion starts it in spite of.
+func LineWaitsOn(rows map[string]Row, entry record.LineEntry) []string {
+	switch entry.Kind {
+	case record.LineQueuedRoot:
+		return WaitsOn(rows, entry.Issue)
+	case record.LineFirstPhase:
+		return Holds(rows, entry.Issue)
+	default:
+		return nil
+	}
+}
+
 // Blocked is every issue Legion is waiting to start that waits on another issue, by issue key:
 // what the daemon's state shows under `blocked` and what a tick notice tells the controller,
 // from the one judgement both readings and both deciders share.
 //
-// It is the decisions themselves, read rather than made: a root of waiting — the line admission
-// promotes from, which the caller passes as it computes it — that promotion skips (WaitsOn), and
-// a recorded child the workflow holds at `admitted` (Holds; admission starts it once Holdable
-// meets nothing Unfinished). A candidate the rule exempts is never judged, as the decider that
-// would admit it does not judge it either (Exempt): what promotion starts whatever its links say
-// is never reported as waiting on them.
+// It is the decisions themselves, read rather than made: a candidate of the line — which the
+// caller passes as it computes it — that promotion skips (LineWaitsOn, the rule promotion
+// itself reads, per kind), and a recorded child the workflow holds at `admitted` (Holds;
+// admission starts it once Holdable meets nothing Unfinished). A candidate the rule exempts is
+// never judged, as the decider that would admit it does not judge it either (Exempt): what
+// promotion starts whatever its links say is never reported as waiting on them.
 //
 // more is what a decider outside this package has already judged and rendered, which today is
 // the children-first wait (record.ChildWaitRows): that rule reads the mirror's parent column
@@ -126,9 +149,9 @@ func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 // here, and it must still reach the one list a reader reads. A key both deciders name keeps one
 // row, with each one's issues in it — the deciders are independent, and an issue can wait on a
 // link and on a child at once.
-func Blocked(rows map[string]Row, issues, waiting []record.Issue, more []record.BlockedIssue) []record.BlockedIssue {
-	blocked := make([]record.BlockedIssue, 0, len(waiting)+len(more))
-	at := make(map[string]int, len(waiting)+len(more))
+func Blocked(rows map[string]Row, issues []record.Issue, line []record.LineEntry, more []record.BlockedIssue) []record.BlockedIssue {
+	blocked := make([]record.BlockedIssue, 0, len(line)+len(more))
+	at := make(map[string]int, len(line)+len(more))
 	add := func(key string, waits []string) {
 		if index, named := at[key]; named {
 			for _, wait := range waits {
@@ -141,9 +164,9 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue, more []record.
 		at[key] = len(blocked)
 		blocked = append(blocked, record.BlockedIssue{Issue: key, BlockedBy: waits})
 	}
-	for _, issue := range waiting {
-		if waits := WaitsOn(rows, issue); len(waits) > 0 {
-			add(issue.Key, waits)
+	for _, entry := range line {
+		if waits := LineWaitsOn(rows, entry); len(waits) > 0 {
+			add(entry.Issue.Key, waits)
 		}
 	}
 	for _, issue := range issues {
@@ -266,7 +289,7 @@ func JudgeLine(ctx context.Context, tx pgx.Tx, store record.Store, project strin
 		return rows, facts, nil, err
 	}
 	facts.Held = HeldIssues(rows, issues)
-	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, store, project, issues, facts.Gates); err != nil {
+	if facts.ChildWaits, err = record.ChildWaitsOf(ctx, tx, store, project, issues, facts); err != nil {
 		return rows, facts, nil, fmt.Errorf("read what the unstarted issues of %s wait on under them: %w", project, err)
 	}
 	line := record.Waiting(issues, slots, facts)

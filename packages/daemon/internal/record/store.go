@@ -104,6 +104,32 @@ func (s *Postgres) IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys
 	return issues, nil
 }
 
+// AncestorsOf is the record of each of keys and of every issue above it on the chain of recorded
+// parents, by key order, for the issues of project; a key with no record contributes nothing. No
+// keys read nothing.
+//
+// The chain is walked in the database, in one query whatever its depth, because its callers walk
+// it under the one fact lock every fact takes (intake.ApplyFact): a read per step would cost a
+// round trip per level on every fact of every consumer. The walk carries only the key and the
+// parent, and the records are read once at the end; `union` is what ends it, since a chain that
+// loops back on itself derives nothing new on its second turn.
+func (s *Postgres) AncestorsOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error) {
+	if len(keys) == 0 {
+		return []Issue{}, nil
+	}
+	issues, err := queryIssues(ctx, tx, `with recursive chain as (
+			select key, parent from issues where project = $1 and key = any($2)
+			union
+			select above.key, above.parent from issues above
+				join chain on above.key = chain.parent and above.project = $1
+		)
+		select `+issueColumns+` from issues where project = $1 and key in (select key from chain) order by key`, project, keys)
+	if err != nil {
+		return nil, fmt.Errorf("read the issues above %v of project %s: %w", keys, project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error) {
 	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
 		where status = 'todo' and handed_over and key = tree and $1 = any(ancestry)
@@ -1290,9 +1316,8 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 	}
 	// ever_opened only ever rises: the write ORs what the row holds with what this gate opens with,
 	// because a changes request's write carries a gate whose approval it has just cleared and would
-	// otherwise put out a mark a past approval lit. The inserted value is classify.DesignGateOpen's
-	// rule written out rather than called: internal/classify reads this package, so this package
-	// may not read it back.
+	// otherwise put out a mark a past approval lit. What counts as opened is the one statement of
+	// it (GateOpen), which classify.DesignGateOpen calls too.
 	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, approved_seq, approved_at,
 		told_changes_version, told_changes_reason, told_changes_seq, told_changes_at, ever_opened)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -1304,7 +1329,7 @@ func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) erro
 		ever_opened = design_gates.ever_opened or excluded.ever_opened`,
 		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, approvedSeq, approvedAt,
 		gate.ToldChangesVersion, toldReason, toldSeq, toldAt,
-		gate.EverOpened || gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion)
+		gate.EverOpened || GateOpen(gate))
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}
@@ -1621,6 +1646,16 @@ func (s *Postgres) EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int
 // made against is the one the caller is acting at, which rides in on the row it hands over
 // (NewOutboxRow's nextAt), so one transition reads one clock throughout.
 //
+// A row whose lease has lapsed takes a fresh lease token with its new payload, in the shape the
+// ready_merge conflict already uses: the lane that wrote the lapsed lease may be slow rather
+// than dead, and every move it has left is matched on the token it holds — RenewOutboxLease
+// renews by the token alone, and FinishOutbox deletes by the id and the token. Left in place,
+// that token would let such a lane renew its lease, deliver the earlier task it had already
+// read, and then finish the row now carrying the later one, which would delete the later task
+// with nothing to re-place it: the issue's pending delivery holds the resume pass off
+// (StillWorked) and every completion of it is refused HANDOFF_STALE_ASSIGNMENT. A row that has
+// never been leased keeps the empty token, which is what an unleased row carries.
+//
 // A partial unique index on the pending start would be the other way to keep one row, and is not
 // available: Enqueue allows one `on conflict` target per statement and already spends it on
 // ready_merge (readyMergeConflict).
@@ -1628,7 +1663,8 @@ func (s *Postgres) ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRo
 	if !json.Valid(row.Payload) {
 		return false, fmt.Errorf("replace the owed start of %s: payload is not JSON", row.Issue)
 	}
-	tag, err := tx.Exec(ctx, `update outbox set payload = $2
+	tag, err := tx.Exec(ctx, `update outbox set payload = $2, lease_until = null,
+			lease_token = case when lease_token = '' then '' else gen_random_uuid()::text end
 		where id = (select id from outbox
 			where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
 				and payload->>'needsSlot' = 'true' and (lease_until is null or lease_until <= $3)
