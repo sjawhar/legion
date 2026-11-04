@@ -4399,7 +4399,7 @@ A `github-app` secret whose `github-owners` names no account is refused `github-
 none) and `Secret.GitHubOwners` the lowercased, sorted, single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.
 `Values` takes one policy snapshot for its re-check and passes the same snapshot's owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an installation on an account they do not list, nor for a record with no positive installation id.
 A release may narrow its GitHub App tokens (`secrets.GitHubNarrowing`, the `github_app` body of `POST /v1/grants/{id}/values`):
-the token of one listed account's installation alone, sent GitHub's `access_tokens` body naming repositories of that account, `contents: read` and `metadata: read`, or both, and nothing else, so a caller can only narrow.
+the token of one listed account's installation alone, sent GitHub's `access_tokens` body naming repositories of that account, `contents: read`, `metadata: read` and `pull_requests: read`, or both, and nothing else, so a caller can only narrow.
 A body naming repositories alone names no permissions, and GitHub then gives the token every permission the App holds, its organization permissions among them: only `read_only` limits those.
 The narrowing is that release's alone: the grant records none (each release's `grant.used` audit row does) and the broker keeps no token, so its next release without one mints the owner-wide tokens, and no approval, record, request object or grant changes, since the session holding the grant can always have the owner-wide token.
 `policy.ParseGitHubNarrowing` checks the body (one login by `policy.ParseGitHubLogin`;
