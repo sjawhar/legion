@@ -1277,6 +1277,7 @@ jobs:
               - 'packages/envoy/cmd/**'
               - 'packages/envoy/daemonpermissions/**'
               - 'packages/envoy/deploy/**'
+              - 'packages/envoy/dispatchbody/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
               - 'packages/envoy/internal/**'
