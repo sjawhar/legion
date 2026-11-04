@@ -122,6 +122,98 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
    *  that card is open - once the pointer leaves it the card closes itself
    *  (`REF_PREVIEW_CLOSE_DELAY_MS`) and `interacted` lets the row go. */
   private onOwnCard = false;
+  /** The row the reader's hand is on and the viewport top they last saw it at - where every
+   *  compensation puts it back. It is read rather than re-measured because the view can be
+   *  wrong when a commit arrives: a change this component's own commits never see has already
+   *  moved the row. A card below the hand answering itself, a thread body arriving, Markdown
+   *  finishing - each is a child's own commit, which re-renders the child alone, so
+   *  `getSnapshotBeforeUpdate` is never called for it. Where the rows scroll in the document
+   *  the browser's own scroll anchoring covers that; in an element the host names (`scroller`)
+   *  it does not, which is what `contentResized` stands in for. Measured in the Inbox drawer:
+   *  the answered row's card shrinks by a card's height one commit before the list drops the
+   *  row, and the reader's row ended exactly that far out. */
+  private held: { id: string; top: number } | null = null;
+  private contentSize: ResizeObserver | null = null;
+  /** Set by a scroll this component made, so the scroll event it raises is not read as the
+   *  reader moving the view. Scroll events run before resize observations in a frame, so
+   *  without this the compensation's own event would record the place it just corrected. */
+  private selfScrolled = false;
+
+  /** Where the pointer last was, in viewport pixels. A row moving under a pointer that has not
+   *  moved makes the browser dispatch `pointerout`/`pointerover` again, with the same
+   *  coordinates: that is the list moving under the hand, which is the thing being compensated
+   *  for, so it must not be read as the reader looking somewhere new. */
+  private pointerAt: { x: number; y: number } | null = null;
+
+  /** Records where the hand's row sits now as the place to keep it. Called where the view is
+   *  the reader's own: the pointer moving onto a row or off one, and a scroll they made. */
+  private readonly rememberHeld = (): void => {
+    const current = this.interacted();
+    this.held =
+      current === null ? null : { id: current.id, top: current.row.getBoundingClientRect().top };
+  };
+
+  /** True when this pointer event is the hand moving rather than the list moving under it. */
+  private handMoved(event: PointerEvent): boolean {
+    const at = this.pointerAt;
+    this.pointerAt = { x: event.clientX, y: event.clientY };
+    return at === null || at.x !== event.clientX || at.y !== event.clientY;
+  }
+
+  /** Moves the box this anchor owns and remembers that it did. */
+  private scrollBy(delta: number): void {
+    const scroller = this.props.scroller?.current ?? null;
+    if (scroller === null) {
+      const before = window.scrollY;
+      window.scrollBy(0, delta);
+      this.selfScrolled = window.scrollY !== before;
+      return;
+    }
+    const before = scroller.scrollTop;
+    scroller.scrollTop += delta;
+    this.selfScrolled = scroller.scrollTop !== before;
+  }
+
+  private readonly viewScrolled = (event: Event): void => {
+    const scroller = this.props.scroller?.current ?? null;
+    const mine = scroller === null ? event.target === document : event.target === scroller;
+    if (!mine) return;
+    if (this.selfScrolled) {
+      this.selfScrolled = false;
+      return;
+    }
+    this.rememberHeld();
+  };
+
+  /** The root's content changed height outside a commit of this component's. Puts the hand's
+   *  row back where the reader last saw it, in the box the host named; with no such box the
+   *  document's own scroll anchoring owns this and nothing here runs. */
+  private readonly contentResized = (): void => {
+    const held = this.held;
+    const root = this.root;
+    if (this.props.scroller?.current == null || held === null || root === null) return;
+    const element = root.querySelector<HTMLElement>(
+      `[${this.props.item}="${CSS.escape(held.id)}"]`
+    );
+    if (element === null) {
+      this.held = null;
+      return;
+    }
+    const delta = element.getBoundingClientRect().top - held.top;
+    if (delta !== 0) this.scrollBy(delta);
+  };
+
+  componentDidMount(): void {
+    // Capture, because `scroll` does not bubble: one listener catches the window's and the
+    // named box's alike, and the handler reads a rect only for the box this anchor owns.
+    window.addEventListener("scroll", this.viewScrolled, true);
+  }
+
+  componentWillUnmount(): void {
+    window.removeEventListener("scroll", this.viewScrolled, true);
+    this.contentSize?.disconnect();
+    this.contentSize = null;
+  }
 
   // Both listeners hang off the rendered root, not `document`: `pointerover`/`pointerout` bubble,
   // so a pointer entering a row still reaches the root, and leaving a row for anything outside
@@ -133,6 +225,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     }
     this.hovered = rowWithin(root, `[${this.props.item}]`, event.target);
     this.onOwnCard = false;
+    if (this.handMoved(event)) this.rememberHeld();
   };
 
   // A pointer moving from a row onto the card that row's own reference opened has left nothing
@@ -153,6 +246,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     }
     this.hovered = null;
     this.onOwnCard = false;
+    if (this.handMoved(event)) this.rememberHeld();
   };
 
   private readonly setRoot = (node: HTMLElement | null): void => {
@@ -160,10 +254,18 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
       this.root.removeEventListener("pointerover", this.pointerOver);
       this.root.removeEventListener("pointerout", this.pointerOut);
     }
+    this.contentSize?.disconnect();
+    this.contentSize = null;
     this.root = node;
     if (node !== null) {
       node.addEventListener("pointerover", this.pointerOver);
       node.addEventListener("pointerout", this.pointerOut);
+      // Not every environment the unit tests run in has one (happy-dom); there the hold is the
+      // commit path alone, which is what those tests exercise.
+      if (typeof ResizeObserver !== "undefined") {
+        this.contentSize = new ResizeObserver(this.contentResized);
+        this.contentSize.observe(node);
+      }
     }
     const { rootRef } = this.props;
     if (rootRef !== undefined) rootRef.current = node;
@@ -218,10 +320,17 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     if (enabled !== undefined && !enabled()) return null;
     const current = this.current();
     if (current === null) return null;
+    // Where the reader last saw the row they have their hand on, not where it sits now: a
+    // change no commit of this component's saw may already have moved it (`held`), and
+    // measuring again here would take that drift for the place to keep.
+    const held = this.held;
     return {
       group: group === undefined ? null : current.row.getAttribute(group),
       id: current.id,
-      top: current.row.getBoundingClientRect().top,
+      top:
+        held !== null && held.id === current.id
+          ? held.top
+          : current.row.getBoundingClientRect().top,
       via: current.via,
     };
   }
@@ -240,14 +349,7 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     const { group } = this.props;
     if (group !== undefined && element.getAttribute(group) !== snapshot.group) return;
     const delta = element.getBoundingClientRect().top - snapshot.top;
-    if (delta !== 0) {
-      const scroller = this.props.scroller?.current ?? null;
-      if (scroller === null) {
-        window.scrollBy(0, delta);
-      } else {
-        scroller.scrollTop += delta;
-      }
-    }
+    if (delta !== 0) this.scrollBy(delta);
   }
 
   render(): ReactNode {

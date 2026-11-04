@@ -313,3 +313,31 @@ test("rows scrolling in an element are pinned by that element's scrollTop, and t
     view.unmount();
   }
 });
+
+// The Inbox drawer's defect: the row above the hand shrank inside its own card, a commit this
+// anchor never sees, and the browser re-dispatched the boundary events at the pointer's own
+// unchanged position. Reading the row's place again there would take the drift for the place
+// to keep, and the next commit would pin the row where it had already slid to.
+test("a row moving under a pointer that has not moved does not become the place it is kept at", () => {
+  const view = render(<List rows={ids(12)} scroller={scrollerRef} />);
+  try {
+    const scroller = scrollerRef.current;
+    if (scroller === null) throw new Error("scroller missing");
+    scroller.scrollTop = 100;
+    const hovered = document.querySelector<HTMLElement>('[data-row="r4"]');
+    if (hovered === null) throw new Error("r4 missing");
+    fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
+    const held = viewportTop("r4");
+
+    // Content above the hand's row loses 50 px with no commit of this anchor's, so the row
+    // slides up under a pointer that has not moved, and the browser says so again.
+    scroller.scrollTop = 150;
+    expect(viewportTop("r4")).toBe((held ?? 0) - ROW_HEIGHT);
+    fireEvent.pointerOver(hovered, { clientX: 20, clientY: 250 });
+
+    view.rerender(<List rows={["a", ...ids(12)]} scroller={scrollerRef} />);
+    expect(viewportTop("r4")).toBe(held);
+  } finally {
+    view.unmount();
+  }
+});
