@@ -251,7 +251,10 @@ func TestATokenNamingAServiceAndNoPersonIsASessionsCredential(t *testing.T) {
 	const token = "a-token-the-exchange-issued-a-machine"
 	rig.broker.Says(token, serviceToken(caller.jkt, time.Hour))
 
-	want := brokertoken.Caller{Session: "ses_a1b2c3", Service: "example-fleet"}
+	// The scope is carried whole, as callerOf carries it for every answer: a service-only token
+	// gains nothing by it, since the one reader of the field (api.broker_token's person-scope
+	// branch) asks for a person first, and this caller has none.
+	want := brokertoken.Caller{Session: "ses_a1b2c3", Service: "example-fleet", ProjectScope: brokertoken.ProjectScopePerson}
 	decided, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token))
 	if err != nil {
 		t.Fatalf("Verify refused a token naming a service and no person: %v", err)
