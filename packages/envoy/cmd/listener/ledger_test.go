@@ -262,14 +262,17 @@ func TestALedgerCallThatFailedInAReconnectIsMadeAgainOnceTheConnectionIsBack(t *
 	noException(t, probe)
 }
 
-// A session that receives - one reading its own NATS subscription, one whose own consumer the
-// relay pulls, one another listener owns - is handed nothing by this listener, so its delivery
-// writes nothing to the ledger and a message that reaches only such sessions is acked. The
-// fan-out holds to the same rule: it asks the ledger for a recipient it refuses, whose exception
-// the pair's record dedupes, and for no other. A recipient that simply takes the message would
-// otherwise cost two KV round trips on the durable's handler for a delivery this pod never
-// makes, and a 30 s retry of the message for every one of its recipients while the ledger is
-// down.
+// The durable lane writes nothing to the ledger for a session that receives - one reading its
+// own NATS subscription, one whose own consumer the relay pulls, one another listener owns -
+// and a message that reaches only such sessions is acked. The agent-subject path never decodes
+// one for a session that takes the stored message itself (durableNeedsDelivery), and settles a
+// session another listener owns before it asks the ledger at all. The fan-out holds to the same
+// rule: it asks the ledger for a recipient it refuses, whose exception the pair's record
+// dedupes, and for no other. A recipient that simply takes the message would otherwise cost two
+// KV round trips on the durable's handler for a delivery this pod never makes, and a 30 s retry
+// of the message for every one of its recipients while the ledger is down. The core lane's
+// agent-subject delivery does record the pair a self-subscribed session took, which is what
+// dedupes the next copy of it (TestListenerDeliveryHandler_DedupesSuccessfulDelivery).
 func TestASessionThatReceivesCostsNoLedgerWrite(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
 	cfg := harness.config

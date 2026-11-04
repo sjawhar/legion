@@ -603,11 +603,16 @@ const deliverySessionReadTimeout = 2 * time.Second
 // listener's to deliver, so this one acknowledges the message silently; a session that records no
 // way of receiving at all is held and retried, then given up (unplaceableAgentDelivery).
 //
-// Only a delivery this listener answers for and cannot place asks the delivery ledger, and it
-// asks once the handling has got that far: a session that receives costs no ledger write, since
-// nothing is prompted for it and so nothing is there to skip, while a message already reported
-// or given up for this session is skipped rather than reported a second time, on this pod or the
-// one that takes delivery over.
+// A delivery this listener answers for asks the delivery ledger before it applies its outcome,
+// as main does: the pair is attempted, and a delivery that lands - the session takes the message
+// off its own subscription - records it delivered, so a second copy of the same message is a
+// dedupe skip rather than a second delivery, on this pod or the one that takes delivery over,
+// and a message already reported or given up for this session is skipped rather than reported a
+// second time. The two routes this listener hands nothing to are settled before that ask and
+// cost no ledger write at all: a message the relay of the session's own consumer delivers, and
+// one a session another listener owns. A record of either would say this listener delivered a
+// message it handed to nobody, and the relay, which asks the ledger for nothing, would be judged
+// by it.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata the durable's handler read carries everything unplaceableAgentDelivery
@@ -672,22 +677,35 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		message.finalize(false)
 		return
 	}
+	// Every route left reaches the session through this listener or not at all, so the ledger is
+	// asked here, before the outcome below is applied: a second copy of a message this session
+	// has taken is a dedupe skip against the record the first wrote, and a redelivery a lost ACK
+	// brings, or a copy another pod reads, is skipped rather than reported or given up a second
+	// time.
+	attempt, deliver, retryIn := ledgerAttempt(cfg, message, item, sessionID, false)
+	if !deliver {
+		message.finish(cfg, retryIn)
+		return
+	}
 	if result.Delivered {
 		deliveryStatus := "delivered"
 		deliveryLog := "listener agent delivered"
 		if result.Skipped {
 			// The session holds its own NATS subscription and the message reaches it there
-			// (session.Resolve): this listener handed it to nobody.
+			// (session.Resolve): this listener handed it to nobody, but the message did reach
+			// the session, so the pair is recorded delivered and the next copy of it is skipped.
 			deliveryStatus = "skipped"
 			deliveryLog = "listener agent session takes the message off its own subscription"
 		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
+			attempt:      attempt,
 			metricStatus: deliveryStatus,
 			duration:     &deliveryTimer,
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, deliveryLog, sessionID, item.Topic, item.EventID, deliveryStatus)
 			},
+			settle: settleRecord,
 		})
 		message.finalize(false)
 		return
@@ -695,18 +713,12 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	if message.cancelled() {
 		// The receiver cut this message's handling short on a shutdown: neither a failed delivery
 		// to report nor a session found nowhere, but a retry for whichever pod holds the lease
-		// next. Nothing was asked of the ledger, so there is nothing to give up.
+		// next. The attempt taken above is given up, so the pod that takes the lease delivers the
+		// message rather than skipping it as one already on its way.
 		cfg.logger.DeliveryLog(slog.LevelWarn, "listener agent delivery cancelled at shutdown", sessionID, item.Topic, item.EventID, "retry")
+		clearLedgerAttempt(cfg, item, attempt)
 		cfg.messagesNAKed.Inc()
 		message.finalize(true)
-		return
-	}
-	// Nothing placed the message. The ledger is asked here, where the report or the give-up
-	// below is the only thing a record of this pair stands for: a redelivery a lost ACK brings,
-	// or a copy another pod reads, is skipped rather than reported or given up a second time.
-	attempt, deliver, retryIn := ledgerAttempt(cfg, message, item, sessionID, false)
-	if !deliver {
-		message.finish(cfg, retryIn)
 		return
 	}
 	if result.Err != nil {

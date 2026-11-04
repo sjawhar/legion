@@ -402,6 +402,50 @@ describe("frames already written", () => {
     expect(seqs(handed)).toEqual([1]);
     expect(repliesTo(replies, "_INBOX.2")).toEqual(["received", "done"]);
   });
+
+  // The listener repeats a frame its session received but had not written when the relaying
+  // pod's term ended (cmd/listener/README.md, "When a session can see a message twice"): the
+  // successor restarts the session's consumer at its ack floor and publishes that message again,
+  // on a reply inbox of its own. The host writes it once either way - the copy that arrives
+  // while the write runs joins the frame still held, and the one that arrives after it is
+  // dropped as already written - and every inbox is answered, so no copy waits out an ack wait.
+  test("a copy of a frame received but not yet written is written once and answered on every inbox", async () => {
+    const clock = { now: T0 };
+    const ledger = replayEngine(clock);
+    const writes: number[] = [];
+    const { delivery, handed, replies, state, settled } = setup({ clock, ledger });
+    const write = Promise.withResolvers<void>();
+    state.deliver = async (frame) => {
+      // The host has the frame and writes it in its own time, letting the next one through.
+      frame.release();
+      await write.promise;
+      writes.push(frame.streamSeq);
+      await ledger.recordDelivered({ event_id: `evt-${frame.streamSeq}` });
+      frame.done();
+    };
+
+    delivery.receive(relay({ seq: 9, reply: "_INBOX.9" }));
+    expect(seqs(handed)).toEqual([9]);
+    expect(repliesTo(replies, "_INBOX.9")).toEqual(["received"]);
+
+    // The successor's relay sends the same stored message again while the write is still running.
+    delivery.receive(relay({ seq: 9, delivered: 2, reply: "_INBOX.9b" }));
+    expect(seqs(handed)).toEqual([9]);
+    expect(repliesTo(replies, "_INBOX.9b")).toEqual(["received"]);
+
+    write.resolve();
+    await settled();
+    expect(repliesTo(replies, "_INBOX.9")).toEqual(["received", "done"]);
+    expect(repliesTo(replies, "_INBOX.9b")).toEqual(["received", "done"]);
+
+    // And once more after the write finished with done: the ledger says the message is written.
+    delivery.receive(relay({ seq: 9, delivered: 3, reply: "_INBOX.9c" }));
+    await settled();
+
+    expect(seqs(handed)).toEqual([9]);
+    expect(writes).toEqual([9]);
+    expect(repliesTo(replies, "_INBOX.9c")).toEqual(["received", "done"]);
+  });
 });
 
 describe("follow filter", () => {

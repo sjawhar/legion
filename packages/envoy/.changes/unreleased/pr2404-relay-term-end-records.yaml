@@ -1,6 +1,6 @@
 kind: Fixed
 body: |-
-    A message a session's relay had unanswered when its receive term ended is no longer sent a
+    A message a session's relay had no `done` for when its receive term ended is no longer sent a
     second time by the pod that takes the lease over. The term's end cancelled the relay, so the
     frame was dropped unacknowledged and the successor, restarting the session's consumer at its
     ack floor, was given the message again: the session took it twice. A relay stopped with a
@@ -10,13 +10,16 @@ body: |-
     margin) before it restarts a session's consumer, so the grace always ends first. A holder
     taken over by force -- killed, its node lost, its record left to expire -- settles nothing
     and is not waited for.
-    A frame still unanswered when the grace ends is in doubt, since only the session's reply says
-    whether it took the message: the stopping pod logs `session relay left a frame in doubt: its
-    settle bound ended with the session's reply still out` and the successor sends that one
-    message again. So a repeat with the same event id is possible after a hard take-over, after a
-    frame whose reply had not come back when its pod's term ended, and when a links drop loses a
-    frame's reply and the consumer's acknowledgement together -- the two ride one connection --
-    and nowhere else. The grace is sized on a frame's round trip, measured on the test host over
+    A frame the grace ends without a `done` is in doubt, its session's `received` notwithstanding:
+    `received` says the client decoded the frame, not that its host wrote the message, so only
+    `done` says the session took it. The stopping pod logs `session relay left a frame in doubt:
+    its settle bound ended with the session's reply still out` and the successor sends that one
+    message again; the session's client answers that copy and writes it once, since it joins a
+    copy of a frame it still holds and drops one it has already written. So a repeat with the
+    same event id is possible after a hard take-over, after a frame its session had received but
+    not written when its pod's term ended, and when a links drop loses a frame's reply and the
+    consumer's acknowledgement together -- the two ride one connection -- and nowhere else.
+    The grace is sized on a frame's round trip, measured on the test host over
     200 frames: p50 2.44 ms, p99 11.8 ms, slowest 37.2 ms on a quiet box, 111 ms under load.
     A hard take-over is bounded as before at 15 s, and a message published in the gap a
     receive-lost cut leaves between one pod's term and the next reaches its session 1.257 s after

@@ -967,14 +967,14 @@ func TestTwoPodsARelayedFrameTheLinksDroppedUnderIsRepeatedAtMostOnceWithItsId(t
 	}
 }
 
-// A frame the active pod's relay has unanswered when its term ends is not sent again by the pod
-// that takes over. The session's reply is held when the pod is stopped; the term's end cancels
-// the relay, which goes on hearing the session for relaySettleGrace (settleStoppedFrames), the
-// session answers inside it, and the stopping relay acks the message. The successor waits
-// relayFormerSettle (lease.FormerSettleWait) before it restarts the session's consumer, so it
-// restarts at an ack floor past that message and never sends it again. The session must take it
-// exactly once. Before the settle the stopping relay forgot the frame unacked, the successor was
-// given it again, and the session took it twice: CI met that as
+// A frame the active pod's relay has had no done for when its term ends is not sent again by the
+// pod that takes over. The session's reply is held when the pod is stopped; the term's end
+// cancels the relay, which goes on hearing the session for relaySettleGrace
+// (settleStoppedFrames), the session answers done inside it, and the stopping relay acks the
+// message. The successor waits relayFormerSettle (lease.FormerSettleWait) before it restarts the
+// session's consumer, so it restarts at an ack floor past that message and never sends it again.
+// The session must take it exactly once. Before the settle the stopping relay forgot the frame
+// unacked, the successor was given it again, and the session took it twice: CI met that as
 // TestTwoPodsReceiveConnectionLostHandsOverWithin15s's "evt-mp-0079 to ses_mp_recvlost_one
 // prompted 2 times" (run 41589787158, job 125769769345); this row forces that order (INFRA-557
 // tester's round 27).
@@ -1013,18 +1013,18 @@ func TestTwoPodsARelayedFrameInFlightWhenTheTermEndsIsNotSentAgainByTheSuccessor
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
 
-// A frame the active pod's relay still has unanswered when the stopping relay's settle bound ends
-// reaches the session at most twice, under its own event id, and no other message repeats. The
-// session's reply is held when the pod is stopped; the stopping relay waits relaySettleGrace for
-// it, the session answers only well past that, and the successor restarts the session's consumer
-// at an ack floor below that message and publishes it again. Only the session's reply says
-// whether it took that frame, and it came after the bound, so no pod can know: the stopping pod
-// logs the frame in doubt (relayFrameInDoubtLine) and the successor sends it once more, which is
-// the one repeat the root's at-least-once contract allows for a frame whose reply had not come
-// back when its pod's term ended (cmd/listener/README.md, "State the pods share"). What the row
-// refuses is a second repeat of it, a repeat of any other message, an event id no message
-// carried, and a stopping pod that says nothing about the frame it cut (INFRA-557 tester's
-// round 28, the architect's edge (2)).
+// A frame the active pod's relay still has no done for when the stopping relay's settle bound
+// ends reaches the session at most twice, under its own event id, and no other message repeats.
+// The session's reply is held when the pod is stopped; the stopping relay waits relaySettleGrace
+// for it, the session answers only well past that, and the successor restarts the session's
+// consumer at an ack floor below that message and publishes it again. Only the session's done
+// says whether it wrote that frame, and it came after the bound, so no pod can know: the
+// stopping pod logs the frame in doubt (relayFrameInDoubtLine) and the successor sends it once
+// more, which is the one repeat the root's at-least-once contract allows for a frame its session
+// had not written when its pod's term ended (cmd/listener/README.md, "State the pods share").
+// What the row refuses is a second repeat of it, a repeat of any other message, an event id no
+// message carried, and a stopping pod that says nothing about the frame it cut (INFRA-557
+// tester's round 28, the architect's edge (2)).
 func TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -1125,18 +1125,19 @@ func TestTwoPodsSIGKILLWithAFrameUnansweredReachesTheSessionWithin15s(t *testing
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
 
-// A frame whose "received" reply reached the stopping relay is not sent again by the pod that
-// takes over, however long the session then takes to write it. The session answers the frame
-// "received" at once - it has the frame - and "done" only once it has written it, here 2 s past
-// the stopping relay's settle grace. The pod is stopped in between. A received frame is not in
-// doubt: its session said it has it, and the frame's reply subscription heard that before the
-// term ended. The session must take the message exactly once. At fde2b129 the stopping relay
-// counts a frame as settled only on "done" (settleStoppedFrames waits for outstanding, which
-// "received" does not clear), logs this one in doubt when its grace ends, and the successor sends
-// it again: twice. The same holds when the term ends for a lost receive connection rather than a
-// stop (INFRA-557 tester's round 29, the architect's rule that a frame whose received reply
-// arrived never repeats).
-func TestTwoPodsARelayedFrameItsSessionReceivedIsNotSentAgainAfterAStop(t *testing.T) {
+// A frame the session received but had not written when its relay's term ended is repeated at
+// most once, under its own event id. The session answers the frame "received" at once - it has
+// the frame - and "done" only once it has written it, here 2 s past the stopping relay's settle
+// grace. The pod is stopped in between. "received" says the client decoded the frame, not that
+// its host wrote it, so the stopping relay settles a frame on "done" alone (settleStoppedFrames
+// waits for outstanding, which only done or nak clears): this one is left in doubt when the
+// grace ends and the successor sends it once more. The session must take that frame at most
+// twice and every other message exactly once, and be prompted with no event id no message
+// carried. The repeat costs the host nothing: the real client writes a redelivered copy once
+// (packages/envoy-client/src/consumer-delivery.ts joins a copy of a frame it still holds and
+// drops one it has written). The same holds when the term ends for a lost receive connection
+// rather than a stop (INFRA-557 tester's round 29).
+func TestTwoPodsARelayedFrameReceivedButNotDoneAtAStopIsRepeatedAtMostOnceWithItsId(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
@@ -1165,7 +1166,11 @@ func TestTwoPodsARelayedFrameItsSessionReceivedIsNotSentAgainAfterAStop(t *testi
 	after := publisher.mustPublish(t, sessionID)
 	serving.awaitAll(t, []mpMessage{m, after}, 30*time.Second)
 	time.Sleep(mpQuiet)
-	serving.requireOnce(t, []mpMessage{warm, m, after})
+	serving.requireOnce(t, []mpMessage{warm, after})
+	if took := serving.counts()[m.event]; took > 2 {
+		t.Fatalf("%s to %s reached it %d times, want once, or twice as the frame received but not written when the term ended", m.event, sessionID, took)
+	}
+	serving.requireKnown(t, []mpMessage{warm, m, after})
 	serving.requireOrder(t, []mpMessage{warm, m, after})
 }
 

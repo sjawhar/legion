@@ -342,9 +342,13 @@ Every pod of a machine id reads and writes the same records, so a pod that takes
 standby answering `/v1`, answers as the active pod would:
 
 - **Delivery ledger** (`internal/dedupe`, `delivery.<durable>.<32 hex of sha256(dedupe key)>.<session>`
-  in `envoy_listener`): before it prompts a session or forwards a role-lane message, a pod records
-  the pair attempted, and once it lands, delivered. A pair another pod delivered is not prompted
-  again. A pod skips a pair as `listener attempt-dedupe skip` only for an attempt it holds itself:
+  in `envoy_listener`): four things ask it, and nothing else does — a role-lane forward, a
+  fan-out refusal, an unplaceable agent delivery's give-up, and the agent-subject delivery of a
+  message a session takes off its own subscription. Before any of them, a pod records the pair
+  attempted, and once it lands, delivered: a pair another pod delivered is not delivered again,
+  and a refusal or a give-up another pod reported is not reported twice. The relay of a
+  session's own consumer asks it for nothing ("When a session can see a message twice" below).
+  A pod skips a pair as `listener attempt-dedupe skip` only for an attempt it holds itself:
   one whose forward may still be running (less than 35 s old and not settled), or one a delivery
   kept (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of
   its own boot that it holds no such attempt for (a clear that could not be written, a write
@@ -365,17 +369,22 @@ standby answering `/v1`, answers as the active pod would:
   through that session's own consumer, relayed as a frame, and the consumer's ack floor — not the
   ledger — is what says the session has it. There are exactly three cases, and each repeats the
   message once, under the same event id:
-  - a frame whose reply the pod's receive term ended before it heard. The stopping relay waits
-    `relaySettleGrace` (750 ms) for that reply and acks the message when it comes, and the pod
-    taking over waits `relayFormerSettle` (1 s) before it restarts the session's consumer at its
-    ack floor, so a reply that arrives inside the grace costs nothing. One that does not is in
-    doubt (`session relay left a frame in doubt`): nothing says whether the session took it, so
-    the successor publishes it once more.
+  - a frame the session received but had not written when the pod's receive term ended. The
+    session answers `received` once it decodes a frame and `done` once its host wrote it, and
+    only `done` says the message landed, so `done` is the reply the stopping relay waits
+    `relaySettleGrace` (750 ms) for and acks the message on; the pod taking over waits
+    `relayFormerSettle` (1 s) before it restarts the session's consumer at its ack floor, so a
+    `done` that arrives inside the grace costs nothing. A frame still unwritten when the grace
+    ends is in doubt (`session relay left a frame in doubt`), whether or not its `received` came
+    back: nothing says the session has the message, so the successor publishes it once more.
+    The session's client answers the repeat and writes it once — it joins a copy of a frame it
+    still holds, and drops one it has already written (`packages/envoy-client`'s
+    consumer delivery).
   - a frame whose reply was lost when the pod's session-consumer links dropped, which carries
     the reply and the message's acknowledgement alike. Nothing on this pod recorded the
     delivery — there is no second channel it could have been recorded on — so the relay
     restarts at the ack floor when the links come back and publishes that frame again. A frame
-    the session answered before the drop was acked on those links and is passed over.
+    the session answered `done` before the drop was acked on those links and is passed over.
   - a hard take-over (a killed pod, a lost node): the pod that had a frame in flight wrote
     nothing and is waited for by nobody, so the successor publishes it again.
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the

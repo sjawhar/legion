@@ -3466,7 +3466,8 @@ Each item below names an endpoint and its method, then its contract, and an item
   Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and neither publishes a delivery exception: the sender has the answer.
   Only a receipt that arrived through the route counts as a confirmation:
   the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads.
-  The delivery ledger holds no record of such a session: a path that hands a self-subscribed session nothing writes none for it, since `fanoutDelivery` asks the ledger only for a recipient it refuses and `agentSubjectDelivery` only for one it could not place or failed to deliver.
+  Four deliveries ask the delivery ledger and no others do: a role-lane forward, a fan-out refusal, an unplaceable agent delivery's give-up, and the agent-subject delivery of a message a session takes off its own subscription, which records the pair delivered so the next copy of it is a `dedupe` skip (`TestListenerDeliveryHandler_DedupesSuccessfulDelivery`).
+  That record says the machine delivered the message, not that the session confirmed it, so the route reads its own `confirmed` record rather than the ledger, and `fanoutDelivery`, which asks the ledger only for a recipient it refuses, writes nothing for a self-subscribed recipient at all.
 
 - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
   — the role-claim records among them — and reach `$JS.API.*`.
@@ -3807,13 +3808,15 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
   a frame the session answers puts it back to 2 s, and the session's next registration resumes the relay at once, whichever comes first.
   A pause is logged once an episode — the first one since the session last answered a frame — not once a probe.
 
-- **A stopping relay's last frames:** a term's end cancels the relay, and the frames it has unanswered get `relaySettleGrace` (750 ms) more on the reply subscription and the session-consumer connection the pod still holds (`sessionRelays.settleStoppedFrames`):
+- **A stopping relay's last frames:** a term's end cancels the relay, and the frames it has not had `done` or `nak` for get `relaySettleGrace` (750 ms) more on the reply subscription and the session-consumer connection the pod still holds (`sessionRelays.settleStoppedFrames`):
   a session that answers `done` inside the grace has its frame acked here, so the pod taking over restarts at an ack floor past that message and never publishes it again.
   The pod taking a released holder's lease over waits `relayFormerSettle` (the grace and a 250 ms margin, `lease.FormerSettleWait`) before it restarts a session's consumer, so the grace always ends first;
   a holder taken over by force - killed, its node lost, its record expired - settles nothing and is not waited for, and its successor restarts at once.
-  A frame still unanswered when the grace ends is in doubt:
-  only the session's reply says whether it took the message and none is coming, so the stopping pod logs one WARN naming it (`session relay left a frame in doubt: its settle bound ended with the session's reply still out`, with the session, the topic, the event id, the frame's subject and its stream sequence) and the successor publishes that one frame again.
-  That is the one repeat this path allows, under the same event id (`cmd/listener/README.md`).
+  A frame the grace ends without a `done` is in doubt, whether or not the session answered it `received`:
+  `received` says the client decoded the frame, not that its host wrote the message, so only `done` says the session took it, and the stopping pod logs one WARN naming the frame (`session relay left a frame in doubt: its settle bound ended with the session's reply still out`, with the session, the topic, the event id, the frame's subject and its stream sequence) and the successor publishes that one frame again.
+  That is the one repeat this path allows, under the same event id (`cmd/listener/README.md`), and the session's client writes the repeat once:
+  it joins a copy of a frame it still holds and drops one it has already written (`packages/envoy-client/src/consumer-delivery.ts`).
+  `TestTwoPodsARelayedFrameReceivedButNotDoneAtAStopIsRepeatedAtMostOnceWithItsId` (build tag `multiprocess`, `cmd/listener/multiprocess_takeover_test.go`) holds that to two real pods.
   A links drop is the same case:
   a session's reply and the relay's ack of it ride the one connection, so a drop that loses the reply loses the ack with it, and the relay restarts at the ack floor and publishes the frame again, at most once more under that id.
   The relay asks the delivery ledger for none of this:
@@ -4323,7 +4326,7 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   The route then confirms it with each registered self-subscribed session:
   it forwards the same envelope, `event_id` and `dedupe_key` unchanged, with a receipt to the agent subject of every session whose registered interests match the topic on any machine (`store.Registry.MatchAll`), whose session entry is live and `self_subscribed`, other than the `source_session`, retrying each as a role message is retried, and answers once each confirmed, or 504 naming each that did not (the Listener API's `/v1/messages/publish` row).
   Only a receipt that arrived through the route counts:
-  `agentSubjectDelivery` and `fanoutDelivery` write no ledger record for a self-subscribed session whose delivery they skipped, since this listener handed it nothing there is anything to dedupe, so the route reads a record of its own (`listenerDeps.confirmed`) instead.
+  `fanoutDelivery` writes no ledger record for a self-subscribed session whose delivery it skipped, and the record `agentSubjectDelivery` writes for one says the message reached that session's own subscription, not that the session confirmed it, so the route reads a record of its own (`listenerDeps.confirmed`) instead.
   A topic whose own publish did not reach NATS, the window ending first or the publish failing at once for any reason but a refusal, is answered 504 `publish_failed` and forwarded to no one, so a topic with no recipient is answered 200 only once it was published.
   A session that stopped without unregistering stays registered until its registration lapses (5 minutes) and is named in every `not_confirmed` 504 in that time;
   it is not a failed delivery to the others.
