@@ -24,7 +24,8 @@ func TestKindSecretsAreServed(t *testing.T) {
 	githubApp := kindSecret("GITHUB_APP_KEY", policy.KindGitHubApp, "github-app-value")
 	googleLogin := kindSecret("GOOGLE_LOGIN_KEY", policy.KindGoogleLogin, "google-login-value")
 	googleLogin.Tags[policy.TagMaxGrant] = "1h"
-	store := secrets.NewLocal(githubApp, googleLogin)
+	azureLogin := kindSecret("AZURE_LOGIN_KEY", "azure-login", `{"tenant_id":"tenant","client_id":"client"}`)
+	store := secrets.NewLocal(githubApp, googleLogin, azureLogin)
 
 	set, err := policytest.Loader(store).Load(context.Background())
 	if err != nil {
@@ -34,6 +35,7 @@ func TestKindSecretsAreServed(t *testing.T) {
 	for name, kind := range map[string]string{
 		"GITHUB_APP_KEY":   policy.KindGitHubApp,
 		"GOOGLE_LOGIN_KEY": policy.KindGoogleLogin,
+		"AZURE_LOGIN_KEY":  "azure-login",
 	} {
 		secret, ok := set.Secrets[name]
 		if !ok {
