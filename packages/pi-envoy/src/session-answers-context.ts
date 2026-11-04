@@ -231,12 +231,24 @@ function withoutReadLine(text: string): string {
     : text;
 }
 
+/** The items a rendered list shows, one block each (`renderShown` joins them with a blank line):
+ *  without the block holding the marker and the line naming the read, and without the line
+ *  counting what the character cap left out, which the read note's own length can move. */
+function shownItems(text: string): string[] {
+  return withoutReadLine(text)
+    .split("\n\n")
+    .slice(1)
+    .filter((block) => !/^\d+ older items? left out/.test(block));
+}
+
 /** Whether `next` shows something `shown` did not: an item, or an answer or comment a person
- *  changed. Without both reads' words (a list an older copy of this extension placed), any change
- *  in the text counts, except the line naming the read itself. */
+ *  changed. Without both reads' words (a list an older copy of this extension placed), the items
+ *  the two texts show are compared instead, so neither the line naming the read nor an item this
+ *  read's character cap left out counts as something new. */
 function showsNew(shown: CarriedAnswers, next: CarriedAnswers): boolean {
   if (shown.words === undefined || next.words === undefined) {
-    return withoutReadLine(shown.text) !== withoutReadLine(next.text);
+    const before = new Set(shownItems(shown.text));
+    return shownItems(next.text).some((item) => !before.has(item));
   }
   const before = new Set(shown.words);
   return next.words.some((word) => !before.has(word));

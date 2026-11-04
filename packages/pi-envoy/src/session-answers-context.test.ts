@@ -461,6 +461,32 @@ test("a request an older copy already gave the list gets no second one and no re
   expect(calls()).toBe(0);
 });
 
+// A list an older copy placed carries no item fingerprints, so the two texts' items are compared.
+// The line naming the read takes characters from the reader's cap, so a cached read can show one
+// item fewer than the fresh read before it. That is not a new item: moving the list for it would
+// change the request at the list's place on every other turn.
+test("an older copy's list that the read note's own length shortened keeps its place and bytes", async () => {
+  const session = {};
+  const fresh = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n2026-10-27T10:00:00.000Z · alice answered your ask\nShip it.`;
+  const capped = `${SESSION_ANSWERS_MARKER}\nAs read at 2026-10-27T11:00:00.000Z; this read failed: Dispatch did not answer within 800 ms.\n\n2026-10-27T11:00:00.000Z · bob sent you a message\nAlso check the docs.\n\n1 older item left out to stay under 8,000 characters: run \`dispatch answers\` to read every one in full.`;
+  const freshList = { role: "user", content: [{ type: "text", text: fresh }], timestamp: 0 };
+  // No read of this copy's own: the older copy's list is what gets placed and kept.
+  const { read, calls } = reading(LIST);
+  await withSessionAnswers([skill, ask, freshList], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  const cappedList = { role: "user", content: [{ type: "text", text: capped }], timestamp: 0 };
+  expect(
+    await withSessionAnswers([...turn, cappedList], requestOf(read, noBranch, session))
+  ).toEqual([skill, ask, freshList, readCall, readResult]);
+  expect(
+    await withSessionAnswers(
+      [...turn, grepCall, grepResult, freshList],
+      requestOf(read, noBranch, session)
+    )
+  ).toEqual([skill, ask, freshList, readCall, readResult, grepCall, grepResult]);
+  expect(calls()).toBe(0);
+});
+
 test("a person's own last message quoting the list's marker is never moved", async () => {
   const { read, calls } = reading(LIST);
   const quoted = { ...list, timestamp: 7 };
