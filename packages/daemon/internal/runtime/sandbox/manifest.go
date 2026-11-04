@@ -328,8 +328,8 @@ func (l launch) overlays(r *Runtime) []string {
 
 // withMemoryOverlays is one PI_CONFIG_FILES list: a role's own overlays and then the project's
 // memory overlays, which outrank them, and own itself where there is no memory overlay to add, so
-// a deployment whose memory is off hands every caller the list it handed before the block existed
-// (launch.overlays, probeManifest).
+// a deployment whose project names no memory overlay hands every caller the list it handed before
+// the block existed (launch.overlays, probeManifest).
 func withMemoryOverlays(own, memory []string) []string {
 	if len(memory) == 0 {
 		return own

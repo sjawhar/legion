@@ -21,7 +21,7 @@ type bootReads struct {
 	paneNatsUser                          string         // the pane seed's user's public key, "" with no pane seed
 	nats                                  natsConnection // the user the daemon's own NATS connection authenticates as
 	instructions                          []byte         // nil when the configuration names none
-	memoryInstructions                    []byte         // nil when the project's memory is off or its block names none
+	memoryInstructions                    []byte         // nil when the project's memory block names no instructions file
 	tmux                                  tmuxReads      // runtime: tmux
 	sandbox                               sandboxReads   // runtime: kubernetes
 }

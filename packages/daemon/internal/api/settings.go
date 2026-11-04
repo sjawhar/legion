@@ -205,7 +205,7 @@ type ProjectSettings struct {
 }
 
 // MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
-// drawn under, absent for a project that names no block, which is off (config.Memory.Off); the
+// drawn under, absent for a project that names no block, which is off (config.Memory.Word); the
 // Oh My Pi overlays every role of a memory-group tree names after the operator's and its own, `[]`
 // for a project that names none; and the one instructions file the daemon appends to such a role's
 // system prompt, absent when the block names none. The paths are the operator's own file names,

@@ -20,7 +20,7 @@ type MemoryMode string
 
 const (
 	// MemoryOff is the mode of a project that names none: the field's zero value is the empty
-	// string, which Memory.Off reads as off beside this word.
+	// string, which Memory.Word records as this word.
 	MemoryOff    MemoryMode = "off"
 	MemoryOn     MemoryMode = "on"
 	MemoryRandom MemoryMode = "random"
@@ -34,7 +34,8 @@ var memoryModes = []MemoryMode{MemoryOff, MemoryOn, MemoryRandom}
 // every role of a memory-group tree names in PI_CONFIG_FILES, after the operator's own and the
 // role's own (role_config_files); and InstructionsPath is the one markdown file the daemon reads at
 // boot and appends to every such role's system prompt, after the deployment's own instructions. A
-// project whose file names no block is off, and an off project passes none of the three on.
+// project whose file names no block is off and passes none of the three on; a block at `off`
+// draws no new tree into the memory group, and a tree already drawn keeps the files it names.
 type Memory struct {
 	Mode             MemoryMode
 	ConfigFiles      []string

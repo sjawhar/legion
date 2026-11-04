@@ -587,7 +587,7 @@ type plan struct {
 	instructions string
 	// memoryInstructions is the daemon's copy of the project's memory instructions
 	// (config.WriteMemoryInstructions), the last fragment of a memory-group launch's system
-	// prompt; "" when the project is off or its block names no instructions file.
+	// prompt; "" when the project names no memory block or its block names no instructions file.
 	memoryInstructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
