@@ -55,7 +55,7 @@ For each spec, ask, comment and message:
 
 ## Decisions
 
-Choices, including answered asks, get `decisions.md` `##` sections only if a disagreeing reader would act differently; others get one spec line.
+Choices—answered asks included—earn `decisions.md` `##` sections only if a disagreeing reader would act differently; keep others to one spec line each.
 
 - The heading names the choice; the text gives the reason and the options weighed.
 - Link each spec block it shaped, `dispatch://KEY/spec#b-<id>` (`doc-read --blocks` lists the ids), and a person's decision its ask, `dispatch://KEY/ask/<id>`.

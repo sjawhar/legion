@@ -101,7 +101,7 @@ test("the three Dispatch skills total fewer than 2,000 words", () => {
 test("the staged decisions rule separates material choices from spec details", () => {
   const skill = readFileSync(path.join(staged, "dispatch-writing-specs/SKILL.md"), "utf8");
   expect(skill).toContain("only if a disagreeing reader would act differently");
-  expect(skill).toContain("others get one spec line");
+  expect(skill).toContain("keep others to one spec line each");
   expect(skill).not.toContain("Each choice you made alone, and each a person made");
 });
 

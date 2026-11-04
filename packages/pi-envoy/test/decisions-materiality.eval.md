@@ -70,3 +70,38 @@ All conditions must hold:
 
 An empty decisions document, a plan to write one, or removing the presentation
 choices entirely fails. A provider or harness error is not a scored trial.
+
+## Held-out transfer task
+
+Freeze this case before testing a revised instruction. It transfers the same
+failure to a different design; it is not another observed production incident.
+Use the same run protocol and pass bar, with exactly three material sections and
+the three supplied export checks instead of the recovery sections and checks.
+
+```text
+Prepare spec.md and decisions.md for ACME-43, an audit-log export. Return both
+complete Markdown documents, labeled by filename. This is an offline draft:
+do not call tools, request approval or post anything. Research and source checks
+are complete. Use only the facts below; there are no open questions.
+
+Operators currently copy log rows by hand, which loses rows and can expose
+message text. The export must give them a complete file without message bodies.
+The team has settled these choices:
+
+- Export CSV rather than JSON because operators import the file into a spreadsheet.
+- Exclude message bodies, retaining only event time, actor and event type.
+  Including bodies could expose private conversation text.
+- Export the rows in a snapshot taken when the operator clicks Export rather than
+  collecting new rows while the file is generated; the snapshot prevents missed
+  or duplicated rows during concurrent writes. The operator chose this in
+  dispatch://ACME-43/ask/33333333-3333-4333-8333-333333333333.
+- Separate paragraphs in the export confirmation with a blank line.
+- Title that confirmation “Export complete” rather than “Export finished”.
+  These last two choices change no behavior or operator action. The operator
+  chose the title in
+  dispatch://ACME-43/ask/44444444-4444-4444-8444-444444444444.
+
+The spec's existing Design block IDs are b-format, b-privacy and b-snapshot for
+the first three choices. Acceptance must check spreadsheet-compatible CSV,
+absence of message bodies, and a stable snapshot during concurrent writes.
+```
