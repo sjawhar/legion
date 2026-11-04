@@ -36,7 +36,6 @@ func TestListenerConfigCheck(t *testing.T) {
 	}
 	cases := []checkCase{
 		{name: "the default port", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort}},
-		{name: "a host bridge", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort, HostBridge: "127.0.0.1"}},
 		{name: "no machine id", in: core.ListenerConfig{Port: 9020}, input: "machineId", err: "machineId is empty"},
 		{name: "a blank machine id", in: core.ListenerConfig{MachineID: " ", Port: 9020}, input: "machineId", err: "machineId has leading or trailing whitespace"},
 		{name: "a machine id with a newline", in: core.ListenerConfig{MachineID: "a\nENVEOF\nid", Port: 9020}, input: "machineId", err: "machineId contains a control character"},
@@ -44,10 +43,6 @@ func TestListenerConfigCheck(t *testing.T) {
 		{name: "port 0, which is no port", in: core.ListenerConfig{MachineID: "m"}, input: "port", err: "port 0 is outside 1-65535"},
 		{name: "a negative port", in: core.ListenerConfig{MachineID: "m", Port: -1}, input: "port", err: "port -1 is outside 1-65535"},
 		{name: "a port above 65535", in: core.ListenerConfig{MachineID: "m", Port: 65536}, input: "port", err: "port 65536 is outside 1-65535"},
-		{name: "a blank host bridge", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: " "}, input: "hostBridge", err: `hostBridge has leading or trailing whitespace: " "`},
-		{name: "a host bridge with leading whitespace", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: " 127.0.0.1"}, input: "hostBridge", err: `hostBridge has leading or trailing whitespace: " 127.0.0.1"`},
-		{name: "a host bridge with trailing whitespace", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1 "}, input: "hostBridge", err: `hostBridge has leading or trailing whitespace: "127.0.0.1 "`},
-		{name: "a host bridge with a newline inside", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1\nENVEOF"}, input: "hostBridge", err: `hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
 		{name: "a listen host", in: core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0"}},
 		{name: "a listen host with a control character", in: core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0\n"}, input: "listenHost", err: `listenHost contains a control character: "0.0.0.0\n"`},
 		// A seed is refused before the control-character refusal that would quote it.
@@ -102,10 +97,10 @@ func TestListenerConfigEnv(t *testing.T) {
 		err  string // a refusal of natsUrls
 	}{
 		{
-			name: "remote NATS, host bridge, the default port",
-			in:   core.ListenerConfig{MachineID: "example-host-a", Port: core.DefaultListenerPort, HostBridge: "127.0.0.1"},
+			name: "remote NATS, the default port",
+			in:   core.ListenerConfig{MachineID: "example-host-a", Port: core.DefaultListenerPort},
 			urls: []string{"nats://hub.internal.example:4222"},
-			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=example-host-a", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
+			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=example-host-a", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1"},
 		},
 		{
 			name: "loopback NATS needs no remote opt-in",
@@ -121,9 +116,9 @@ func TestListenerConfigEnv(t *testing.T) {
 		},
 		{
 			name: "a listen host, right after the port",
-			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", HostBridge: "127.0.0.1"},
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0"},
 			urls: []string{"nats://hub.internal.example:4222"},
-			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1"},
 		},
 		{
 			name: "allowed hosts, right after the listen host and as written",
@@ -136,18 +131,6 @@ func TestListenerConfigEnv(t *testing.T) {
 			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0"},
 			urls: []string{"nats://127.0.0.1:4222"},
 			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222"},
-		},
-		{
-			name: "the opt-in off renders no ENVOY_SUBSCRIBE_ALL_TOPICS",
-			in:   core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1", SubscribeAllTopics: false},
-			urls: []string{"nats://hub.internal.example:4222"},
-			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
-		},
-		{
-			name: "the opt-in on renders ENVOY_SUBSCRIBE_ALL_TOPICS=1 last",
-			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", HostBridge: "127.0.0.1", SubscribeAllTopics: true},
-			urls: []string{"nats://hub.internal.example:4222"},
-			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_SUBSCRIBE_ALL_TOPICS=1"},
 		},
 		{
 			name: "no NATS replicas and no stream byte limit render neither variable",
@@ -168,10 +151,10 @@ func TestListenerConfigEnv(t *testing.T) {
 			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222", "ENVOY_STREAM_MAX_BYTES=21474836480"},
 		},
 		{
-			name: "NATS replicas then the stream byte limit, after the opt-in",
-			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", HostBridge: "127.0.0.1", SubscribeAllTopics: true, NATSReplicas: 3, StreamMaxBytes: 1073741824},
+			name: "NATS replicas then the stream byte limit, after the proxy",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", NATSReplicas: 3, StreamMaxBytes: 1073741824},
 			urls: []string{"nats://hub.internal.example:4222"},
-			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_NATS_REPLICAS=3", "ENVOY_STREAM_MAX_BYTES=1073741824"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_NATS_REPLICAS=3", "ENVOY_STREAM_MAX_BYTES=1073741824"},
 		},
 		{name: "no URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, err: "natsUrls needs at least one URL"},
 		{name: "a comma in a URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{"nats://a:1,nats://b:2"}, err: "natsUrls[0] contains a comma"},

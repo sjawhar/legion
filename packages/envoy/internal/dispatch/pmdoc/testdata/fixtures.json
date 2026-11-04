@@ -59855,6 +59855,158 @@
     "rendered_by_milkdown": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > x\n"
   },
   {
+    "name": "requirements-tasks-and-checks",
+    "markdown": ":::requirement{#r1}\nThe issue page lists every open ask, the most urgent first.\n:::\n\n:::requirement{#r2}\nAn answered ask leaves the list.\n:::\n\n:::plan_task{#t1 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1\"}\nRead the issue's open asks and draw them.\n:::\n\n:::plan_task{#t2 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1 dispatch://CORE-1/artifact/plan-md#b-r2\" needs=\"dispatch://CORE-1/artifact/plan-md#b-t1\"}\nSort the drawn asks by urgency, then drop the answered ones.\n:::\n\n:::check{#k1 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1\" surface=\"browser\" run=\"bun test web/src/features/issue\" when=\"before_merge\" negative_control=\"Draw the asks unsorted and watch this fail.\"}\nThe issue page draws the open asks, the most urgent first.\n:::\n\n:::check{#k2 serves=\"dispatch://CORE-1/artifact/plan-md#b-r2\" when=\"after_merge\"}\nNo answered ask is drawn, written as a claim with nothing to run.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "requirement",
+          "attrs": {
+            "blockId": "r1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The issue page lists every open ask, the most urgent first."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "requirement",
+          "attrs": {
+            "blockId": "r2"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "An answered ask leaves the list."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "plan_task",
+          "attrs": {
+            "serves": [
+              "dispatch://CORE-1/artifact/plan-md#b-r1"
+            ],
+            "blockId": "t1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Read the issue's open asks and draw them."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "plan_task",
+          "attrs": {
+            "serves": [
+              "dispatch://CORE-1/artifact/plan-md#b-r1",
+              "dispatch://CORE-1/artifact/plan-md#b-r2"
+            ],
+            "needs": [
+              "dispatch://CORE-1/artifact/plan-md#b-t1"
+            ],
+            "blockId": "t2"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Sort the drawn asks by urgency, then drop the answered ones."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "check",
+          "attrs": {
+            "serves": [
+              "dispatch://CORE-1/artifact/plan-md#b-r1"
+            ],
+            "surface": "browser",
+            "run": "bun test web/src/features/issue",
+            "when": "before_merge",
+            "negative_control": "Draw the asks unsorted and watch this fail.",
+            "blockId": "k1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The issue page draws the open asks, the most urgent first."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "check",
+          "attrs": {
+            "serves": [
+              "dispatch://CORE-1/artifact/plan-md#b-r2"
+            ],
+            "when": "after_merge",
+            "blockId": "k2"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "No answered ask is drawn, written as a claim with nothing to run."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ATIBAAcBC3Byb3NlbWlycm9yAwtyZXF1aXJlbWVudAcAAQADCXBhcmFncmFwaAcAAQEGBAABAjtUaGUgaXNzdWUgcGFnZSBsaXN0cyBldmVyeSBvcGVuIGFzaywgdGhlIG1vc3QgdXJnZW50IGZpcnN0LigAAQEHYmxvY2tJZAF3CGItMDAwMDAxKAABAAdibG9ja0lkAXcCcjGHAQADC3JlcXVpcmVtZW50BwABQAMJcGFyYWdyYXBoBwABQQYEAAFCIEFuIGFuc3dlcmVkIGFzayBsZWF2ZXMgdGhlIGxpc3QuKAABQQdibG9ja0lkAXcIYi0wMDAwMDIoAAFAB2Jsb2NrSWQBdwJyMocBQAMJcGxhbl90YXNrBwABZQMJcGFyYWdyYXBoBwABZgYEAAFnKVJlYWQgdGhlIGlzc3VlJ3Mgb3BlbiBhc2tzIGFuZCBkcmF3IHRoZW0uKAABZgdibG9ja0lkAXcIYi0wMDAwMDMoAAFlBnNlcnZlcwF1AXcnZGlzcGF0Y2g6Ly9DT1JFLTEvYXJ0aWZhY3QvcGxhbi1tZCNiLXIxKAABZQVuZWVkcwF/KAABZQdibG9ja0lkAXcCdDGHAWUDCXBsYW5fdGFzawcAAZUBAwlwYXJhZ3JhcGgHAAGWAQYEAAGXATxTb3J0IHRoZSBkcmF3biBhc2tzIGJ5IHVyZ2VuY3ksIHRoZW4gZHJvcCB0aGUgYW5zd2VyZWQgb25lcy4oAAGWAQdibG9ja0lkAXcIYi0wMDAwMDQoAAGVAQZzZXJ2ZXMBdQJ3J2Rpc3BhdGNoOi8vQ09SRS0xL2FydGlmYWN0L3BsYW4tbWQjYi1yMXcnZGlzcGF0Y2g6Ly9DT1JFLTEvYXJ0aWZhY3QvcGxhbi1tZCNiLXIyKAABlQEFbmVlZHMBdQF3J2Rpc3BhdGNoOi8vQ09SRS0xL2FydGlmYWN0L3BsYW4tbWQjYi10MSgAAZUBB2Jsb2NrSWQBdwJ0MocBlQEDBWNoZWNrBwAB2AEDCXBhcmFncmFwaAcAAdkBBgQAAdoBOlRoZSBpc3N1ZSBwYWdlIGRyYXdzIHRoZSBvcGVuIGFza3MsIHRoZSBtb3N0IHVyZ2VudCBmaXJzdC4oAAHZAQdibG9ja0lkAXcIYi0wMDAwMDUoAAHYAQZzZXJ2ZXMBdQF3J2Rpc3BhdGNoOi8vQ09SRS0xL2FydGlmYWN0L3BsYW4tbWQjYi1yMSgAAdgBB3N1cmZhY2UBdwdicm93c2VyKAAB2AEDcnVuAXcfYnVuIHRlc3Qgd2ViL3NyYy9mZWF0dXJlcy9pc3N1ZSgAAdgBBHdoZW4BdwxiZWZvcmVfbWVyZ2UoAAHYARBuZWdhdGl2ZV9jb250cm9sAXcrRHJhdyB0aGUgYXNrcyB1bnNvcnRlZCBhbmQgd2F0Y2ggdGhpcyBmYWlsLigAAdgBB2Jsb2NrSWQBdwJrMYcB2AEDBWNoZWNrBwABnAIDCXBhcmFncmFwaAcAAZ0CBgQAAZ4CQU5vIGFuc3dlcmVkIGFzayBpcyBkcmF3biwgd3JpdHRlbiBhcyBhIGNsYWltIHdpdGggbm90aGluZyB0byBydW4uKAABnQIHYmxvY2tJZAF3CGItMDAwMDA2KAABnAIGc2VydmVzAXUBdydkaXNwYXRjaDovL0NPUkUtMS9hcnRpZmFjdC9wbGFuLW1kI2ItcjIoAAGcAgdzdXJmYWNlAX8oAAGcAgNydW4BfygAAZwCBHdoZW4BdwthZnRlcl9tZXJnZSgAAZwCEG5lZ2F0aXZlX2NvbnRyb2wBfygAAZwCB2Jsb2NrSWQBdwJrMgA=",
+    "rendered_by_milkdown": ":::requirement{#r1}\nThe issue page lists every open ask, the most urgent first.\n:::\n\n:::requirement{#r2}\nAn answered ask leaves the list.\n:::\n\n:::plan_task{#t1 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1\"}\nRead the issue's open asks and draw them.\n:::\n\n:::plan_task{#t2 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1 dispatch://CORE-1/artifact/plan-md#b-r2\" needs=\"dispatch://CORE-1/artifact/plan-md#b-t1\"}\nSort the drawn asks by urgency, then drop the answered ones.\n:::\n\n:::check{#k1 serves=\"dispatch://CORE-1/artifact/plan-md#b-r1\" surface=\"browser\" run=\"bun test web/src/features/issue\" when=\"before_merge\" negative_control=\"Draw the asks unsorted and watch this fail.\"}\nThe issue page draws the open asks, the most urgent first.\n:::\n\n:::check{#k2 serves=\"dispatch://CORE-1/artifact/plan-md#b-r2\" when=\"after_merge\"}\nNo answered ask is drawn, written as a claim with nothing to run.\n:::\n"
+  },
+  {
     "name": "setext-underlines-after-delimiter-like-lines",
     "markdown": "A setext underline under a delimiter-like line narrower than the underline, or on a line a container around the paragraph does not continue.\n\nNext.\n\n-\n  =\n-|\n  =\n\nNext.\n\n[^s1]:\\\n-|\n\t=\n\nNext.\n\n[^s2]:r\n-|\n    =\n\nNext.\n\nText[^s3].\n\n[^s3]: other\n|-|-|\n    ===\n",
     "pm_json": {

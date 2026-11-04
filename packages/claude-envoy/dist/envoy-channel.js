@@ -36645,7 +36645,12 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
 }
-var ARTIFACT_OWNER_AND_SOURCE_RULE = "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+var ARTIFACT_SOURCE_RULE = "Exactly one of path or content is required.";
+var ARTIFACT_OWNER_AND_SOURCE_RULE = `${ARTIFACT_SOURCE_RULE} Exactly one of issue and project is required; with project, artifact names the document.`;
+function brokenParts(parts) {
+  const broken = parts.filter(([kept]) => !kept).map(([, message]) => message);
+  return broken.length === 0 ? undefined : broken.join(" ");
+}
 var CONTENT_IS_MARKDOWN = "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
 var PATH_KEEPS_BYTES = "path (--path <file>), which stores a file whose path does not end in .md or .markdown as its bytes, unchanged";
 var ARTIFACT_CONTENT_NAME_RULE = `${CONTENT_IS_MARKDOWN}, so with content the name ends in .md or .markdown or has no extension; upload any other file (.jsonl, .tsv, .json, .txt) with ${PATH_KEEPS_BYTES}.`;
@@ -36654,9 +36659,15 @@ var MARKDOWN_EXTENSION = /^(md|markdown)$/i;
 var artifactOwner = documentOwnerValidation(false);
 function artifactProblem(value) {
   const input = value;
-  if (!artifactOwner.check(value) || typeof input.path === "string" === (typeof input.content === "string")) {
-    return ARTIFACT_OWNER_AND_SOURCE_RULE;
-  }
+  const ownerOrSourceProblem = brokenParts([
+    [artifactOwner.check(value), artifactOwner.message],
+    [
+      typeof input.path === "string" !== (typeof input.content === "string"),
+      ARTIFACT_SOURCE_RULE
+    ]
+  ]);
+  if (ownerOrSourceProblem !== undefined)
+    return ownerOrSourceProblem;
   if (typeof input.content !== "string" || typeof input.name !== "string")
     return;
   const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
@@ -36665,27 +36676,40 @@ function artifactProblem(value) {
   return `${CONTENT_IS_MARKDOWN}, and ${JSON.stringify(input.name)} is not a Markdown name. Upload the file under the same name with ${PATH_KEEPS_BYTES}; content takes a name ending in .md or .markdown or with no extension.`;
 }
 var documentEditOwner = documentOwnerValidation(true);
+var PRECONDITION_RULE = "A precondition selects exactly one of document or blocks.";
+function preconditionKept(value) {
+  const input = value;
+  if (input.precondition === undefined)
+    return true;
+  if (typeof input.precondition !== "object" || input.precondition === null)
+    return false;
+  const precondition = input.precondition;
+  return typeof precondition.document === "string" !== Array.isArray(precondition.blocks);
+}
+function documentEditProblem(value) {
+  return brokenParts([
+    [documentEditOwner.check(value), documentEditOwner.message],
+    [preconditionKept(value), PRECONDITION_RULE]
+  ]);
+}
 var documentEditValidation = {
-  check: (value) => {
-    if (!documentEditOwner.check(value))
-      return false;
-    const input = value;
-    if (input.precondition === undefined)
-      return true;
-    if (typeof input.precondition !== "object" || input.precondition === null)
-      return false;
-    const precondition = input.precondition;
-    return typeof precondition.document === "string" !== Array.isArray(precondition.blocks);
-  },
-  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`
+  check: (value) => documentEditProblem(value) === undefined,
+  message: `${documentEditOwner.message} ${PRECONDITION_RULE}`,
+  refusal: (value) => documentEditProblem(value) ?? `${documentEditOwner.message} ${PRECONDITION_RULE}`
 };
 var commentOwner = documentOwnerValidation(true);
+var COMMENT_TURN_RULE = "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+function commentProblem(value) {
+  const input = value;
+  return brokenParts([
+    [commentOwner.check(value), commentOwner.message],
+    [input.turn === undefined || typeof input.reply_to_ask === "string", COMMENT_TURN_RULE]
+  ]);
+}
 var commentValidation = {
-  check: (value) => {
-    const input = value;
-    return commentOwner.check(value) && (input.turn === undefined || typeof input.reply_to_ask === "string");
-  },
-  message: `${commentOwner.message} turn requires reply_to_ask.`
+  check: (value) => commentProblem(value) === undefined,
+  message: `${commentOwner.message} ${COMMENT_TURN_RULE}`,
+  refusal: (value) => commentProblem(value) ?? `${commentOwner.message} ${COMMENT_TURN_RULE}`
 };
 var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 var ISSUE_UPDATE_DONE_RULE = "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
@@ -36712,14 +36736,20 @@ var messageValidation = {
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
 var readOwner = documentOwnerValidation(false);
+var READ_OWNER_RULE = "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+var READ_MESSAGE_RULE = "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+function readProblem(value) {
+  const input = value;
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone = input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
 var readValidation = {
-  check: (value) => {
-    const input = value;
-    if (typeof input.message !== "string")
-      return readOwner.check(value);
-    return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
-  },
-  message: "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " + "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it."
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`
 };
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z) {
@@ -47945,7 +47975,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },

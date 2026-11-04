@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type renderer struct {
@@ -52,12 +54,16 @@ type renderer struct {
 	layout *Layout
 }
 
-// BlockOffset identifies one rendered block in byte offsets of the markdown.
+// BlockOffset identifies one rendered block in byte offsets of the markdown, with the
+// attributes a typed block's opening line wrote (renderTypedAttributes), nil for every other
+// block and for a typed block carrying none: the render encodes each value once, and no reader
+// of the rendered document walks the tree again for them.
 type BlockOffset struct {
-	ID   string
-	Type string
-	From int
-	To   int
+	ID         string
+	Type       string
+	From       int
+	To         int
+	Attributes []model.BlockAttributeValue
 }
 
 // Render returns doc as canonical Markdown. A mark the rendering does not write
@@ -436,10 +442,13 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.err = fmt.Errorf("%w: cannot render block %q", ErrSchema, n.Type)
 			return
 		}
-		attrs, err := renderTypedAttributes(n, typ)
+		attrs, values, err := renderTypedAttributes(n, typ)
 		if err != nil {
 			r.err = err
 			return
+		}
+		if blockOffset >= 0 {
+			r.blockOffsets[blockOffset].Attributes = values
 		}
 		colons := typedFence(n, len(prefix))
 		fence := strings.Repeat(":", colons)

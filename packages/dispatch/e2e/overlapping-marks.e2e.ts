@@ -1,13 +1,14 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import {
+  createAsk,
+  createComment,
   createIssue,
   createProject,
   getArtifact,
   getArtifactText,
   getComment,
   listComments,
-  listIssueAsks,
 } from "./api";
 import {
   actionBar,
@@ -286,12 +287,28 @@ test("two readers' suggestions keep both action-bar anchors @phone", async ({
 
 type RecordKind = "Comment" | "Suggest" | "Ask";
 
-/** The composer field each kind's record is written in. */
-const recordField: Record<RecordKind, string> = {
-  Ask: "Question",
-  Comment: "Comment",
-  Suggest: "Replacement",
-};
+/** Writes the record of `kind` on `quote` through the API and answers it with the mark it left
+ *  in the document. What the click below reads is the two marks, whoever wrote them; the rows
+ *  above prove the selection bar and the composer write the same records, so these rows no
+ *  longer pay two composer round trips for a fixture - and no longer lose a mark to the margin's
+ *  refusal of a selection-bar action while an open composer's send is still outstanding. */
+async function seedOverlapRecord(
+  issueKey: string,
+  kind: RecordKind,
+  quote: string
+): Promise<{ id: string; markId: string }> {
+  const anchor = { artifact: "spec", quote } as const;
+  const record =
+    kind === "Ask"
+      ? await createAsk(issueKey, { anchor, question: `On ${quote}?` })
+      : await createComment(issueKey, {
+          anchor,
+          body: `On ${quote}`,
+          ...(kind === "Suggest" ? { suggestion: { replace_with: "red" } } : {}),
+        });
+  if (record.anchor === null) throw new Error(`the ${kind} on "${quote}" has no anchor`);
+  return { id: record.id, markId: record.anchor.mark_id };
+}
 
 const overlapKinds: { kind: RecordKind; noun: string }[] = [
   { kind: "Comment", noun: "comment" },
@@ -317,51 +334,23 @@ for (const { kind, noun } of overlapKinds) {
         spec: initialMarkdown,
         title: "Overlap click",
       });
-      const artifactId = issue.primary_artifact_id;
       const project = testInfo.project.name;
-      // Every record of this kind with an anchor, as the server holds it.
-      const anchored = async () => {
-        const records =
-          kind === "Ask"
-            ? await listIssueAsks(issue.key)
-            : await listComments(issue.key, artifactId);
-        return records.flatMap((record) =>
-          record.anchor === null
-            ? []
-            : [{ id: record.id, markId: record.anchor.mark_id, quote: record.anchor.quote }]
-        );
-      };
+      // Written in the row's order: the second mark nests inside or around the first, which is
+      // what the two orders are here to cover. They are kept by their quote, since the click
+      // below names the narrower record whichever order wrote it.
+      const marks: Record<string, { id: string; markId: string }> = {};
+      for (const quote of order.quotes) {
+        marks[quote] = await seedOverlapRecord(issue.key, kind, quote);
+      }
+      const wide = marks["quick brown"];
+      const narrow = marks.brown;
       const context = await asUser(browser, "alice");
 
       try {
-        const page = await context.newPage();
-        await page.goto(`/issues/${issue.key}/spec`);
-        await expect(connectedDot(page)).toHaveText("connected");
-
-        for (const [index, quote] of order.quotes.entries()) {
-          await setSheet(page, project, false);
-          await selectEditorText(page, quote);
-          const button = actionBar(page).getByRole("button", { exact: true, name: kind });
-          if (kind === "Suggest" && project === "iphone") {
-            await touchHold(page, await centerOf(button), 0);
-          } else {
-            await button.click();
-          }
-          const composer = page.getByRole("form", { name: "Comment composer" });
-          await composer.getByLabel(recordField[kind]).fill(`On ${quote}`);
-          await composer.locator('button[type="submit"]').click();
-          await expect.poll(async () => (await anchored()).length).toBe(index + 1);
-        }
-        const records = await anchored();
-        const wide = records.find((record) => record.quote === "quick brown");
-        const narrow = records.find((record) => record.quote === "brown");
-        if (wide === undefined || narrow === undefined) {
-          throw new Error(`Expected one ${noun} on each quote, got ${JSON.stringify(records)}.`);
-        }
-
         // A fresh reader of the document presses the text both marks cover: a click on the
         // desktop, and a tap on the phone, where the review sheet then opens under the finger.
-        await page.reload();
+        const page = await context.newPage();
+        await page.goto(`/issues/${issue.key}/spec`);
         await expect(connectedDot(page)).toHaveText("connected");
         await Promise.all([
           expectMark(page, wide.markId, "quick brown"),

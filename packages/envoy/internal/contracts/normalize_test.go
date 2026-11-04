@@ -1993,9 +1993,12 @@ func TestGithubPayloadFields(t *testing.T) {
 				"action":     "closed",
 				"repository": map[string]any{"full_name": "example-org/example-repo"},
 				"pull_request": map[string]any{
-					"number":           24,
-					"merged":           true,
-					"head":             map[string]any{"sha": "head-sha", "ref": "feature/payloads"},
+					"number": 24,
+					"merged": true,
+					"head": map[string]any{
+						"sha": "head-sha", "ref": "feature/payloads",
+						"repo": map[string]any{"full_name": "example-org/example-repo"},
+					},
 					"base":             map[string]any{"ref": "main"},
 					"merge_commit_sha": "merge-sha",
 					"merged_by":        map[string]any{"login": "merger"},
@@ -2004,8 +2007,28 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 			want: map[string]string{
 				"head_sha": "head-sha", "head_ref": "feature/payloads", "base_ref": "main", "merged": "true",
+				"head_repo":        "example-org/example-repo",
 				"merge_commit_sha": "merge-sha", "merged_by": "merger", "updated_at": "2026-09-07T10:01:00Z",
 			},
+		},
+		{
+			// A fork's pull request names its own repository as the head's; Dispatch attributes
+			// no result's currency to one (delivery's headAttribution).
+			name:  "a fork's pull request names the fork as its head repository",
+			event: "pull_request",
+			body: map[string]any{
+				"action":     "opened",
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{
+					"number": 25,
+					"head": map[string]any{
+						"sha": "fork-sha", "ref": "patch-1",
+						"repo": map[string]any{"full_name": "stranger/example-repo"},
+					},
+					"base": map[string]any{"ref": "main"},
+				},
+			},
+			want: map[string]string{"head_repo": "stranger/example-repo", "head_sha": "fork-sha"},
 		},
 		{
 			name:  "workflow run carries branch and pull request facts",
