@@ -25,7 +25,6 @@ import type {
   CreateProjectInput,
   CreateVersionInput,
   CredentialPendingResponse,
-  CredentialPendingRow,
   DispatchServiceErrorShape,
   EditArtifactInput,
   EditArtifactResponse,

@@ -33,11 +33,18 @@ const actAnswerSpec = "Context\n\n" +
 // seededActDocument creates actAnswerSpec as a document, starts a service that settles a live
 // write, seeds the document's live text and waits until settlement has indexed both blocks as
 // asks of the document - the rows the carry reads.
+//
+// The settle is a second, as the other carry tests that answer and then name a version use
+// (approval_carry_approved_test.go), and not the 20 ms a test that only seeds can afford: a
+// settlement firing while one of these tests holds its joined transaction takes the document's
+// rows in the other order and the two deadlock, which `-race` is slow enough to hit. The seeding
+// below schedules one settlement itself and waits up to three seconds for it, so a second costs
+// the seed nothing.
 func seededActDocument(t *testing.T) (*store.Store, *Service, string) {
 	t.Helper()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, actAnswerSpec)
-	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: 20 * time.Millisecond})
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Second})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, actAnswerSpec)
 	service.ScheduleSettlement(artifactID)
