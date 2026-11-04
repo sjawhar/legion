@@ -72,7 +72,9 @@ func TestDecisionConversionKeepsIssueAtomicAndRetainsClosedConversations(t *test
 	if read.Code != http.StatusOK {
 		t.Fatalf("retained conversation: %d %s", read.Code, read.Body.String())
 	}
-	kept := decodeBody[model.Comment](t, read)
+	kept := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read).Comment
 	if kept.Body != comment.Body || !kept.Resolved || kept.Anchor == nil || kept.Anchor.ArtifactID != blocked.ID {
 		t.Fatalf("closed conversation lost its history identity: %#v", kept)
 	}

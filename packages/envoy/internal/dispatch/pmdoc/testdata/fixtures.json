@@ -5792,6 +5792,114 @@
     "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n\nText.\n\n100. An item holding its content five columns in.\n\n```\none line of code after it\n```\n\nIndented code after a quote, a blank line between or one line long:\n\n> # h\n\n```\na\nb\n```\n\n*\n  >\n  ```\n  one line\n  ```\n"
   },
   {
+    "name": "decision",
+    "markdown": "# Decision nodes\n\n::::decision{#one-source title=\"Keep one source\" shaped=\"dispatch://CORE-1/spec#b-rule@v1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nUse the original row, not a copied answer.\n\n:::callout{#why kind=\"note\" title=\"Why\"}\nRelations stay on the decision node when it moves.\n:::\n\nUnsure: a source that cannot retain identity would change this choice.\n::::\n\n:::decision{#old-file title=\"Keep a separate file\" replaced=\"true\"}\nThe file has been replaced by native nodes.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Decision nodes"
+            }
+          ]
+        },
+        {
+          "type": "decision",
+          "attrs": {
+            "title": "Keep one source",
+            "replaced": false,
+            "shaped": [
+              "dispatch://CORE-1/spec#b-rule@v1"
+            ],
+            "from_ask": "dispatch://CORE-1/ask/a1",
+            "decided_by": "alice",
+            "blockId": "one-source"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the original row, not a copied answer."
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "Why",
+                "blockId": "why"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Relations stay on the decision node when it moves."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Unsure: a source that cannot retain identity would change this choice."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "decision",
+          "attrs": {
+            "title": "Keep a separate file",
+            "replaced": true,
+            "blockId": "old-file"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The file has been replaced by native nodes."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASgBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYEAAEBDkRlY2lzaW9uIG5vZGVzKAABAAJpZAF3ACgAAQAFbGV2ZWwBfQEoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMIZGVjaXNpb24HAAETAwlwYXJhZ3JhcGgHAAEUBgQAARUqVXNlIHRoZSBvcmlnaW5hbCByb3csIG5vdCBhIGNvcGllZCBhbnN3ZXIuKAABFAdibG9ja0lkAXcIYi0wMDAwMDKHARQDB2NhbGxvdXQHAAFBAwlwYXJhZ3JhcGgHAAFCBgQAAUMyUmVsYXRpb25zIHN0YXkgb24gdGhlIGRlY2lzaW9uIG5vZGUgd2hlbiBpdCBtb3Zlcy4oAAFCB2Jsb2NrSWQBdwhiLTAwMDAwMygAAUEEa2luZAF3BG5vdGUoAAFBBXRpdGxlAXcDV2h5KAABQQdibG9ja0lkAXcDd2h5hwFBAwlwYXJhZ3JhcGgHAAF6BgQAAXtGVW5zdXJlOiBhIHNvdXJjZSB0aGF0IGNhbm5vdCByZXRhaW4gaWRlbnRpdHkgd291bGQgY2hhbmdlIHRoaXMgY2hvaWNlLigAAXoHYmxvY2tJZAF3CGItMDAwMDA0KAABEwV0aXRsZQF3D0tlZXAgb25lIHNvdXJjZSgAARMIcmVwbGFjZWQBeSgAARMGc2hhcGVkAXUBdyBkaXNwYXRjaDovL0NPUkUtMS9zcGVjI2ItcnVsZUB2MSgAARMIZnJvbV9hc2sBdxhkaXNwYXRjaDovL0NPUkUtMS9hc2svYTEoAAETCmRlY2lkZWRfYnkBdwVhbGljZSgAARMHYmxvY2tJZAF3Cm9uZS1zb3VyY2WHARMDCGRlY2lzaW9uBwAByQEDCXBhcmFncmFwaAcAAcoBBgQAAcsBK1RoZSBmaWxlIGhhcyBiZWVuIHJlcGxhY2VkIGJ5IG5hdGl2ZSBub2Rlcy4oAAHKAQdibG9ja0lkAXcIYi0wMDAwMDUoAAHJAQV0aXRsZQF3FEtlZXAgYSBzZXBhcmF0ZSBmaWxlKAAByQEIcmVwbGFjZWQBeCgAAckBBnNoYXBlZAF/KAAByQEIZnJvbV9hc2sBfygAAckBCmRlY2lkZWRfYnkBfygAAckBB2Jsb2NrSWQBdwhvbGQtZmlsZQA=",
+    "rendered_by_milkdown": "# Decision nodes\n\n::::decision{#one-source title=\"Keep one source\" replaced=\"false\" shaped=\"dispatch://CORE-1/spec#b-rule@v1\" from_ask=\"dispatch://CORE-1/ask/a1\" decided_by=\"alice\"}\nUse the original row, not a copied answer.\n\n:::callout{#why kind=\"note\" title=\"Why\"}\nRelations stay on the decision node when it moves.\n:::\n\nUnsure: a source that cannot retain identity would change this choice.\n::::\n\n:::decision{#old-file title=\"Keep a separate file\" replaced=\"true\"}\nThe file has been replaced by native nodes.\n:::\n"
+  },
+  {
     "name": "definition-callout-holding-an-unclosed-fence",
     "markdown": "A callout in a footnote definition, holding an unclosed fence that ends in a blank line, before a paragraph the definition does not hold.\n\nText[^d].\n\n[^d]: x\n\n    :::callout{#df1 kind=\"note\" title=\"T\"}\n    ```\n    code\n\nafter\n",
     "pm_json": {
