@@ -1273,13 +1273,14 @@ type Store interface {
 	// ending to settle what it claims: its publish forgets exactly what it named
 	// (ForgetKeptDecisions), a newer catch-up that supersedes it hands those rows over
 	// (workflow.HandOverKept), and every other ending leaves them to the row's deletion, for the
-	// architect's next ready to name. The drop locks the issue's catch-ups that no live lease holds
-	// before it reads their leases: a claim a moment from committing is waited for and its lease
-	// seen, and one that arrives after the lock waits for the drop, then finds the row gone if the
-	// drop deleted it (TestDroppingCatchUpsLeavesTheRowALaneIsLeasing). It leaves a leased row
-	// unlocked, since a lane finishing one waits on the decisions a caller may already have locked
-	// (TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting). A leased row with no decisions is dropped
-	// as before: the
+	// architect's next ready to name. A claim of one of the issue's catch-ups and this drop are
+	// serialized by an advisory lock keyed by the issue, which ClaimRow takes too: a claim either
+	// commits before the drop reads the leases, and is seen, or it waits for the drop and claims
+	// nothing when the drop deleted its row (TestDroppingCatchUpsLeavesTheRowALaneIsLeasing,
+	// TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued). The drop locks no row, since a
+	// lane finishing a catch-up waits on the decisions its caller holds
+	// (TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting). A leased row with no decisions is
+	// dropped as before: the
 	// runner executes it from memory, and the notice executor publishes it only while OutboxLeased
 	// still finds it, so a dropped row is delivered only when the drop lands during its publish, a
 	// duplicate the fresh catch-up follows. A dropped catch-up's decisions are released with its row

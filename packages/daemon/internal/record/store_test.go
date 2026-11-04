@@ -1702,9 +1702,10 @@ func TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce
 // rows, so a drop whose delete read the row before the lease committed would delete it after. The
 // lane then publishes the row from memory, its re-hold copies the text naming the decisions the
 // drop released, and the fresh catch-up the drop's transaction wrote names them too: told twice
-// (the kept-decision model's seed 262). So the drop locks the issue's catch-ups first and reads the
-// leases after: a lease a moment from committing is seen, and a lease taken after the lock finds
-// the row gone and claims nothing.
+// (the kept-decision model's seed 262). So a claim of one of the issue's catch-ups and the drop
+// take one advisory lock, keyed by the issue: a lease a moment from committing is waited for and
+// seen, and a claim taken after the lock waits for the drop and claims nothing when its row is
+// gone.
 func TestDroppingCatchUpsLeavesTheRowALaneIsLeasing(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1850,6 +1851,91 @@ func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
 	if left != 0 || claimedBy != 0 {
 		t.Fatalf("after both committed the catch-up %d is in the outbox %d times and %s is claimed by row %d; want the finished row gone "+
 			"and the decision unclaimed", catchUp, left, ref, claimedBy)
+	}
+}
+
+// A re-hold queues a copy of a catch-up and moves the row's claims onto it (reholdNotice,
+// MoveKeptClaims) while a drop of the root's catch-ups runs, and a lane then claims that copy. The
+// drop's lease check reads the outbox in a subquery, which its delete does not recheck against a
+// lease committed after the statement began, so a claim of a copy made after the drop's own reads
+// would leave the copy deleted and its lane publishing it from memory, beside the fresh catch-up
+// naming the decisions the deletion released: told twice. The claim takes the drop's lock, so it
+// waits for the drop and claims nothing of a row the drop took.
+func TestDroppingCatchUpsWaitsForTheClaimOfACopyAReholdQueued(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	ref := "dispatch://LEGION-1/ask/ask-1"
+	kept := KeptDecisions{Decisions: []DecisionMark{{Ref: ref, At: at, Issue: "LEGION-1"}}}
+	var catchUp int64
+	inTx(t, st, func(tx pgx.Tx) {
+		putRoot(t, ctx, records, tx, "LEGION-1")
+		must(t, records.AddParkedDecision(ctx, tx, ParkedDecision{Issue: "LEGION-1", Ref: ref, Decision: DecisionAskAnswered,
+			Actor: "user:alice", At: at}))
+		row, err := NewOutboxRow("LEGION-1", Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "the tree of LEGION-1",
+			CatchUp: &CatchUp{Generation: 1, Launch: 1, Decided: ref, Kept: &kept}}, now)
+		must(t, err)
+		catchUp, err = records.EnqueueID(ctx, tx, row)
+		must(t, err)
+		must(t, records.ClaimKeptDecisions(ctx, tx, "LEGION-1", kept, catchUp))
+	})
+
+	// The re-hold's copy, queued in a transaction of its own and carrying the row's claims.
+	var copyID int64
+	inTx(t, st, func(tx pgx.Tx) {
+		row, err := NewOutboxRow("LEGION-1", Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "the tree of LEGION-1",
+			Resends: 1, ResendOf: catchUp, CatchUp: &CatchUp{Generation: 1, Launch: 1, Decided: ref, Kept: &kept}}, now)
+		must(t, err)
+		copyID, err = records.EnqueueID(ctx, tx, row)
+		must(t, err)
+		must(t, records.MoveKeptClaims(ctx, tx, catchUp, copyID))
+	})
+
+	// The drop, which takes both rows and holds its lock from here until it commits.
+	txDrop, err := st.BeginTx(ctx, pgx.TxOptions{})
+	must(t, err)
+	defer func() { _ = txDrop.Rollback(ctx) }()
+	must(t, records.DropCatchUps(ctx, txDrop, "LEGION-1", now))
+
+	// The lane's claim of the copy, which must wait for the drop and take nothing.
+	claimed := make(chan error, 1)
+	leased := make(chan bool, 1)
+	go func() {
+		claimed <- st.Tx(ctx, func(tx pgx.Tx) error {
+			_, ok, err := records.ClaimRow(ctx, tx, copyID, now, time.Minute)
+			leased <- ok
+			return err
+		})
+	}()
+	testwait.Eventually(t, "the claim of the copy to wait on the drop", func() bool {
+		select {
+		case err := <-claimed:
+			t.Fatalf("the claim of the copy returned (%v) while the drop ran; want it waiting on the drop's lock", err)
+		default:
+		}
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	must(t, txDrop.Commit(ctx))
+	must(t, <-claimed)
+	if took := <-leased; took {
+		t.Fatalf("the lane leased the copy %d the drop had deleted; want it to claim nothing, since its publish would name "+
+			"the decisions the deletion released and the fresh catch-up names them", copyID)
+	}
+
+	var left int
+	var claimedBy int64
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, tx.QueryRow(ctx, "select count(*) from outbox where id in ($1, $2)", catchUp, copyID).Scan(&left))
+		must(t, tx.QueryRow(ctx, "select coalesce(claimed_by, 0) from parked_decisions where issue = 'LEGION-1' and ref = $1", ref).Scan(&claimedBy))
+	})
+	if left != 0 || claimedBy != 0 {
+		t.Fatalf("after the drop %d of the catch-up and its copy are in the outbox and %s is claimed by row %d; want both gone and the "+
+			"decision unclaimed, for the fresh catch-up to name", left, ref, claimedBy)
 	}
 }
 
