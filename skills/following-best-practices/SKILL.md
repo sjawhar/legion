@@ -18,19 +18,21 @@ Before you write a design, a recommendation or options, start a fresh subagent a
 <The problem only.>
 
 From this problem alone, research and answer three questions. Do not ask for or propose a design.
-1. What is best practice here? Every practice that applies to this kind of problem, each with a source you read (the tools' own documentation, two or three well-regarded projects) and why it applies here.
+1. What is best practice here? Every practice that applies to this kind of problem, as a table with one row per practice and the columns `Practice | Source | Why it applies to this case`. Source is a page you read (the tools' own documentation, two or three well-regarded projects), as a link. Why it applies names the facts of this problem that make the practice matter here; "it is a best practice" is not a reason. Put every practice you name in any answer below in this table, a practice a fact of the setup rules out included, and leave no cell empty.
 2. What is the world-class answer? The criteria that make it the best answer for this problem.
 3. Which fact of this setup, if any, rules out a practice or the world-class answer? A cost in time, money or effort is not such a fact.
 ```
 
-Wait for its answers in the same turn: in Claude Code, start it with `run_in_background: false`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive. Check that every practice in its answers has a source and why it applies here, and ask for each one missing before you go on (in Claude Code, from a fresh subagent given its answers, started with `run_in_background: false`). Record its answers in a file or a Dispatch comment, each practice with its source and why it applies here, before any action that states or leans to a design: text you write, a file, a subagent brief, or a command's arguments, such as an issue title, even in a dry run. Recording them does not end your turn: go on with the work.
+Wait for its answers in the same turn: in Claude Code, start it with `run_in_background: false`; in omp, `wait` for its task. Never end your turn while it runs: in a headless session, the end of your turn stops every subagent still running, and its answers never arrive.
+
+Then write the practice table yourself, in a file or a Dispatch comment, before any action that states or leans to a design: text you write, a file, a subagent brief, or a command's arguments, such as an issue title, even in a dry run. The table is step 1's record. It has one row for each practice its answers name, in the world-class criteria and the ruling-out facts too and a practice they rule out included, with the same three columns. Fill each row from its answers: a link it gives as the source, and a reason that names a fact of this problem. For each row whose source is not a link or whose reason names no fact of this problem, ask a research subagent for the missing cell (in Claude Code, a fresh subagent given its answers, started with `run_in_background: false`), and fill it from that answer, never from your own words. Do not take any action that states or leans to a design while a row is incomplete: an incomplete row is not a reason to drop the practice. Below the table, copy its world-class answer and the ruling-out facts. Recording them does not end your turn: go on with the work.
 
 Then:
 
 - Follow every best practice unless a fact of this case rules it out, and write that fact in the design. Less work, less money, no new credential, or a precedent here that does it another way is not such a fact.
 - Design the world-class answer. Fall short of it only when a fact of this case requires it, and name each shortfall with its reason. Name a cost the person must accept as a cost, for them to decide.
 - Settle a disputed fact with evidence: the documentation, the code or a probe. Ask the person only for a cost to accept or a choice of priority.
-- In a spec, open the `Design` part with a `### Best practice and world-class` entry copied from step 1: each best practice with its source, why it applies here and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
+- In a spec, open the `Design` part with a `### Best practice and world-class` entry copied from step 1's table: each best practice with its source, why it applies to this case and whether the design follows it, the world-class answer, and each place the design falls short with its reason. The approver then sees the comparison without asking for it.
 
 ## 2. Before each approval request
 
