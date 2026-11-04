@@ -259,7 +259,25 @@ func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) 
 	missing := "dispatch://" + issue.Key + "/spec#b-nowhere"
 
 	writeBrowserDocument(t, documents, checks.ID, claimMarkdown("c1", missing))
-	settledVersion(t, handler, documents, checks.ID, 2)
+	// Settled on this goroutine, not through SettleNow's timer, which the browser's update can
+	// outrun: the room arms the settlement that update owes, at the hour-long settle window, as it
+	// drains the update, which can come after the text is live. That arming replaces SettleNow's
+	// timer before it fires or moves the generation under its settlement, which then writes
+	// nothing. SettleIssueDocuments runs the owed settlement itself, and again when a write
+	// supersedes it. The upload's live write already owes it, so the call cannot find none owed.
+	var owed bool
+	if err := database.Pool.QueryRow(context.Background(), `select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, checks.ID).Scan(&owed); err != nil {
+		t.Fatalf("read checks.md's pending settlement: %v", err)
+	}
+	if !owed {
+		t.Fatal("checks.md owes no settlement, want the upload's still owed")
+	}
+	if err := documents.SettleIssueDocuments(context.Background(), issue.Key); err != nil {
+		t.Fatalf("settle the issue's documents: %v", err)
+	}
+	if version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+checks.ID+"/versions/2", nil, "alice"); version.Code != http.StatusOK {
+		t.Fatalf("checks.md version 2 once settled: status=%d body=%s, want 200", version.Code, version.Body.String())
+	}
 
 	stored := readBlockRefs(t, database, checks.ID)
 	if len(stored) != 1 || stored[0].BlockID != "c1" || stored[0].Kind != "serves" || stored[0].ToID != issue.Key+"/spec#nowhere" {
