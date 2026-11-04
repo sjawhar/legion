@@ -428,8 +428,8 @@ func idleRigKeptNothing(t *testing.T, status int, body, reason string) {
 // (the Legion daemon's notices, notify.Publish). Nothing is kept for the role, so the attempt a
 // live holder took is the only way this message can reach the session and the count below reads
 // that attempt and nothing else; a sender that lets the listener keep the message is the
-// five-wake pass's role message and the restart's, whose kept copies are counted where they are
-// handed over.
+// five-wake pass's role message and the restart's, and only the restart's kept copy is counted,
+// where it is handed over (idleRigDeliveredOnce).
 func idleRigRetryPublish(t *testing.T, rig *idleWakeRig, issue idleRigIssue, message, key string) {
 	t.Helper()
 	publish := func() int {

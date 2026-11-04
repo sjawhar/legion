@@ -49,8 +49,9 @@ const listenerReadyInterval = 5 * time.Minute
 // wakeReportAttempt bounds one publish, wakeReportRetry is the first wait between two of them,
 // doubling to wakeReportRetryCap, and wakeReportBudget bounds the whole report: past it the
 // listener has been unable to reach the stream for minutes, which its own liveness report then
-// says, and holding the goroutine longer buys nothing. No caller waits any of it out — the two
-// reports a 404 raises are published off that 404's path (reportRoleWake, reportAgentWake).
+// says, and holding the goroutine longer buys nothing. No caller waits any of it out — a role
+// report is published off the path of the 404 or the 202 kept answer it is raised beside, and an
+// agent report off its undeliverable message's (reportRoleWake, reportAgentWake).
 const (
 	wakeReportAttempt  = 2 * time.Second
 	wakeReportRetry    = 250 * time.Millisecond
@@ -70,8 +71,8 @@ type wakeReport struct {
 
 // publishWakeReport publishes one report on bus.LegionWakeTopic, retrying until the stream
 // acknowledges it, the whole report's budget runs out, or ctx ends with the listener. Nothing
-// waits for it: the 404 it was raised beside is answered whatever the bus does, and is answered
-// without waiting for it (reportRoleWake).
+// waits for it: the 404 or the 202 kept answer it was raised beside is answered whatever the bus
+// does, and is answered without waiting for it (reportRoleWake).
 //
 // Every attempt publishes the one envelope built below, under the one event id and dedupe key,
 // as the stream keeps no duplicate window for these: an attempt the stream stored and failed to

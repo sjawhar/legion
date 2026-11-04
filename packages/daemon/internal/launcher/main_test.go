@@ -49,12 +49,12 @@ func TestTheTestProcessIsGuarded(t *testing.T) {
 	fixtureenv.RequireGuarded(t)
 }
 
-// No test of this package can reach the workspace of the pod it runs in: the negative control for
-// TestMain's guard, on each of the three routes a test here has to a workspace it did not make
-// itself. Each route is its own case, so a guard taken out of TestMain is reported on every route
-// it opens rather than on the first alone. The first case fails without a Guard whatever the
-// machine holds; in a Legion issue pod, where LEGION_WORKSPACE names the pod's live workspace,
-// the first two then name the workspace a restore of this package's tests would have worked.
+// No test of this package can reach the workspace of the pod it runs in. The guard's own control
+// is TestTheTestProcessIsGuarded; this adds what that does not say. The first two cases fail
+// without a Guard in a Legion issue pod, where LEGION_WORKSPACE names the pod's live workspace,
+// and name the workspace a restore of this package's tests would have worked. The third holds
+// whether or not a Guard ran: it checks only that fixtureenv.Isolated, which the bundle fixture
+// builds its environment from, drops a workspace the process holds.
 func TestNoTestOfThisPackageCanReachThePodsWorkspace(t *testing.T) {
 	// The test process: Guard ran, and nothing it takes out is left — no LEGION_, no GIT_ but
 	// GIT_ALLOW_PROTOCOL=file, no JJ_ (fixtureenv.RequireGuarded), so neither this package's code
@@ -75,10 +75,10 @@ func TestNoTestOfThisPackageCanReachThePodsWorkspace(t *testing.T) {
 			t.Errorf("a generation started by a test here would restore into %s, the workspace of the process that runs the tests", dir)
 		}
 	})
-	// A fixture's own git and jj (bundleFixture.env): their environment drops a workspace the
-	// process holds whether or not a Guard ran. The process is handed a workspace of this case's
-	// own to read back, so what passes is Isolated's doing and not an environment that held none
-	// anyway.
+	// fixtureenv.Isolated, which bundleFixture.env is built from, drops a workspace the process
+	// holds whether or not a Guard ran. This reads Isolated and not bundleFixture.env itself. The
+	// process is handed a workspace of this case's own to read back, so what passes is Isolated's
+	// doing and not an environment that held none anyway.
 	t.Run("a fixture's environment carries no workspace the process holds", func(t *testing.T) {
 		decoy := filepath.Join(t.TempDir(), "not-the-pods-workspace")
 		t.Setenv("LEGION_WORKSPACE", decoy)
