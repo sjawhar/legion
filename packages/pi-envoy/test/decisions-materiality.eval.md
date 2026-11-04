@@ -61,8 +61,9 @@ All conditions must hold:
   machine, retry policy, session reset policy, and preserving uncommitted work.
   Equivalent headings and order are fine; there is no word-count target.
 - Neither presentation choice has a decision section or is bundled into another
-  decision as an extra rationale. Each remains a single line in the spec, even
-  though the title came from an answered ask.
+  decision as an extra rationale. Each remains ordinary spec content: a requirement,
+  design or check line, even when it came from an answered ask. Repeating a choice
+  across those spec parts is normal and does not fail this check.
 - Each decision gives its reason and links the supplied spec block. The session
   policy also links its answered ask; the title's ask remains in its spec line.
 - There are no invented choices, open asks or approval requests, and the spec
