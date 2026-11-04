@@ -313,13 +313,13 @@ type Service struct {
 	// to ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
 	// offered theirs, and to watch what becomes of each one's state.
 	afterSocketPreload func(room string, loaded *persistence.LoadResult)
-	// beforeUnloadEndsLoad runs in ygo's OnUnloadDocument (releaseUnloadedRoom) after everything
-	// the unload reads before it ends a load of the room, and before it ends one. Nil outside
-	// tests; tests use it to hold one room's unload there while a later room of the same name
-	// loads and unloads in full. A choice of load made from anything read before this point is
-	// what that order breaks (an unload that read ygo's live document first left a load counted for
-	// good), so the hook stays here, and not at the unload's start, for as long as that is worth
-	// proving.
+	// beforeUnloadEndsLoad runs in ygo's OnUnloadDocument (releaseUnloadedRoom) before the unload
+	// reads which load of the room to end. Nil outside tests; tests use it to hold one room's
+	// unload there while a later room of the same name loads and unloads in full. The rule it
+	// pins: the unload chooses its load only from what it reads under roomSlots.mu, after this
+	// point (roomUnloaded). An unload that chose from a read made before it - ygo's live document,
+	// at 849c00dd - left a load counted for good, and the either-order test held here fails on
+	// that order.
 	beforeUnloadEndsLoad func(room string)
 	// bootstrapping runs as a room's load hook decodes state, the stored state its load read, into
 	// the room's document (bootstrapLoadedState). Nil outside tests; tests use it to count the
@@ -405,12 +405,14 @@ type Service struct {
 	connections   atomic.Int64
 	// residentBytes is the encoded bytes the loads ygo holds took, each load's own history and
 	// every update the room it left behind has committed since (residentLoad), for the room
-	// figures: loaded state only. The bytes a commit parks - structs and deletions waiting for an
-	// edit the room has not received, which sit in ygo's pending queue inside the room's document
-	// until they integrate or the room unloads - are not counted. ygo bounds them per room by
-	// Server.MaxPendingItems, which this service sets to maxUpdateItems (1<<20; New, below, and
-	// persistence.go), refusing an update that would park more items, or more delete ranges,
-	// than that (ygo v1.55.1-sami.1 provider/websocket/server.go:1246-1248): a count, not bytes.
+	// figures: loaded state only. The bytes a commit parks after the load - structs and deletions
+	// waiting for an edit the room has not received, which sit in ygo's pending queue inside the
+	// room's document until they integrate or the room unloads - are not counted; parked rows
+	// already stored are part of the history a later load decodes, and count there. ygo bounds
+	// the parked ones per room by Server.MaxPendingItems, which this service sets to
+	// maxUpdateItems (1<<20; New, below, and persistence.go), refusing an update that would park
+	// more items, or more delete ranges, than that (ygo v1.55.1-sami.1
+	// provider/websocket/server.go:1246-1248): a count, not bytes.
 	// Each load's bytes are counted against that load's token, and each unload of a name ends the
 	// name's oldest token, so a room that loaded again before an earlier room of the same name
 	// reported its unload keeps its own; two ended rooms that unload out of order each end the

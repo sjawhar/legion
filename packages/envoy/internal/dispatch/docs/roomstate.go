@@ -258,10 +258,9 @@ func (s *Service) releaseIfUnused(room string) {
 // the resident rooms, nor holds a place under the room cap unless a socket still holds a
 // reservation on it, the bytes of one load of the name no longer count as resident (roomUnloaded,
 // which ends the name's oldest load: the one ending, save in the out-of-order case below), and its
-// state goes too unless something
-// still holds it, whose end releases it instead. ygo calls it exactly once for each room whose
-// load succeeded, and only for a room that has left its map, whichever way the room goes: the
-// idle sweep, the last peer leaving, CloseRoom.
+// state goes too unless something still holds it, whose end releases it instead. ygo calls it
+// exactly once for each room whose load succeeded, and only for a room that has left its map,
+// whichever way the room goes: the idle sweep, the last peer leaving, CloseRoom.
 //
 // The unload ends the oldest load counted under the name (roomUnloaded). That load is always one
 // that has left ygo's map: ygo holds one room of a name at a time, takes a room out of its map
