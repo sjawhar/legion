@@ -1424,6 +1424,23 @@ digest on the browser step's own command line. A role does not run the whole
 suite in an issue pod — two CPUs do not carry it — it runs the files it is
 working on.
 
+A row of this suite takes under two seconds, or says above its `test(` why it
+cannot. The reason goes in a `// SLOW(>=2s): <what it spends the time on>`
+comment, and `bun e2e/tools/check-slow-rows.ts <playwright report.json> --dir e2e`
+holds the two together: it exits 1 on a row at or above 2,000 ms that no such
+comment covers, and on a comment whose every row came in well under that. Run it
+over a one-worker report of the files you changed, since four workers inflate a
+row by the contention of its neighbours rather than by its own work. A marker is
+earned by a row that reached three quarters of the threshold, not only by one
+that crossed it: four of the eight rows of `coverage.e2e.ts`, `plan-tab.e2e.ts`
+and `verification.e2e.ts` sit between 1.5 and 2.7 seconds, where the machine
+decides which side of the bar they land, and without that band such a row fails
+the check bare on a slow run and marked on a fast one. A row's own cost is what
+it proves: most of a short row is the floor every row pays, measured in an issue
+pod at a fresh Chromium context (0.25 s), the cold parse of the dashboard bundle
+that context cannot cache (0.40 s) and the dashboard's boot reads before its
+first draw (0.80 s).
+
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
 Two rules keep an assertion honest. First, name the state the fixture puts the system in and ask whether the
