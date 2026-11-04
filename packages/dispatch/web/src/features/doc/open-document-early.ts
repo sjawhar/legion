@@ -1,13 +1,15 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
-import { issueQuery } from "../../api/queries";
+import { issueQuery, userStateQuery } from "../../api/queries";
 import type { ArtifactText } from "../../api/types";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { parseIssuePath } from "../refs/routes";
 import { liveTextQueryOptions } from "./live-text";
 
 /**
- * Starts the reads an open document needs, from the address alone, as early as the shell knows
+ * Starts the reads an open document needs, from the address alone, as early as the page knows
  * it: the issue, and then the document's own text.
  *
  * It exists because of what those reads used to wait behind. The document's first fetch began
@@ -18,13 +20,29 @@ import { liveTextQueryOptions } from "./live-text";
  * (dispatch://INFRA-341, R11). None of them is anything the text read depends on: the address
  * names the issue, the issue names the document, and the document names its text.
  *
+ * The page's first address opens as the entry module evaluates (`main.tsx`), which is before
+ * React has rendered anything and before the sign-in check has been asked for, let alone
+ * answered: on a phone that moved the issue's read about a second earlier and the document's
+ * text about two, since neither waits any longer for the shell to commit. Every later address
+ * opens from the shell's own effect (`app.tsx`'s `OpenDocumentEarly`), which is when the page
+ * learns of it. The two meet on the page's first render, so an address already opened is not
+ * opened again: a second read of the same text under `staleTime: 0` would download the
+ * document twice.
+ *
  * What it does not change is who may read what. These are the page's own reads, made with the
- * page's own session under the same query keys, after the sign-in check has answered
- * (`AuthGate`); the page that mounts next finds each in the cache or in flight, and asks for it
- * itself exactly as it always did. A failure is left in the cache as any failed read is, for
- * that page to show and to retry.
+ * page's own session under the same query keys, and Dispatch answers each exactly as it
+ * answers the page's: a reader who may not read this issue is refused here as they are
+ * refused everywhere, and the shell still shows them whatever the sign-in check says
+ * (`AuthGate`). The page that mounts next finds each read in the cache or in flight, and asks
+ * for it itself exactly as it always did. A failure is left in the cache as any failed read
+ * is, for that page to show and to retry.
  */
 export function openDocumentEarly(client: QueryClient, pathname: string, search: string): void {
+  const address = `${pathname}${search}`;
+  if (address === openedAddress) {
+    return;
+  }
+  openedAddress = address;
   // Whatever the address before this one left unread is this navigation's to drop, before
   // anything of this one is started: a read belongs to the opening it was made for.
   earlyTextRead = undefined;
@@ -34,6 +52,18 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
   if (route?.kind !== "issue" && route?.kind !== "spec" && route?.kind !== "artifact") {
     return;
   }
+  // The text itself, where the address names the document: `/issues/{key}/artifacts/{slug}`
+  // names it as Dispatch's own route does, so the bytes a reader reads are asked for in the
+  // first round trip rather than the second. The issue read below still runs - the page needs
+  // it, and it is what names the artifact this answer belongs to - but the document's 420 KB
+  // no longer waits behind it, which on a phone was over a second of nothing on the screen
+  // (dispatch://INFRA-341, R11). The Spec tab's address names no slug, so its text is read by
+  // the id the issue answers with, as it always was.
+  const bySlug =
+    route.kind === "artifact" ? api.getIssueArtifactText(route.key, route.slug) : undefined;
+  // Nothing waits on this promise until the issue read hands it over, so its refusal is
+  // answered here rather than left to the window as an unhandled rejection.
+  void bySlug?.catch(() => undefined);
   void client
     .fetchQuery(issueQuery(route.key))
     .then((issue) => {
@@ -43,11 +73,30 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
           : primarySpec(issue);
       // A blob artifact, and a slug this issue has no artifact for, open no document.
       if (artifact?.kind === "doc") {
-        readTheTextEarly(client, artifact.id);
+        readTheTextEarly(client, artifact.id, bySlug);
       }
     })
     .catch(() => undefined);
+  // The other read the page showing this document holds its whole render behind: the reader's
+  // own issue state, which `IssuePage` waits for beside the issue itself (`useIssueDetail`) and
+  // which the shell otherwise asks for only once it has rendered. The document draws inside
+  // that page, so a read the page waits on is a read the document waits on.
+  void client.prefetchQuery(userStateQuery());
+  // The engine that draws the document, started beside those reads rather than behind them.
+  // Its first screenful is parsed by the read-only headless engine (`DocumentPreview`), whose
+  // schema read and 461 KB chunk the shell otherwise asks for only once it has rendered -
+  // which on a phone put both, and the engine's own build, between the text arriving and the
+  // first block being drawn from it (dispatch://INFRA-341, R11). It is started after the reads
+  // above are out, since the build runs on the page's own thread in a long chain of
+  // continuations and the reads' answers are read on that thread too. The warm-up is the
+  // shell's own (`DeploymentResilience`), loads once however many callers ask, and draws
+  // nothing itself.
+  void warmMarkdownRenderer().catch(() => undefined);
 }
+
+/** The address this module last opened, so the entry's own call and the shell's first effect -
+ *  which run for the same address, in that order - open it once between them. */
+let openedAddress: string | undefined;
 
 /**
  * The text read this module made for the document the address opened, waiting for the admission
@@ -75,10 +124,27 @@ export function openDocumentEarly(client: QueryClient, pathname: string, search:
  */
 let earlyTextRead: { artifactId: string; read: Promise<ArtifactText> } | undefined;
 
-function readTheTextEarly(client: QueryClient, artifactId: string): void {
+/** The document's text, under the key the page reads it by. `asked` is the same read already
+ *  in flight under the document's address, where the address named it: it is the same route's
+ *  answer about the same document, made for this opening, so the cache takes it rather than
+ *  asking a second time. One that fails says nothing about the document - the slug may name a
+ *  file this issue no longer has - so the read by id is made in its place, as it would have
+ *  been, and so is every retry. */
+function readTheTextEarly(
+  client: QueryClient,
+  artifactId: string,
+  asked?: Promise<ArtifactText>
+): void {
   // `staleTime: 0` because an admission takes this read: it has to be a read, never whatever
   // this key happened to hold.
-  const read = client.fetchQuery({ ...liveTextQueryOptions(artifactId), staleTime: 0 });
+  const read = client.fetchQuery({
+    ...liveTextQueryOptions(artifactId),
+    queryFn:
+      asked === undefined
+        ? () => api.getArtifactText(artifactId)
+        : () => asked.catch(() => api.getArtifactText(artifactId)),
+    staleTime: 0,
+  });
   earlyTextRead = { artifactId, read };
   void read.catch(() => {
     // A failed read is the document's own to report and to retry; what it must not do is wait

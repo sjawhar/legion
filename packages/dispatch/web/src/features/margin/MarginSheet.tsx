@@ -182,8 +182,28 @@ export function MarginSheet({
     onClose: sheet.closeThread,
     open: isPhoneViewport && phoneThread !== undefined,
   });
-  // What the margin's own tabs give way to: the rail it collapses to, or a phone margin thread.
-  const covered = collapsed || (isPhoneViewport && phoneThread !== undefined);
+  // What the margin's own tabs give way to: the rail it collapses to, a compact sheet nothing
+  // has named a card in and the reader has not opened, or a phone margin thread.
+  //
+  // A shut compact sheet is what a reader opening a document meets. Its tabs are
+  // `display: none` there - the sheet is 64 px of `Review (N)` until it is dragged up - and
+  // the cards behind them cost what a card costs: a read of every ask's thread
+  // (`GET /asks/{id}`, one each), and every ask and comment body drawn through the headless
+  // engine, on the thread the document beside them is waiting for. On a phone opening a
+  // document of five decision blocks that was five reads and about a second of main thread in
+  // front of the document's own first draw (dispatch://INFRA-341, R11). None of it is on
+  // screen, so none of it is drawn until the reader opens the sheet; the count beside `Review`
+  // is the margin's own asks query, which is read either way, and the composer below keeps its
+  // draft as it does under the rail.
+  //
+  // A card the route named is the exception, and is drawn in the shut sheet as it always was:
+  // the landing selects it, places it and scrolls the sheet to it before the reader opens the
+  // sheet over it (`useMarginListeners`, `e2e/deep-links.e2e.ts`, "an iPhone secondary-document
+  // link scrolls its selected card after opening the review sheet"), and a card that is not
+  // there yet is a landing that cannot happen.
+  const unnamedShutSheet =
+    isCompactViewport && !sheet.expanded && selection.selectedItemId === undefined;
+  const covered = collapsed || unnamedShutSheet || (isPhoneViewport && phoneThread !== undefined);
   // The cards are laid out against the document's blocks and marks only while a reader can see
   // them there: the desktop margin that is up, or a compact sheet the reader has opened. The open
   // document measures where its blocks and marks sit for that alone

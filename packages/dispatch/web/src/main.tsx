@@ -3,8 +3,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
+import { whoAmIQuery } from "./api/queries";
 import { DispatchQueryClient, queryRetry, queryRetryDelay } from "./api/query-client";
 import { App } from "./app";
+import { openDocumentEarly } from "./features/doc/open-document-early";
 import {
   DeploymentResilience,
   installChunkFailureRecovery,
@@ -30,6 +32,18 @@ const queryClient = new DispatchQueryClient({
     },
   },
 });
+
+// The sign-in check, asked for as the entry evaluates. Every page waits on it - the shell
+// renders its skeleton until it answers (`app.tsx`'s `AuthGate`) - and it used to be asked for
+// from that gate's own first commit, about 800 ms into React's boot on a throttled phone. Who
+// may read what is untouched: the same check, the same answer, the same gate.
+void queryClient.prefetchQuery(whoAmIQuery());
+
+// The address this page was opened at, read before React renders anything: a document opens on
+// its own text, and nothing about that read waits on the shell, the sign-in check or the issue
+// page (`open-document-early.ts`, dispatch://INFRA-341 R11). A later address opens from the
+// shell's own effect, and this one is not opened twice.
+openDocumentEarly(queryClient, window.location.pathname, window.location.search);
 
 const root = document.getElementById("root");
 if (root === null) {

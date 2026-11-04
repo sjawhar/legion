@@ -319,7 +319,14 @@ export function ProofDocument({
     queryKey: ["block-schema"],
     staleTime: Number.POSITIVE_INFINITY,
   });
+  // The artifact's own read waits for the editor's draw, as the badges' read below does. The
+  // one thing it gives this component is a fresher `versions` list, and the artifact the issue
+  // named already carries that list - it is the fallback two lines of this file use anyway
+  // (`versions`, below) - so nothing a reader sees before the editor is drawn comes from here,
+  // while reading it landed 200-350 ms in front of the document's own first draw
+  // (dispatch://INFRA-341, R11).
   const artifactQuery = useQuery({
+    enabled: editorDrawn,
     queryKey: ["artifact", artifact.id],
     queryFn: () => api.getArtifact(artifact.id),
   });
@@ -354,8 +361,15 @@ export function ProofDocument({
   const repairError = page && admission?.kind === "repair" ? admission : undefined;
   const rebuildError = page && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
+  // The badges' read waits for the editor's own draw. It is one row per block of the document -
+  // 639 KB for the 406,000-character document R11 measures - and nothing of the document is
+  // drawn from it: it says which blocks carry a comment or an ask, which is a mark down the
+  // right edge of blocks the reader already has. Read with everything else it landed in the
+  // seconds before the document's first draw and was decoded on the thread that draw was
+  // waiting for (dispatch://INFRA-341, R11); read after it, it costs the reader nothing they
+  // are waiting on. A version shows no badges at all.
   const blockReferencesQuery = useQuery({
-    enabled: version === undefined,
+    enabled: version === undefined && editorDrawn,
     queryKey: ["artifact", artifact.id, "blocks"],
     queryFn: () => api.getArtifactBlocks(artifact.id),
   });

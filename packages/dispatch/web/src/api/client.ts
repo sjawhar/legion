@@ -1253,6 +1253,17 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
+  /** The same markdown as `getArtifactText`, by the address a reader opens the document at
+   *  rather than by the id only the issue's own read names
+   *  (`GET /api/v1/issues/{key}/artifacts/{slug}/text`, the same handler and the same check).
+   *  It is how a document route reads its document in one round trip instead of two
+   *  (`features/doc/open-document-early.ts`, dispatch://INFRA-341 R11). */
+  getIssueArtifactText(issueKey: string, slug: string): Promise<ArtifactText> {
+    return this.json<ArtifactText>(
+      `/api/v1/issues/${pathSegment(issueKey)}/artifacts/${pathSegment(slug)}/text`
+    );
+  }
+
   rebuildArtifact(
     id: string,
     markdown: string | undefined,

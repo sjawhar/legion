@@ -77,9 +77,11 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           selectedItemId: undefined,
           showResolved: false,
         },
+        // Open, as the other rows here render it: below `xl` the margin is a bottom sheet, and
+        // a shut one draws neither tab nor card (`MarginSheet`'s `covered`).
         sheet: {
           closeThread: () => {},
-          expanded: false,
+          expanded: true,
           replySending: false,
           thread: undefined,
           toggle: () => {},
@@ -94,7 +96,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
   );
 
   try {
-    expect(screen.getByRole("button", { name: "Open review panel (3 open asks)" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Close review panel (3 open asks)" })).not.toBeNull();
     expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
       "true"
     );

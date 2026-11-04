@@ -174,8 +174,14 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
 }
 
 /** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. The
- *  parse worker is not one of them: a page that draws no long body downloads none of it. */
+ *  parse worker is not one of them: a page that draws no long body downloads none of it.
+ *
+ *  The chunk is asked for before the schema read is awaited, not after it: the engine needs
+ *  both, neither needs the other, and reading them one after the other put 461 KB of download
+ *  behind a round trip on the path a document's first draw waits on
+ *  (dispatch://INFRA-341, R11). */
 export async function warmMarkdownRenderer(): Promise<void> {
+  headlessModule ??= import("@legion/proof-editor/headless");
   await loadEngine(await loadBlockSchema());
 }
 

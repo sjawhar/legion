@@ -17,9 +17,9 @@
 // here as well: the document on the screen before its editor exists, and the editor opening
 // where its reader had got to. None of them carries throttling: what they prove is what the
 // page does, not how long it takes.
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createComment, createIssue, createIssueArtifact, createProject } from "./api";
+import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
 import { documentEditor, documentTransport } from "./editor";
 import {
   commentDiagrams,
@@ -74,7 +74,8 @@ async function everythingOwedFinished(what: string): Promise<void> {
 }
 
 /**
- * Writes `content` as an issue document and answers the path a reader opens it at.
+ * Writes `content` as an issue document and answers the issue it belongs to and the path a
+ * reader opens it at.
  *
  * The issue's title and the document's file name are both short, and both rows use names of the
  * same length. At 390 px the document's first block begins 650 px down a 664 px viewport, and
@@ -83,13 +84,16 @@ async function everythingOwedFinished(what: string): Promise<void> {
  * scroll and there is no first number to read. Which document a row measures is in the row's
  * own title, not in what it seeds.
  */
-async function seedDocument(name: string, content: string): Promise<string> {
+async function seedDocument(
+  name: string,
+  content: string
+): Promise<{ issueKey: string; path: string }> {
   await resetDatabase();
   await createProject({ key: "BIG", name: "Big documents" });
   const issue = await createIssue({ project: "BIG", title: "A document" }, agent);
   const uploaded = await createIssueArtifact(issue.key, { content, name }, agent);
   await everythingOwedFinished(name);
-  return `/issues/${issue.key}/artifacts/${uploaded.artifact.slug}`;
+  return { issueKey: issue.key, path: `/issues/${issue.key}/artifacts/${uploaded.artifact.slug}` };
 }
 
 interface Row {
@@ -145,7 +149,7 @@ for (const row of rows) {
     // The document the run measures is the one this module spells, so a change to the generator
     // that moved either size would be read here rather than in a number that quietly moved.
     expect(diagramsIn(row.content)).toBe(row.diagrams);
-    const path = await seedDocument(row.name, row.content);
+    const { path } = await seedDocument(row.name, row.content);
 
     const alice = await asUser(browser, "alice");
     try {
@@ -176,7 +180,7 @@ test(`a link to the decision block at the end of ${documentNames.large} lands on
 }) => {
   test.setTimeout(600_000);
   const block = decisionBlockId(decisionBlocks);
-  const path = await seedDocument("specs-large.md", largeDocument);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -204,7 +208,7 @@ test(`a link to the decision block at the end of ${documentNames.large} lands on
 
 test(`${documentNames.small} is on the screen before its editor is @phone`, async ({ browser }) => {
   test.setTimeout(300_000);
-  const path = await seedDocument("specs-small.md", smallDocument);
+  const { path } = await seedDocument("specs-small.md", smallDocument);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -230,7 +234,7 @@ test(`the editor opens ${documentNames.large} where its reader had got to @phone
   browser,
 }) => {
   test.setTimeout(600_000);
-  const path = await seedDocument("specs-large.md", largeDocument);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
   // A section half-way down the document: far enough that a swap which kept the page's scroll
   // offset rather than the reader's place would leave them sections away from these words.
   const landmarkText = sectionHeading(Math.floor(documentDiagrams.large / 2));
@@ -275,10 +279,130 @@ test(`the editor opens ${documentNames.large} where its reader had got to @phone
   }
 });
 
+// The two rows below are about what the page does in front of that draw, which is what the
+// numbers above are mostly made of. The document's own reads are started from the address, so
+// they wait for nothing the issue page does; and the margin beside the document draws no card
+// a reader cannot see. Neither row is timed: each reads what the page asked for and what it
+// drew, never how long either took.
+
+/** A document of one short section, so these rows seed in a moment: what they read is the
+ *  order the page does things in, which no length of document changes. */
+const shortDocument = "# The lease ledger\n\nThe paragraph a reader meets first.\n";
+
+/** The pathname of each request the page made, newest last, for a row that reads what the page
+ *  asked for. */
+function requestedPaths(page: Page): string[] {
+  const paths: string[] = [];
+  page.on("request", (request) => paths.push(new URL(request.url()).pathname));
+  return paths;
+}
+
+/** Either route a document's markdown is read by: the one the address names it at, and the one
+ *  the issue's own read names it at (`web/src/api/client.ts`). */
+const documentTextRoute = /^\/api\/v1\/(issues\/[^/]+\/artifacts\/[^/]+|artifacts\/[^/]+)\/text$/;
+
+test("a document's own text is read before the sign-in check has answered @phone", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const { issueKey, path } = await seedDocument("notes.md", shortDocument);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const asked = requestedPaths(page);
+    // The sign-in check, held: every page waits on it (`app.tsx`'s `AuthGate` shows its
+    // skeleton until it answers), so while it is out nothing of the shell, the issue page or
+    // the margin has rendered at all.
+    const signInHeld = Promise.withResolvers<void>();
+    await page.route("**/auth/whoami", async (route) => {
+      await signInHeld.promise;
+      await route.continue();
+    });
+    await page.goto(path, { waitUntil: "commit" });
+
+    // The document's own text, asked for from the address alone
+    // (`web/src/features/doc/open-document-early.ts`), while the check is still out. The
+    // address names the document, so the read is the slug route's; a Spec tab's address names
+    // no slug and its text is read by the id the issue answers with.
+    await expect
+      .poll(() => asked.filter((what) => documentTextRoute.test(what)), {
+        intervals: [100],
+        message:
+          "the document's text was never asked for while the sign-in check was out: the read " +
+          "is waiting for the shell again",
+        timeout: 60_000,
+      })
+      .toEqual([`/api/v1/issues/${issueKey}/artifacts/notes-md/text`]);
+    // And the shell really has not rendered: the Inbox read it makes is still unmade.
+    expect(asked).not.toContain("/api/v1/inbox");
+
+    // Released, the page shows the document it already holds the text of.
+    signInHeld.resolve();
+    const firstBlock = page
+      .locator(
+        '[aria-label="Document text"] [data-block-id], [aria-label="Document editor"] [data-block-id]'
+      )
+      .first();
+    await expect(firstBlock).toBeVisible({ timeout: 60_000 });
+    await expect(firstBlock).toContainText("The lease ledger");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a phone draws the margin's ask cards only once its reader opens the review panel @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "iphone",
+    "above the phone layout the margin is a column of its own, which is always on screen"
+  );
+  test.setTimeout(180_000);
+  const { issueKey, path } = await seedDocument("notes.md", shortDocument);
+  const question = "Which window should the lease ledger settle in?";
+  await createAsk(
+    issueKey,
+    { options: [{ label: "The next window" }, { label: "The window after it" }], question },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const asked = requestedPaths(page);
+    await page.goto(path);
+    await expect(documentEditor(page)).toContainText("The lease ledger", { timeout: 120_000 });
+
+    // The whole page is up, and the shut sheet holds no card: a card behind it is 64 px of
+    // `Review (1)`, and the thread read each card makes is a read the reader never sees the
+    // answer to (dispatch://INFRA-341, R11).
+    const sheet = page.getByTestId("margin-sheet");
+    await expect(sheet.locator("[data-margin-item]")).toHaveCount(0);
+    expect(asked.filter((what) => /^\/api\/v1\/asks\/[^/]+$/.test(what))).toHaveLength(0);
+    // The count beside `Review` is the margin's own asks read, which it makes either way.
+    const review = page.getByRole("button", { name: /^Open review panel/ });
+    await expect(review).toHaveAccessibleName("Open review panel (1 open ask)");
+
+    await review.click();
+    await expect(sheet.getByText(question)).toBeVisible();
+    await expect(sheet.locator("[data-margin-item]")).toHaveCount(1);
+    await expect
+      .poll(() => asked.filter((what) => /^\/api\/v1\/asks\/[^/]+$/.test(what)), {
+        intervals: [100],
+        message: "the opened card never read its own thread",
+        timeout: 30_000,
+      })
+      .toHaveLength(1);
+  } finally {
+    await alice.close();
+  }
+});
+
 test(`a reader answers a decision block in ${documentNames.large} @phone`, async ({ browser }) => {
   test.setTimeout(600_000);
   const block = decisionBlockId(decisionBlocks);
-  const path = await seedDocument("specs-large.md", largeDocument);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
 
   const alice = await asUser(browser, "alice");
   try {

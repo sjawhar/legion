@@ -136,6 +136,10 @@ test("two readers' comments can cover the same text, and neither cuts the other'
       orphaned: false,
     });
 
+    // On a phone the margin is a bottom sheet, and a shut one no link has named a card in
+    // draws none (`web/src/features/margin/MarginSheet.tsx`): the cards these two readers
+    // wrote are read where a reader would read them, in the open panel.
+    for (const page of readers) await setSheet(page, testInfo.project.name, true);
     await Promise.all(
       readers.flatMap((page) => [
         expectMark(page, bobMark, "quick brown"),
@@ -148,6 +152,7 @@ test("two readers' comments can cover the same text, and neither cuts the other'
 
     await bobPage.reload();
     await expect(connectedDot(bobPage)).toHaveText("connected");
+    await setSheet(bobPage, testInfo.project.name, true);
     await Promise.all([
       expectMark(bobPage, bobMark, "quick brown"),
       expectMark(bobPage, aliceMark, "brown"),
