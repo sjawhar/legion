@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -242,14 +243,18 @@ type compactionQueue struct {
 	// done is closed when the worker has returned.
 	done chan struct{}
 	// beforeStep runs on the worker before each step, and afterStep after it with what the step
-	// decided and the backoff it ran under, zero for a check. Nil outside tests; tests use
+	// decided and the backoff it ran under, zero for a check. Unset outside tests; tests use
 	// afterStep to see the steps a room takes, and beforeStep to change what the step will read
 	// at a point no step is inside. A step reads the room's rows twice - its check, then the
 	// compaction the check sent it to - so a test that changes those rows between the two leaves
 	// the step a check that says there is something to fold and a compaction that finds nothing,
 	// which drops the room from the queue (dispatch://INFRA-1075).
-	beforeStep func(room string)
-	afterStep  func(room string, retry time.Duration, next compactionNext)
+	//
+	// They are atomic pointers because a test sets them while the worker is running and the
+	// worker reads them on every step: a plain field is a data race the detector reports against
+	// whatever test is running beside it.
+	beforeStep atomic.Pointer[func(room string)]
+	afterStep  atomic.Pointer[func(room string, retry time.Duration, next compactionNext)]
 
 	mu     sync.Mutex
 	timing compactionTiming
@@ -361,12 +366,12 @@ func (q *compactionQueue) run(ctx context.Context) {
 			timer.Stop()
 			continue
 		}
-		if q.beforeStep != nil {
-			q.beforeStep(entry.room)
+		if before := q.beforeStep.Load(); before != nil {
+			(*before)(entry.room)
 		}
 		next := q.step(ctx, entry.room, entry.retry > 0)
-		if q.afterStep != nil {
-			q.afterStep(entry.room, entry.retry, next)
+		if after := q.afterStep.Load(); after != nil {
+			(*after)(entry.room, entry.retry, next)
 		}
 		q.settle(entry, next)
 	}

@@ -299,7 +299,7 @@ func TestTheCompactionQueueComesBackToARetriedDocumentWhenItsYoungRowsComeDue(t 
 	// out. It failed 4 runs in 30 that way (dispatch://INFRA-1075).
 	aged := make(chan struct{})
 	var ageOnce sync.Once
-	service.compactions.beforeStep = func(room string) {
+	ageRows := func(room string) {
 		if room != artifactID {
 			return
 		}
@@ -308,6 +308,7 @@ func TestTheCompactionQueueComesBackToARetriedDocumentWhenItsYoungRowsComeDue(t 
 			close(aged)
 		})
 	}
+	service.compactions.beforeStep.Store(&ageRows)
 	<-aged
 	young := storedRows(t, database, artifactID)
 	step := steps.await(t, artifactID, 0, "the retry that finds no old row to check the document again later", func(step compactionStepRecord) bool {
@@ -352,16 +353,17 @@ func TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns(t *testi
 	// queue settles that step: the room is still in flight when the append notes it.
 	appended := make(chan error, 1)
 	var once sync.Once
-	record := service.compactions.afterStep
-	service.compactions.afterStep = func(room string, retry time.Duration, next compactionNext) {
+	record := service.compactions.afterStep.Load()
+	appendWhileInFlight := func(room string, retry time.Duration, next compactionNext) {
 		if room == artifactID && next.kind == compactionDone {
 			once.Do(func() {
 				_, err := persist.AppendUpdate(context.Background(), artifactID, late)
 				appended <- err
 			})
 		}
-		record(room, retry, next)
+		(*record)(room, retry, next)
 	}
+	service.compactions.afterStep.Store(&appendWhileInFlight)
 
 	loadStored(t, service, artifactID)
 	steps.await(t, artifactID, 0, "the queue to compact the document", func(step compactionStepRecord) bool {
@@ -683,16 +685,16 @@ type compactionSteps struct {
 }
 
 // quickCompactionQueue makes the service's compaction queue check a noted room at once and retry
-// after backoff, doubling to four times it, and returns the record of its steps. It runs before
-// anything notes a room, so the worker reads none of it before it is set.
+// after backoff, doubling to four times it, and returns the record of its steps.
 func quickCompactionQueue(service *Service, backoff time.Duration) *compactionSteps {
 	steps := &compactionSteps{}
 	q := service.compactions
-	q.afterStep = func(room string, retry time.Duration, next compactionNext) {
+	record := func(room string, retry time.Duration, next compactionNext) {
 		steps.mu.Lock()
 		defer steps.mu.Unlock()
 		steps.steps = append(steps.steps, compactionStepRecord{room: room, retry: retry, next: next})
 	}
+	q.afterStep.Store(&record)
 	q.mu.Lock()
 	q.timing = compactionTiming{backoff: backoff, backoffCap: 4 * backoff}
 	q.mu.Unlock()

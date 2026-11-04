@@ -482,7 +482,11 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	innerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000004", "brown")
 
 	editLiveTree(t, service, artifactID, replaceRun("brown", "browner"))
-	waitFor(t, time.Second, "anchor refresh to browner", func() bool {
+	// roomWait, not a second: each wait below is on a settlement landing in the database, which
+	// is an event the condition reads, and the only thing the bound decides is how loaded a
+	// runner may be before it is mistaken for a settlement that never came. A second was not
+	// enough once the package's tests began running beside each other (dispatch://INFRA-1075).
+	waitFor(t, roomWait(t), "anchor refresh to browner", func() bool {
 		anchor := loadAskAnchor(t, service, askID)
 		return anchor.Quote == "browner" && !anchor.Orphaned && loadCommentAnchor(t, service, innerID).Quote == "browner"
 	})
@@ -497,7 +501,7 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	}
 
 	editLiveTree(t, service, artifactID, deleteRun("browner"))
-	waitFor(t, time.Second, "anchor orphaning after browner deletion", func() bool {
+	waitFor(t, roomWait(t), "anchor orphaning after browner deletion", func() bool {
 		anchor := loadAskAnchor(t, service, askID)
 		return anchor.Orphaned && anchor.Version == 1
 	})
@@ -779,7 +783,7 @@ func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *
 	}
 	alignLatestVersionWithUpdates(t, service, artifactID)
 	browserMark(t, service, artifactID, "proofComment", "dangling", "one|two")
-	waitFor(t, time.Second, "unrecorded mark removed", func() bool {
+	waitFor(t, roomWait(t), "unrecorded mark removed", func() bool {
 		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
 		return !found
 	})
@@ -906,7 +910,7 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 		t.Fatalf("commit projection transaction: %v", err)
 	}
 	ledger.publish()
-	waitFor(t, time.Second, "settled projection version for after", func() bool {
+	waitFor(t, roomWait(t), "settled projection version for after", func() bool {
 		var markdown string
 		var named bool
 		if err := service.store.Pool.QueryRow(context.Background(), `
@@ -970,7 +974,7 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	}
 	// The anchored ask and comment above schedule their own settlements, so version 2 can be the
 	// pre-replace snapshot; wait for the replacement's settled state, not a version number.
-	waitFor(t, time.Second, "the deleted quote's comment to orphan", func() bool {
+	waitFor(t, roomWait(t), "the deleted quote's comment to orphan", func() bool {
 		return loadCommentAnchor(t, service, commentID).Orphaned
 	})
 	if anchor := loadAskAnchor(t, service, askID); anchor.Orphaned || anchor.Quote != "brown" {
