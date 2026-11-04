@@ -90,7 +90,10 @@ const issueRepoJoin = `left join repo on repo.key = i.key
 // ran out of depth.
 const issueRepoColumns = `i.repo, coalesce(repo.owned, repo_default.repo), coalesce(repo.too_deep, false)`
 
-// repoScan receives issueRepoColumns for one issue.
+// repoScan receives issueRepoColumns for one issue. These columns answer the same
+// repository-resolution rule refs.IssueRepoLateral runs for a single key, the one
+// refs.IssueRepository reads for the currency mark and the pull-request head attribution, so an
+// issue read and those two can never name different repositories for the same issue.
 type repoScan struct {
 	own, resolved *string
 	tooDeep       bool

@@ -574,6 +574,8 @@ var issueWithProgressQuery = `
 		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
 		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
+		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and ` + aliasedVerificationRole + `), ''),
+		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and ` + aliasedPlanRole + `), ''),
 		       i.last_seq, ` + issueClaimColumns + `,
 		       ` + issueProgressColumns + `,
 		       ` + issueComponentsColumns + `,
@@ -597,7 +599,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	targets := []any{
 		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.BlockedBy, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
-		&issue.PrimaryArtifactID, &issue.LastSeq,
+		&issue.PrimaryArtifactID, &issue.VerificationArtifactID, &issue.PlanArtifactID, &issue.LastSeq,
 	}
 	targets = append(targets, claim.targets()...)
 	targets = append(targets, progress.targets()...)

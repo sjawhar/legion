@@ -29,7 +29,6 @@ type ListenerConfig struct {
 	MachineID   string // ENVOY_MACHINE_ID
 	Port        int    // PORT, 1-65535: a component resolves its default, DefaultListenerPort
 	ListenHost  string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
-	HostBridge  string // "" leaves ENVOY_HOST_BRIDGE unset
 	SOCKS5Proxy string // "" leaves ENVOY_NATS_SOCKS5_PROXY unset
 	// AllowedHosts are the names a client may reach the listener's /v1 interface by,
 	// ENVOY_ALLOWED_HOSTS. An empty list leaves the variable unset, and a listener that requires
@@ -37,14 +36,6 @@ type ListenerConfig struct {
 	// (cmd/listener/apiauth.go, servesHost); an entry is rendered as written, since the listener
 	// normalizes what it reads.
 	AllowedHosts []string
-	// SubscribeAllTopics renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, which has the listener also hold a
-	// core subscription on every notification topic, so a session served on its machine receives a
-	// topic the stream does not store. Only a NATS user whose grant allows `notifications.>`
-	// (HostPermissions, ListenerHostPermissions) may set it: the listener's start ends when NATS
-	// refuses that subscription, as it does for ListenerPermissions and DispatchPermissions. The
-	// component cannot read the user's grant, so the operator who knows it opts in; false renders
-	// nothing.
-	SubscribeAllTopics bool
 	// NATSReplicas is the copies JetStream keeps of every stream and bucket the listener creates,
 	// ENVOY_NATS_REPLICAS, at most bus.MaxReplicas. 0 leaves the variable unset, and the listener
 	// then keeps one copy (internal/config/config.go).
@@ -127,9 +118,7 @@ func CheckAllowedHosts(input string, hosts []string) error {
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
 //
 // CheckMachineID owns the machine-id rule and CheckAllowedHosts the allowed-host rule.
-// ENVOY_HOST_BRIDGE is read untrimmed into every local
-// delivery's URL (internal/session/session.go), so a host bridge with surrounding whitespace is
-// refused. Port is always given, since a health check calls it. No value may hold a control
+// Port is always given, since a health check calls it. No value may hold a control
 // character: a watchdog writes the environment, one variable per line, into a heredoc of a script
 // that runs as root on the host, where a line break would end the heredoc and run what follows it.
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
@@ -146,15 +135,6 @@ func (c ListenerConfig) Check() error {
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return InputErrorf("port", "port %d is outside 1-65535", c.Port)
-	}
-	if bus.HoldsSeed(c.HostBridge) {
-		return InputErrorf("hostBridge", "%w", SeedRefusal("hostBridge"))
-	}
-	if strings.TrimSpace(c.HostBridge) != c.HostBridge {
-		return InputErrorf("hostBridge", "hostBridge has leading or trailing whitespace: %q", c.HostBridge)
-	}
-	if strings.ContainsFunc(c.HostBridge, unicode.IsControl) {
-		return InputErrorf("hostBridge", "hostBridge contains a control character: %q", c.HostBridge)
 	}
 	if bus.HoldsSeed(c.ListenHost) {
 		return InputErrorf("listenHost", "%w", SeedRefusal("listenHost"))
@@ -191,12 +171,9 @@ func (c ListenerConfig) Check() error {
 // the URL. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
 // does not vouch for, since the listener refuses such a server without it. ENVOY_ALLOWED_HOSTS
 // follows the ENVOY_LISTEN_HOST block, and only when the config lists a host, so a listener
-// without one renders what it always rendered. ENVOY_SUBSCRIBE_ALL_TOPICS=1 follows the
-// ENVOY_HOST_BRIDGE block, and only when SubscribeAllTopics is set, for the same reason: every
-// rendering made before the opt-in existed, the hub's cloud-config and Dispatch's container among
-// them, stays byte for byte. ENVOY_NATS_REPLICAS then ENVOY_STREAM_MAX_BYTES come last, each only
-// when its field is above 0, for that reason too; ENVOY_NATS_REPLICAS there is where
-// aws/rendering's ListenerEnv writes its own, after Env's variables.
+// without one renders what it always rendered. ENVOY_NATS_REPLICAS then ENVOY_STREAM_MAX_BYTES
+// come last, each only when its field is above 0, for that reason too; ENVOY_NATS_REPLICAS there
+// is where aws/rendering's ListenerEnv writes its own, after Env's variables.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
@@ -241,12 +218,6 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	}
 	if c.SOCKS5Proxy != "" {
 		env = append(env, bus.SOCKS5ProxyEnvVar+"="+c.SOCKS5Proxy)
-	}
-	if c.HostBridge != "" {
-		env = append(env, "ENVOY_HOST_BRIDGE="+c.HostBridge)
-	}
-	if c.SubscribeAllTopics {
-		env = append(env, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")
 	}
 	if c.NATSReplicas > 0 {
 		env = append(env, "ENVOY_NATS_REPLICAS="+strconv.Itoa(c.NATSReplicas))

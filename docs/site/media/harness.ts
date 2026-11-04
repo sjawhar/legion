@@ -157,18 +157,59 @@ export interface DispatchWorkspace extends SeededWorkspace {
   readonly marginThread: { readonly commentId: string; readonly markId: string };
 }
 
+/** The requirements the workflow issue's spec marks, in the words of its own subject. The e2e
+ *  suite's `seedWorkspace` is the seed of the browser specs as well, so the docs add these with
+ *  a write of their own, as they add the margin thread: the Spec tab lists a spec's requirements
+ *  under the document (`web/src/features/issue/SpecRequirements.tsx`), and a spec that marks none
+ *  shows the reader an empty panel instead. Each requirement earns a `has no check` flag, since
+ *  the example issue holds no Verification document; that flag is what the issue page's
+ *  documentation describes. */
+const WORKFLOW_REQUIREMENTS = `## Requirements
+
+:::requirement{#r1}
+One command starts Dispatch, the fake Envoy and the fake GitHub together, and opens a browser already signed in.
+:::
+
+:::requirement{#r2}
+The corpus the seed writes holds a question of every kind a reader meets: an open one, a snoozed one, an answered one and a retracted one.
+:::
+
+:::requirement{#r3}
+Each run starts from an empty database, so no run reads what the run before it left.
+:::
+`;
+
 /** The e2e suite's realistic workspace (`seedWorkspace`), plus what the docs show that it leaves
- *  out: a comment thread anchored on a spec, the delivery measures' fixture and the Pipeline page's
- *  rows beside it (`e2e/delivery-seed.ts`). Call `reset()` first. */
+ *  out: the requirements its spec marks, a comment thread anchored on that spec, the delivery
+ *  measures' fixture and the Pipeline page's rows beside it (`e2e/delivery-seed.ts`). Call
+ *  `reset()` first. */
 export async function seedDispatchWorkspace(): Promise<DispatchWorkspace> {
   const { seedWorkspace } = await import("../../../packages/dispatch/e2e/workspace");
   const { seedMeasuresFixture, seedPipelineRows } = await import(
     "../../../packages/dispatch/e2e/delivery-seed"
   );
-  const { createComment } = await dispatchApi();
+  const { createComment, editArtifact, getIssue, getIssueCoverage } = await dispatchApi();
   const seeded = await seedWorkspace();
   await seedMeasuresFixture();
   await seedPipelineRows();
+  // The requirements go between the summary and the open question, where a spec states them,
+  // and alice writes them: the workflow issue is hers, and she filed it.
+  const spec = (await getIssue(seeded.issues.workflow)).primary_artifact_id;
+  await editArtifact(spec, {
+    ops: [
+      {
+        after: "One command, a seeded corpus, a signed-in browser.",
+        markdown: WORKFLOW_REQUIREMENTS,
+        op: "insert",
+      },
+    ],
+    summary: "Mark the requirements",
+  });
+  // The Spec tab reads the requirements out of the block index, which the accepted write
+  // fills, so the seed waits for them rather than leaving the first shot to find none.
+  await expect
+    .poll(async () => (await getIssueCoverage(seeded.issues.workflow)).requirements.length)
+    .toBe(3);
   const comment = await createComment(
     seeded.issues.workflow,
     {
