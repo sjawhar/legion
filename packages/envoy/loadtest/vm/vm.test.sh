@@ -51,7 +51,11 @@
 # user, all of it before the loadgen copy and any container, mounts nothing a second time over a
 # VM that already carries the mount, takes the backing directory's name from remote_root's own
 # last element unless the deployment file names another, and is refused by name, with no
-# container started, when that mount cannot be made or is not exec.
+# container started, when that mount cannot be made or is not exec; (o) up and check both run on
+# deployment.example.json, with nothing of it changed but the paths that must point at this pod;
+# (p) that example carries every key vm.sh reads and no other, both lists read out of the
+# script's own cfg, cfg_valid and jq filters rather than written here again; (q) the example is
+# valid JSON and names no routable address, no real machine and no credential.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -1063,5 +1067,160 @@ for target in lt@10.138.0.21 lt@10.138.0.22; do
     fail "paths.stateful_dir is not the backing directory on $target: $(sudo_log "$target")"
 done
 pass "the deployment file names the backing directory under the stateful partition"
+
+# ---- (o) the example deployment file is one vm.sh runs on ---------------------------------------
+
+# deployment.example.json is the file a reader copies. These three cases hold it to vm.sh itself
+# and not to a second copy of the schema: the script runs on it, its keys are read out of the
+# script's own filters, and nothing of a real deployment is in it.
+readonly example=$here/deployment.example.json
+
+# The example with the five remote paths and the loadgen binary pointed at this pod, because
+# those alone name a file system the fakes stand in for. Everything else is the example's own --
+# the project, the zone, both VMs, the instance and the settings it expects, every image, port,
+# secret, load value and production address -- and up and check read it as a reader's own file.
+readonly example_local=$tmp/example-local.json
+jq --arg root "$remote/example" --arg loadgen "$bin/loadgen" '
+  .paths.remote_root = $root
+  | .paths.nats_store = ($root + "/nats")
+  | .paths.cert = ($root + "/stub-embed.pem")
+  | .paths.remote_loadgen = ($root + "/loadgen")
+  | .paths.remote_work = ($root + "/work")
+  | .paths.loadgen = $loadgen' "$example" >"$example_local"
+
+reset_fake
+run_vm up --config "$example_local"
+((RC == 0)) || fail "up refused the example deployment file: see the output above"
+[ "$(actions | grep -c '^start ')" = 9 ] ||
+  fail "up started $(actions | grep -c '^start ') containers from the example, not the 9 of the specification"
+pass "vm.sh up runs on deployment.example.json and starts the whole deployment it describes"
+
+run_vm check --config "$example_local"
+((RC == 0)) || fail "check refused the deployment the example describes: see the output above"
+grep -q '| no |' "$tmp/out" && fail "check read back a value of the example that differs: see the output above"
+grep -q 'the deployment file' "$tmp/out" && fail "check refused a value of the example: see the output above"
+pass "vm.sh check reads every value of deployment.example.json back and refuses none of them"
+
+# ---- (p) the example carries the keys vm.sh reads, and only those --------------------------------
+
+# container_field N: field N of every line of vm.sh's own container table, once each. Field 2
+# names the VMs its .vms.<vm>.* filters are read for and field 3 the keys of .images.<key>.
+container_field() {
+  bash -c 'source "$1"; printf "%s\n" "${CONTAINERS[@]}"' _ "$vm" | awk -v n="$1" '{print $n}' | sort -u
+}
+
+# script_keys: every key of the deployment file vm.sh reads, one "KEY<tab>required" or
+# "KEY<tab>optional" a line, read out of the script's own text and not written here again: each
+# cfg and cfg_valid call gives its filter and, by its second argument, whether the key has a
+# default; the two objects it reads with jq give theirs by their "// {}"; the one array it reads
+# element by element gives its own by "// empty". A filter spelled with a parameter is expanded
+# over the arguments the script passes it -- the VMs and image keys of its container table, the
+# ports it asks port_of for, the values it asks load_value for -- and a parameter of a shape not
+# known here stays in the key, so the comparison below names it rather than dropping it.
+script_keys() {
+  local body vms images ports loads key kind list word expanded
+  body=$(grep -v '^[[:space:]]*#' "$vm")
+  vms=$(container_field 2) images=$(container_field 3)
+  ports=$(grep -oE '\bport_of [a-z_]+' <<<"$body" | awk '{print $2}' | sort -u)
+  loads=$(grep -oE '\bload_value [a-z_.]+' <<<"$body" | awk '{print $2}' | sort -u)
+  {
+    grep -oE '\bcfg(_valid)? [^)|&;]*' <<<"$body" |
+      awk '{ if ($1 == "cfg_valid") { f = $3; n = 4 } else { f = $2; n = 3 }
+             gsub(/"/, "", f)
+             if (f !~ /^\./) next
+             printf "%s\t%s\n", substr(f, 2), (NF >= n ? "optional" : "required") }'
+    grep -oE '\(\.[A-Za-z_.]+ // [^)]*\)' <<<"$body" | sed -E 's/^\(\.([A-Za-z_.]+) .*/\1\toptional/'
+    grep -oE '"\.[A-Za-z_.]+\[[^"]*\] // empty"' <<<"$body" | sed -E 's/^"\.([A-Za-z_.]+)\[.*/\1\trequired/'
+  } | while IFS=$'\t' read -r key kind; do
+    case $key in
+      vms.*) list=$vms ;;
+      images.*) list=$images ;;
+      'ports.$1') list=$ports ;;
+      'load.$1') list=$loads ;;
+      *) printf '%s\t%s\n' "$key" "$kind"; continue ;;
+    esac
+    for word in $list; do
+      expanded=${key//'$1'/$word}
+      printf '%s\t%s\n' "${expanded//'$key'/$word}" "$kind"
+    done
+  done | awk -F'\t' '{ if (($1 in kind) && kind[$1] != $2) kind[$1] = "required"; else kind[$1] = $2 }
+                     END { for (k in kind) printf "%s\t%s\n", k, kind[k] }' | sort
+}
+
+declare -A KEY_KIND=()
+while IFS=$'\t' read -r key kind; do
+  KEY_KIND[$key]=$kind
+done < <(script_keys)
+((${#KEY_KIND[@]} > 40)) ||
+  fail "only ${#KEY_KIND[@]} keys were read out of vm.sh's own filters, so this case is reading the script wrong"
+
+# example_key LEAF: the key of the deployment file that LEAF is a value of -- itself, or the
+# object or array above it that vm.sh reads whole: cloudsql.expect's Admin API paths, the ports
+# of ports.load_listeners, the addresses of production_addresses. Empty when no key vm.sh reads
+# holds it.
+example_key() {
+  local k=$1
+  while :; do
+    [ -z "${KEY_KIND[$k]+set}" ] || { printf '%s\n' "$k"; return 0; }
+    [[ $k == *.* ]] || return 0
+    k=${k%.*}
+  done
+}
+
+declare -A CARRIED=()
+while read -r leaf; do
+  [ -n "$leaf" ] || continue
+  key=$(example_key "$leaf")
+  [ -n "$key" ] ||
+    fail "deployment.example.json carries $leaf, which vm.sh never reads: drop it, or name it in the script"
+  CARRIED[$key]=1
+done < <(jq -r 'paths(scalars) | map(tostring) | join(".")' "$example")
+pass "every key deployment.example.json carries is one vm.sh reads"
+
+missing=""
+for key in "${!KEY_KIND[@]}"; do
+  [ -z "${CARRIED[$key]+set}" ] || continue
+  missing+=" $key (${KEY_KIND[$key]})"
+done
+[ -z "$missing" ] ||
+  fail "vm.sh reads these keys and deployment.example.json carries none of them:$missing"
+pass "deployment.example.json carries every key vm.sh reads, the optional ones at their own defaults"
+
+# ---- (q) the example names nothing of a real deployment ------------------------------------------
+
+jq -e . "$example" >/dev/null || fail "deployment.example.json is not valid JSON"
+
+# This repository is public, so every machine the example names is a placeholder: an address in
+# RFC 1918 or on the loopback, a host that is one of the public Google endpoints vm.sh defaults
+# to, an instance of the lt- register, an image digest that is one character repeated, and a
+# credential that is the placeholder "...".
+while read -r address; do
+  [[ $address =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.) ]] ||
+    fail "deployment.example.json names the address $address, which is neither RFC 1918 nor loopback"
+done < <(grep -oE '[0-9]+(\.[0-9]+){3}' "$example")
+
+while read -r host; do
+  case $host in
+    10.* | 127.* | metadata.google.internal | sqladmin.googleapis.com | compute.googleapis.com) ;;
+    *) fail "deployment.example.json reaches the host $host, which is no placeholder and no public Google endpoint" ;;
+  esac
+done < <(grep -oE '"[a-z]+://[^/"]+' "$example" | sed -E 's|^.*://||; s|^.*@||; s|:[0-9]+$||')
+
+while read -r instance; do
+  [[ $instance =~ ^lt-[a-z0-9-]+$ ]] ||
+    fail "deployment.example.json names the instance $instance, which is not of the placeholder lt- register"
+done < <(jq -r '(.vms[].instance, .cloudsql.instance)' "$example")
+
+while read -r image; do
+  digest=${image##*@sha256:}
+  [ "${#digest}" = 64 ] && [ -z "${digest//${digest:0:1}/}" ] ||
+    fail "deployment.example.json gives the image $image, whose digest is not one repeated character, so it reads as a real one"
+done < <(jq -r '.images[]' "$example")
+
+while read -r secret; do
+  [ "$secret" = "..." ] ||
+    fail "deployment.example.json holds '$secret' where a credential goes; the placeholder is \"...\""
+done < <(jq -r '(.secrets[], .cloudsql.password)' "$example")
+pass "deployment.example.json is valid JSON and names no routable address, no real machine and no credential"
 
 printf 'PASS: packages/envoy/loadtest/vm/vm.test.sh\n'

@@ -86,23 +86,10 @@
 # production address comes from the deployment file --config names, because the deployment's own
 # shape has already changed once under this issue (the application VM is n4d-standard-32 and the
 # generator n4d-standard-16 in dispatch://INFRA-1051's later version) and will change again. The
-# file is one JSON object:
-#
-#   {"project": "theorem-agent-infra", "zone": "us-west1-a",
-#    "vms": {"app":       {"ssh": "lt@10.138.0.21", "host": "10.138.0.21", "instance": "lt-app"},
-#            "generator": {"ssh": "lt@10.138.0.22", "host": "10.138.0.22", "instance": "lt-gen"}},
-#    "cloudsql": {"instance": "lt-db", "connection_name": "p:us-west1:lt-db", "host": "10.139.0.3",
-#                 "port": 5432, "user": "dispatch", "password": "...", "database": "dispatch",
-#                 "template": "dispatch_seed", "sslmode": "require", "vcpus": 16,
-#                 "expect": {"databaseVersion": "POSTGRES_18", "settings.edition": "ENTERPRISE"}},
-#    "images": {"dispatch": "...@sha256:...", "listener": "...@sha256:...",
-#               "proxy": "...@sha256:...", "nats": "...@sha256:..."},
-#    "ports": {"dispatch": 8766, "pprof": 6060, "pprof_tunnel": 16060, "proxy": 5432,
-#              "listener": 9020, "hub_listener": 9030, "nats": 4222, "nats_monitor": 8222,
-#              "stub_embed": 8443, "load_listeners": [9021, 9022, 9023, 9024]},
-#    "secrets": {"dispatch_token": "...", "listener_token": "...", "embed_key": "..."},
-#    "paths": {"remote_root": "/var/lib/dispatch-loadtest", "stateful_dir": "dispatch-loadtest"},
-#    "production_addresses": ["10.139.0.2:5432", "10.138.0.10:4222"]}
+# file is one JSON object, and vm/deployment.example.json beside this script is one: every key
+# read below, each optional one at the default named below, with placeholder machines, addresses
+# and credentials throughout. Copy that file and edit it; vm.test.sh holds it to this script, so
+# a key added here and not to it fails that test.
 #
 # cloudsql.expect is read as it is written: each key is a path into the Cloud SQL Admin API's
 # answer and each value what that path must read, so a change of production's instance is a
