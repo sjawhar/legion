@@ -209,6 +209,29 @@ func appTransient(err error) bool {
 	return errors.As(err, &transient)
 }
 
+// appAttempt is one attempt at the boot's App reads, bounded by appMintAttempt: passed, refused,
+// transient (appTransient), or pending when a token_command is still running past the bound
+// (appauth.ErrCommandPending, most often a grant that waits on a person's approval). A pending
+// attempt spends no retry: the command goes on, and the next attempt joins it, so the boot waits
+// for the grant with one request and never kills it.
+func appAttempt(attempt func(context.Context) error) func(context.Context) bootprobe.Outcome {
+	return func(ctx context.Context) bootprobe.Outcome {
+		bounded, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		err := attempt(bounded)
+		switch {
+		case err == nil:
+			return bootprobe.Outcome{Passed: true}
+		case errors.Is(err, appauth.ErrCommandPending):
+			return bootprobe.Outcome{Pending: err.Error()}
+		case appTransient(err):
+			return bootprobe.Outcome{Detail: err.Error()}
+		default:
+			return bootprobe.Outcome{Refusal: err}
+		}
+	}
+}
+
 // appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
 // installation, so a daemon serving no repository yet still knows the review App's login, as one
 // attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
@@ -217,7 +240,7 @@ func appTransient(err error) bool {
 // review App's and count no fix attempt, and is refused, as is a review App that names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			login, err := apps.AppLogin(ctx, role)
 			if err != nil {
@@ -226,7 +249,7 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 			logins[role] = login
 		}
 		return nil
-	}, appMintAttempt, appTransient))
+	}))
 	if err != nil {
 		return "", err
 	}
@@ -241,14 +264,14 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
 // token passed asks GitHub only for the review token.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
-	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			if _, err := tokens.Token(ctx, role, owner); err != nil {
 				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
 		return nil
-	}, appMintAttempt, appTransient))
+	}))
 }
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
@@ -257,7 +280,7 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, rebuild *rebuilder, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
+func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, rebuild *rebuilder, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -269,8 +292,18 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	var apps *appsHolder
 	tokens := suppliedTokens
 	if tokens == nil {
-		apps = newAppsHolder(buildApps(cfg))
+		// The workflow owns the manager it makes: a boot that fails before the workflow is
+		// returned closes it, so a token_command still waiting on a grant does not outlive the
+		// boot. The holder is what every reader holds, so a change of an App's credential swaps
+		// the manager behind it and closes the one it replaced.
+		owned := buildApps(cfg)
+		apps = newAppsHolder(owned)
 		tokens = apps
+		defer func() {
+			if opened == nil {
+				closeTokens(owned)
+			}
+		}()
 	}
 	installs, ok := tokens.(appauth.Installations)
 	if !ok {
@@ -1334,12 +1367,25 @@ func (w *workflowRuntime) releaseReadied(ctx context.Context) {
 	}
 }
 
+// stop closes the workflow's connections and ends every token_command its token manager still runs
+// (appauth.Manager.Close), waiting for each to exit, so a command waiting on a person's approval
+// does not outlive the daemon.
 func (w *workflowRuntime) stop() {
 	if w == nil {
 		return
 	}
 	if w.nats != nil {
 		w.nats.close()
+	}
+	closeTokens(w.tokens)
+}
+
+// closeTokens closes an App token manager that can be closed, so a token_command still waiting on
+// a grant does not outlive what owned the manager. A token source a test supplied, and the holder
+// itself, answer no Close and are left alone: the holder's own rebuild closes what it replaces.
+func closeTokens(tokens appauth.Tokens) {
+	if closer, ok := tokens.(interface{ Close() }); ok {
+		closer.Close()
 	}
 }
 

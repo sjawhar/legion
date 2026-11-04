@@ -408,7 +408,12 @@ func (h *appsHolder) holder() string { return config.HolderGitHubApps }
 
 func (h *appsHolder) rebuild(cfg *config.Config) error {
 	tokens := buildApps(*cfg)
-	h.current.Store(&tokens)
+	replaced := h.current.Swap(&tokens)
+	// The manager the new one replaces owns a token_command's goroutine, so a rebuild that left
+	// it open would leak one per changed App credential.
+	if replaced != nil {
+		closeTokens(*replaced)
+	}
 	return nil
 }
 
