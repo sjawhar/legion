@@ -156,12 +156,13 @@ func TestHTTPServer_StartAndStop(t *testing.T) {
 	cfg := httpServerConfig(mock.url())
 	cfg.validate()
 
-	var notifiedURI string
-	var notifyMu sync.Mutex
+	// The server calls onNotify on a goroutine of its own, so the URI comes back over a channel.
+	notified := make(chan string, 1)
 	s := NewHTTPServer(cfg, func(uri string) {
-		notifyMu.Lock()
-		notifiedURI = uri
-		notifyMu.Unlock()
+		select {
+		case notified <- uri:
+		default:
+		}
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -170,15 +171,14 @@ func TestHTTPServer_StartAndStop(t *testing.T) {
 	if s.State() != StateReady {
 		t.Fatalf("expected ready state, got %d", s.State())
 	}
-	time.Sleep(500 * time.Millisecond)
-	notifyMu.Lock()
-	uri := notifiedURI
-	notifyMu.Unlock()
-	if uri == "" {
+	// The mock server sends a notification after subscribe.
+	select {
+	case uri := <-notified:
+		if uri != "whatsapp://messages/15551234567/5551234567@s.whatsapp.net" {
+			t.Fatalf("unexpected notified URI: %s", uri)
+		}
+	case <-time.After(10 * time.Second):
 		t.Fatal("expected notification URI to be set")
-	}
-	if uri != "whatsapp://messages/15551234567/5551234567@s.whatsapp.net" {
-		t.Fatalf("unexpected notified URI: %s", uri)
 	}
 }
 

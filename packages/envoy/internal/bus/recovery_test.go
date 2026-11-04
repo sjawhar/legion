@@ -697,10 +697,10 @@ func TestRecovery_ClosedTriggersWithoutPublish(t *testing.T) {
 	// which would also close stopCh and prevent recovery.
 	client.Conn.Close()
 
-	// SubOK should become false during recovery.
-	time.Sleep(100 * time.Millisecond)
-
-	// Wait for recovery to complete (recover creates new connection + resubscribes).
+	// Closing the connection drops SubOK at once, and recovery raises it again from its own
+	// goroutine, so the fall is a state recovery concurrently leaves and only the rise can be read
+	// without racing it. Waiting for the rise is waiting for recovery to end: new connection,
+	// resubscribed.
 	waitFor(t, 30*time.Second, "SubOK to become true after recovery", client.SubOK)
 
 	// Publish a message through the recovered connection and verify delivery.
