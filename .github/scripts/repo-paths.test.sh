@@ -49,24 +49,7 @@ value_of() {
   printf '%s' "${line#*=}"
 }
 
-echo "case: today's repository, sjawhar/legion"
-paths sjawhar/legion
-check "exits 0" "$(is "$rc" 0)"
-check "worker_image" "$(is "$(value_of worker_image)" 'ghcr.io/sjawhar/legion-worker')"
-check "envoy_image" "$(is "$(value_of envoy_image)" 'ghcr.io/sjawhar/legion/envoy')"
-# shellcheck disable=SC2016 # literal ${VERSION}: Pulumi substitutes it at install time
-check "plugin_download_url" \
-  "$(is "$(value_of plugin_download_url)" 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}')"
-check "repository_url" "$(is "$(value_of repository_url)" 'https://github.com/sjawhar/legion')"
-check "docs_site" "$(is "$(value_of docs_site)" 'https://sjawhar.github.io')"
-check "docs_base" "$(is "$(value_of docs_base)" '/legion')"
-check "docs_edit_base" \
-  "$(is "$(value_of docs_edit_base)" 'https://github.com/sjawhar/legion/edit/main/docs/site/')"
-check "seven keys, no more" "$(is "$(grep -c '' <<< "$out")" 7)"
-sjawhar_out="$out"
-
-echo
-echo "case: the name the repository moves to, cybermonklabs/legion"
+echo "case: today's repository, cybermonklabs/legion"
 paths cybermonklabs/legion
 check "exits 0" "$(is "$rc" 0)"
 check "worker_image" "$(is "$(value_of worker_image)" 'ghcr.io/cybermonklabs/legion-worker')"
@@ -79,6 +62,23 @@ check "docs_site" "$(is "$(value_of docs_site)" 'https://cybermonklabs.github.io
 check "docs_base" "$(is "$(value_of docs_base)" '/legion')"
 check "docs_edit_base" \
   "$(is "$(value_of docs_edit_base)" 'https://github.com/cybermonklabs/legion/edit/main/docs/site/')"
+check "seven keys, no more" "$(is "$(grep -c '' <<< "$out")" 7)"
+today_out="$out"
+
+echo
+echo "case: another owner and another name, so the table hard-codes neither, acme/widgets"
+paths acme/widgets
+check "exits 0" "$(is "$rc" 0)"
+check "worker_image" "$(is "$(value_of worker_image)" 'ghcr.io/acme/widgets-worker')"
+check "envoy_image" "$(is "$(value_of envoy_image)" 'ghcr.io/acme/widgets/envoy')"
+# shellcheck disable=SC2016 # literal ${VERSION}: Pulumi substitutes it at install time
+check "plugin_download_url" \
+  "$(is "$(value_of plugin_download_url)" 'https://github.com/acme/widgets/releases/download/envoy-infra-v${VERSION}')"
+check "repository_url" "$(is "$(value_of repository_url)" 'https://github.com/acme/widgets')"
+check "docs_site" "$(is "$(value_of docs_site)" 'https://acme.github.io')"
+check "docs_base" "$(is "$(value_of docs_base)" '/widgets')"
+check "docs_edit_base" \
+  "$(is "$(value_of docs_edit_base)" 'https://github.com/acme/widgets/edit/main/docs/site/')"
 check "seven keys, no more" "$(is "$(grep -c '' <<< "$out")" 7)"
 
 echo
@@ -94,25 +94,25 @@ check "worker_image lowercases nothing" \
 
 echo
 echo "case: one key asked for is that value alone"
-paths sjawhar/legion docs_base
+paths cybermonklabs/legion docs_base
 check "exits 0" "$(is "$rc" 0)"
 check "the value, with no key= prefix" "$(is "$out" '/legion')"
 check "one line" "$(is "$(grep -c '' <<< "$out")" 1)"
 
 # shellcheck disable=SC2016 # literal ${VERSION}: Pulumi substitutes it at install time
-expected_download='https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
-paths sjawhar/legion plugin_download_url
+expected_download='https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}'
+paths cybermonklabs/legion plugin_download_url
 check "the Pulumi placeholder reaches the caller uninterpolated" "$(is "$out" "$expected_download")"
 
 echo
 echo "case: GITHUB_REPOSITORY unset, as it is off a runner"
 paths unset
 check "exits 0" "$(is "$rc" 0)"
-check "gives today's sjawhar/legion table" "$(is "$out" "$sjawhar_out")"
+check "gives today's cybermonklabs/legion table" "$(is "$out" "$today_out")"
 
 echo
 echo "case: a value that is not <owner>/<name> is refused"
-for bad in legion a/b/c /legion 'sjawhar legion'; do
+for bad in legion a/b/c /legion 'acme legion'; do
   paths "$bad"
   check "'$bad' exits non-zero" "$(is "$rc" 1)"
   check "'$bad' prints nothing on stdout" "$(is "$out" '')"
@@ -121,13 +121,13 @@ done
 
 echo
 echo "case: an argument that is not a key is refused"
-paths sjawhar/legion no_such_key
+paths cybermonklabs/legion no_such_key
 check "exits non-zero" "$(is "$rc" 1)"
 check "prints nothing on stdout" "$(is "$out" '')"
 check "names the key" "$(contains "$err" "unknown key 'no_such_key'")"
 check "lists the known keys" "$(contains "$err" 'known keys: worker_image envoy_image')"
 
-paths sjawhar/legion docs_base docs_site
+paths cybermonklabs/legion docs_base docs_site
 check "two keys at once exit non-zero" "$(is "$rc" 1)"
 check "printing nothing on stdout" "$(is "$out" '')"
 check "and saying how many it takes" "$(contains "$err" 'takes one key or none, got 2')"

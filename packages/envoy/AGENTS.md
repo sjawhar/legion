@@ -190,7 +190,7 @@ Each item below names a task and where its code is, then notes on it.
   any process whose bus is connected publishes each unpublished row, directly through the bus client rather than the outbox, with event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
   A restart on the announced commit announces nothing; a rollback announces again.
   `/healthz` reports the latest announcement's commit as `fleet_commit`, which the Legion daemon's boot reads;
-  the daemon compares the commit against the merges of its open production checks in `sjawhar/legion`.
+  the daemon compares the commit against the merges of its open production checks in `cybermonklabs/legion`.
   Subject and payload: `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **Registry of live server processes**: `internal/dispatch/processes/`
@@ -1404,13 +1404,13 @@ a stored version holds no block id, so each version is cut into its decisions by
 A new decision marks nothing, and neither does the block index's first pass over a document, which gives every block and every pair one version;
 a version this document does not hold and a spec block Dispatch records no change for leave a link as it is, and a spec block whose last change is older than the document's first version is out of date by the first half alone, since every change of the decision came after it.
 `GET /api/v1/issues/{key}/decisions` serves that view - the document's `dispatch://` address (null, with no decisions, when the issue has no `decisions.md`), the issue's open asks whose block is in its spec in the shape every ask read has, and each decision in document order with its links read through `refs.BlockLinks`, the read `GET /api/v1/block-links` already serves.
-`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (a person's) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
+`POST /api/v1/artifacts/{id}/blocks/{block_id}/keep` `{text_sha256}` (the `person` scope: a person at a browser, or a credential of theirs that holds it) records that the caller agrees with the decision that heading block opens, as the text they read it at, as one `decision_keeps` row keyed on the block rather than on the person:
 the sum is the decision's own `text_sha256`, which the view serves beside its `text`, and a decision whose text changed since is `409 DECISION_CHANGED` with nothing written, as an answer to an ask reworded since is `409 ASK_EDITED` - a Keep over text nobody read is what Keep exists to prevent - while a body with no sum is `400 INVALID_KEEP`.
 Keep records that the decision has been reviewed and not who reviewed it, so a second person's Keep moves the row, and the row holds that sum beside the version the decision then stood at.
 The sum, not the version, is what the view's `waiting_review` compares - an agent's decision, not replaced, whose text no Keep holds as it stands - since a decision's changed version is the greatest of the blocks it holds now and so does not move when a block is removed from the decision or moved into or out of it, where the text changes and every remaining block keeps its version.
 The document Keep takes is its issue's `decisions.md` resolved as the view resolves it, by slug and then by filename; any other document, and any other block - one that is no decision heading, or a decision under `## Replaced` - is `404 TARGET_NOT_FOUND`.
 It appends `decision.kept` (`{artifact_id, block_id, changed_version}`) on the decision's issue, which wakes nobody (`events.Quiet`): a Keep asks its agent for nothing.
-`GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, and announce nothing.
+`GET` and `PUT /api/v1/me/documents/{id}/read` `{version}` are one person's last read version of a document (`user_document_reads`, keyed on `model.CanonicalLogin` as `user_ask_snooze` is), which the Spec tab marks each block changed since; they serve per-person state as `GET /api/v1/me/state` and `PUT /api/v1/me/issues/{key}/state` do, need the `person` scope as those two do, and announce nothing.
 
 A comment and a message are collections of blocks too (migrations 0142-0144, `itemblocks`, `refs/item_blocks.go`).
 `itemblocks.Split` reads a body as the document parser reads a document (`pmdoc.ParseWithSourceStarts`) and cuts it at its top-level blocks, each block the body's own text from the start of the line where it starts to where the next one starts, less the spaces, tabs and line endings that end it, so its stored text, its excerpt and its identity are what its author wrote, never the canonical rendering.
@@ -2118,14 +2118,16 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients.
   The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
 
-- `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more;
+- `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and `pinned`, which needs the `person` scope since the pins are one person's) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more;
   alone it pages `contracts.DefaultIssuePageLimit`, 50):
   `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it.
   `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter;
   so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406:
   the route ignored all three and answered every row).
-  The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match.
-  `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0159`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds.
+  The page is cut by the statement that reads it, which counts in the same read what the filters match, so a page and its `total` cannot come from two readings of a moving table, and the six values each listed issue carries are resolved for that page's rows alone (`issueSummaryQuery`, `api/issue_queries.go`, writes the listing's four statement texts: paged and unpaged, each of them pinned or not).
+  A `route_status` request is the one exception: that filter runs in Go after the Envoy roster answers, so it reads the unpaged statement and its page is cut after the filter (`issuePage.of`), `total` counting what is left.
+  `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0159_route_roster`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds.
+  A paged request therefore answers 500 for a parent chain that is too deep or loops only when the bad issue is on the page it asked for, where the unpaged listing answers 500 for any issue it matches.
   The order ends on the key, the one column no two issues share:
   nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still.
   A walk of the pages is exact only on an unchanged listing:
@@ -2174,8 +2176,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A project's default is set by a person alone, through `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee` `{assignee}` (an email of a row of `people`, or `null` to clear it;
   `400 ASSIGNEE_NOT_ALLOWED` otherwise, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, and a `settings.project_default_assignee.updated` event);
   no agent command, flag or route sets it, which is deliberate (`api/project_default_assignee.go`).
-  `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options;
-  `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports.
+  `GET /api/v1/users` (needs the `person` scope) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options;
+  `GET /api/v1/whoami` (any auth) returns `{kind: "user", login, scopes}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner, scopes}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token; `scopes` is the OAuth scopes the credential holds, `[]` for one that holds none) — what `dispatch whoami` reports.
   Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
 
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON
@@ -2193,7 +2195,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — decides from it under the issue's row lock), which records the takeover.
   Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message;
   a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all.
-  `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force
+  `{"force": true}` takes either anyway and needs the `person` scope of its caller (`403 OAUTH_SCOPE_REQUIRED` for a credential without it, `requireCallerScope`), and only this route has that force
   — a refusal on the release route never offers one.
   An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`.
   A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows:
@@ -2214,11 +2216,13 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is;
   not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits;
   a closed issue refuses it, `409 ISSUE_CLOSED`).
-  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `refs.IssueRepoLateral`:
-  the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null.
-  The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue;
-  a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default.
-  An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
+  Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `refs.IssueRepoTerms`, the server's one repository-resolution rule (`internal/dispatch/refs/issues.go`, spliced by `api`'s issue reads with `refs.IssueRepoJoin` and `refs.IssueRepoColumns`):
+  one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
+  A chain stops at the first issue that names a repository or at `refs.IssueDepthCap` (32) links, the most any issue sits below its root (`api`'s `parentDepthCap` is that same number), so it costs at most 33 rows per issue;
+  a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
+  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, for the results route and the pull-request head attribution, so neither can name a repository the issue page does not show.
+
+- An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).
   Only this release's API holds the cap after that, under the project's dependency lock; nothing in the database does.
   So no server of the earlier release may serve once `0113` applies, whether left serving or started again by a rollback:
@@ -2306,9 +2310,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which settlement's retraction of a removed ask block and the resolve route both call.
   A request while the latest version is approved returns the approval and opens nothing.
 
-- Answering an approval ask (humans only;
+- Answering an approval ask (the `person` and `approve` scopes;
   `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`.
-  `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread.
+  `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (the `person` and `approve` scopes) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread.
   Both write their row through `docs.WriteReview`, which appends the review's event and keeps that event's sequence on the owner in the row (`artifact_reviews.event_seq`, migration 0120, in the same transaction; null for a review recorded before it).
   Migration 0120's deferred constraint trigger `artifact_reviews_event_seq` writes the same column at the commit of any transaction that inserted a review without it - the release before 0120, still serving during a rollout and again during a rollback, inserts every review naming no `event_seq` - from that transaction's own event of the review's type, document and version on the owner, which the owner's row lock keeps the newest there until the commit;
   a row `WriteReview` already sequenced is left as it is.
@@ -2412,7 +2416,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A replayed delivery callback, which writes nothing, answers the stored reply alone.
 
 - Every ask read also carries `referenced_by_count`:
-  how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list;
+  how many edges point at that ask from a node kind this build reads (`refs.BacklinkCounts` unions only the arms of `graph_edges` that can point at a node of the kind asked for — the view's own `to_kind` is a parameter, so reading the view itself makes a custom plan plan every arm on every call — and reads each of those arms through its own index;
+  the counts are the view's, arm for arm, and `refs/backlink_counts_test.go` holds them to it arm by arm, failing when the view gains an arm the count does not declare, while a node kind with no declared arms is refused rather than counted low;
+  it binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list;
   a document's, comment's, message's or ask's mention that one of its blocks holds counts once for each citing block, in place of the item's own row, `heldByABlock`;
   an edge at a current part of the ask counts as the ask's, since the ask's own read lists it, so a comment citing one of its parts counts 1), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card.
   It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`;
@@ -2497,10 +2503,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the SPA partitions by `waiting_on` and keeps this order inside each section.
   The client uses the same open-ask response to surface every `waiting_on: human` row under `Waiting on you` and its `Blocked on you` count;
   `waiting_on: agent` rows are `Waiting on agents`, whoever replied last.
-  `GET /api/v1/issues/{key}` carries the same `last_reply` and `waiting_on` on every `open_asks` row (`issueOpenAsk`, `issue_queries.go`), so the issue header applies the inbox's whose-turn rule without the human-only inbox.
+  `GET /api/v1/issues/{key}` carries the same `last_reply` and `waiting_on` on every `open_asks` row (`issueOpenAsk`, `issue_queries.go`), so the issue header applies the inbox's whose-turn rule without the inbox the `person` scope opens.
   A `comment.created` payload that replies to an ask carries `ask_state` (the ask's state at posting time) beside `ask_question`, so an agent can tell a clarification request on its open ask from discussion after the answer.
 
-- `GET /api/v1/inbox?assignee=me|unassigned|<email>` (one value, combining with `project`) narrows the human-only inbox by the owning issue's assignee (`inboxAssigneeFilter`, `api/inbox.go`):
+- `GET /api/v1/inbox?assignee=me|unassigned|<email>` (one value, combining with `project`) narrows the inbox, which needs the `person` scope, by the owning issue's assignee (`inboxAssigneeFilter`, `api/inbox.go`):
   `me` is the caller's lowercase email; an `<email>` is canonicalised (`strings.ToLower(strings.TrimSpace(...))`) before it is looked up in `people`, so a shared `?assignee=Alice@example.com` link never 400s, while an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`;
   `me` / `<email>` keep issue-owned asks with `i.assignee = $login`, `unassigned` keeps asks on unassigned issues **and every project-document ask** (a document has no assignee, so it is unassigned by definition); no value returns everything.
   This is the contract for shareable links and humans' scripts: the SPA asks for no assignee at all.
@@ -2602,15 +2608,14 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `POST`/`PATCH /api/v1/issues[/{key}]` take `components` as a tri-state raw field like `parent`:
   `null`/`{mode: inherit}` deletes the row, `explicit` needs one to fifty slug ids that are components of the issue's project, from any of its sources, and not `external` (`400 COMPONENTS_INPUT` names each unknown, retired, external, or other-project id), `none` needs a non-blank `reason`;
   the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue.
-  Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode
-  — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query.
+  Resolution is on read, never stored: `issueComponentsTerms` is one set of `with` terms — a depth-capped `union all` walk up `parent_key`, climbing the chains of every issue of the read's `subjects` term together, to the nearest row of either mode (`none` is inherited exactly like `explicit`), then one grouped read splitting each owner's members into live and retired ids — that `loadIssue`, the listing's four statements, the tree route and the delivery timeline's issue facts share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from one rule and the walk costs a read one pass rather than one per row.
   `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once:
   every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`).
   `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`;
   inherited attachments are not edges), `model.GraphEdgeKinds`, the structural edge kinds, holds `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
 
 - Per-user agent state is its own tables and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue).
-  `PUT /api/v1/me/agents/{session_id}/state` (human-only) takes `{cleared_before?, read_through?, read_replies?}` (the first two RFC3339;
+  `PUT /api/v1/me/agents/{session_id}/state` (needs the `person` scope) takes `{cleared_before?, read_through?, read_replies?}` (the first two RFC3339;
   at least one): `cleared_before` upserts the viewer's Clear into `user_agent_state(login, session_id, cleared_before)` (`store/migrations/0033_user_agent_state.up.sql`), replacing the previous one, and `read_through` upserts their read mark into `user_agent_read(login, session_id, read_through)` (`0051_user_agent_read.up.sql`), which only moves forward so a tab that read less a moment ago cannot make a reply unread again, keyed on `model.CanonicalLogin(actor.ID)` as `user_ask_snooze` is.
   `read_replies`, the ids of messages the path's session wrote, adds one row per reply to `user_agent_reply_read(login, session_id, reply_id)` (`0067_user_agent_reply_read.up.sql`, keyed on the canonical login too, primary key `(login, reply_id)`), which reads those replies and no other:
   a view that shows only some of a session's replies (the broadcast page, each recipient's reply to that broadcast) writes it, because moving the read mark through them would also read the session's older reply to another message, which the viewer never saw.
@@ -2637,7 +2642,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   how it shows and marks unread replies is `packages/dispatch/AGENTS.md`'s (`features/agents/`).
 
 - A human's snooze on one inbox row is its own table and route pair, like per-user agent state.
-  `PUT /api/v1/me/asks/{id}/snooze` (human-only, because the inbox is) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `model.CanonicalLogin(actor.ID)` rather than the actor id
+  `PUT /api/v1/me/asks/{id}/snooze` (needs the `person` scope, as the inbox does) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `model.CanonicalLogin(actor.ID)` rather than the actor id
   — both identity implementations name a person by lowercase email now, but a row written before they did can carry another casing of the same name, so keying on the raw id could give one person two snooze sets.
   That makes the `me/*` family inconsistent, deliberately and visibly:
   `user_ask_snooze` and `user_agent_read` (`0051`) key on the canonical login, while `user_issue_state` (migration `0001`) and `user_agent_state` (`0033`) key on the raw `actor.ID`, and `inbox.go` now binds one form twice
@@ -2678,7 +2683,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The table has no foreign key to the thread it names:
   nothing deletes a comment, ask, message, issue or document, so a row's thread exists, and a harness that empties those tables empties `user_threads` with them (`packages/dispatch/e2e/seed.ts`).
 
-- `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (human-only, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply.
+- `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (needs the `person` scope, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply.
   A close withdraws its issue's open asks, so an open ask on a closed issue is one a close by an older release left during a roll;
   its row stays, since the Inbox hides it.
   A row's `reply` is the thread's newest write by someone else:
@@ -2691,7 +2696,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction.
   How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
 
-- `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title.
+- `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (both need the `person` scope) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title.
   A live subscriber's `last_seen` is its session's;
   a subscriber no longer live has its last heartbeat, the interest row's `last_seen`, when the listener still knows it, else the interest row's `updated_at`, which can lag that heartbeat by up to `store.InterestRefreshAge` (a listener that restarted since the session died, or one predating the field, sends no `last_seen`).
   `DELETE .../subscribers/{session_id}` removes matching topics with `POST /v1/interests/unsubscribe`;
@@ -2706,7 +2711,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A new route is a new row (and a bumped pin in `routes_table_test.go`), and a mutating one is a new line in `writeClasses` or it is not served at all (Security, the project check).
   An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell.
   `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises);
-  the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
+  the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` need the `person` scope, since a person writing to a session is writing to someone else's conversation.
 
 - `GET /api/v1/dashboard/builds` (any authenticated caller, `api/dashboard_builds.go`) answers `{serving, live}`:
   `serving` is the entry chunk (`/assets/index-*.js`) of the dashboard build this process serves (`api.Deps.DashboardEntry`, which `cmd/dispatch` takes from its boot's `dashboard.Publish`;
@@ -2720,8 +2725,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `GET /api/v1/asks/{id}` returns `followers` (`{session_id, since}`, oldest first);
   `GET /api/v1/asks/{id}/followers` (any authenticated actor) returns the same list.
   `PUT` / `DELETE /api/v1/asks/{id}/followers/{session_id}` add or remove one follower and append `ask.follower_added` / `ask.follower_removed` (`{ask_id, session_id, by}`):
-  a bearer sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`);
-  a human (cookie identity) sends no body and may add or remove any session.
+  a credential without the `person` scope sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`);
+  one that holds it — a person's browser cookie, or a token of theirs — may add or remove any session and sends no body, since putting another session on an ask is the person's act, and that write is recorded as the person with the agent beside them.
+  A credential acting as the path session itself follows or unfollows it as it always did, recorded as that session with no act, whether the session is the one a broker-issued token proved or the one its body names: that is its own act and no person's.
   A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
 
 - A reply joins its thread the same way on both write paths.
@@ -3074,6 +3080,38 @@ The verifier is built from settings Dispatch already has and takes none of its o
 `DISPATCH_AGENT_SECRETS_URL`, `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` and `DISPATCH_SERVER_URL`, the origin a proof's `htu` is checked against).
 A deployment with no broker configured has no such kind at all, and a `DPoP` presentation there is the `401 UNAUTHORIZED` `invalid bearer token` that any non-bearer `Authorization` header has always been.
 
+Which routes a credential may reach is decided by two OAuth scopes rather than by whether it is a browser.
+`person` is "this credential acts as its person" (`model.ScopePerson`), and every route the dashboard reaches needs it.
+`approve` adds, beside `person`, the acts that approve work or control a credential (`model.ScopeApprove`):
+a document review, the answer of an ask of kind `approval`, a machine-login decision (`/approve`, `/deny`, `machine-lookup`), a credential-grant or machine-login revoke, and minting, changing or revoking a personal token.
+No credential holds `approve` without `person`, since one that does not act as its person has nobody to approve for.
+A browser sign-in holds both.
+A personal token holds the set its own `agent_tokens.scopes` row names, both by default, changed in Settings or through `PATCH /api/v1/me/agent-tokens/{id}` (`{"scopes":[…]}`, answering the token), as `POST /api/v1/me/agent-tokens` takes an optional `scopes` at the mint.
+A broker-issued token the broker scoped to its person holds both, and one scoped to a project holds neither.
+The shared agent token and a Kubernetes service-account token hold neither.
+`GET /api/v1/whoami` answers `scopes` for every caller, `[]` for one that holds none.
+
+Each route's scopes stand beside the table in `api/routes_table.go`'s `routeScopes`, keyed by `"<method> <pattern>"` and stamped onto `apiRoute.OAuthScopes`, which `GET /api/v1` and `envoy-dispatch routes` both carry;
+a name in that map that is no row of the table refuses to mount (`scopedRoutesNotMounted`), as an unclassed mutating row does.
+`api.gateRouteScopes` is the gate: `register` wraps every row `routeScopes` names in it, ahead of the keyed, project and session layers, and the first scope the credential lacks, in the order the row names them, is `403 OAUTH_SCOPE_REQUIRED` naming that scope, under `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope>"` (RFC 6750 section 3.1).
+A handler restates no scope; `api.actingPerson` builds the person it acts for, with the agent beside them.
+Three checks cannot sit at that gate and answer the same refusal from where they can:
+answering an ask of kind `approval` needs `approve`, read inside the transaction under the ask's row lock, since an ask's kind is known only once its row is read (`missingScopeError`);
+the claim's `{"force": true}` needs `person` of a caller the route itself admits whatever its scopes (`requireCallerScope`, `api/issue_claim.go`);
+and the live socket's `agent` view needs `person`, read at the upgrade, answering `OAUTH_SCOPE_REQUIRED` on the subscription id with no challenge header, since a frame carries no HTTP header.
+
+An act an agent makes for its person is recorded with the person as the actor and `model.ActorAct` beside it (`Actor.Act`), which names the agent:
+the session a broker token proved, else the session the caller named (`?session=`, or a body `actor` on a route whose handler already declares one, `actSessionFromBody`), else the personal token's id and name, and the scopes that credential held.
+Those scopes are a snapshot taken at the act and never read back from the token, so a person who narrows a token narrows what it may do next and un-approves nothing it approved before.
+A browser's act carries none, since the person themselves acted, and `ActorAct.Holds` answers true for every scope of a nil act.
+Every reader shows the agent beside the person.
+A route that always took tokens records exactly as before: an agent's comment is still the agent's.
+
+Two consequences are worth stating.
+A new version of a document carries its approval only when every answer the carry counts was made at a browser or under an act holding `approve` (`docs.carryVerdict`, `internal/dispatch/docs/approval_carry.go`):
+without that test an agent its person narrowed to `person` alone could carry an approval of theirs by answering a block, which is the one thing the narrowing was meant to stop.
+`POST /api/v1/messages/{id}/deliveries/{attempt}/accept` refuses a message whose author carries an act, `409 ACCEPT_WRITTEN_BY_AGENT`, so such a message reaches the session as a card naming the agent and never as words the person typed.
+
 A credential that names one project writes that project and nothing else, and every write is decided in one place.
 Each mutating row of the route table declares what its write belongs to (`api/routes_table.go`'s `writeClasses`, stamped onto `apiRoute.Scope`;
 a `GET` row declares nothing, and a mutating row that declares nothing fails `TestEveryMutatingRouteIsClassed` and panics `Register` rather than being served unjudged).
@@ -3100,7 +3138,7 @@ The session check holds every row classed *the calling session's* whose pattern 
 — the `agents/{session_id}` writes and `PUT /api/v1/me/agents/{session_id}/state` — to the session the caller's credential proved:
 another session's path is `403 SESSION_SCOPE`, naming the session the credential acts for, the route and the session addressed.
 A broker-issued token is the only credential that proves a session, so it is the only one this can refuse;
-the other rows of that class are held to their caller by their own handlers (`403 ACCEPT_FORBIDDEN` and `403 REPLY_FORBIDDEN` for an attempt that is not the caller's session's, `requireHuman` and the calling person's key for the `me` token rows), which is what the class comment on `scopeSession` records row by row.
+the other rows of that class are held to their caller by their own handlers (`403 ACCEPT_FORBIDDEN` and `403 REPLY_FORBIDDEN` for an attempt that is not the caller's session's, the `person` scope and the calling person's key for the `me` token rows), which is what the class comment on `scopeSession` records row by row.
 
 Both checks are a no-op for every credential that carries no project and proves no session (a cookie, a personal token, a Kubernetes service-account token, the shared token, and a broker token whose `project_scope` is `person`, which reaches `brokerTokenActor` with no `Project` and needs no mechanism of its own):
 that is the rule and not a transitional measure, and it is what lets Dispatch deploy before anything presents a broker token.
@@ -3878,7 +3916,8 @@ The session's own user, such as a `gcp:NatsHub`'s credential-free `sessionUser`,
 - **Settings** (`bus.SessionConsumers`):
   explicit ack, `AckWait` 60 s, `MaxAckPending` 1,024, `MaxDeliver` unlimited, `InactiveThreshold` 72 hours (the stream's retention, `contracts.DeliveryDuplicateWindow`), and the stream's replica count.
   A new consumer starts at the sequence after the stream's last, which delivers what `DeliverNew` delivers, and that start is recorded on the session's entry (`consumer_start`), which is what the durable path skips by.
-  When the registration's `resume` names the stream's current `envoy_stream_id`, the consumer starts at `resume.seq + 1` instead, and a start below the stream's first sequence answers `gap: true`.
+  When the registration's `resume` names the stream's current `envoy_stream_id` and carries a `seq`, the consumer starts at `resume.seq + 1` instead, a `seq` of 0 included (a session that holds nothing of the stream starts at sequence 1), and a start below the stream's first sequence answers `gap: true`.
+  A `resume` without `seq`, or naming another `envoy_stream_id`, leaves the start at the stream's end.
 
 - **Filter:** the session's agent subject and each followed topic the stream stores (`bus.StreamCaptures`), reduced so that no two filters overlap (`bus.ReduceFilterSubjects`:
   a subject another contains is dropped, two that partly overlap become their common token prefix and `>`, and `X` and `X.>` both stay).
@@ -4139,7 +4178,7 @@ The host's automatic BTW answer (`postDeliveryReply`) never sends the parameter.
 It is how `dispatch read --message` reads a direct-message conversation back, since a human's direct message belongs to no issue.
 A thread on an issue follows the issue's rule, exactly as `GET /api/v1/issues/{key}/messages/{id}` does.
 An issue-less thread is a direct conversation:
-a human reads any of them, and a bearer names its session in `?session=` (400 `SESSION_REQUIRED` without it) and reads only one that session is in, whose root targets `session:<id>` or where it authored a reply; any other is 403 `THREAD_FORBIDDEN`.
+a credential holding the `person` scope reads any of them, since a direct conversation is its person's own, and every other names its session in `?session=` (400 `SESSION_REQUIRED` without it) and reads only one that session is in, whose root targets `session:<id>` or where it authored a reply; any other is 403 `THREAD_FORBIDDEN`.
 The session is the caller's own claim, like `actor` on a write, so this keeps a session from reading another session's direct conversation by mistake and is not an authorization boundary.
 Direct-conversation text also reaches every authenticated caller through that caller's `events` view on `/ws/live`; nothing in Dispatch restricts it by session.
 The command sends the host's session id.
@@ -4182,7 +4221,7 @@ That delivery is counted in the server's background wait (`detached`, which `wai
 A process killed before every recipient settled leaves them owed, for the delivery sweep, or a repeat (below), to resume.
 Each recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its message, which a delivery worker then claims and settles, or, when the process stops first, the delivery sweep sends once its row is a minute old (`api/delivery_sweep.go`).
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the order the send named them;
-all three routes are human-only, like the one-session route they are built from.
+all three routes need the `person` scope, like the one-session route they are built from.
 
 A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes" above);
 the body's `idempotency_key` of LEGION-446 is gone from the route and its `broadcast_idempotency_keys` table from the schema.
@@ -5490,7 +5529,7 @@ Each `dev-broker.sh` run creates and drops its own isolated database, on the sha
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the image builds from, and by hand (`workflow_dispatch`) from any branch.
 Every run builds and smoke-tests each platform on a native runner of its own, with no emulation (`docker (amd64)` on `ubuntu-24.04`, `docker (arm64)` on `ubuntu-24.04-arm`), and pushes it by digest, with no tag;
-its `image_index` job then joins the two into the `ghcr.io/sjawhar/legion/envoy:<commit sha>` index, each image labelled `org.opencontainers.image.revision` with that sha, and its `attest` job attests that index's digest with `actions/attest-build-provenance`.
+its `image_index` job then joins the two into the `ghcr.io/cybermonklabs/legion/envoy:<commit sha>` index, each image labelled `org.opencontainers.image.revision` with that sha, and its `attest` job attests that index's digest with `actions/attest-build-provenance`.
 Its `release_build` and `release_publish` jobs run only on `refs/heads/main`, so a branch dispatch publishes one immutable image index, for a dev slot to pin before merge, and moves no tag.
 `release_build` holds no secret: it computes the version with `release-push.sh version` and builds and checks the agent-secrets binaries (`agent-secrets --version` on the linux/amd64 binary;
 `go version -m` on all six for the recorded `buildversion.tag`).
@@ -5506,8 +5545,8 @@ a branch dispatch pushes an `envoy:<sha>` tag too, and its certificate names `re
 Accept a digest only when a run of the workflow on `main` built it, as for the worker image (`docs/kubernetes.md`, "Pin by digest, never by tag"):
 
 ```bash
-gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+gh attestation verify oci://ghcr.io/cybermonklabs/legion/envoy@sha256:… --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
@@ -5516,7 +5555,7 @@ The certificate names the workflow whose job signed, so the `attest` job stays i
 in a called workflow it would name that file and this command would refuse every image.
 Its subject is the `envoy:<commit sha>` index digest a deployment pins, not a per-platform manifest.
 `latest` has no attestation: `release_publish` writes it as a new index with its own revision annotation, so its digest differs from the `envoy:<sha>` index it points at.
-To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r
+To pin from `latest`, read that annotation (`docker buildx imagetools inspect --raw ghcr.io/cybermonklabs/legion/envoy:latest | jq -r
 '.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
 `release_publish` does not wait for `attest`; when `attest` alone fails, re-run the failed jobs, which signs the same digest `image_index` hands over.
 The attestation is separate from the BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image, and the index carries both legs' provenance, which a deployment reads to map a digest to its commit.

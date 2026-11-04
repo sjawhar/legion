@@ -204,9 +204,9 @@ func liveEnded(sub, reason string) LiveEnded {
 
 // LiveError refuses a frame or a subscription, by the code the matching GET route would answer
 // (INVALID_QUERY, DELIVERY_NOT_CONFIGURED), the socket's own (INVALID_FRAME,
-// TOO_MANY_SUBSCRIPTIONS) or an agent view's (HUMAN_ONLY, SESSION_ID_INPUT, STREAM_UNAVAILABLE).
-// Sub names the subscription it refuses, and is empty for a frame Dispatch could not read a sub
-// from.
+// TOO_MANY_SUBSCRIPTIONS) or an agent view's (OAUTH_SCOPE_REQUIRED, SESSION_ID_INPUT,
+// STREAM_UNAVAILABLE). Sub names the subscription it refuses, and is empty for a frame Dispatch
+// could not read a sub from.
 type LiveError struct {
 	Type    string `json:"type"`
 	Sub     string `json:"sub,omitempty"`

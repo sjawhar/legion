@@ -25,7 +25,7 @@ const (
 	imageType     = "docker:index/remoteImage:RemoteImage"
 	commandType   = "command:remote:Command"
 	listenerType  = "envoy-infra:host:Listener"
-	exampleImage  = "ghcr.io/sjawhar/legion/envoy:example"
+	exampleImage  = "ghcr.io/cybermonklabs/legion/envoy:example"
 )
 
 // newMocks returns the mock engine host's tests run on. A RemoteImage's state gets an imageId, as
