@@ -314,11 +314,15 @@ start it by hand. Without `answeredAt`, check, in order:
 4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
    answered after `since` and none of the above holds, the answer's event never reached the
    daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
-   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
-   its catch-up cursor, with the root held until the whole window is in, then decides it once.
-   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
-   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
-   own event.
+   (`legion restart`) catches the root up from its catch-up cursor: the boot applies the root's
+   Dispatch event log after the cursor, with the root held until the whole window is in, then
+   decides it once. A restart does not read an answer recorded before the root's first catch-up
+   on this release, for a root recorded before the catch-up cursor existed and given no work
+   since: that first catch-up only sets the cursor to the issue's latest sequence and replays
+   nothing, and a boot whose read of the root Dispatch refused leaves it with no cursor, so the
+   next boot's catch-up is that first one. In that case, or without a restart, have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event.
 
 A root whose architect registered its spec while the approval request waits on the person is in
 `awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
@@ -697,7 +701,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and the
+  anything above the reviewer's approved head but a commit under `docs/solutions/`, which retro
+  no longer writes, and the
   removal of files under `.legion/` that `legion handoffs import` commits
   (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
   is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
@@ -938,7 +943,8 @@ notice comes once per handoff commit, from whichever pass finds it first.
   on a quiet project the consumer may have handled every event between `start` and `stream_first`
   before it went missing. Any it had not reached may have been missed: the daemon applied none of
   them, and the two-minute pass heals the pull requests of the GitHub events among them.
-- **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
+- **`agent-secrets: the token login failed; retrying`** (an error line with the cause, the class
+  it was sorted into and the retry schedule that class takes).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
   every start and again before each credential expires; pods wait to be enrolled until a login
@@ -951,10 +957,14 @@ notice comes once per handoff commit, from whichever pass finds it first.
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
   reads `"state": "failed"` until a login succeeds. Nothing needs restarting, and no person is ever
-  asked. When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
+  asked. The line names the class the failure was sorted into (`class`), the retry schedule that
+  class takes (`schedule`), the wait before the next login (`retry_in`) and the cause (`error`).
+  When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
   broker is down, out of reach, or cannot reach its database), the daemon retries 2 s later,
   doubling to at most 10 s, so it logs in within about 10 s of the broker serving again. After
-  any other failure it retries 30 s later, doubling to at most 5 minutes.
+  any other failure it retries 30 s later, doubling to at most 5 minutes: a refusal the broker
+  decided, a token file it could not read, and a fault on the daemon's own side — a TLS
+  handshake that failed, or a host name that does not resolve — which no wait of seconds fixes.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

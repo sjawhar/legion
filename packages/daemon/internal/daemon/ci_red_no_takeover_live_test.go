@@ -62,6 +62,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -129,6 +130,7 @@ type ciRedNoTakeoverLive struct {
 // and the new assignment's taken, and last a red whose phase-ended message reaches a topic no
 // session holds, which finishes the row and leaves the start acting all the same.
 func TestACIRedStartsTheNextRoleAtOnceAndTakesNoTurnOverLive(t *testing.T) {
+	fixtureenv.Live(t)
 	r := newCIRedNoTakeoverLive(t)
 	r.step("step1-the-tester-works-the-assignment-its-phase-handed-it", r.testerWorksItsAssignment)
 	r.step("step2-the-red-starts-the-implementer-while-the-testers-turn-runs-on", r.redStartsAtOnce)

@@ -1103,12 +1103,14 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 // Before it assigns any, every admitted root that now waits only on a person gives its slot back
 // (workflow's ReconcileAwaiting, then releaseReturnedSlots), and every root in the workflow that
 // neither holds a slot nor waits for one leaves it (releaseUnslotted), so each pass of admission —
-// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. A
-// candidate a.pending still names is held back: the Dispatch consumer has not yet reached the
-// stream position Reconcile captured when it deferred that key. release, not promote, is what
-// clears pending — it empties the whole set at once, so this need only check membership. An
-// admitted candidate's architect start is queued behind a row creating its issue branch
-// (record.IssueBranch), which the start waits for.
+// a live fact, the boot read, a release, a tick — repairs that state rather than keeping it. The
+// pass stops at the first candidate either hold holds: one a.pending still names, since the
+// Dispatch consumer has not yet reached the stream position Reconcile captured when it deferred
+// that key, or one the boot's catch-up still holds (catchingUp). A pass after the hold's release
+// fills the free slots in line order. release, not promote, is what clears pending — it empties
+// the whole set at once, so this need only check membership. An admitted candidate's architect
+// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
+// waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -1182,14 +1184,15 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	for len(own) < cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if respectHolds && a.held(candidate.Key) {
-			continue
-		}
-		// An answered root the boot's catch-up still holds has not applied everything Dispatch
-		// recorded while the daemon was down, so its resume task would miss it; it keeps its place
-		// at the front of the line, and nothing behind it takes the slot, until its catch-up
-		// releases it and decides it on the next pass.
-		if a.catchingUpFor(candidate.Key) {
+		// A hold stops the pass rather than skipping the root it holds: a held root's record may
+		// still miss what Dispatch recorded, so no pass decides it, and an answered root the boot's
+		// catch-up still holds would get a resume task that misses what Dispatch recorded while the
+		// daemon was down. The held root keeps its place in the waiting line and nothing behind it
+		// takes its slot until a pass after the hold's release fills the free slots in line order:
+		// release's own pass for the Dispatch consumer hold, and the next pass (normally the one
+		// intake.CatchUpApplied drives) for the catch-up hold. heldKeys is the same predicate
+		// ReconcileAwaiting was handed above.
+		if heldKeys(candidate.Key) {
 			break
 		}
 		answered := candidate.Answered()

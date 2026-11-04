@@ -70,6 +70,8 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
@@ -1009,6 +1011,20 @@ export class DispatchApiClient {
     return this.json<Event[]>(
       pathWithQuery(`/api/v1/issues/${pathSegment(key)}/events`, { ...query, ids: ids?.join(",") })
     );
+  }
+
+  /** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
+   *  document order, each with every result recorded against it from any issue, newest first,
+   *  and each result's currency as the server judged it against the repository. */
+  getIssueResults(key: string): Promise<IssueCheckResults> {
+    return this.json<IssueCheckResults>(`/api/v1/issues/${pathSegment(key)}/results`);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. The
+   *  server decides the gaps - a requirement with no plan task is no gap until the issue has a
+   *  plan document - so a reader draws its answer rather than judging again. */
+  getIssueCoverage(key: string): Promise<IssueCoverage> {
+    return this.json<IssueCoverage>(`/api/v1/issues/${pathSegment(key)}/coverage`);
   }
 
   getInbox(project?: string): Promise<InboxRow[]> {

@@ -83,9 +83,9 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 // it: the claim's serves and answers edges from the claim, and the mention from the claim's
 // paragraph. Dropping the prose keeps the pointer's edge as it was first written.
 func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
-	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(map[string]pmdoc.BlockAttributeSchema{
-		"serves":  {Kind: "block[]", Targets: []string{"requirement"}},
-		"answers": {Kind: "block[]"},
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(pmdoc.BlockAttributes{
+		{Name: "serves", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList, Targets: []string{"requirement"}}},
+		{Name: "answers", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList}},
 	}))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
