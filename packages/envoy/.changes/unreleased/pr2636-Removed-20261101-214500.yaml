@@ -10,7 +10,7 @@ body: |
   Engine instance, `<account>#<key thumbprint>` for one minted anywhere else) and names its
   fleet's service and no person, so the machine reads the secrets that service owns
   and the shared agent-tier ones and never a person's; a fleet's `BROKER_VM_EXCHANGE_ACCOUNTS`
-  person and project reach its Dispatch token alone. Migration `0024`
+  person and project reach its Dispatch token alone. Migration `0026`
   retires every live `vm` enrollment, with its grants and its pending requests, and takes the
   kind out of the enrollments check. `agent-secrets enroll --vm` and `renew --vm` are gone, and
   the Compute Engine metadata identity reader they held moves to

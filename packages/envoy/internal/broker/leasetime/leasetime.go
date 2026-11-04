@@ -77,8 +77,8 @@ func HelperRenewAfter(leaseLeft, minRenew time.Duration) time.Duration {
 type Renewer string
 
 const (
-	// RenewerAgentSecrets is `agent-secrets renew`, the renewer of a pod's, a VM's or an agent
-	// box's own enrollment: it waits a third of the lease, then two, four, eight, ten, ten …
+	// RenewerAgentSecrets is `agent-secrets renew`, the renewer of a pod's or an agent box's own
+	// enrollment: it waits a third of the lease, then two, four, eight, ten, ten …
 	// seconds after each failed renewal.
 	RenewerAgentSecrets Renewer = "agent-secrets renew"
 	// RenewerHelper is agent-secrets-helper's renewLoop, which renews a machine session's
