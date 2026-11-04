@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -578,22 +579,37 @@ func markThreadsRead(t *testing.T, database *store.Store, threads []string) {
 	}
 }
 
-// holdGateThread takes one thread's row the way a press takes it, on a connection of the test's
-// own, and answers the transaction holding it. Both presses queue behind that transaction, and
-// the roll back that follows starts one of them inside the other's scan.
-func holdGateThread(t *testing.T, database *store.Store, gate string) pgx.Tx {
+// gateHold is one thread's row held the way a press takes it, on a connection of the test's own.
+// Both presses queue behind its transaction, and the roll back that follows starts one of them
+// inside the other's scan.
+type gateHold struct {
+	tx pgx.Tx
+	// release rolls the hold back, and does it once however many callers ask: the round's own
+	// goroutine releases it as soon as both presses have queued, and the cleanup below is the
+	// safety net for a round that fails before that. Rolling one transaction back twice returns
+	// its connection to the pool twice, and the second roll back then reads a connection another
+	// request has taken and written on - a data race `go test -race` reports and fails on.
+	release func()
+}
+
+func holdGateThread(t *testing.T, database *store.Store, gate string) gateHold {
 	t.Helper()
 	held, err := database.Pool.Begin(context.Background())
 	if err != nil {
 		t.Fatalf("hold the gate row: %v", err)
 	}
-	t.Cleanup(func() { _ = held.Rollback(context.Background()) })
+	var once sync.Once
+	hold := gateHold{
+		tx:      held,
+		release: func() { once.Do(func() { _ = held.Rollback(context.Background()) }) },
+	}
+	t.Cleanup(hold.release)
 	if _, err := held.Exec(context.Background(), `
 		select 1 from user_threads where login = 'alice' and thread_id = $1 for no key update
 	`, gate); err != nil {
 		t.Fatalf("hold the gate row: %v", err)
 	}
-	return held
+	return hold
 }
 
 // Two Mark all read presses by one person over the same threads, at once, with their query
@@ -632,8 +648,8 @@ func TestInboxReadRacingAnotherMarkAll(t *testing.T) {
 		held := holdGateThread(t, database, gate)
 		queued := make(chan int, 1)
 		go func() {
-			queued <- storetest.WaitForLockWaiters(t, held, 2, 10*time.Second)
-			_ = held.Rollback(context.Background())
+			queued <- storetest.WaitForLockWaiters(t, held.tx, 2, 10*time.Second)
+			held.release()
 		}()
 		mark := time.Now()
 		later := mark.Add(time.Millisecond)
