@@ -2397,11 +2397,11 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
-/** One comment, message or ask a person authored or a recorded session alias received. */
+/** One item authored, received or mentioned, or a document block mentioning the person. */
 export interface PersonNode {
-  readonly kind: "comment" | "message" | "ask";
+  readonly kind: "comment" | "message" | "ask" | "block";
   readonly id: string;
-  readonly relations: ("authored_by" | "delivered_to")[];
+  readonly relations: ("authored_by" | "delivered_to" | "mentions")[];
   readonly title: string;
   readonly created_at: string;
   readonly ref: string | null;

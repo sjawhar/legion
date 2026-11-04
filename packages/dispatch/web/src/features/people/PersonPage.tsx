@@ -40,7 +40,8 @@ export function PersonPage(): ReactNode {
           {nodes.data?.pages[0]?.person ?? login}
         </h1>
         <p className={`mt-1 text-sm ${textMutedOnCanvas}`}>
-          Authored by this person or delivered to a session recorded as theirs, newest first.
+          Authored by this person, delivered to their recorded sessions, or mentioning them, newest
+          first.
         </p>
       </header>
       {nodes.isPending ? <LoadingSkeleton label="Loading person nodes" /> : null}
@@ -64,7 +65,11 @@ export function PersonPage(): ReactNode {
               <span>{row.kind}</span>
               {row.relations.map((relation) => (
                 <LabelPill key={relation}>
-                  {relation === "authored_by" ? "Authored" : "Received"}
+                  {relation === "authored_by"
+                    ? "Authored"
+                    : relation === "mentions"
+                      ? "Mentioned in"
+                      : "Received"}
                 </LabelPill>
               ))}
             </div>

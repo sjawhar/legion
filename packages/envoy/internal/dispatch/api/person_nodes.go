@@ -40,6 +40,10 @@ const personNodesQuery = `
 			select g.from_kind, g.from_id, g.kind from person_aliases a
 			join ` + refs.AllEdgesSQL + ` g on g.to_kind = 'session' and g.to_id = a.alias and g.kind = 'delivered_to'
 			where a.person = $1 and a.alias_kind = 'session' and g.from_kind in ('comment', 'message', 'ask')
+			union all
+			select g.from_kind, g.from_id, g.kind from ` + refs.AllEdgesSQL + ` g
+			where g.kind = 'mentions' and g.to_kind = 'person' and g.to_id = $1
+			  and g.from_kind in ('comment', 'message', 'block')
 		) edges group by from_kind, from_id
 	), items as (
 		select 'comment' as kind, c.id::text as id, c.body as title, c.created_at, r.relations,
@@ -53,6 +57,10 @@ const personNodesQuery = `
 		select 'ask', k.id::text, k.question, k.created_at, r.relations, k.issue_key, a.project_key, a.slug, null
 		from related r join asks k on r.from_kind = 'ask' and r.from_id = k.id::text
 		left join artifacts a on a.id = k.artifact_id
+		union all
+		select 'block', d.node_id, d.excerpt, d.changed_at, r.relations, a.issue_key, a.project_key, a.slug, d.block_id
+		from related r join document_blocks d on r.from_kind = 'block' and r.from_id = d.node_id
+		join artifacts a on a.id = d.artifact_id
 	), page as (
 		select * from items order by created_at desc, kind, id desc limit $2 offset $3
 	)
@@ -104,6 +112,14 @@ func (s *server) listPersonNodes(w http.ResponseWriter, r *http.Request) {
 		first, _, _ := strings.Cut(*body, "\n")
 		item := personNode{Kind: *kind, ID: *id, Relations: relations, Title: text.HeadRunes(first, 240), CreatedAt: createdAt.UTC()}
 		switch {
+		case *kind == "block":
+			document, _, _ := strings.Cut(*id, "#")
+			item.Ref = new(refs.BlockRef("dispatch://"+document, *target))
+			if issue != nil {
+				item.Href = new("/issues/" + *issue + "/artifacts/" + url.PathEscape(*slug) + "#b-" + text.EncodeBlockID(*target))
+			} else {
+				item.Href = new("/projects/" + *project + "/documents/" + url.PathEscape(*slug) + "#b-" + text.EncodeBlockID(*target))
+			}
 		case issue != nil:
 			item.Ref = new("dispatch://" + *issue + "/" + *kind + "/" + *id)
 			item.Href = new("/issues/" + *issue + "/" + *kind + "s/" + *id)

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // referenceEnd is every character that ends a reference: whitespace (the Unicode space separators
@@ -212,6 +214,25 @@ func parseDispatch(value string) (Ref, bool) {
 		return parseBlock(document, fragment)
 	}
 	key, tail, found := strings.Cut(value, "/")
+	kind := ""
+	switch key {
+	case "people":
+		kind = "person"
+	case "sessions":
+		kind = "session"
+	case "roles":
+		kind = "role"
+	}
+	if kind != "" {
+		id, err := url.PathUnescape(tail)
+		if kind == "person" {
+			id = model.CanonicalLogin(id)
+		}
+		if err != nil || !IsSessionID(id) {
+			return Ref{}, false
+		}
+		return Ref{Kind: kind, ID: id}, true
+	}
 	if issueKeyPattern.MatchString(key) {
 		if !found || tail == "" {
 			return Ref{Kind: "issue", IssueKey: key, ID: key}, true

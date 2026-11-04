@@ -3,6 +3,7 @@ import {
   hasControlCharacter,
   isSessionId,
   itemFromSearch,
+  parseIdentityReference,
   SESSION_ID_PATTERN,
   shortSessionId,
 } from "@legion/contracts";
@@ -570,6 +571,14 @@ export function composerReferences(
   const references: ComposerReference[] = [];
   const seen = new Set<string>();
   for (const { value } of referenceSpans(body)) {
+    const identity = parseIdentityReference(value);
+    if (identity !== undefined) {
+      if (!seen.has(identity.reference)) {
+        seen.add(identity.reference);
+        references.push({ href: identity.href, reference: identity.reference });
+      }
+      continue;
+    }
     const route = referenceRouteFromHref(value, appOrigin);
     if (route === undefined) {
       continue;

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -836,6 +837,14 @@ func eventDestinations(event model.Event, ownerTopic string, routing routing, lo
 		}
 	}
 	d.add(ownerTopic, "publish owner topic", ownerTopic)
+	if event.Type == "comment.created" {
+		filter := newRecipientFilter(event, d)
+		for _, sessionID := range slices.Sorted(maps.Keys(payloadMentionedSessions(event.Payload))) {
+			if filter.keep(sessionID) {
+				d.addSessions([]string{sessionID}, "publish mention fallback to")
+			}
+		}
+	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {

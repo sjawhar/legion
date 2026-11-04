@@ -290,7 +290,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		select viewname
 		from pg_views
 		where schemaname = current_schema()
-	`, []string{"graph_edges", "graph_inbox_edges", "graph_person_edges", "person_aliases"})
+	`, []string{"graph_edges", "graph_inbox_edges", "graph_mention_edges", "graph_person_edges", "person_aliases"})
 
 	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `

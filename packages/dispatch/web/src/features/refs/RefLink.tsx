@@ -1,3 +1,4 @@
+import { parseIdentityReference } from "@legion/contracts";
 import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
@@ -112,7 +113,7 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
     let lastIndex = 0;
     let replaced = false;
     for (const { start, value: raw } of referenceSpans(value, "dispatch://")) {
-      if (parseDispatchReference(raw) === undefined) {
+      if (parseDispatchReference(raw) === undefined && parseIdentityReference(raw) === undefined) {
         continue;
       }
       fragment.appendChild(document.createTextNode(value.slice(lastIndex, start)));
@@ -176,6 +177,12 @@ export function collectReferenceAnchors(
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a:not([data-dispatch-picture])")) {
     const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
     if (href === null) {
+      continue;
+    }
+    const identity = parseIdentityReference(href);
+    if (identity !== undefined) {
+      anchor.setAttribute("href", identity.href);
+      anchor.setAttribute("data-dispatch-ref", identity.reference);
       continue;
     }
     const text = anchor.textContent ?? "";

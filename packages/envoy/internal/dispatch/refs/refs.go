@@ -186,6 +186,11 @@ func TargetOf(ref text.Ref) (Target, bool) {
 		return Target{}, false
 	}
 	kind := ref.Kind
+	// Older builds already resolve session nodes, so identity mentions use unknown storage
+	// kinds until graph_mention_edges maps them into the complete graph.
+	if kind == "person" || kind == "session" || kind == "role" {
+		kind += "_mention"
+	}
 	if kind == "block" && ref.Item != "" {
 		kind = ItemKind(ref.Item).BlockKind()
 	}
