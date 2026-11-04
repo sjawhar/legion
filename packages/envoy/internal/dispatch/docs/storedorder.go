@@ -2,6 +2,7 @@ package docs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -438,39 +439,48 @@ type parkedRow struct {
 	through  int64
 }
 
-// judgeParkedRows checks each resolved row in a separate streamed prefix replay, omitting only
-// what that row newly parked and retaining what it integrated. Each comparison holds two documents,
-// regardless of how many rows waited together; extra prefix reads avoid retaining a document copy
-// per parked row or buffering the stored history.
+// judgeParkedRows advances one shared prefix in omitted-version order. Each comparison copies
+// that prefix and replays only the omitted row's unresolved span, not the older history. Three
+// documents suffice regardless of how many rows wait; suffix work follows the unresolved spans.
 func judgeParkedRows(ctx context.Context, tx pgx.Tx, artifactID string, resolved []*parkedRow, report *StoredOrderReport) error {
-	for _, row := range resolved {
-		differs, err := compareParkedPrefix(ctx, tx, artifactID, row)
+	ordered := slices.Clone(resolved)
+	slices.SortFunc(ordered, func(a, b *parkedRow) int {
+		return cmp.Compare(a.mismatch.Update, b.mismatch.Update)
+	})
+	prefix := newDocumentCopy()
+	defer prefix.Destroy()
+	var through int64
+	differs := make(map[*parkedRow]bool, len(resolved))
+	for _, row := range ordered {
+		before := row.mismatch.Update - 1
+		if err := replayStoredRange(ctx, tx, artifactID, through, before, func(_ int64, update []byte) error {
+			return decodeStoredState(prefix, update)
+		}); err != nil {
+			return err
+		}
+		through = before
+		var err error
+		differs[row], err = compareParkedPrefix(ctx, tx, artifactID, prefix, row)
 		if err != nil {
 			return err
 		}
-		if differs {
+	}
+	// Keep the report in resolution order, even when rows resolve in reverse order.
+	for _, row := range resolved {
+		if differs[row] {
 			report.Mismatches = append(report.Mismatches, row.mismatch)
 		}
 	}
 	return nil
 }
 
-func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, omitted *parkedRow) (bool, error) {
-	rows, err := tx.Query(ctx, `
-		select version, update from doc_updates where artifact_id = $1 and version <= $2 order by version
-	`, artifactID, omitted.through)
-	if err != nil {
-		return false, fmt.Errorf("read the document's stored updates again: %w", err)
-	}
-	defer rows.Close()
-	full, without := newDocumentCopy(), newDocumentCopy()
+func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, prefix *crdt.Doc, omitted *parkedRow) (bool, error) {
+	options := documentCopyOptions(maxUpdateItems)
+	full, without := prefix.Clone(options...), prefix.Clone(options...)
+	defer full.Destroy()
+	defer without.Destroy()
 	applies := true
-	for rows.Next() {
-		var version int64
-		var update []byte
-		if err := rows.Scan(&version, &update); err != nil {
-			return false, fmt.Errorf("scan a stored document update: %w", err)
-		}
+	err := replayStoredRange(ctx, tx, artifactID, omitted.mismatch.Update-1, omitted.through, func(version int64, update []byte) error {
 		var unsubscribe func()
 		if applies && version == omitted.mismatch.Update {
 			// OnUpdate carries only what integrated, not what parked. Earlier rows' parked
@@ -485,16 +495,44 @@ func compareParkedPrefix(ctx context.Context, tx pgx.Tx, artifactID string, omit
 			unsubscribe()
 		}
 		if err != nil {
-			return false, fmt.Errorf("replay the fold through update %d: %w", version, err)
+			return err
 		}
 		if applies && version != omitted.mismatch.Update {
 			applies = decodeStoredState(without, update) == nil
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("read the document's stored updates again: %w", err)
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return !applies || !sameStoredState(without, full), nil
+}
+
+func replayStoredRange(ctx context.Context, tx pgx.Tx, artifactID string, after, through int64, apply func(int64, []byte) error) error {
+	if after >= through {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `
+		select version, update from doc_updates where artifact_id = $1 and version <= $2 and version > $3 order by version
+	`, artifactID, through, after)
+	if err != nil {
+		return fmt.Errorf("read the document's stored updates again: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var version int64
+		var update []byte
+		if err := rows.Scan(&version, &update); err != nil {
+			return fmt.Errorf("scan a stored document update: %w", err)
+		}
+		if err := apply(version, update); err != nil {
+			return fmt.Errorf("replay the fold through update %d: %w", version, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the document's stored updates again: %w", err)
+	}
+	return nil
 }
 
 // sameStoredState compares integrated clocks and deletions, then the encoded parked content.
@@ -508,6 +546,7 @@ func sameStoredState(a, b *crdt.Doc) bool {
 		return false
 	}
 	if aParked.Items > 0 || aParked.DeleteRanges > 0 {
+		// Limitation: ygo exposes no decoded pending structs; ContentIDs cannot compare payloads or normalize split runs.
 		return bytes.Equal(crdt.EncodeStateAsUpdateV1(a, aClocks), crdt.EncodeStateAsUpdateV1(b, bClocks))
 	}
 	return sameDeletes(crdt.DeleteSetFromDoc(a), crdt.DeleteSetFromDoc(b))
