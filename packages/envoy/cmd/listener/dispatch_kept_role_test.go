@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,9 +26,8 @@ import (
 // Postgres, and the listener's drain - which reads a kept lane by stream sequence and not by who
 // wrote it - hands that copy to the session that claims the role afterwards.
 
-// outboxRoleEvent seeds an issue routed to role and appends one event on it, as Dispatch's API
-// does, and returns the event.
-func outboxRoleEvent(t *testing.T, database *dispatchstore.Store, broker *events.Broker, key, role string) model.Event {
+// outboxRoleIssue seeds the project and an issue routed to role, as Dispatch's API writes them.
+func outboxRoleIssue(t *testing.T, database *dispatchstore.Store, key, role string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('TT', 'Test') on conflict do nothing`); err != nil {
@@ -39,6 +39,13 @@ func outboxRoleEvent(t *testing.T, database *dispatchstore.Store, broker *events
 	`, key, "role:"+role); err != nil {
 		t.Fatalf("create the issue: %v", err)
 	}
+}
+
+// outboxRoleEvent seeds an issue routed to role and appends one event on it, as Dispatch's API
+// does, and returns the event.
+func outboxRoleEvent(t *testing.T, database *dispatchstore.Store, broker *events.Broker, key, role string) model.Event {
+	t.Helper()
+	outboxRoleIssue(t, database, key, role)
 	return outboxIssueEvent(t, database, broker, key, "3b2f4a6d-7c18-4a52-9e0b-1d5c7a9f2e34", "for whoever takes the role")
 }
 
@@ -46,23 +53,30 @@ func outboxRoleEvent(t *testing.T, database *dispatchstore.Store, broker *events
 // commits it, so the outbox reads it on its LISTEN wake.
 func outboxIssueEvent(t *testing.T, database *dispatchstore.Store, broker *events.Broker, key, messageID, body string) model.Event {
 	t.Helper()
+	return outboxEvent(t, database, broker, model.Event{
+		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: messageID, IssueKey: new(key), Body: body},
+	})
+}
+
+// outboxEvent appends event, committed as Dispatch's API commits it, so the outbox reads it on
+// its LISTEN wake, and returns it as the broker recorded it.
+func outboxEvent(t *testing.T, database *dispatchstore.Store, broker *events.Broker, event model.Event) model.Event {
+	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the event's transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	event, err := broker.Append(ctx, tx, model.Event{
-		IssueKey: new(key), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: messageID, IssueKey: new(key), Body: body},
-	})
+	appended, err := broker.Append(ctx, tx, event)
 	if err != nil {
 		t.Fatalf("append the event: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit the event: %v", err)
 	}
-	return event
+	return appended
 }
 
 // runOutbox runs Dispatch's outbox over database and the listener's NATS client until the test
@@ -151,6 +165,138 @@ func TestAnEventDispatchRoutedToAnUnheldRoleReachesTheRolesNextHolder(t *testing
 	}
 	if keys := lane.keys(); len(keys) != 1 {
 		t.Fatalf("the drain forwarded %d copies, want the one Dispatch kept: %v", len(keys), keys)
+	}
+}
+
+// outboxHeldRoleComment writes a comment on the issue key names that mentions sessionID - the
+// session the issue's route resolved to when the comment was written, so the comment suppresses
+// that route for it - with the attempt its sender died with in flight: pending under a claim
+// that lapsed, which Dispatch's delivery sweep resends and the outbox waits no longer on
+// (model.MentionResumedSQL), so the outbox holds the route's copy as a comment_fallback_copies
+// row rather than publishing it. It appends the comment.created event as Dispatch's API appends
+// it, and returns the comment's id, that event and the dedupe key the mention's send goes under,
+// which is the key the held copy carries (contracts.AgentSendDedupeKey).
+func outboxHeldRoleComment(t *testing.T, database *dispatchstore.Store, broker *events.Broker, key, role, sessionID string) (string, model.Event, string) {
+	t.Helper()
+	ctx := context.Background()
+	body := "@" + sessionID + " are you there?"
+	var commentID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into comments (issue_key, author, body)
+		values ($1, '{"kind":"user","id":"alice"}', $2) returning id::text
+	`, key, body).Scan(&commentID); err != nil {
+		t.Fatalf("create the comment: %v", err)
+	}
+	target := "session:" + sessionID
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comment_mentions (comment_id, target, delivery) values ($1, $2, 'steer')
+	`, commentID, target); err != nil {
+		t.Fatalf("create the mention of %s: %v", target, err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, created_at, claimed_at)
+		values ($1, $2, 1, 'steer', $3, 'pending', now() - interval '2 minutes', now() - interval '2 minutes')
+	`, commentID, target, sessionID); err != nil {
+		t.Fatalf("create the mention's attempt: %v", err)
+	}
+	event := outboxEvent(t, database, broker, model.Event{
+		IssueKey: new(key), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{
+			Comment: model.Comment{
+				ID: commentID, IssueKey: new(key), Body: body,
+				Mentions: []model.Mention{{Target: target, Delivery: "steer", SessionID: new(sessionID)}},
+			},
+			SuppressRoute: true, SuppressedRoute: "role:" + role, SuppressedRouteSessionID: new(sessionID),
+		},
+	})
+	return commentID, event, contracts.AgentSendDedupeKey(sessionID, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+}
+
+// heldFallbackCopies is how many comment_fallback_copies rows the comment has at destination.
+func heldFallbackCopies(t *testing.T, database *dispatchstore.Store, commentID, destination string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from comment_fallback_copies where comment_id = $1 and destination = $2
+	`, commentID, destination).Scan(&rows); err != nil {
+		t.Fatalf("read the comment's held copies: %v", err)
+	}
+	return rows
+}
+
+// A copy Dispatch held for a role route, whose mention of a session failed, reaches that very
+// session through the listener's drain under the mention's own key, with no role forward's
+// prefix. The outbox's fallback pass finds the role unclaimed and keeps the copy on that role's
+// kept lane, under the key of the failed mention of the session the route resolved to
+// (publishFallbackCopies, roleForward.keep); the session that claims the role next is that same
+// session, and the host it runs on claimed that key when the mention's send landed before the
+// attempt failed. So the drain forwards the copy to it as the pass's own forward would have
+// done, under that key alone (contracts.RoleForwardDedupeKey, roleForward.forwarded): the host
+// drops it and the session is shown the comment once, where the prefix - a key no host has seen
+// - would show it the comment a second time.
+//
+// The forward's Nats-Msg-Id is what makes the two writers' copies one at the stream: Dispatch's
+// outbox forwards a kept copy of its own behind a keep (handOverKept) and keys it by the same
+// rule, so both name the copy bus.ForwardMsgID of that key and the holder's agent subject, and
+// the stream stores one copy of it for that holder however often it is forwarded.
+//
+// TestAnEventDispatchRoutedToAnUnheldRoleReachesTheRolesNextHolder is the other side of the
+// rule: a copy whose key names no session keeps the prefix, whoever its next holder is.
+func TestAKeptCopyOfAFailedMentionReachesThatSessionUnderTheMentionsKey(t *testing.T) {
+	harness := newListenerDeliveryHarness(t)
+	const (
+		role   = "kept-for-the-mentioned-session"
+		holder = "ses_mentioned_by_the_held_comment"
+		key    = "T-1"
+	)
+	roleTopic := contracts.RoleTopicPrefix + role
+	lane := newKeptLaneUnderClaim(t, harness, func(int, string, contracts.Envelope) error { return nil })
+	database := migratedDispatchDatabase(t)
+	broker := events.NewBroker()
+	outboxRoleIssue(t, database, key, role)
+	commentID, event, mentionKey := outboxHeldRoleComment(t, database, broker, key, role, holder)
+	runOutbox(t, harness, database, broker)
+
+	// The outbox publishes the comment's event with the route's copy held back for the mention
+	// still being resent; the resend then fails for good, so the next fallback pass publishes
+	// that copy, which for a role route means keeping it for the role's next holder.
+	waitFor(t, 30*time.Second, "Dispatch's outbox to hold the route's copy of the comment", func() bool {
+		return heldFallbackCopies(t, database, commentID, roleTopic) == 1
+	})
+	if _, err := database.Pool.Exec(context.Background(),
+		`update comment_deliveries set state = 'failed' where comment_id = $1`, commentID); err != nil {
+		t.Fatalf("fail the mention's resend: %v", err)
+	}
+	var kept contracts.Envelope
+	waitFor(t, 30*time.Second, "the fallback pass to keep the held copy for the role's next holder", func() bool {
+		item, ok := readKeptRoleMessage(t, harness.client, role)
+		kept = item
+		return ok && item.DedupeKey == mentionKey
+	})
+	if kept.Topic != roleTopic || kept.EventID != fmt.Sprintf("dispatch-%d", event.ID) {
+		t.Fatalf("the kept copy is event %q on topic %q, want the comment's event on the role topic Dispatch held it for",
+			kept.EventID, kept.Topic)
+	}
+
+	lane.register(t, holder)
+	lane.claim(t, holder, role)
+	handed := lane.await(t, 1, 30*time.Second)
+
+	if handed[0].holder != holder {
+		t.Fatalf("the copy reached %s, want the mentioned session %s, which claimed the role", handed[0].holder, holder)
+	}
+	if handed[0].key != mentionKey {
+		t.Fatalf("the copy was forwarded under %q, want the mention's own key %q, which that session's host drops",
+			handed[0].key, mentionKey)
+	}
+	if strings.HasPrefix(handed[0].key, roleForwardDedupePrefix) {
+		t.Fatalf("the copy forwarded to the session its own mention names carries %q, want no role forward's prefix",
+			handed[0].key)
+	}
+	subject := contracts.AgentSubject(holder)
+	if want := bus.ForwardMsgID(mentionKey, subject); handed[0].msgID != want {
+		t.Fatalf("the forward was made under %q, want %q: the outbox's own handover of a kept copy names it that, and the stream stores the two as one",
+			handed[0].msgID, want)
 	}
 }
 

@@ -21,11 +21,13 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 )
 
-// keptHandover is one forward a drain of a kept lane made: the session it reached and the dedupe
-// key it carried.
+// keptHandover is one forward a drain of a kept lane made: the session it reached, the dedupe
+// key it carried and the Nats-Msg-Id it went under, which is what keeps one message to one
+// stored copy per holder however often it is forwarded (bus.ForwardMsgID, roleForward.msgID).
 type keptHandover struct {
 	holder string
 	key    string
+	msgID  string
 }
 
 // keptLaneUnderClaim is one listener's kept lane under test: the harness's stores, a delivery
@@ -52,12 +54,12 @@ func newKeptLaneUnderClaim(t *testing.T, harness listenerDeliveryHarness, forwar
 	lane := &keptLaneUnderClaim{harness: harness, forwards: make(chan keptHandover, 64)}
 	var attempts atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, _ string, _ time.Duration) error {
+	cfg.forwardRole = inlineForward(func(subject string, item contracts.Envelope, msgID string, _ time.Duration) error {
 		holder := strings.TrimPrefix(subject, contracts.AgentTopicPrefix)
 		if err := forward(int(attempts.Add(1)), holder, item); err != nil {
 			return err
 		}
-		handed := keptHandover{holder: holder, key: item.DedupeKey}
+		handed := keptHandover{holder: holder, key: item.DedupeKey, msgID: msgID}
 		lane.mu.Lock()
 		lane.handed = append(lane.handed, handed)
 		lane.mu.Unlock()

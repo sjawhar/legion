@@ -58,14 +58,6 @@ type mentionDeliveries struct {
 	// lowest session, should its attempts name several), which a fallback copy keyed by that
 	// target carries (publishFallbackCopies).
 	targetFallbackKeys map[string]string
-	// targetFallbackSessions is keyed like targets, and holds for each target of
-	// targetFallbackKeys the session whose mention that key is (the lowest of the sessions whose
-	// attempt of that target failed, by the rule targetFallbackKeys picks its key by), which is
-	// the session the host of whom has that key already. It is what a fallback copy keyed by a
-	// target names when its role destination resolves a holder: a copy forwarded to that very
-	// session carries the mention's own key rather than a role forward's
-	// (decideFallbackCopy, fallbackSend.send).
-	targetFallbackSessions map[string]string
 	// held holds each destination of the comment a fallback row owns (comment_fallback_copies):
 	// the fallback pass publishes or settles it, and the event's own publish skips it
 	// (destinations.addDestination).
@@ -75,12 +67,11 @@ type mentionDeliveries struct {
 // newMentionDeliveries is the empty reading of one comment's mentions, which every read fills.
 func newMentionDeliveries() mentionDeliveries {
 	return mentionDeliveries{
-		sessions:               mentionOutcomes{kind: sessionMentions, states: map[string]mentionState{}},
-		targets:                mentionOutcomes{kind: targetMentions, states: map[string]mentionState{}},
-		fallbackKeys:           map[string]string{},
-		targetFallbackKeys:     map[string]string{},
-		targetFallbackSessions: map[string]string{},
-		held:                   map[string]struct{}{},
+		sessions:           mentionOutcomes{kind: sessionMentions, states: map[string]mentionState{}},
+		targets:            mentionOutcomes{kind: targetMentions, states: map[string]mentionState{}},
+		fallbackKeys:       map[string]string{},
+		targetFallbackKeys: map[string]string{},
+		held:               map[string]struct{}{},
 	}
 }
 
@@ -554,9 +545,11 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // the holder that claims it next, and the stream's acknowledgement of that keep marks the row
 // published as a holder's receipt of a forward does; a holder that is the very session the row's
 // key names is forwarded to under the mention's own dedupe key rather than a role forward's
-// prefixed one, which is what makes that session's host drop a copy of a mention it was given
-// (fallbackSend.send); a resolution that reaches the destination with nothing to send at all -
-// the holder is the event's own actor, or the role token is one no claim can ever name - settles
+// prefixed one, which is what makes that session's host drop a copy of a mention it was given,
+// and that is the one rule every forwarder of a role message follows
+// (contracts.RoleForwardDedupeKey, roleForward.forward); a resolution that reaches the
+// destination with nothing to send at all - the holder is the event's own actor, or the role
+// token is one no claim can ever name - settles
 // the row unpublished, and one that leaves it pending counts an attempt and backs the row off, as
 // a failed publish does. The pass never writes the events row:
 // the event's published_at, published_destinations and payload stay as its own publish left
@@ -761,14 +754,12 @@ const (
 	fallbackPublishes
 )
 
-// fallbackSend is the copy a pass publishes for one row: the envelope, the forward that carries
-// it when the row's destination is a role topic, nil for every other destination
-// (fallbackRoleForward), and the session the row's key names, whose failed mention the copy
-// stands in for and whose dedupe key the envelope carries (decideFallbackCopy).
+// fallbackSend is the copy a pass publishes for one row: the envelope, whose dedupe key is the
+// failed mention's own, and the forward that carries it when the row's destination is a role
+// topic, nil for every other destination (fallbackRoleForward, decideFallbackCopy).
 type fallbackSend struct {
-	item      contracts.Envelope
-	forward   *roleForward
-	mentioned string
+	item    contracts.Envelope
+	forward *roleForward
 }
 
 // send starts the copy's send through sender, within ctx: a role destination forwarded to the
@@ -778,34 +769,31 @@ type fallbackSend struct {
 // (keptHandovers). A forward that resolved to no holder it could reach answers its own error, as
 // a batch's chain does (sendChains), so the row counts an attempt and backs off.
 //
-// A forward whose holder is the very session the row's key names goes under the mention's own
-// dedupe key, which the envelope carries already, rather than under a role forward's prefixed one
-// (roleForward.forwardKeyed): that session's host drops a copy keyed like the mention it was
-// given before the attempt failed, and the prefix - a key no host has seen - would show it the
-// comment twice. A role fallback row is held for a route a mention of the session that route
-// resolved to suppressed, so its holder is usually that very session. Every other holder is
-// forwarded to as any role route is, prefix and all, the key standing for the role's copy rather
-// than that session's mention. A keep needs none of this: the copy is stored under the mention's
-// own key for the role's next holder, and whoever forwards it on prefixes it there.
+// The copy carries the mention's own dedupe key, and a forward of it keys by the one rule both
+// forwarders of a role message follow (contracts.RoleForwardDedupeKey, roleForward.forward): a
+// holder that is the very session that key names - which a role fallback row's holder usually
+// is, the row being held for a route a mention of the session that route resolved to suppressed
+// - is forwarded that key as it is, and its host drops a copy of a mention it was given, while
+// every other holder is forwarded the role forward's prefixed key, standing for the role's copy
+// rather than that session's mention. A keep stores the copy under the mention's own key for the
+// role's next holder, where whoever forwards it on applies the same rule.
 func (s fallbackSend) send(ctx context.Context, deps Deps, sender bus.Sender, handed *keptHandovers) <-chan error {
 	switch {
 	case s.forward == nil:
 		return sender.PublishAsync(s.item)
 	case s.forward.err != nil:
 		return failedAnswer(s.forward.err)
-	case s.forward.keptFor == "" && s.forward.skip == "" && s.mentioned != "" && s.forward.holder == s.mentioned:
-		return s.forward.forwardKeyed(sender, s.item)
 	}
 	return s.forward.send(ctx, deps, sender, s.item, handed)
 }
 
 // decideFallbackCopy decides one claimed row by its key's attempts (publishFallbackCopies), and
-// returns, when the copy is to be published, the send to make: the envelope, the role forward
-// that carries it to a role destination's holder, and the session the row's key names - the key
-// itself for a row keyed by a session, and for one keyed by a target the session whose mention
-// that target's fallback key is (mentionDeliveries.targetFallbackSessions), empty when the read
-// holds none. A role no live holder can take is published like any other destination: its forward
-// keeps the copy on the role's kept lane for the role's next holder (forwardOf, keptOrSkipped).
+// returns, when the copy is to be published, the send to make: the envelope, under the dedupe
+// key of the failed mention its key names (mentionDeliveries.fallbackKeys for a row keyed by a
+// session, targetFallbackKeys for one keyed by a target), and the role forward that carries it
+// to a role destination's holder. A role no live holder can take is published like any other
+// destination: its forward keeps the copy on the role's kept lane for the role's next holder
+// (forwardOf, keptOrSkipped).
 // Only a resolution that reaches the destination with nothing to send at all - the holder is the
 // event's own actor, or the role token is one no claim can ever name - settles the row as a sent
 // mention does, with nothing published.
@@ -847,11 +835,7 @@ func decideFallbackCopy(
 			"comment_id", held.commentID, "destination", held.destination, "reason", forward.skip)
 		return fallbackSettles, fallbackSend{}, nil
 	}
-	mentioned := held.key
-	if held.kind == targetMentions {
-		mentioned = deliveries.targetFallbackSessions[held.key]
-	}
-	return fallbackPublishes, fallbackSend{item: item, forward: forward, mentioned: mentioned}, nil
+	return fallbackPublishes, fallbackSend{item: item, forward: forward}, nil
 }
 
 // claimFallbackCopies claims at most batchSize unsettled fallback rows that are due - never

@@ -754,7 +754,7 @@ func TestAHeldCopyOfARoleRouteReachesTheRolesHolder(t *testing.T) {
 // like the mention is dropped there and the session is shown the comment once; carried under
 // contracts.RoleForwardDedupePrefix, as a role route's own forward carries it, it would be a key
 // no host has seen, with an event id of its own, and that session would be shown the comment
-// twice (fallbackSend.send, roleForward.forwardKeyed). The prefix is right for every other
+// twice (fallbackSend.send, contracts.RoleForwardDedupeKey). The prefix is right for every other
 // holder, which TestAHeldCopyOfARoleRouteReachesTheRolesHolder holds.
 func TestAFallbackPassForwardsARoleCopyToItsOwnMentionedHolderUnderTheMentionsKey(t *testing.T) {
 	ctx := store.WithTransactionTracking(context.Background())
@@ -787,6 +787,63 @@ func TestAFallbackPassForwardsARoleCopyToItsOwnMentionedHolderUnderTheMentionsKe
 	if strings.HasPrefix(forwards[0].DedupeKey, contracts.RoleForwardDedupePrefix) {
 		t.Fatalf("the copy forwarded to the session its own mention names carries %q, want no role forward's prefix",
 			forwards[0].DedupeKey)
+	}
+}
+
+// A copy held for a role route that no live holder could take when the pass ran is kept on the
+// role's kept lane, and the session the row's key names, claiming that role while the keep is
+// in flight, is handed it by the keep's own handover (handOverKept) under the mention's own
+// dedupe key, not a role forward's. The handover forwards the copy by the same method the
+// pass's own forward uses (roleForward.forward), so the rule that keys a forward by its holder
+// holds wherever that copy reaches that session from
+// (contracts.RoleForwardDedupeKey); keyed with the prefix here, the copy would be a key no host
+// has seen and would show the mentioned session the comment a second time, exactly as it would
+// had the pass resolved the holder itself.
+//
+// Nothing drains the lane here - no listener runs in this test - so the keep's handover is the
+// one path the copy has to the holder, and the stream holds its one forward of it on that
+// session's agent subject under the id bus.ForwardMsgID makes of that same key, which is what
+// the listener's own drain of the lane would forward it under.
+func TestAKeptFallbackCopyHandedToItsOwnMentionedHolderCarriesTheMentionsKey(t *testing.T) {
+	ctx := store.WithTransactionTracking(context.Background())
+	rig := newRoleRig(t)
+	// s1 is the session seedHeldRoleFallbackCopy mentions and suppresses the route by; nobody
+	// holds the role while the pass decides the row, so its copy is kept for the role's next
+	// holder, and s1 is that holder, claiming the role under the keep.
+	const role, holder, target = "reviewer", "s1", "session:s1"
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	recv := rig.receiver(t, holder, true)
+	commentID := seedHeldRoleFallbackCopy(ctx, t, rig.deps(), role)
+	claimed := make(chan error, 1)
+	publisher := claimedUnderTheKeep(rig.client, func() {
+		claimed <- rig.claimUnder(role, holder, session.SessionEntry{SelfSubscribed: true})
+	})
+
+	publishFallbackCopies(ctx, rig.publisherOn(publisher), unfenced{})
+
+	if err := <-claimed; err != nil {
+		t.Fatalf("the claim made under the keep: %v", err)
+	}
+	held := readHeldCopy(t, rig.database, commentID, contracts.RoleTopicPrefix+role)
+	if !held.published || !held.settled || held.attempts != 0 {
+		t.Fatalf("the role route's held copy is attempts=%d settled=%v published=%v, want it kept and settled by the one pass",
+			held.attempts, held.settled, held.published)
+	}
+	want := contracts.AgentSendDedupeKey(holder, model.CommentMentionIdempotencyKey(commentID, target, "steer"))
+	handed := handedNow(t, recv, "the copy kept for a role its own mentioned session claimed under the keep")
+	if handed.DedupeKey != want {
+		t.Fatalf("the handover carried %q to %s, want the mention's own key %q, which its host drops",
+			handed.DedupeKey, holder, want)
+	}
+	if strings.HasPrefix(handed.DedupeKey, contracts.RoleForwardDedupePrefix) {
+		t.Fatalf("the copy handed to the session its own mention names carries %q, want no role forward's prefix",
+			handed.DedupeKey)
+	}
+	subject := contracts.AgentSubject(holder)
+	stored := storedMsgIDs(t, rig.conn, subject)
+	if len(stored) != 1 || stored[0] != bus.ForwardMsgID(want, subject) {
+		t.Fatalf("the stream holds %v on %s, want the handover's one copy under %q, the id a drain's forward of it would carry too",
+			stored, subject, bus.ForwardMsgID(want, subject))
 	}
 }
 

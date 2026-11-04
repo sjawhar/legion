@@ -232,30 +232,23 @@ func (f *roleForward) send(ctx context.Context, deps Deps, sender bus.Sender, it
 // route's own send makes and the handover behind a keep makes again for the copy it hands over
 // (send, handOverKeptCopy).
 //
-// It goes to the holder as a listener's role forward carries it: its topic the role's, its
-// dedupe key contracts.RoleForwardDedupePrefix and the original's, its event id unchanged, so the
-// holder's receipt and dedupe apply as to any role forward. It goes to the holder's agent subject
-// with a Request under the forward's MsgId (bus.ForwardMsgID), so the stream, which captures agent
-// subjects, stores one copy however often it is sent. The answer is the holder's empty receipt for
-// a self-subscribed holder (or one with no subscription of its own, which nothing answers, so it
+// It goes to the holder as a listener's role forward carries it: its topic the role's, its event
+// id unchanged, and its dedupe key the one contracts.RoleForwardDedupeKey names for this holder -
+// the prefix and the original's key for every key but the holder's own agent send key, which is
+// carried as it is, so a copy of a comment keyed by the failed mention of the holder itself is
+// dropped at that host rather than shown a second time. The listener's two forwarders of a role
+// message ask the same rule (cmd/listener/role_lane.go, roleForward.forwarded), so the copies of
+// one message forwarded by either carry one key and one MsgId.
+//
+// It goes to the holder's agent subject with a Request under the forward's MsgId
+// (bus.ForwardMsgID of that key and the subject), so the stream, which captures agent subjects,
+// stores one copy however often it is sent. The answer is the holder's empty receipt for a
+// self-subscribed holder (or one with no subscription of its own, which nothing answers, so it
 // stays pending). For a holder whose entry records a port it is the stream's acknowledgement of
 // the stored copy alone: no listener pushes to a port, so such a holder answers nothing itself
 // and only a session consumer of its own reaches it.
 func (f *roleForward) forward(sender bus.Sender, item contracts.Envelope) <-chan error {
-	item.DedupeKey = contracts.RoleForwardDedupePrefix + item.DedupeKey
-	return f.forwardKeyed(sender, item)
-}
-
-// forwardKeyed is that request itself: item sent to the holder's agent subject as it is, under
-// whatever dedupe key it already carries, which is the role forward's prefixed one for every
-// forward of a role's own route (forward).
-//
-// The one sender of an item whose key is already the one its holder dedupes on is the fallback
-// pass, for a copy whose role resolved to the very session the row's key names (fallbackSend.send):
-// that session's host was given the mention's own key by a send that landed before the attempt
-// failed, so a copy carrying it is dropped there, while the role forward's prefix would make it a
-// key no host has seen and show the comment twice.
-func (f *roleForward) forwardKeyed(sender bus.Sender, item contracts.Envelope) <-chan error {
+	item.DedupeKey = contracts.RoleForwardDedupeKey(item.DedupeKey, f.holder)
 	subject := contracts.AgentSubject(f.holder)
 	return sender.Request(subject, item, bus.RequestOptions{
 		MsgID:           bus.ForwardMsgID(item.DedupeKey, subject),
@@ -309,9 +302,10 @@ func (f *roleForward) keep(ctx context.Context, deps Deps, sender bus.Sender, it
 // own keep, by starting a handover after every one of them (keepForNextHolder); the outbox is
 // that lane's second writer and has no drain of its own, so it reads the claim and that lane
 // again - it holds the role readers already - and forwards the copy itself, under the id the
-// drain's forward of it would carry (bus.ForwardMsgID of the role-forward dedupe key and the
-// holder's agent subject, roleForward.msgID in cmd/listener/role_lane.go). Whichever of the two
-// copies arrives second is collapsed by the stream's duplicate window and by the holder's own
+// drain's forward of it would carry (bus.ForwardMsgID of the key contracts.RoleForwardDedupeKey
+// names for that holder and the holder's agent subject, which is what roleForward.msgID in
+// cmd/listener/role_lane.go makes of a Dispatch envelope). Whichever of the two copies arrives
+// second is collapsed by the stream's duplicate window and by the holder's own
 // dedupe key, so the holder takes exactly one, in order, without waiting for the sweep. It needs
 // no NATS grant the outbox does not hold, no change to the lane's cursor and no second publisher.
 //

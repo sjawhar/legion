@@ -1,6 +1,9 @@
 package contracts
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // RoleForwardDedupePrefix starts the dedupe key of a role forward: an envelope sent to a role's
 // holder on the holder's agent subject, its topic still the role's, its dedupe key this prefix and
@@ -16,6 +19,32 @@ var mintedDedupeKey = regexp.MustCompile(MintedDedupeKeyPattern)
 // that comment failed, so a host that already holds the mention drops the copy.
 func AgentSendDedupeKey(sessionID, idempotencyKey string) string {
 	return "agent." + sessionID + "." + idempotencyKey
+}
+
+// RoleForwardDedupeKey is the dedupe key a role forward of a message to holder carries: the
+// message's own key unchanged when that key is already holder's own agent send key
+// (AgentSendDedupeKey, a key beginning agent.<holder>.), and RoleForwardDedupePrefix in front of
+// it for every other key, which is what a role forward has always carried.
+//
+// The exception is there because such a key is one the holder's host has claimed already: the
+// send that minted it - Dispatch's outbox gives the copy of a comment the key of the mention of
+// that session whose send failed - may have landed before the attempt failed, so a copy carrying
+// that key is dropped at that host and the session is shown the comment once, while the prefix
+// would make it a key no host has seen and show the comment a second time. A key naming another
+// session names no claim of this holder's, and an empty holder names no host at all, so both
+// take the prefix.
+//
+// Both forwarders of a role message ask it - the listener's role lane and the drain of a role's
+// kept lane (roleForward.forwarded in cmd/listener/role_lane.go), and Dispatch's outbox, for a
+// route's own forward and for the handover behind a keep (roleForward.forward in
+// internal/dispatch/outbox/role.go) - so one message reaches one holder under one key, and so
+// under one bus.ForwardMsgID of that key and the holder's agent subject, which is what keeps the
+// stream to one stored copy of it however often it is forwarded.
+func RoleForwardDedupeKey(dedupeKey, holder string) string {
+	if holder != "" && strings.HasPrefix(dedupeKey, AgentSendDedupeKey(holder, "")) {
+		return dedupeKey
+	}
+	return RoleForwardDedupePrefix + dedupeKey
 }
 
 // DedupeKeyNamesTheUpstreamEvent reports whether an envelope's dedupe key names its event, so that a
