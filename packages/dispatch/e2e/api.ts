@@ -1,4 +1,8 @@
-import type { EditArtifactInput } from "@legion/contracts";
+import type {
+  CheckResultRecorded,
+  EditArtifactInput,
+  RecordCheckResultInput,
+} from "@legion/contracts";
 import type {
   Actor,
   Agent,
@@ -7,6 +11,8 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactReview,
+  ArtifactReviewState,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -31,6 +37,7 @@ import type {
   HandoffSummary,
   InboxRow,
   Issue,
+  IssueCoverage,
   IssueDetails,
   IssueSummary,
   ItemBlocks,
@@ -250,6 +257,32 @@ export function patchIssue(
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+}
+
+/** `POST /api/v1/issues/{key}/results`: one result of one check, recorded on `issue`, which
+ *  need not be the issue whose Verification document holds the check. The answer carries the
+ *  stored result and the pull-request body line it implies. */
+export function recordCheckResult(
+  issue: string,
+  input: RecordCheckResultInput,
+  options: ApiOptions = { as: "agent" }
+): Promise<CheckResultRecorded> {
+  return request<CheckResultRecorded>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. */
+export function getIssueCoverage(issue: string, options: ApiOptions = {}): Promise<IssueCoverage> {
+  return request<IssueCoverage>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/coverage`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 /** The project list in the server's order: lifecycle status, then rank. */
@@ -632,6 +665,36 @@ export function requestApproval(
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
+    "POST",
+    input,
+    options
+  );
+}
+
+/** `POST /api/v1/artifacts/{id}/plan-reviews`: the plan review's approval of one plan version,
+ *  which is the only way a plan is approved. */
+export function createPlanReview(
+  id: string,
+  version: number,
+  options: ApiOptions = { as: "agent" }
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/plan-reviews`,
+    "POST",
+    { version },
+    options
+  );
+}
+
+/** Reviews the document's latest settled version as a person does from its header, with no
+ *  approval request needed: Approve, or Request changes with a reason. */
+export function reviewArtifact(
+  id: string,
+  input: { state: ArtifactReviewState; reason?: string },
+  options: ApiOptions = {}
+): Promise<ArtifactReview> {
+  return request<ArtifactReview>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
     "POST",
     input,
     options

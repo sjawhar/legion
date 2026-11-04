@@ -109,8 +109,9 @@ env:
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Legion Oh My Pi plugin, seeded as the Envoy one is. scripts/pi-plugin-prepack.sh copies
   # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
-  # there releases whatever its type. Its notices generator and the prepack itself are shipped
-  # build inputs too, so they get the same patch release.
+  # there releases whatever its type. Its notices generator, the prepack itself and patches/ (the
+  # bundle inlines nats.js through envoy-client, with its patch applied) are shipped build inputs
+  # too, so they get the same patch release.
   PI_LEGION_VERSION_ARGS: >-
     --package-dir packages/pi-legion --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/legion-architect/ --patch-path skills/legion-controller/
@@ -119,11 +120,12 @@ env:
     --patch-path skills/ce-simplify-code/
     --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
+    --patch-path patches/
     -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/
     skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/
     skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
-    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh
+    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Go `legion`. The binary embeds its prompts (internal/prompts/roles and go), so a docs:
   # commit there still releases. The notices scripts and the target list are runtime inputs of the
   # release archives and worker image, so any change to one needs a new tag rather than a CI-only
@@ -920,12 +922,15 @@ jobs:
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
     # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's
     # `permissions:` blocks declare, even for the `attest` job this call skips: its workflow-level
-    # block (the build) and its `attest` job's (id-token and attestations: write, for the image's
-    # GitHub attestation). The legion version tag and the release note, which need contents: write,
-    # are worker_image_release below.
+    # block (the build, with actions: read and checks: write for the ci-ok report its build runs
+    # only on ci.yaml's pull_request call) and its `attest` job's (id-token and attestations:
+    # write, for the image's GitHub attestation). The legion version tag and the release note,
+    # which need contents: write, are worker_image_release below.
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
       id-token: write
       attestations: write
     with:
@@ -954,6 +959,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: read
+      checks: write
       id-token: write
       attestations: write
     with:

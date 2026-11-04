@@ -97,8 +97,14 @@ function documentOwnerValidation(
   };
 }
 
-const ARTIFACT_OWNER_AND_SOURCE_RULE =
-  "Exactly one of path or content is required. Exactly one of issue and project is required; with project, artifact names the document.";
+const ARTIFACT_SOURCE_RULE = "Exactly one of path or content is required.";
+const ARTIFACT_OWNER_AND_SOURCE_RULE = `${ARTIFACT_SOURCE_RULE} Exactly one of issue and project is required; with project, artifact names the document.`;
+
+/** Joins the parts of a rule a call broke, so a refusal never names a part the call kept. */
+function brokenParts(parts: ReadonlyArray<readonly [boolean, string]>): string | undefined {
+  const broken = parts.filter(([kept]) => !kept).map(([, message]) => message);
+  return broken.length === 0 ? undefined : broken.join(" ");
+}
 
 const CONTENT_IS_MARKDOWN =
   "content is stored as a Markdown document, which rewrites other text (a JSONL file's lines come back joined into one paragraph)";
@@ -126,12 +132,14 @@ function artifactProblem(value: unknown): string | undefined {
     readonly path?: unknown;
     readonly content?: unknown;
   };
-  if (
-    !artifactOwner.check(value) ||
-    (typeof input.path === "string") === (typeof input.content === "string")
-  ) {
-    return ARTIFACT_OWNER_AND_SOURCE_RULE;
-  }
+  const ownerOrSourceProblem = brokenParts([
+    [artifactOwner.check(value), artifactOwner.message],
+    [
+      (typeof input.path === "string") !== (typeof input.content === "string"),
+      ARTIFACT_SOURCE_RULE,
+    ],
+  ]);
+  if (ownerOrSourceProblem !== undefined) return ownerOrSourceProblem;
   if (typeof input.content !== "string" || typeof input.name !== "string") return undefined;
   const extension = NAME_EXTENSION.exec(input.name.trim())?.[1];
   if (extension === undefined || MARKDOWN_EXTENSION.test(extension)) return undefined;
@@ -139,32 +147,50 @@ function artifactProblem(value: unknown): string | undefined {
 }
 
 const documentEditOwner = documentOwnerValidation(true);
+const PRECONDITION_RULE = "A precondition selects exactly one of document or blocks.";
+
+function preconditionKept(value: unknown): boolean {
+  const input = value as { readonly precondition?: unknown };
+  if (input.precondition === undefined) return true;
+  if (typeof input.precondition !== "object" || input.precondition === null) return false;
+  const precondition = input.precondition as {
+    readonly document?: unknown;
+    readonly blocks?: unknown;
+  };
+  return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
+}
+
+function documentEditProblem(value: unknown): string | undefined {
+  return brokenParts([
+    [documentEditOwner.check(value), documentEditOwner.message],
+    [preconditionKept(value), PRECONDITION_RULE],
+  ]);
+}
+
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    if (!documentEditOwner.check(value)) return false;
-    const input = value as { readonly precondition?: unknown };
-    if (input.precondition === undefined) return true;
-    if (typeof input.precondition !== "object" || input.precondition === null) return false;
-    const precondition = input.precondition as {
-      readonly document?: unknown;
-      readonly blocks?: unknown;
-    };
-    return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
-  },
-  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
+  check: (value) => documentEditProblem(value) === undefined,
+  message: `${documentEditOwner.message} ${PRECONDITION_RULE}`,
+  refusal: (value) =>
+    documentEditProblem(value) ?? `${documentEditOwner.message} ${PRECONDITION_RULE}`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
 const commentOwner = documentOwnerValidation(true);
+const COMMENT_TURN_RULE =
+  "turn requires reply_to_ask: turn says who holds an open ask's thread after the reply. Pass reply_to_ask with the open ask's id, or drop turn.";
+
+function commentProblem(value: unknown): string | undefined {
+  const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+  return brokenParts([
+    [commentOwner.check(value), commentOwner.message],
+    [input.turn === undefined || typeof input.reply_to_ask === "string", COMMENT_TURN_RULE],
+  ]);
+}
+
 const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
-    return (
-      commentOwner.check(value) &&
-      (input.turn === undefined || typeof input.reply_to_ask === "string")
-    );
-  },
-  message: `${commentOwner.message} turn requires reply_to_ask.`,
+  check: (value) => commentProblem(value) === undefined,
+  message: `${commentOwner.message} ${COMMENT_TURN_RULE}`,
+  refusal: (value) => commentProblem(value) ?? `${commentOwner.message} ${COMMENT_TURN_RULE}`,
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
@@ -241,26 +267,36 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
  * issue or document, so the id is all there is.
  */
 const readOwner = documentOwnerValidation(false);
+const READ_OWNER_RULE =
+  "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one.";
+const READ_MESSAGE_RULE =
+  "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.";
+
+/** dispatch_read's refusal: a call with message breaks only the message rule, and a call
+ *  without it only the owner rule. */
+function readProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly message?: unknown;
+    readonly issue?: unknown;
+    readonly project?: unknown;
+    readonly artifact?: unknown;
+    readonly ref?: unknown;
+  };
+  if (typeof input.message !== "string") {
+    return readOwner.check(value) ? undefined : READ_OWNER_RULE;
+  }
+  const alone =
+    input.issue === undefined &&
+    input.project === undefined &&
+    input.artifact === undefined &&
+    input.ref === undefined;
+  return alone ? undefined : READ_MESSAGE_RULE;
+}
+
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
-  check: (value) => {
-    const input = value as {
-      readonly message?: unknown;
-      readonly issue?: unknown;
-      readonly project?: unknown;
-      readonly artifact?: unknown;
-      readonly ref?: unknown;
-    };
-    if (typeof input.message !== "string") return readOwner.check(value);
-    return (
-      input.issue === undefined &&
-      input.project === undefined &&
-      input.artifact === undefined &&
-      input.ref === undefined
-    );
-  },
-  message:
-    "Exactly one of issue and project is required; project alone lists its documents, and with artifact names one. " +
-    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+  check: (value) => readProblem(value) === undefined,
+  message: `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
+  refusal: (value) => readProblem(value) ?? `${READ_OWNER_RULE} ${READ_MESSAGE_RULE}`,
 };
 
 /** Component attachment modes an issue write accepts. */
@@ -1174,7 +1210,7 @@ export const dispatchToolSpecs = [
       "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
-      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
+      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, a typed block's serves and needs under it, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
       "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
@@ -1192,7 +1228,7 @@ export const dispatchToolSpecs = [
       blocks: z
         .boolean()
         .describe(
-          "List the live document's blocks, with each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
+          "List the live document's blocks, with a typed block's serves and needs and each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
         )
         .optional(),
       ref: z
@@ -1222,18 +1258,28 @@ export const dispatchToolSpecs = [
       "nothing, and a different one is refused, since it would rewrite the card the human is " +
       "reading. Approve and Request changes each close the request, so the next call opens a new " +
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
-      "approval goes stale when the document changes outside its decision blocks after it: " +
-      "request approval again once that revision is complete and " +
+      "approval goes stale when the document changes outside its decision blocks after it, until " +
+      "a later version's text is exactly the approved version's again, as when an accidental " +
+      "edit is undone exactly, and no decision block in it was decided since: that version " +
+      "carries the approval and the document reads approved at it, so nothing is requested for " +
+      "it. When the document does not read approved, request approval again once that revision " +
+      "is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
       ", with a one-sentence summary naming what changed since the earlier approval: the card " +
       "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +
       "A human's own answer to a decision block carries the approval to the version it writes when " +
       "that answer is the whole change since the approved version, so nothing is requested for " +
       "it. A new version of a Legion root spec closes its armed design gate until a human " +
-      "approves it; the carried approval reopens it too. " +
+      "approves it; a carried approval reopens it too. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
+      "Refused 409 PLAN_APPROVED_BY_REVIEW on an issue's plan, which its plan review approves " +
+      "(dispatch plan-approve), never a person. " +
+      "On an issue's spec the answer ends with a `Coverage of <name>:` line naming each requirement " +
+      "the spec marks that no check serves, in any document of the issue or of its descendants, or saying " +
+      "the spec marks no requirements; a spec every requirement of which has a check gets no such line. It never " +
+      "names a missing plan task, and a gap refuses nothing. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1249,8 +1295,116 @@ export const dispatchToolSpecs = [
         .describe(
           `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
+      include_verification: z
+        .boolean()
+        .describe(
+          "Ask for the issue's Verification document in the same request, beside this one: one Inbox card names both at their current versions, and the answer records the human's review on each. 409 NO_VERIFICATION_DOCUMENT when the issue has no verification.md. Without it the request names this document alone and records nothing on the Verification document."
+        )
+        .optional(),
     }),
     validation: documentOwnerValidation(true),
+  },
+  {
+    name: "dispatch_plan_approve",
+    example: { issue: "DSP-1", version: 2 },
+    description:
+      "Record the plan review's approval of an issue's plan at the version it reviewed. A plan is " +
+      "approved by that review, never by a person: dispatch request-approval on a plan is refused " +
+      "409 PLAN_APPROVED_BY_REVIEW, so no plan approval ever reaches a human's Inbox. The approval " +
+      "is pinned to the version named, so a later plan version makes it stale and the review runs " +
+      "again. Refused 409 NOT_PLAN_DOCUMENT on any other document, the issue's spec included, and " +
+      "400 INVALID_REVIEW for a version the plan does not have. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      artifact: z
+        .string()
+        .describe("Plan document artifact id, slug, or filename; the issue's plan.md by default.")
+        .optional(),
+      version: z
+        .number({ int: true, min: 1 })
+        .describe("The plan version the review read and approved."),
+    }),
+  },
+  {
+    name: "dispatch_result",
+    example: {
+      issue: "DSP-1",
+      check: "k1",
+      role: "implementer",
+      verdict: "pass",
+      commit: "1111111111111111111111111111111111111111",
+    },
+    description:
+      "Record one result of one check of an issue's Verification document, and print the " +
+      "pull-request body line it implies. The check is named by its block id, or, when two " +
+      "Verification documents in reach share that id, by its canonical reference " +
+      "(dispatch://KEY/artifact/verification-md#b-<id>); 409 CHECK_AMBIGUOUS names them, and an " +
+      "id no Verification document of the issue or of an issue above it holds is 400 " +
+      "UNKNOWN_CHECK. A pass counting any failed, skipped or excluded case contradicts itself " +
+      "and is 400 RESULT_CONTRADICTS. The result is recorded against the check's own issue, so " +
+      "a child's run of a parent's check appears under that check. A closed issue takes a " +
+      "result only for a check whose when is after_merge or default_branch — the production " +
+      "check after the merge — and refuses every other one with 409 ISSUE_CLOSED, as it refuses " +
+      "every other write. Write the printed line into the pull-request body unchanged: it is " +
+      "the one grammar every writer uses, and it carries no link to Dispatch. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      check: z
+        .string()
+        .describe(
+          "The check block's id, or its canonical reference dispatch://KEY/artifact/verification-md#b-<id> when the id is not unique among the issue's Verification document and those of the issues above it."
+        ),
+      role: z
+        .string({ max: 32 })
+        .describe(
+          "Who ran it: implementer, tester, reviewer. At most 32 characters of a-z and -, printed in the pull-request line."
+        ),
+      verdict: z.enum(["pass", "fail"]).describe("Whether the check passed."),
+      commit: z.string().describe("The 40-character lowercase hex commit the check ran at."),
+      surface: z.string().describe("Where a person reaches the change.").optional(),
+      run: z.string().describe("The command that proved it.").optional(),
+      observed: z.string().describe("What the command printed.").optional(),
+      negative_control: z
+        .string()
+        .describe("The deliberately broken input and the refusal seen.")
+        .optional(),
+      failed: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run failed; 0 by default.")
+        .optional(),
+      skipped: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run skipped; 0 by default.")
+        .optional(),
+      excluded: z
+        .number({ int: true, min: 0 })
+        .describe("Cases the run excluded; 0 by default.")
+        .optional(),
+      screenshots: z
+        .array(z.string())
+        .describe(
+          "dispatch:// references to image documents of this issue or of the check's issue."
+        )
+        .optional(),
+    }),
+  },
+  {
+    name: "dispatch_results",
+    example: { issue: "DSP-1" },
+    description:
+      "Print each check of an issue's Verification document with its latest result and whether " +
+      "that result is current. A result is current when it ran at the commit the work stands at " +
+      "— the head of an open pull request of the check's issue, the final head of a merged one, " +
+      "or, for an after_merge or default_branch check, a commit on the repository's default " +
+      "branch — and the check's words have not changed since; older otherwise, and unknown when " +
+      "Dispatch cannot read the repository. A push that moves the pull request's head makes a " +
+      "result older with no write of anyone's: record it again at the new head. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+    }),
   },
   {
     name: "dispatch_artifact",
@@ -1299,11 +1453,17 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      "An issue whose spec marks requirements carries one `Coverage:` line per gap, `Coverage: R3 has no check` or " +
+      "`Coverage: R3 has no plan task` (the second only once the issue has a plan document), counting the `check` and " +
+      "`plan_task` blocks of every document of the issue and of its descendants; a spec that marks none reads " +
+      "`Coverage: the spec marks no requirements`. Nothing is refused for a gap. " +
       `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
       "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
-      "A block read prints `Block:`, `Document:`, `Changed in version:` and `Text:`, then those two sections; a pinned one adds " +
+      "A block read prints `Block:`, `Type:` for a block of a document, `Document:`, every attribute a typed block carries " +
+      "(a `check`'s serves, surface, run, when and negative_control; a `plan_task`'s serves and needs), `Changed in version:` " +
+      "and `Text:`, then those two sections; a pinned one adds " +
       "the block's text at that version and whether it is unchanged, changed or removed since, and an absent block, unpinned, " +
       "reads `No block <id> in <document>.` " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
@@ -1510,11 +1670,14 @@ export const dispatchToolSpecs = [
     description:
       "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " +
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
-      "with dispatch projects. A key that already exists is refused " +
+      "with dispatch projects. When a person asks for a project, make the key from its name. Check the key with " +
+      "dispatch projects. If the key is free, create the project. Ask the person only when the key is in use. " +
+      "A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
       `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
-      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
-      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. When no person ` +
+      "asked for a project and an existing project already covers the work, do not create a project. File an " +
+      "issue in that project with dispatch issue.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
       name: z

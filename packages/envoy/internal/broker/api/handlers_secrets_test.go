@@ -94,12 +94,13 @@ func TestSettingsAnswersTheGCPStore(t *testing.T) {
 }
 
 // rereadsFreely is the broker-wide bucket a row about what a reread *answers* mounts, so that
-// row never meets the production sizing of a bucket it is not about. The production figure
-// (api.DefaultRereadOverallLimit) is a burst of ten refilled one a second, sized for the fleet
-// rather than for a test: a row driving several rereads back to back, and any row that later
-// drives one more, would be answered by a limiter rather than by the handler it is testing, and
-// would go red on a sizing change that was correct. The rows that *are* about the limiter inject
-// a bucket of their own in the same way, with no tokens left in it.
+// row never meets the production sizing of a bucket it is not about. The production figure is
+// the store's whole fleet budget divided by the pods the process counts (api.RereadOverallFor):
+// a burst of ten refilled one a second at two pods, and slower above that. It is sized for the
+// fleet rather than for a test: a row driving several rereads back to back, and any row that
+// later drives one more, would be answered by a limiter rather than by the handler it is
+// testing, and would go red on a sizing change that was correct. The rows that *are* about the
+// limiter inject a bucket of their own in the same way, with no tokens left in it.
 var rereadsFreely = ratelimit.Limit{Every: time.Millisecond, Burst: 100}
 
 func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
@@ -244,18 +245,21 @@ func TestRereadIsRateLimitedPerAddress(t *testing.T) {
 // and by enough that holding it down takes more than one address: the rule is that the address
 // bucket refills at half the rate of the shared bucket THIS PROCESS MOUNTS.
 //
-// It has to be the mounted bucket and not a constant, because cmd/broker mounts
-// api.GCPRereadOverallLimit only under gcp-secret-manager and api.DefaultRereadOverallLimit
-// otherwise: an address limit derived from the Google figure alone makes every AWS deployment
-// pay a fourfold tightening for a Secret Manager quota it never touches, and one derived from
-// the default figure alone leaves a single address able to hold a Secret Manager fleet's budget
-// at zero.
+// It has to be the mounted bucket and not a constant, because no constant is what a process
+// mounts: cmd/broker divides the Secret Manager fleet budget under gcp-secret-manager and the
+// default one otherwise, and each pod divides whichever it has by the pods it counts. An
+// address limit derived from the Google figure alone makes every AWS deployment pay a fourfold
+// tightening for a Secret Manager quota it never touches, one derived from the default figure
+// alone leaves a single address able to hold a Secret Manager fleet's budget at zero, and one
+// derived at a fixed replica count drifts from the bucket the process really runs as the count
+// moves.
 //
 // Retry-After is the observable: it carries the refusing bucket's own Every
 // (ratelimit.RetryAfterSeconds, which every bucket refusal of that package carries), so it says
 // which bucket refused and at what rate, which nothing else in the answer does. The mounted
 // shared bucket is given a depth no row here can reach, so the only refusal this can meet is the
-// address's own.
+// address's own. The two rates it drives are the two stores' sizings at two pods; the relation
+// is the same at every count, since RereadRate moves both buckets together.
 func TestOneAddressNeverOutlastsTheSharedRereadBucket(t *testing.T) {
 	for _, shared := range []time.Duration{time.Second, 4 * time.Second} {
 		t.Run(shared.String(), func(t *testing.T) {

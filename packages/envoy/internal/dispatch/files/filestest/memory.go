@@ -1,7 +1,8 @@
 // Package filestest holds what Dispatch's file tests run against: Memory, the in-memory
-// files.Store of the API, backfill and health-probe tests, and S3, a fake bucket on loopback that
-// files.NewS3 reaches through the AWS SDK's own environment (ServeS3). Nothing a deployment builds
-// imports it.
+// files.Store of the API, backfill and health-probe tests; S3, a fake bucket on loopback that
+// files.NewS3 reaches through the AWS SDK's own environment (ServeS3); and GCS, a fake Cloud
+// Storage bucket on loopback that files.NewGCS reaches through the client options it hands out
+// (ServeGCS). Nothing a deployment builds imports it.
 package filestest
 
 import (

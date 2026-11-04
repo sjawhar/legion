@@ -16,6 +16,13 @@ what the human decides, each as a [decision block](skill://dispatch/SKILL.md#ask
 Never post a second "spec" artifact beside it: `dispatch artifact` with the primary document's name
 replaces the human's document.
 
+Mark each requirement of the spec as a `requirement` block, and write the issue's Verification
+document (`verification.md`) with it: one `check` block per thing that must be proved, each with
+`serves` naming the requirements it serves, its `surface`, its `run`, its `when` and its
+`negative_control`. The human approves both documents in one request (step 4 below), and every
+later role reads the checks: the implementer and the tester record a result against each, and the
+reviewer approves only once every `before_merge` check has a passing result current at the head.
+
 On your first pass over the spec, cut each requirement carried over from an earlier issue's spec or
 decisions that no source of this issue states: those were decided for that issue. This issue's
 sources are the words a person wrote in it, and its `Filed for` line with what that line cites: the
@@ -59,21 +66,26 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    them to answer: give such a point its own decision block first, or take it out of the spec.
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
+   dispatch request-approval --issue <root issue> --include-verification --summary '<what the human is approving> Reviews: <gap result>, <claim result>; <what they do not show>.'
    ```
+
+   `--include-verification` asks for the spec and the Verification document in one request, each
+   at its own current settled version, and the human's answer records a review on each. An issue
+   with no `verification.md` is refused `NO_VERIFICATION_DOCUMENT`, and one whose Verification
+   document has no settled version `NO_VERSION`.
 
    `--summary` says in one to three sentences what the human is approving and nothing else (no
    commentary and no open question), then one sentence with both reviews' results and what they do
    not show, for example `Reviews: no open gap, 14 of 14 claims verified; neither shows that the
    design works once built.` The primary document is the default; the
    command prints `Approval requested for spec.md (document id <UUID>) at version <N> (ask <id>)`.
-5. Register that document version with the daemon:
+5. Register the spec's version with the daemon:
 
    ```ts
    legion({
      op: "register_gate",
      issue: "<root issue>",
-     artifactId: "<UUID>", // the document id the request printed
+     artifactId: "<UUID>", // the spec's document id, which the request printed
      version: <N>, // the version the human is asked to approve
    })
    ```
@@ -82,6 +94,11 @@ When the gate is armed, run this exact sequence before the tree's work starts:
    never the slug or file name you passed in (`spec`, `spec.md`): the daemon recognizes the
    document's approval events by that id alone; the `legion` tool looks a slug or file name up in
    Dispatch and hands the daemon the id.
+
+   The gate records one document. A request naming the spec and the Verification document sends
+   an `artifact.approved` event for each, and the gate opens on the spec's alone, so register the
+   spec's id and version and never the Verification document's: a Verification-only version
+   closes and opens nothing. INFRA-175 is where that changes.
 
 Facts about the request:
 
@@ -124,12 +141,17 @@ reason, and answer it in the spec if the latest version does not already.
 
 Approval is pinned to the spec version: any new version closes the gate again, and no
 `design-approved`-type wake says so; you know from your own edit, or from the `artifact.version`
-event on your issue. The exception is the
-version a human's own answer to a decision block writes when that answer is the whole change since
-the version they approved: Dispatch records an `approved` review in their name at the new version
-and emits `artifact.approved`, and the daemon reopens the gate and sends `design-approved`.
+event on your issue. The exceptions are the version a human's own answer to a decision block
+writes when that answer is the whole change since the version they approved, and a version whose
+text is exactly the text of the version they approved, with no decision block in it decided
+since, such as an accidental edit undone exactly: for either, Dispatch records an `approved`
+review in their name at the new version and emits `artifact.approved`, and the daemon reopens the
+gate and sends `design-approved`. Undo an accidental edit of an approved root spec exactly. When
+the spec then reads Approved at the new version, request nothing; when it does not (a block in
+it was decided since), request approval again with steps 3 to 5.
 
-So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
+So edit an approved root spec only when its Summary, a requirement it marks, a check of its
+Verification document, the tree's scope, or a
 decision a human settled in one of its decision blocks changes. Such a change is a point the human
 has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
 at the end of the section it changes, and add nothing else to the spec. If you edit the block before
@@ -139,7 +161,7 @@ to the version it writes. Once they have answered:
 - When the answer is the whole change, request nothing: the document's chip reads Approved at the
   new version, its reviews dialog shows the review in their name, and the `design-approved` the
   daemon sent opens nothing new. Carry on, and release no wave because of it.
-- When the answer changes the Summary, the Acceptance or the tree's scope, rewrite that text and
+- When the answer changes the Summary, a requirement, a check or the tree's scope, rewrite that text and
   repeat steps 3 to 5 on the new version, with a one-sentence `--summary` naming what changed since
   the earlier approval, then the reviews' sentence (the card shows that approval, `Approved at
   version N on <date> by <who>.`, and its `Show diff` control carries the detail). The rewrite
@@ -150,25 +172,28 @@ to the version it writes. Once they have answered:
 
 A settled decision is the human's. A plan that would overturn one goes back to the planner with the
 decision kept, unless the planner brings evidence the human did not weigh that would change it
-(such as a measurement showing the settled choice cannot meet the Acceptance); then a decision
+(such as a measurement showing the settled choice cannot pass a check); then a decision
 block names the decision and that evidence. A plan never overturns a settled decision on its own.
 
-A design change that leaves the Summary, Acceptance, scope and settled decisions intact (a
+A design change that leaves the Summary, the requirements, the checks, the scope and the settled
+decisions intact (a
 planner's measurement that finds a better way to build the same outcome) goes in the plan (the
 issue's `plan.md` document and the planner's `plan` handoff on the issue), never into the approved spec, even
 where the spec's text describes the older design; the reviewer reads the plan beside the spec.
 
 When a planner's `phase-finished` names a departure from the spec's design, compare it with the
-approved spec. If the Summary, the Acceptance, the scope and every settled decision are unchanged,
+approved spec. If the Summary, the requirements, the checks, the scope and every settled decision
+are unchanged,
 the plan is the record and the tree carries on; otherwise change the root spec and request
 approval again.
 
-Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
-approval. A child issue's spec is never gated.
+Later waves and re-scoping open children toward the same requirements need no spec edit and no new
+approval. A child issue's spec is never gated, and the child's own Verification document is
+written by its architect.
 
 ## A decision block for a read no pod can make
 
-An acceptance criterion sometimes needs evidence from a production or external system before a
+A check sometimes needs evidence from a production or external system before a
 human can approve it: a measurement, a current count, a stored record. First check whether a
 credential this tree's pods carry reaches it: the model route every pod has, and any identity the
 operator's deployment grants pods. Read the pod's own environment (for example `AWS_CONFIG_FILE` or

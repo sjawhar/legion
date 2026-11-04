@@ -407,8 +407,8 @@ func takesStoredMessagesItself(entry session.SessionEntry, storedSeq uint64) boo
 // the session's live entry takes it another way (takesStoredMessagesItself, one skipped delivery),
 // nor when its cached interest names another listener, which delivers it
 // (session.HandleAgentMessage's OwnedElsewhere). Everything else is decoded and delivered: a
-// serving-port or core-path session of this machine, and a session nobody has, for which the path
-// raises its no_holder exception.
+// session of this machine whose entry records neither way of taking it, or whose entry read did
+// not answer, and a session nobody has, for which the path raises its no_holder exception.
 func agentSubjectNeedsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) (needed bool, skipped int) {
 	if entry, err := cfg.sessions.Get(sessionID); err == nil && takesStoredMessagesItself(entry, storedSeq) {
 		return false, 1

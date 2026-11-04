@@ -7,7 +7,8 @@
 # the bundle, the restored seed template), replay-prepare and its prepared templates, and the
 # `reset --replay` that resets database dispatch from one (cmd_reset_replay). Its functions call
 # stack.sh's own helpers (sql, spawn, start_dispatch, build_dispatch_at, loadgen) and common.sh's
-# (die, note, sha256_of, joined_sha256), which bash resolves when they are called, so stack.sh
+# (die, note, sha256_of, joined_sha256, and the part download and bundle verify that cluster.sh
+# shares with it: replay_fetch_parts, replay_get_bundle), which bash resolves when called, so stack.sh
 # sources it before it defines them; its top-level constants read $here and $ROOT, which stack.sh
 # sets before the source line. $here, $ROOT, $BIN, $LOGS, $PGBIN, base_env and BUILT_TREE (set by
 # build_dispatch_at) are stack.sh's (SC2154).
@@ -352,55 +353,6 @@ cmd_replay_manifest() {
         parts: [$s.parts[] | part]} end)}'
 }
 
-# replay_download OUT ISSUE SLUG VERSION: one version of a Dispatch file artifact into OUT, with
-# the caller's DISPATCH_URL and the bearer token in DISPATCH_TOKEN_FILE. stack.sh runs in the
-# caller's environment (only the stack processes start under env -i), and the token reaches curl on
-# its standard input, never on a command line or in this script's output.
-replay_download() {
-  [ -n "${DISPATCH_URL:-}" ] || die "DISPATCH_URL is not set: set it and DISPATCH_TOKEN_FILE to download the replay's parts, or pass --from-dir"
-  [ -r "${DISPATCH_TOKEN_FILE:-}" ] || die "DISPATCH_TOKEN_FILE does not name a readable file: set it to download the replay's parts, or pass --from-dir"
-  local token
-  token=$(<"$DISPATCH_TOKEN_FILE")
-  token=${token//[$'\r\n\t ']/}
-  note "downloading dispatch://$2/artifact/$3 version $4"
-  printf 'Authorization: Bearer %s\n' "$token" |
-    curl -q -fsSL --retry 3 --max-time 900 -H @- -o "$1" "${DISPATCH_URL%/}/api/v1/issues/$2/artifacts/$3/versions/$4"
-}
-
-# replay_fetch_part ENTRY ISSUE FROM_DIR: put a manifest part (its JSON) at $REPLAY_DIR/parts/<file>:
-# kept when its sha256 matches, else copied from FROM_DIR or downloaded, and refused, deleted, when
-# its sha256 differs from the manifest's.
-replay_fetch_part() {
-  local entry=$1 issue=$2 from_dir=$3 file slug version want
-  file=$(jq -er .file <<<"$entry")
-  slug=$(jq -er .slug <<<"$entry")
-  version=$(jq -er .version <<<"$entry")
-  want=$(jq -er .sha256 <<<"$entry")
-  [[ $file =~ ^[A-Za-z0-9._-]+$ ]] || die "the manifest's part file '$file' is not a plain file name"
-  local dst=$REPLAY_DIR/parts/$file
-  if [ -f "$dst" ] && [ "$(sha256_of "$dst")" = "$want" ]; then
-    note "part $file: kept (sha256 matches)"
-    return 0
-  fi
-  local tmp=$dst.tmp
-  rm -f -- "$tmp"
-  if [ -n "$from_dir" ]; then
-    [ -f "$from_dir/$file" ] || die "part $file: not in --from-dir $from_dir"
-    cp -- "$from_dir/$file" "$tmp"
-  elif ! replay_download "$tmp" "$issue" "$slug" "$version"; then
-    rm -f -- "$tmp"
-    die "part $file: the download of dispatch://$issue/artifact/$slug version $version failed"
-  fi
-  local got
-  got=$(sha256_of "$tmp")
-  if [ "$got" != "$want" ]; then
-    rm -f -- "$tmp" "$dst"
-    die "part $file: sha256 $got, the manifest says $want; deleted it"
-  fi
-  mv -f -- "$tmp" "$dst"
-  note "part $file: $(stat -c %s -- "$dst") bytes, sha256 matches"
-}
-
 # drop_prepared_templates: drop every prepared template (dispatch_replay_<16 hex>) and its record.
 drop_prepared_templates() {
   local db
@@ -484,54 +436,15 @@ cmd_replay_get() {
   if [ "$has_seed" = true ]; then
     running postgres || die "Postgres is not running; stack.sh start first (replay-get restores the seed into it)"
   fi
-  local issue=$LOADTEST_REPLAY_ISSUE entry started=$SECONDS
-  mkdir -p -- "$REPLAY_DIR/parts"
-
-  local bundle_parts=()
-  while IFS= read -r entry; do
-    replay_fetch_part "$entry" "$issue" "$from_dir"
-    bundle_parts+=("$REPLAY_DIR/parts/$(jq -r .file <<<"$entry")")
-  done < <(jq -c '.bundle.parts[]' "$manifest")
-  ((${#bundle_parts[@]} > 0)) || die "$manifest lists no bundle parts"
-  local want got
-  want=$(jq -er .bundle.tar_zst_sha256 "$manifest")
-  got=$(joined_sha256 "${bundle_parts[@]}")
-  [ "$got" = "$want" ] || die "the joined bundle parts' sha256 is $got, the manifest's tar_zst_sha256 $want"
-  # bundle.unpacked.json names the joined parts the bundle came from and its bundle.meta.json, so
-  # the same parts over an untouched bundle are not unpacked again.
-  local bundle=$REPLAY_DIR/bundle marker=$REPLAY_DIR/bundle.unpacked.json
-  if [ -f "$marker" ] && [ "$(jq -r .tar_zst_sha256 "$marker")" = "$want" ] && [ -f "$bundle/$BUNDLE_META" ] &&
-    [ "$(jq -r .bundle_meta_sha256 "$marker")" = "$(sha256_of "$bundle/$BUNDLE_META")" ]; then
-    note "bundle at $bundle is already unpacked from these parts; kept"
-  else
-    rm -f -- "$marker"
-    rm -rf -- "$bundle.tmp"
-    note "unpacking the bundle into $bundle"
-    loadgen replay-unpack -out "$bundle.tmp" "${bundle_parts[@]}"
-    rm -rf -- "$bundle"
-    mv -- "$bundle.tmp" "$bundle"
-    jq -n --arg tar "$want" --arg meta "$(sha256_of "$bundle/$BUNDLE_META")" \
-      '{tar_zst_sha256: $tar, bundle_meta_sha256: $meta}' >"$marker"
-  fi
-  local verified
-  verified=$(loadgen replay-verify-bundle -dir "$bundle") || die "the bundle at $bundle does not verify (above)"
-  note "bundle verified: $verified"
-
+  local started=$SECONDS
+  replay_get_bundle "$manifest" "$REPLAY_DIR" "$from_dir" loadgen
   if [ "$has_seed" != true ]; then
     note "the manifest names no seed (seed is null): nothing restored"
     note "replay-get done in $((SECONDS - started)) s"
     return 0
   fi
-  local seed_parts=()
-  while IFS= read -r entry; do
-    replay_fetch_part "$entry" "$issue" "$from_dir"
-    seed_parts+=("$REPLAY_DIR/parts/$(jq -r .file <<<"$entry")")
-  done < <(jq -c '.seed.parts[]' "$manifest")
-  ((${#seed_parts[@]} > 0)) || die "$manifest lists no seed parts"
-  want=$(jq -er .seed.dump_sha256 "$manifest")
-  got=$(joined_sha256 "${seed_parts[@]}")
-  [ "$got" = "$want" ] || die "the joined seed parts' sha256 is $got, the manifest's dump_sha256 $want"
-  restore_replay_seed "$manifest" "${seed_parts[@]}"
+  replay_fetch_parts "$manifest" seed "$REPLAY_DIR/parts" "$from_dir"
+  restore_replay_seed "$manifest" "${REPLAY_PARTS[@]}"
   note "replay-get done in $((SECONDS - started)) s"
 }
 

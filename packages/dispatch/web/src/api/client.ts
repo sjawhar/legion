@@ -70,6 +70,8 @@ import type {
   Issue,
   IssueAskRow,
   IssueAskThreadRow,
+  IssueCheckResults,
+  IssueCoverage,
   IssueDecisions,
   IssueDetails,
   IssueReferenceSummary,
@@ -463,6 +465,16 @@ export function threadReadRequest(threadId: string, readThrough: string): WriteR
     body: { read_through: readThrough },
     method: "PUT",
     path: `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+  };
+}
+
+/** `PUT /api/v1/me/documents/{id}/read`: the person's last read version of a document
+ *  (`putDocumentRead`). */
+export function documentReadRequest(id: string, version: number): WriteRequest<DocumentRead> {
+  return {
+    body: { version },
+    method: "PUT",
+    path: `/api/v1/me/documents/${pathSegment(id)}/read`,
   };
 }
 
@@ -989,6 +1001,20 @@ export class DispatchApiClient {
     );
   }
 
+  /** `GET /api/v1/issues/{key}/results`: the checks of the issue's Verification document in
+   *  document order, each with every result recorded against it from any issue, newest first,
+   *  and each result's currency as the server judged it against the repository. */
+  getIssueResults(key: string): Promise<IssueCheckResults> {
+    return this.json<IssueCheckResults>(`/api/v1/issues/${pathSegment(key)}/results`);
+  }
+
+  /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. The
+   *  server decides the gaps - a requirement with no plan task is no gap until the issue has a
+   *  plan document - so a reader draws its answer rather than judging again. */
+  getIssueCoverage(key: string): Promise<IssueCoverage> {
+    return this.json<IssueCoverage>(`/api/v1/issues/${pathSegment(key)}/coverage`);
+  }
+
   getInbox(project?: string): Promise<InboxRow[]> {
     return this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
   }
@@ -1302,11 +1328,7 @@ export class DispatchApiClient {
   /** Record the caller's last read version of a document: the Spec tab marks each block that
    *  changed since it. */
   putDocumentRead(id: string, version: number, bounds: WriteBounds): Promise<DocumentRead> {
-    return this.put<DocumentRead>(
-      `/api/v1/me/documents/${pathSegment(id)}/read`,
-      { version },
-      bounds
-    );
+    return this.send(documentReadRequest(id, version), bounds);
   }
 
   /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
@@ -1384,8 +1406,12 @@ export class DispatchApiClient {
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
   }
-  getReferences(reference: string): Promise<GraphReferences> {
-    return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  /** The edges at a node; `kind` keeps those of one kind - `part_of` lists a document's blocks,
+   *  which a document's read otherwise leaves out. */
+  getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
+    return this.json<GraphReferences>(
+      pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
