@@ -247,12 +247,18 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	return nil
 }
 
-// settleUnfinished records a hand-over for every child a done root leaves in the workflow at the
-// end of its linger. A reopen inside the linger resumes those children in the old tree instead:
-// lingerExpired is fenced on the root generation, and the durable hand-over record makes a late
-// daemon PATCH no-op when the root came back before its event arrives. Each hand-over keeps the
-// child's phase, gate, phase rows and pull request across a new root generation; promotion starts
-// the phase's role again in that phase. A child finished or parked has no run to carry on.
+// unfinishedHandOvers is every child a done root leaves in the workflow at the end of its linger,
+// each of which the close hands to Legion (handOver). It is read before the close's own writes,
+// because what the close hands over is also what it does not warn about: a decision a person made
+// on one of these children, or on an issue below one, is owed to that child's architect once the
+// child is re-admitted, not left behind by this tree (warnKeptDecisionsOfAClosedTree). A root that
+// did not stay done hands over nothing.
+//
+// A reopen inside the linger resumes those children in the old tree instead: lingerExpired is
+// fenced on the root generation, and the durable hand-over record makes a late daemon PATCH no-op
+// when the root came back before its event arrives. Each hand-over keeps the child's phase, gate,
+// phase rows and pull request across a new root generation; promotion starts the phase's role
+// again in that phase. A child finished or parked has no run to carry on.
 //
 // A child still admitted never started under its tree's design, so it is left where it is — with
 // one exception: one the mirror still shows waiting on an unfinished issue (blockers.Holds)
@@ -265,7 +271,10 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // re-admission is another tree's work arriving rather than its own coming back, so it is no tree
 // taken back either — it is checked, which is what the blocked-root rule reads when the child comes
 // up for admission (blockers.Exempt).
-func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
+func (e *Engine) unfinishedHandOvers(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) ([]record.Issue, error) {
+	if root.Status != "done" {
+		return nil, nil
+	}
 	var unfinished, admitted []record.Issue
 	for _, member := range members {
 		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
@@ -278,17 +287,16 @@ func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Is
 	}
 	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(admitted, nil))
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var handed []record.Issue
 	for _, member := range unfinished {
 		if member.Phase == phase.Admitted && len(blockers.Holds(rows, member)) == 0 {
 			continue
 		}
-		if err := e.handOver(ctx, tx, root, member); err != nil {
-			return err
-		}
+		handed = append(handed, member)
 	}
-	return nil
+	return handed, nil
 }
 
 // handOver writes the durable fence before queuing the one Dispatch PATCH that sets the child todo
@@ -346,8 +354,77 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		}
 	}
 	e.logOnCommit(ctx, "workflow: linger closed the tree", "tree", issue.Key, "generation", issue.Generation, "issues", len(members))
-	if issue.Status == "done" {
-		return intake.Result{}, e.settleUnfinished(ctx, tx, *issue, members)
+	handed, err := e.unfinishedHandOvers(ctx, tx, *issue, members)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if err := e.warnKeptDecisionsOfAClosedTree(ctx, tx, *issue, handed); err != nil {
+		return intake.Result{}, err
+	}
+	for _, child := range handed {
+		if err := e.handOver(ctx, tx, *issue, child); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	return intake.Result{}, nil
+}
+
+// warnKeptDecisionsOfAClosedTree names every decision a person made while nobody in this tree
+// could hear it that the tree's close leaves behind: every row whose issue stands in this tree
+// now, in whatever state — kept for a start or a catch-up to name, claimed by one, or held by the
+// unconfirmed task queued on an architect's claim (Store.ParkedDecisions, whose reading is by the
+// issue each row was decided on). The tree closes for good here, so no start task and no catch-up
+// of it names them to an architect again, and each is one Warn line of its own, written once the
+// close has committed (warnOnCommit), so a row run again after a failed commit writes nothing
+// twice. The controller was told each when it was kept — that is what a person's decision on a
+// tree nobody in it hears reaches (record.RelayParkedDecision's notice) — so the line says where
+// the decision stands rather than that it is lost.
+//
+// A decision this same close hands to a child is no such decision: one made on a member the close
+// hands to Legion (handed) goes with that member into the tree of its own, where it stands under
+// its own issue with nothing to move, and that member's architect is told it at its start. Those
+// are logged as handed over rather than warned about, so the Warn lines name what this close
+// really leaves standing. A member the close leaves behind — one already out of the workflow,
+// below a handed child or not — keeps what was decided on it in this closing tree, and that is a
+// Warn line.
+func (e *Engine) warnKeptDecisionsOfAClosedTree(ctx context.Context, tx pgx.Tx, root record.Issue, handed []record.Issue) error {
+	goesWithAChild := make(map[string]bool, len(handed))
+	for _, child := range handed {
+		goesWithAChild[child.Key] = true
+	}
+	kept, err := e.store.ParkedDecisions(ctx, tx, root.Key)
+	if err != nil {
+		return err
+	}
+	for _, decision := range kept {
+		e.keptDecisionOfAClosedTree(ctx, root.Key, decision.Ref, decision.Issue, keptDecisionStands(decision), goesWithAChild)
+	}
+	return nil
+}
+
+// keptDecisionStands names, for the close's line, where a decision the closing tree still owes
+// stands now: held by the unconfirmed task queued on an architect's claim, claimed by a start or
+// a catch-up that has not settled it, or kept for the next one to name.
+func keptDecisionStands(decision record.ParkedDecision) string {
+	switch {
+	case decision.HeldBy.Claim != "":
+		return "held by its architect's unconfirmed task"
+	case decision.ClaimedBy != 0:
+		return "claimed by a start or a catch-up"
+	default:
+		return "kept for its issue's tree"
+	}
+}
+
+// keptDecisionOfAClosedTree writes the one line this decision gets: the Warn for a decision the
+// close leaves standing, and an Info for one that goes with a child the same close hands over,
+// which names the child's own architect's start as what tells it.
+func (e *Engine) keptDecisionOfAClosedTree(ctx context.Context, root, ref, issue, where string, goesWithAChild map[string]bool) {
+	if goesWithAChild[issue] {
+		e.logOnCommit(ctx, "workflow: the tree closed owing a person's decision; it goes to the architect of the child this close handed to Legion",
+			"ref", ref, "root", root, "issue", issue, "where", where)
+		return
+	}
+	e.warnOnCommit(ctx, "workflow: the tree closed while it still owed a person's decision to an architect; the controller already has its parked-decision notice",
+		"ref", ref, "root", root, "issue", issue, "where", where)
 }

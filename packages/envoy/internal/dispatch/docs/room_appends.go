@@ -127,7 +127,7 @@ type BrowserUpdate struct {
 // appends, and stay with their own updates' calls otherwise. The version returned is the last the
 // flush appended, zero when it appended none.
 func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
-	_, err := p.appendRoomTx(ctx, room, flush, through, credit, nil)
+	_, err := p.appendRoomTx(ctx, room, flush, through, credit, nil, true)
 	if err != nil || len(flush.versions) == 0 {
 		return 0, err
 	}
@@ -140,6 +140,12 @@ func (p *PgVersioned) AppendRoomFlush(ctx context.Context, room string, flush *R
 // the same transaction a room's batch does, with the updates given rather than read off the room's
 // queue, and is gated on the room cursor ctx is marked with, if any.
 func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
+	return p.appendUpdates(ctx, room, updates, true)
+}
+
+// appendUpdates is AppendUpdatesWithCredit's append, with owes, whether the transaction marks the
+// document owing a settlement: a parked append writes no owed row (AppendParkedUpdate).
+func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []BrowserUpdate, owes bool) (persistence.Version, error) {
 	if len(updates) == 0 {
 		return 0, fmt.Errorf("append document updates: no update to append")
 	}
@@ -148,7 +154,7 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 			return 0, err
 		}
 	}
-	return p.appendRoomTx(ctx, room, nil, 0, nil, updates)
+	return p.appendRoomTx(ctx, room, nil, 0, nil, updates, owes)
 }
 
 // appendRoomTx is the transaction a room's updates are stored in: it holds the room's in-process
@@ -168,9 +174,10 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 // What it stores is flush's run through `through`, read under the document's lock once the first
 // pipeline holds it (Service.flushRun), or, for a nil flush, given, whose credits are held at
 // their versions once the commit lands and land, committed or not, with credit's; first is then
-// the version given's first update took. A run that holds nothing commits nothing. Any database
+// the version given's first update took. owes is whether the transaction marks the document
+// owing a settlement (appendWrites). A run that holds nothing commits nothing. Any database
 // error rolls back what is open and still releases the session lock, as lockRoom's does.
-func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit, given []BrowserUpdate) (first persistence.Version, err error) {
+func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit, given []BrowserUpdate, owes bool) (first persistence.Version, err error) {
 	conn, ctx, release, err := p.holdRoom(ctx, room, true, func(ctx context.Context) (*pgxpool.Conn, error) {
 		appends, err := p.store.Pool.RoomAppends()
 		if err != nil {
@@ -253,7 +260,7 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 	if len(updates) == 0 {
 		return 0, nil
 	}
-	statements, last, err := p.appendWrites(room, head, updates)
+	statements, last, err := p.appendWrites(room, head, updates, owes)
 	if err != nil {
 		return 0, err
 	}

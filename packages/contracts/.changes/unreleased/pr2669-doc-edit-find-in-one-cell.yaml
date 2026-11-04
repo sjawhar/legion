@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The `doc-edit` description says a find or quote anchor stays inside one block, and in a table inside one cell, that several cells change with one operation per cell in the same batch, and that an anchor names one cell''s text. It says a find opening with a list marker that matches no text as written selects an item of that kind of list whose text starts with the rest, a task box after the marker selecting only a task item in that state, and that a `with` carrying the same kind of marker replaces the item''s text under its own number.'
-time: 2026-11-02T00:00:00Z
-custom:
-    Issue: pr2669

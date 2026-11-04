@@ -333,9 +333,10 @@ publish that was not reached, labelled `reason`. `denied` is a publish NATS refu
 server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
 forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
 kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
-holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the
-stored copy - and `failed` any other failure. A denied publish also logs
-`dispatch outbox: publish event` at ERROR, naming the subject.
+holder's receipt - and `failed` any other failure. A holder whose entry an earlier listener
+stored with a port is counted on the stream's acknowledgement of the stored copy, until that
+entry lapses. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the
+subject.
 
 ## Behind a proxy
 

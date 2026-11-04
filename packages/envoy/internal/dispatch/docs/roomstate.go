@@ -83,6 +83,12 @@ type roomState struct {
 	// are zero again (countsFellLocked), or when the record is handed over with its counts
 	// (handOverFailedRoomLocked). Every place either count falls tells countsFellLocked.
 	idle wakeSignal
+	// parked are the parked bytes of commits that parked something and changed nothing, which no
+	// OnUpdate hands to the room's persistence (classifyDrained). They wait here, with the cursor
+	// of the room instance that parked them, until a drainer that holds no replica lock and no
+	// document lock stores them (storeParked): a drain can run under a settlement's document lock,
+	// and the store takes that lock.
+	parked []parkedBytes
 	// shadow is what the latest committed live write left the room to measure again the classes
 	// of the browser updates stored after its own (roomShadow), nil while none is left.
 	shadow     *roomShadow
@@ -366,12 +372,19 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 // open writer, a running or armed settlement, a latest edit source no settlement has read, a
 // failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
 // browser, a document socket's admission (admitting), an update the room's persistence has not
-// taken or appended, and an in-flight credit whose append has not landed. Its caller holds
-// state.mu.
+// taken or appended, a commit's parked bytes not yet stored, and an in-flight credit whose append
+// has not landed. Its caller holds state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
 		!state.unsettled && state.failed == nil && len(state.connected) == 0 && state.admitting == 0 &&
-		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
+		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0 &&
+		len(state.parked) == 0
+}
+
+// parkedBytes is one commit's parked bytes and the cursor of the room instance that took them.
+type parkedBytes struct {
+	update []byte
+	cursor *roomCursor
 }
 
 // queueUpdateClass records what the room's update observer read off one update, for the
@@ -438,10 +451,10 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (*queuedClass, 
 // findUpdateClassLocked is the class recorded for update that no call has taken yet, nil for
 // none. The class is the one recorded with the very slice update is (sameUpdate): ygo hands the
 // room's observer and its persistence the slice it encoded at the commit, so that is the same
-// commit, where equal bytes need not be - two commits that change nothing encode alike, and each
-// takes its own class. Only an update no queued class holds the slice of - a copy, as a test can
-// hand on - falls back to the first class with the same bytes. Its caller holds the queue's
-// state.mu.
+// commit, where equal bytes need not be - two commits can encode alike, a browser's deletion and
+// a repair's of the same items, and each takes its own class. Only an update no queued class
+// holds the slice of - a copy, as a test can hand on - falls back to the first class with the
+// same bytes. Its caller holds the queue's state.mu.
 func findUpdateClassLocked(queue []*queuedClass, update []byte) *queuedClass {
 	for _, class := range queue {
 		if !class.handed && sameUpdate(class.update, update) {
@@ -457,9 +470,9 @@ func findUpdateClassLocked(queue []*queuedClass, update []byte) *queuedClass {
 }
 
 // sameUpdate reports whether queued, the update a class holds, is update, the one its caller was
-// handed: the very slice, not equal bytes. Two commits that change nothing encode alike, so bytes
-// cannot tell one from the other; the slice can, since ygo hands every observer of one commit the
-// slice it encoded for it.
+// handed: the very slice, not equal bytes. Two commits can encode alike - a browser's deletion
+// and a repair's of the same items - so bytes cannot tell one from the other; the slice can,
+// since ygo hands every observer of one commit the slice it encoded for it.
 func sameUpdate(queued, update []byte) bool {
 	return len(queued) == len(update) && len(queued) > 0 && &queued[0] == &update[0]
 }

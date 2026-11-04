@@ -195,6 +195,17 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 	return p.AppendUpdatesWithCredit(ctx, room, []BrowserUpdate{{Update: update, ContentChanged: true}})
 }
 
+// AppendParkedUpdate stores a room's parked bytes - what a peer's update kept but could not
+// integrate, since it waits for an edit the room has not received (storeParked) - as one update
+// with no class, no credit and no pending authors, and without marking the document owing a
+// settlement: they change nothing a settlement reads, and the commit that later integrates them
+// marks the document owed itself. It runs the transaction a room's batch of one does
+// (appendUpdates), so it is gated on the room cursor ctx is marked with and announces the change
+// as any append does.
+func (p *PgVersioned) AppendParkedUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	return p.appendUpdates(ctx, room, []BrowserUpdate{{Update: update}}, false)
+}
+
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 //

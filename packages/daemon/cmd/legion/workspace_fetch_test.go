@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -484,6 +485,7 @@ func (v *issueVolume) advanceRemote(t *testing.T) string {
 		// The clone creates work, so every command in the run names its parent as the directory
 		// it runs in rather than inheriting the test process's.
 		command.Dir = scratch
+		command.Env = fixtureenv.Isolated(t.TempDir())
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v\n%s", strings.Join(argv, " "), err, output)
 		}
@@ -503,6 +505,7 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	// The clone creates the cache, so it runs in the scratch directory holding it rather than in
 	// the directory the test process happens to have.
 	clone.Dir = scratch
+	clone.Env = fixtureenv.Isolated(t.TempDir())
 	if output, err := clone.CombinedOutput(); err != nil {
 		t.Fatalf("clone the cache: %v\n%s", err, output)
 	}

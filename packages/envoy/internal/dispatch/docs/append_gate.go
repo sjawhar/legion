@@ -156,7 +156,7 @@ func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room strin
 	if err != nil {
 		return 0, err
 	}
-	statements, version, err := p.appendWrites(room, head, updates)
+	statements, version, err := p.appendWrites(room, head, updates, true)
 	if err != nil {
 		return 0, err
 	}
@@ -197,12 +197,17 @@ const appendUpdatesStatement = `
 // the same updates leave appended one at a time. A caller runs the statements in its transaction
 // (writeStatement.exec) or queues them into the batch it commits with (writeStatement.queue).
 //
+// owes is whether the document owes a settlement from these updates. It is false for a room's
+// parked bytes alone (AppendParkedUpdate), which change nothing a settlement reads and credit
+// nobody: they write no owed row and no pending authors, and the commit that later integrates
+// them marks the document owed itself.
+//
 // Each update's credit is taken here (UpdateCredit.take), so the caller holds the document's
 // advisory lock from before the gate until the transaction ends. The owed row is taken with the
 // write, so a route that goes on to append an event (an upload, issue creation) holds it before
 // its event, as an answer marking this document a copy owed does (owedCopiesOf);
 // Ledger.Commit's later recordLatestEditSource then waits on nothing.
-func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpdate) ([]writeStatement, persistence.Version, error) {
+func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpdate, owes bool) ([]writeStatement, persistence.Version, error) {
 	if len(updates) == 0 {
 		return nil, 0, errors.New("append document updates: no update to append")
 	}
@@ -230,10 +235,6 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 	if err != nil {
 		return nil, 0, err
 	}
-	owedStatement, err := updateOwedStatement(room, owed)
-	if err != nil {
-		return nil, 0, err
-	}
 	statements := []writeStatement{{
 		sql: appendUpdatesStatement,
 		// The document is named in doc_compaction_owed, the documents the compaction sweep reads
@@ -241,7 +242,15 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 		// first row has nothing to fold into, and a document already named stays as it is.
 		args: []any{room, notice, room, versions, contents, classes, head > 0 || len(updates) > 1},
 		what: "append document update",
-	}, owedStatement}
+	}}
+	if !owes {
+		return statements, persistence.Version(last), nil
+	}
+	owedStatement, err := updateOwedStatement(room, owed)
+	if err != nil {
+		return nil, 0, err
+	}
+	statements = append(statements, owedStatement)
 	if len(authors) > 0 {
 		upsert, err := pendingAuthorsStatement(room, authors)
 		if err != nil {

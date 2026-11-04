@@ -22,12 +22,6 @@ import (
 type roomInstance struct {
 	hold   roomHold
 	cursor roomCursor
-	// loadedHead is the head the instance's load read (roomLoad.head), the version through which
-	// the document it loaded holds every stored update: the load folds the stored history through
-	// that head (servicePersistenceAdapter.LoadDoc, PgVersioned.Load). It is not the cursor's
-	// start, which also folds in the versions took recorded while the load ran - those are durable,
-	// but not in the loaded document. Set once, when the load starts the instance (roomLoad.start).
-	loadedHead int64
 	// resident is the token of the load this instance stands for, which the bytes of every update
 	// the instance commits count against (classifyDrained, queueUpdateClass), so the unload that
 	// ends the token takes them back (residentLoad). Set once, where the instance is kept (keepInstance).
@@ -163,7 +157,7 @@ func (load *roomLoad) start() (instance *roomInstance, recheck func()) {
 		}
 	}
 	load.appended = nil
-	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}, loadedHead: load.head}
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}}
 	if decide, notice := load.recheck, load.noticed; decide != nil && notice.Head != through {
 		recheck = func() { decide(notice) }
 	}
