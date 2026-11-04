@@ -414,42 +414,19 @@ func (p *Population) parkedSpans(issue *Issue) []Span {
 	})
 }
 
-// queuedSpans is the time an issue spent back in the queue: "any time the issue's observed phase
-// is `admitted` after it first left `admitted`". Before observations it is none, which is what
-// this answers for an issue the sampler never saw, since the parked subtraction already covers
-// the daemon's own parking.
+// queuedSpans is the issue's queue time, and there is one definition of it: "every observed
+// stretch in which the issue's phase is `admitted` and it holds no slot, whenever it falls. Work
+// time to merge and every bar of phase time subtract the same queue time. A root in `admitted`
+// that holds a slot is in design, not in the queue" (the spec's "Rule details — Queue time, one
+// definition"). It is the phase timeline's own `queued` spans, so the work time and the bars
+// cannot read it two ways and the seven bars of an issue add up to its work time on either
+// timeline.
+//
+// Before observations it is none: the timeline the event log draws holds no queued phase, and
+// the parked subtraction already covers the daemon's own parking.
 func (p *Population) queuedSpans(issue *Issue) []Span {
-	marks := issue.Observed[legion.FieldPhase]
-	end := p.issueEnd(issue)
-	var left time.Time
-	var departed bool
-	var spans []Span
-	for index, mark := range marks {
-		phase := legion.JSONString([]byte(mark.Value))
-		if phase == "" {
-			continue
-		}
-		if !departed {
-			if phase != phaseAdmitted {
-				left, departed = mark.At, true
-			}
-			continue
-		}
-		if phase != phaseAdmitted {
-			continue
-		}
-		span := Span{From: mark.At, To: end}
-		if index+1 < len(marks) {
-			span.To = marks[index+1].At
-		}
-		if span.From.Before(left) {
-			span.From = left
-		}
-		if span.Duration() > 0 {
-			spans = append(spans, span)
-		}
-	}
-	return normalize(spans)
+	phases, _ := p.Phases(issue)
+	return phaseSpansOf(phases, phaseQueued)
 }
 
 // markSpans is the stretches in which a field's recorded value satisfies holds, from the marks the

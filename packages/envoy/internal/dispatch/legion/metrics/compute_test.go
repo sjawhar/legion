@@ -7,9 +7,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
-// TestNoQueueOrParkedHourEntersTheWorkTime: the work time runs from the issue's first worker event
-// to its close, less the hours it sat in backlog or icebox and the hours its observed phase went
-// back to `admitted` after it had left it.
+// TestNoQueueOrParkedHourEntersTheWorkTime: the work time runs from the issue's first worker
+// event to its close, less the hours it sat in backlog or icebox and the hours its observed
+// phase was `admitted` with no slot held.
 func TestNoQueueOrParkedHourEntersTheWorkTime(t *testing.T) {
 	issue := newIssue("INFRA-1").worked("implementer", hour(0)).closedAt(hour(10)).
 		statusAt(hour(0), "in_progress").
@@ -32,10 +32,12 @@ func TestNoQueueOrParkedHourEntersTheWorkTime(t *testing.T) {
 	if report.WorkTime.MedianHours != 7 {
 		t.Errorf("the median work time = %g, want 7", report.WorkTime.MedianHours)
 	}
-	// An issue the queue held before it ever left `admitted` is parked time, not queued time: the
-	// first stretch of admitted is the wait for a slot, which no metric counts twice.
-	if queued := totalOf(fixture(hour(-24), hour(24), issue).queuedSpans(issue)); queued.Hours() != 1 {
-		t.Errorf("the queued spans total %v, want the one hour after it first left admitted", queued)
+	// Queue time is every observed stretch in `admitted` with no slot, whenever it falls (the
+	// spec's "Rule details — Queue time, one definition"), so this issue's is three hours: the
+	// two before it was ever given work and the one it went back for. Only the second is inside
+	// the work time, which is why the row above reports one.
+	if queued := totalOf(fixture(hour(-24), hour(24), issue).queuedSpans(issue)); queued.Hours() != 3 {
+		t.Errorf("the queued spans total %v, want the three hours the issue was admitted holding no slot", queued)
 	}
 }
 
