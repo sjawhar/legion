@@ -362,6 +362,20 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
 
 
+# The four packages the test job's race step runs, and which its plain step therefore leaves out.
+# One list: both step texts below are built from it, and check-ci-filters.sh fails when either step
+# in ci.yaml differs from the text built here, so the two steps cannot name different sets.
+DAEMON_RACE_PACKAGES = ["internal/daemon", "internal/record", "internal/sessionproxy", "internal/launcher"]
+DAEMON_RACE_STEP = "Test the concurrent packages under the race detector"
+DAEMON_RACE_PKGS = [f"./{p}/" for p in DAEMON_RACE_PACKAGES]
+DAEMON_RACE_TEXT = "go test -count=1 -race -timeout 30m " + " ".join(DAEMON_RACE_PKGS)
+DAEMON_PLAIN_STEP = "Test the Go daemon"
+DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
+DAEMON_PLAIN_SCRIPT = f"""\
+set -o pipefail
+go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
+
+
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
 DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
@@ -392,14 +406,19 @@ GATES = [
     ], reads=CI_SELF + setup_go("typecheck", f"{DAEMON}/go.mod")),
 
     gate("test", "test", runs=[
-        step_run("test", "Test the Go daemon", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
-        step_run("test", "Test the concurrent packages under the race detector",
-                 "go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/",
-                 DAEMON, ["./internal/daemon/", "./internal/record/", "./internal/sessionproxy/", "./internal/launcher/"], race=True),
+        step_run("test", DAEMON_RACE_STEP, DAEMON_RACE_TEXT, DAEMON, DAEMON_RACE_PKGS, race=True),
         script_run("scripts/e2e/stage1-skeleton.sh", 'go build -o "$work/legion" ./cmd/legion', at("test", "Stage 1 live proof"),
                    DAEMON, ["./cmd/legion"], mode="build"),
         script_run("scripts/e2e/lib/held-port.test.ts", 'const build = Bun.spawnSync(["go", "build", "-o", listener, "./cmd/listener"], {',
                    at("test", "bun test scripts/e2e/lib"), ENVOY, ["./cmd/listener"], mode="build"),
+    ], exact=[
+        # check-ci-filters.sh reduces only a one-line go test, so the step's whole script is
+        # pinned, as the envoy-go unit step's is. A Run cannot name "./... but the four", so the
+        # entry declares the superset ./..., as the envoy-go unit step's does; the race step's Run
+        # above is what claims the four.
+        pinned_step("test", DAEMON_PLAIN_STEP, DAEMON, DAEMON_PLAIN_SCRIPT, [
+            (DAEMON, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
+        ]),
     ], reads=CLAUDE_ENVOY_BUILD + reads(
         (".github/scripts/*", f"{at('test', 'Test release scripts')} and the steps after it: each .github/scripts/*.test.sh sources "
                               "test-lib.sh and runs its checker (with workflow_paths.py, check-pr-text.sh, ci_filter_coverage.py, "
