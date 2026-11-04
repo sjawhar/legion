@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -461,10 +462,22 @@ func drainPool(t *testing.T, dsn string) *pgxpool.Pool {
 // seedDrainProject copies in drainRunning slotted roots implementing, each with a child
 // implementing, and done trees up to drainRecords records, every record with its Dispatch mirror
 // row, in one transaction of bulk copies.
+//
+// Each running root's tree gets its lifecycle row open under the workflow, because that row is
+// what says a tree runs: an issue of a tree whose lifecycle is not open under the workflow
+// belongs to no live tree, so the admission pass takes its slot and then takes the root out of
+// the workflow (admit's unslotted). No daemon writes a root into a worker phase without the row
+// — admission opens it when it promotes the root — and the one store that ever held that shape,
+// a pre-release one, gets the row from the migration that introduced this rule. So a fixture
+// that seeds a running tree writes the row itself, as the migration would.
 func seedDrainProject(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	admitted := time.Date(2026, 10, 28, 8, 0, 0, 0, time.UTC)
-	var issues, mirror, slots [][]any
+	token, err := claim.ProjectToken(drainProject)
+	if err != nil {
+		t.Fatalf("the project token of %s: %v", drainProject, err)
+	}
+	var issues, mirror, slots, lifecycles [][]any
 	add := func(key, tree string, parent *string, at phase.Phase, status string) {
 		issues = append(issues, []any{key, tree, drainProject, key, parent, string(at), int64(1), status, status, "M", true, int64(1), drainRepo, "main", drainRepo})
 		mirror = append(mirror, []any{key, drainProject, status, []string{}, int64(1)})
@@ -474,6 +487,7 @@ func seedDrainProject(t *testing.T, pool *pgxpool.Pool) {
 		add(root, root, nil, phase.Implementing, "in_progress")
 		add(drainChild(i), root, &root, phase.Implementing, "in_progress")
 		slots = append(slots, []any{root, i, admitted})
+		lifecycles = append(lifecycles, []any{token, root, int64(1), "workflow"})
 	}
 	for tree := 0; len(issues) < drainRecords; tree++ {
 		root := fmt.Sprintf("LEGION-%d", 10_000+tree*(1+drainDoneChildren))
@@ -492,6 +506,7 @@ func seedDrainProject(t *testing.T, pool *pgxpool.Pool) {
 				"last_dispatch_seq", "repo", "default_branch", "github_repo"}, issues},
 			{"dispatch_issues", []string{"key", "project", "status", "blockers", "dispatch_seq"}, mirror},
 			{"slots", []string{"issue", "index", "admitted_at"}, slots},
+			{"tree_lifecycles", []string{"project", "tree", "epoch", "authority"}, lifecycles},
 		} {
 			if _, err := tx.CopyFrom(context.Background(), pgx.Identifier{table.name}, table.columns, pgx.CopyFromRows(table.rows)); err != nil {
 				return fmt.Errorf("copy %d rows into %s: %w", len(table.rows), table.name, err)
