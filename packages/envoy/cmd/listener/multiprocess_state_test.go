@@ -25,16 +25,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// mpLineWith is the first line of output containing every one of parts, or "".
-func mpLineWith(output string, parts ...string) string {
-	for line := range strings.SplitSeq(output, "\n") {
-		if !slices.ContainsFunc(parts, func(part string) bool { return !strings.Contains(line, part) }) {
-			return line
-		}
-	}
-	return ""
-}
-
 // swallowNextAck has the pod's relay swallow the next acknowledgement the pod sends the durable
 // (nats.go's "+ACK"), and everything the pod sends after it on that link, so the pod handles a
 // message to its end and the durable never hears it. The returned func waits for that ack.
@@ -186,9 +176,9 @@ func mpNextException(t *testing.T, subscription *natsgo.Subscription, within tim
 // acknowledgement reaches the server (the relay swallows it). The standby takes over, restarts
 // S's consumer at its ack floor and is handed that message again: nothing says S took it, since
 // the reply and the acknowledgement rode the one connection that died with the pod, so it is
-// sent once more under the same event id. That is the one repeat a hard take-over allows
-// (cmd/listener/README.md), and what this row refuses is a second one and a repeat of anything
-// else.
+// sent once more under the same event id. A restart sends again every frame above the ack floor
+// (cmd/listener/README.md, "When a session can see a message twice"), and here that is this one
+// message; what this row refuses is a second repeat of it and a repeat of anything else.
 func TestTwoPodsRepeatAtMostOnceWhatAKilledPodDelivered(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -219,7 +209,7 @@ func TestTwoPodsRepeatAtMostOnceWhatAKilledPodDelivered(t *testing.T) {
 // within the hard take-over bound of the kill (a repeat with the same event id is allowed; the
 // held frame was never answered). Before INFRA-557 the durable's 60 s ack wait keeps the message
 // from the standby past that bound.
-func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
+func TestTwoPodsDeliverWhatAKilledPodOnlyAttempted(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)

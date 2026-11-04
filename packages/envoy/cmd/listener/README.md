@@ -344,12 +344,14 @@ standby answering `/v1`, answers as the active pod would:
 - **Delivery ledger** (`internal/dedupe`, `delivery.<durable>.<32 hex of sha256(dedupe key)>.<session>`
   in `envoy_listener`): these ask it, and nothing else does — a role-lane forward, the kept
   lane's drain of a role's stored copies (`keptRoleForwardAttempt`), a fan-out refusal, an
-  unplaceable agent delivery's give-up, the delivery of a message a session reads on its own NATS
-  subscription, and the publish route's confirmation of a send the recipient answered. Before any
-  of them, a pod records the pair attempted, and once it lands, delivered: a pair another pod
-  delivered is not delivered again, and a refusal or a give-up another pod reported is not
-  reported twice. The relay of a session's own consumer asks it for nothing ("When a session can
-  see a message twice" below).
+  unplaceable agent delivery's give-up, an agent-subject delivery whose route to the session
+  failed, which it reports `delivery_failed`, the delivery of a message a session reads on its
+  own NATS subscription, and the publish route's confirmation of a send the recipient answered.
+  Before any of them, a pod records the pair attempted, and once it lands, delivered: a pair
+  another pod delivered is not delivered again, and a refusal or a give-up another pod reported
+  is not reported twice. That failed route's ask is no best-effort one: while the ledger cannot
+  answer, the message is NAKed and the failure retried every 30 s. The relay of a session's own
+  consumer asks it for nothing ("When a session can see a message twice" below).
   A pod skips a pair as `listener attempt-dedupe skip` only for an attempt it holds itself:
   one whose forward may still be running (less than 35 s old and not settled), or one a delivery
   kept (`dedupe.Ledger.Keep`: a give-up, a fanout refusal) for 5 minutes. An attempted record of
@@ -390,10 +392,11 @@ standby answering `/v1`, answers as the active pod would:
   - a receive term ends and the pod that takes over starts the session's relay. The stopping
     relay has `relaySettleGrace` (750 ms) to hear a `done` and ack the frame on it, and the
     successor waits `relayFormerSettle` (1 s) before it restarts, so a `done` that arrives inside
-    the grace costs nothing. A frame still unwritten when the grace ends is in doubt
-    (`session relay left a frame in doubt`), whether or not its `received` came back: the session
-    answers `received` once it decodes a frame and `done` once its host wrote it, and only `done`
-    says the message landed;
+    the grace is acked in time to lift the ack floor as far as the frames still held below it
+    allow; every frame left above that floor is sent again, as above. A frame still unwritten
+    when the grace ends is in doubt (`session relay left a frame in doubt`), whether or not its
+    `received` came back: the session answers `received` once it decodes a frame and `done` once
+    its host wrote it, and only `done` says the message landed;
   - its session-consumer link drops and comes back. The frame's reply and the consumer's
     acknowledgement ride that one link, so a frame answered under the drop was recorded nowhere,
     and the relay restarts at the ack floor as soon as the link is back;

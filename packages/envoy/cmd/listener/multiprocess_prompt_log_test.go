@@ -1,6 +1,6 @@
 //go:build multiprocess
 
-// The accessors of the two-pod suite's prompt log (mpPromptLog, kill_allowance_test.go) that
+// The accessors of the two-pod suite's prompt log (mpPromptLog, prompt_log_test.go) that
 // only the tagged harness and its rows read. The log's type and its counts, and the
 // exactly-once check the rows end on, stay outside the tag, so envoy-go's untagged unit run
 // exercises that check; these are under it because a build without it calls none of them.

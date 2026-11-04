@@ -172,9 +172,11 @@ type sessionRelays struct {
 	pauseMax   time.Duration
 	// formerSettle is how long a former holder that released the lease may still be settling the
 	// frames it had unanswered, counted from this pod's acquisition (lease.FormerSettleWait): a
-	// relay waits it out before it restarts a session's consumer at its ack floor, so a frame
-	// the stopping pod is still acking is not published a second time. Nil for a listener
-	// without a lease, and in a rig that takes nothing over, which wait for nothing.
+	// relay waits it out before it restarts a session's consumer at its ack floor, so the acks
+	// the stopping pod is still writing have moved that floor as far as it will go before the
+	// restart reads it. A restart sends again every frame left above the floor (the README's
+	// "When a session can see a message twice"). Nil for a listener without a lease, and in a
+	// rig that takes nothing over, which wait for nothing.
 	formerSettle func() time.Duration
 
 	ctx    context.Context

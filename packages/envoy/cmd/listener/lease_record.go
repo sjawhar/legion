@@ -202,8 +202,9 @@ func (l *lease) FormerHolder(boot string) (bool, time.Duration) {
 // what it had in hand, counted from this term's acquisition: what is left of relayFormerSettle,
 // and zero when every former boot was taken over by force, which settles nothing, and zero for a
 // pod holding no term. A relay waits it out before it restarts a session's consumer at its ack
-// floor, so a frame the stopping pod is still acking is not published a second time
-// (sessionRelays.relay).
+// floor, so the acks the stopping pod is still writing have moved that floor as far as it will
+// go before the restart reads it; a restart sends again every frame left above it (the README's
+// "When a session can see a message twice", sessionRelays.relay).
 func (l *lease) FormerSettleWait() time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()

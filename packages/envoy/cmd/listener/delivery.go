@@ -137,7 +137,7 @@ type deliveryMessage struct {
 	// subject.
 	msg *nats.Msg
 	// ctx is a durable message's handling context (durableReceiver): the receiver cancels it when
-	// a shutdown's in-flight grace runs out, which aborts a prompt in flight. Nil on the core lanes.
+	// a shutdown's in-flight grace runs out, which aborts a delivery in flight. Nil on the core lanes.
 	ctx context.Context
 	// metadata is a durable message's JetStream metadata, read once by its handler: its stream
 	// sequence, which says which session consumers hold it (storedSeq) and keys an unplaceable
@@ -242,7 +242,7 @@ func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 	}
 }
 
-// clearLedgerAttempt gives attempt up so a retry prompts its pair again. A clear the ledger
+// clearLedgerAttempt gives attempt up so a retry delivers its pair again. A clear the ledger
 // cannot write leaves the attempted record behind, which this process's next attempt for the pair
 // takes over, and logs that.
 func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, attempt dedupe.Attempt) {
@@ -269,9 +269,9 @@ type ledgerAsk struct {
 // listener goes on to deliver; otherwise retryIn > 0 asks the durable lane to retry the message
 // after it, and zero to ack it.
 //
-//   - Delivered (already delivered) and InFlight (this process's attempt whose prompt may still be
-//     running, or one a delivery kept) skip the pair, and the message is acked.
-//   - Deferred (another pod's attempt, which may still be prompting) is retried on the durable lane
+//   - Delivered (already delivered) and InFlight (this process's attempt whose delivery may still
+//     be running, or one a delivery kept) skip the pair, and the message is acked.
+//   - Deferred (another pod's attempt, which may still be delivering) is retried on the durable lane
 //     once that attempt can be taken over, and skipped on a core lane, which retries nothing.
 //   - A ledger that cannot be read retries the message on the durable lane after durableRetryDelay;
 //     a core lane delivers without the ledger, under the zero attempt, which settles nothing. The
@@ -863,11 +863,13 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		// of its own.
 		delivery, err := session.Resolve(item, interest.SessionID, target, message.storedSeq())
 		relayed := err == nil && delivery.Relayed
-		// A recipient whose own consumer relays this message, and one whose resolution failed,
-		// are the two this path asks the ledger nothing for: the first is handed nothing here,
-		// and the second names a delivery that was never made. The ask for a recipient that
-		// reads the message on its own subscription is best-effort, since nothing of it is
-		// handed over either - only its record is worth having, and only if the ledger answers.
+		// A recipient whose own consumer relays this message is asked nothing: it is handed
+		// nothing here. Nor is one this path would have delivered to whose resolution failed,
+		// since that names a delivery that was never made. A refused recipient is asked however
+		// its resolution went, because what its record covers is the refusal reported below. The
+		// ask for a recipient that reads the message on its own subscription is best-effort,
+		// since nothing of it is handed over either - only its record is worth having, and only
+		// if the ledger answers.
 		var attempt dedupe.Attempt
 		if !relayed && (verdict != takeFollowedTopic || err == nil) {
 			var deliver bool

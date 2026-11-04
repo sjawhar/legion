@@ -1,13 +1,16 @@
-// The frames a row's sessions answered, and the exactly-once check the rows of the two-pod suite
-// end on. They are outside the multiprocess tag, so envoy-go's untagged unit run exercises the
-// check: the only CI lane of that tag runs the two-pod rows alone, and a guard no lane runs
-// guards nothing. The session stand-in that fills the log in, and the row helpers that read it,
-// are the tagged harness's (multiprocess_harness_test.go).
+// The frames a row's sessions answered, the exactly-once check the rows of the two-pod suite end
+// on, and mpLineWith, the log-line reader both suites read a line through. They are outside the
+// multiprocess tag, so envoy-go's untagged unit run exercises the check and its own rows read
+// their log lines through the one helper: the only CI lane of that tag runs the two-pod rows
+// alone, and a guard no lane runs guards nothing. The session stand-in that fills the log in, and
+// the row helpers that read it, are the tagged harness's (multiprocess_harness_test.go).
 
 package main
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,4 +86,14 @@ func TestTheExactlyOnceCheckRefusesARepeatOfAFrameAnsweredBeforeTheDrop(t *testi
 	if wrong := log.notOnce([]mpMessage{justBefore}); len(wrong) == 0 {
 		t.Fatal("a frame the session answered a moment before the drop was taken twice and the check passed it; only the frame whose reply the drop lost may come again")
 	}
+}
+
+// mpLineWith is the first line of output containing every one of parts, or "".
+func mpLineWith(output string, parts ...string) string {
+	for line := range strings.SplitSeq(output, "\n") {
+		if !slices.ContainsFunc(parts, func(part string) bool { return !strings.Contains(line, part) }) {
+			return line
+		}
+	}
+	return ""
 }

@@ -21,9 +21,9 @@ const (
 )
 
 // kvRecord is a ledger record's value. at is informational: every age is read from the entry's
-// KV timestamp, the server's clock, which every pod shares. A record an older build wrote
-// carrying fields this one does not know (in_doubt, which no build writes any more) decodes as
-// the attempted or delivered record it is: encoding/json ignores unknown fields.
+// KV timestamp, the server's clock, which every pod shares. A record carrying a field this build
+// does not know decodes as the attempted or delivered record it is: encoding/json ignores
+// unknown fields.
 type kvRecord struct {
 	State string `json:"state"`
 	Boot  string `json:"boot"`
@@ -289,7 +289,7 @@ func (l *KV) sweepLocked(now time.Time) {
 
 // Record writes the pair's delivered record with Put, over whatever the key holds. A record the
 // bucket does not take keeps the attempt (Keep): the pair was delivered, and a repeat of the
-// message within AttemptedAge is not prompted again.
+// message within AttemptedAge is not delivered again.
 func (l *KV) Record(attempt Attempt) error {
 	if attempt.Verdict != Proceed {
 		return nil

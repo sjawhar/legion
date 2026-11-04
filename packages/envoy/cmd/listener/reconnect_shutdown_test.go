@@ -215,15 +215,6 @@ func (r *listenerRelay) drop() {
 	r.links = nil
 }
 
-// cut drops every link and refuses each new one for d, after which the listener's reconnect, which
-// nats.go retries about once a second, lands on the same server again.
-func (r *listenerRelay) cut(d time.Duration) {
-	r.mu.Lock()
-	r.refuseUntil = time.Now().Add(d)
-	r.mu.Unlock()
-	r.drop()
-}
-
 // freeze stops the relay moving bytes in either direction, every socket left open, and returns the
 // func that thaws it, which runs once however often it is called. What either side sent meanwhile
 // is delivered, in order, once the relay thaws.

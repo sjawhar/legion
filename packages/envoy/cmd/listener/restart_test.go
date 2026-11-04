@@ -114,7 +114,8 @@ func interestWarmUp(t *testing.T, p *listenerProcess, n int) map[string]any {
 
 // mainClientReconnectLine matches the reconnect line of the listener's main NATS client alone:
 // named `envoy` before INFRA-557 and `envoy-listener <instance>` since, while the lease's own
-// connection (`envoy-listener-lease <instance>`) and the live lane's log the same message.
+// connection (`envoy-listener-lease <instance>`), the role lane's (`envoy-role-lane`) and the
+// session consumers' (`envoy-session-consumers`) log the same message.
 var mainClientReconnectLine = regexp.MustCompile(`envoy nats reconnected name=(envoy |"envoy-listener )`)
 
 // mainClientReconnects counts the main client's reconnect lines in a listener's output.

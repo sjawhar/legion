@@ -56,7 +56,7 @@ func TestMemory_AnUnsettledAttemptIsInFlightUntilTheTakeoverAge(t *testing.T) {
 	m := newTestMemory(clock)
 	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)
 
-	// A repeat of the same pair while the first prompt may still be running.
+	// A repeat of the same pair while the first delivery may still be running.
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
 	// Another dedupe key to the same session, and the same key to another session, are their own.
 	mustAttempt(t, m, "publish.different", "ses-target", Proceed)
@@ -73,7 +73,7 @@ func TestMemory_AnUnsettledAttemptIsInFlightUntilTheTakeoverAge(t *testing.T) {
 func TestMemory_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
 	clock := newTestClock()
 	m := newTestMemory(clock)
-	// A prompt whose answer never came (slow 204, #389): the delivery keeps its attempt.
+	// A delivery whose outcome never came back: the delivery keeps its attempt.
 	m.Keep(mustAttempt(t, m, "publish.abc123", "ses-target", Proceed))
 
 	clock.Advance(testTakeoverAfter + time.Second)

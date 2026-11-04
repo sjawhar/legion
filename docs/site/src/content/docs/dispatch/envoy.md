@@ -495,7 +495,7 @@ delivers, and a standby taken out is one pod less to take the delivery lease ove
 Give the listener about 30 seconds to stop after `SIGTERM`. It hands its deliveries to a standby,
 stops taking requests, lets deliveries in progress finish, then exits with a non-zero code so a
 restart policy brings it back. The listener's
-[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/cmd/listener/README.md) has
+[README](https://github.com/cybermonklabs/legion/blob/main/packages/envoy/cmd/listener/README.md) has
 the details: the lease, the take-over times, the probe settings and what the pods share.
 
 ## Running Envoy on one machine

@@ -57,11 +57,11 @@ const defaultUnplaceableRetryWindow = 60 * time.Second
 //     retryAfter's fire-and-forget NAK is lost on the wire, consumerAckWait (durable.go, 6 s)
 //     counted from the delivery that was deferred, which began before the slot was taken;
 //   - this pod's: the redelivery waits in the receive loop's local queue (receive.go), kept alive
-//     by InProgress so the durable never redelivers it meanwhile, behind the prompt in hand, up to
-//     promptRequestLimit (30 s), or behind a settle hold after a take-over (7 s at most), before
-//     the handler runs it and releases its slot.
+//     by InProgress so the durable never redelivers it meanwhile, behind the handling of the
+//     message in hand, up to deliveryHandlingLimit (30 s), or behind a settle hold after a
+//     take-over (7 s at most), before the handler runs it and releases its slot.
 //
-// Those come to under a minute; 125 s leaves more than as much again for prompts queued ahead of
+// Those come to under a minute; 125 s leaves more than as much again for messages queued ahead of
 // the redelivery. It is a figure of its own, not a sum of consumerAckWait, since the ack wait
 // bounds nothing a message waits in the local queue. A slot older than that belongs to a message
 // that is not coming back here - the stream dropped or purged it, or its redelivery reached

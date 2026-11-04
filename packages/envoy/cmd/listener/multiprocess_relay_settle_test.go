@@ -204,9 +204,9 @@ func TestTwoPodsARelayedFrameInFlightWhenTheTermEndsIsNotSentAgainByTheSuccessor
 // for it, the session answers only well past that, and the successor restarts the session's
 // consumer at an ack floor below that message and publishes it again. Only the session's done
 // says whether it wrote that frame, and it came after the bound, so no pod can know: the
-// stopping pod logs the frame in doubt (relayFrameInDoubtLine) and the successor sends it once
-// more, which is the one repeat the root's at-least-once contract allows for a frame its session
-// had not written when its pod's term ended (cmd/listener/README.md, "State the pods share").
+// stopping pod logs the frame in doubt (relayFrameInDoubtLine) and the successor's restart sends
+// again every frame above the ack floor, which here is this one (cmd/listener/README.md, "When a
+// session can see a message twice").
 // What the row refuses is a second repeat of it, a repeat of any other message, an event id no
 // message carried, and a stopping pod that says nothing about the frame it cut (INFRA-557
 // tester's round 28, the architect's edge (2)).
@@ -262,11 +262,7 @@ func TestTwoPodsSIGKILLWithAFrameUnansweredReachesTheSessionWithin15s(t *testing
 	warm, m := row.warm, row.held
 
 	killed := a.kill(t)
-	select {
-	case <-a.Exited:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s was still running 10 s after SIGKILL", a.instance)
-	}
+	a.WaitExit(t, "SIGKILL")
 	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
 
 	after := publisher.mustPublish(t, sessionID)

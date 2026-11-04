@@ -255,11 +255,7 @@ func TestTwoPodsAMessageStoredWhileNoRelayRunsReachesItsSessionWithin10s(t *test
 	serving.awaitAll(t, []mpMessage{warm}, 20*time.Second)
 
 	a.kill(t)
-	select {
-	case <-a.Exited:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s was still running 10 s after SIGKILL", a.instance)
-	}
+	a.WaitExit(t, "SIGKILL")
 	// The standby takes a record it has read unchanged for a full leaseTTL (5 s), so the publish
 	// below lands in the gap where neither pod relays this session.
 	if b.active() {

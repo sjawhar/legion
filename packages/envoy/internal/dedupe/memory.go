@@ -28,7 +28,7 @@ type Memory struct {
 }
 
 // NewMemory makes an empty in-process ledger. takeoverAfter is how long an attempt nothing has
-// settled holds the pair, as KVConfig.TakeoverAfter: the longest a prompt can take and a margin.
+// settled holds the pair, as KVConfig.TakeoverAfter: the longest a delivery can take and a margin.
 func NewMemory(takeoverAfter time.Duration) *Memory {
 	return &Memory{records: make(map[Key]memoryRecord), takeoverAfter: takeoverAfter, now: time.Now}
 }

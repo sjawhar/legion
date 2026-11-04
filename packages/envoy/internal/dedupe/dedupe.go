@@ -51,19 +51,19 @@ type Key struct {
 type Verdict uint8
 
 const (
-	// Proceed: this process now holds the pair's attempt and prompts or forwards it, then
+	// Proceed: this process now holds the pair's attempt and delivers or forwards it, then
 	// settles the attempt with Record, Clear or Keep.
 	Proceed Verdict = iota + 1
 	// Delivered: the pair was delivered within DeliveredAge; the message is skipped and acked.
 	Delivered
 	// InFlight: this process holds the pair's attempt and has not resolved it: the attempt is not
-	// settled yet and younger than the takeover age (its prompt may still be running), or the
+	// settled yet and younger than the takeover age (its delivery may still be running), or the
 	// delivery kept it (Keep) less than AttemptedAge ago. The message is skipped and acked. An
 	// attempted record of this process that it holds no such attempt for (a clear that could not
 	// be written, a write whose reply was lost) is taken over, which is Proceed.
 	InFlight
 	// Deferred: another process attempted the pair less than its takeover age ago and may still
-	// be prompting. The durable lane retries the message once RetryIn has passed, when the
+	// be delivering it. The durable lane retries the message once RetryIn has passed, when the
 	// attempt is old enough to take over; a core lane skips it.
 	Deferred
 )
@@ -105,11 +105,11 @@ type Ledger interface {
 	// Record marks the pair of a Proceed attempt delivered.
 	Record(attempt Attempt) error
 	// Clear gives up a Proceed attempt that failed in a way worth retrying, so a retry of the
-	// message, by this process or another, prompts the pair again. An attempt another process
+	// message, by this process or another, delivers the pair again. An attempt another process
 	// has since taken over or recorded is left as it is. A clear the ledger cannot write still
 	// gives the attempt up in this process: its next Attempt for the pair proceeds.
 	Clear(attempt Attempt) error
-	// Keep settles a Proceed attempt whose record is to stand: a prompt whose outcome this
+	// Keep settles a Proceed attempt whose record is to stand: a delivery whose outcome this
 	// process does not know, or a pair the delivery disposed of for good. Attempt answers InFlight
 	// for the pair until the attempt is AttemptedAge old.
 	Keep(attempt Attempt)

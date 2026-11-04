@@ -32,10 +32,11 @@ const (
 // (bus.ReachesPrivateStreamSubject: the Legion controller lane and the failed-delivery lanes),
 // so a session on one would never be relayed.
 //
-// tbExtraSubject, the subject only the other build's stream carries, gets no session: a session
-// consumer's filter is this build's own list of the subjects the stream stores
-// (bus.StreamCaptures, through the registration's followed topics), so a pod of the plain build
-// cannot relay a topic on a subject it does not compile in, whatever the durable's filter takes.
+// `notifications.twobuild.>`, the subject only the other build's stream carries
+// (internal/bus/stream_extra_twobuild.go), gets no session: a session consumer's filter is this
+// build's own list of the subjects the stream stores (bus.StreamCaptures, through the
+// registration's followed topics), so a pod of the plain build cannot relay a topic on a subject
+// it does not compile in, whatever the durable's filter takes.
 // A session following such a topic is served only while a pod of the build that knows the
 // subject holds the term; that is a property of per-session consumers, not of this merge, and it
 // is recorded in the pull request rather than measured here.
@@ -87,11 +88,7 @@ func tbKill(t *testing.T, publisher *mpPublisher, serving *mpNATSSession, pod *m
 	serving.awaitAll(t, slices.Clone(publisher.sent), 30*time.Second)
 	mpEventually(t, 10*time.Second, "the durable to hold no message unacknowledged", func() bool { return publisher.ackPending() == 0 })
 	killed := pod.kill(t)
-	select {
-	case <-pod.Exited:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s was still running 10 s after SIGKILL", pod.instance)
-	}
+	pod.WaitExit(t, "SIGKILL")
 	time.Sleep(time.Second)
 	return killed
 }

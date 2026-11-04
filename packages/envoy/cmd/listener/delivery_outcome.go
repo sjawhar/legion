@@ -139,11 +139,11 @@ const (
 	// this process's attempt in flight, held for the pair until it reaches the ledger's
 	// takeover age (an agent delivery that failed and is not retried).
 	settleNone ledgerSettle = iota
-	// settleClear gives the attempt up (dedupe.Ledger.Clear), so a retry prompts the pair again.
+	// settleClear gives the attempt up (dedupe.Ledger.Clear), so a retry delivers the pair again.
 	settleClear
 	// settleRecord records the pair delivered in the ledger (dedupe.Ledger.Record).
 	settleRecord
-	// settleKeep keeps the attempt (dedupe.Ledger.Keep): a prompt whose outcome is unknown, or a
+	// settleKeep keeps the attempt (dedupe.Ledger.Keep): a delivery whose outcome is unknown, or a
 	// pair this delivery disposed of for good, so a further delivery of the message within
 	// dedupe.AttemptedAge is an attempt-dedupe skip.
 	settleKeep
@@ -170,8 +170,8 @@ type deliveryOutcome struct {
 	// none (e.g. a role that was never assigned a holder).
 	sessionID string
 	// attempt is the pair's delivery-ledger attempt that settle and exceptionFailureClearsAttempt
-	// settle; the zero Attempt (a pair delivered without the ledger, or one the listener does not
-	// prompt) settles nothing.
+	// settle; the zero Attempt (a pair delivered without the ledger, or one the listener asks the
+	// ledger nothing for) settles nothing.
 	attempt dedupe.Attempt
 	// metricStatus is the messagesDelivered "delivery_status" label; ""
 	// skips the increment entirely.

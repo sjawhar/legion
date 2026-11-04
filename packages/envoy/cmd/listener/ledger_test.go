@@ -317,19 +317,9 @@ func TestASessionThatReceivesCostsNoLedgerWaitOrRetry(t *testing.T) {
 	if got := strings.Count(logs, `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
 		t.Fatalf("logged %d %q WARNs, want the one best-effort ask of the self-subscribed recipient:\n%s", got, ledgerUnavailableLine, logs)
 	}
-	if line := lineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
+	if line := mpLineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
 		t.Fatalf("the best-effort ask asked for a retry: %s", line)
 	}
-}
-
-// lineWith is the first line of text containing needle, empty when none does.
-func lineWith(text, needle string) string {
-	for line := range strings.SplitSeq(text, "\n") {
-		if strings.Contains(line, needle) {
-			return line
-		}
-	}
-	return ""
 }
 
 // The copy a self-subscribed recipient read is recorded, so the second copy of the same event -
@@ -448,6 +438,64 @@ func TestALedgerOutageForASelfSubscribedRecipientDelaysNoOtherRecipient(t *testi
 	}
 	if got := counterValue(t, body, deliveredSeries("failed")); got != 1 {
 		t.Fatalf("%s = %d, want the one refusal of %s:\n%s", deliveredSeries("failed"), got, refused, body)
+	}
+}
+
+// The agent-subject path has the same one best-effort ask as the fan-out: the copy a
+// self-subscribed session reads on its own NATS subscription. It is reached only when this
+// listener's session cache misses, because a cached entry that says the session takes the
+// message itself has the durable ack it before it is decoded (durableNeedsDelivery), so the
+// arrangement here is trailingListeners' (api_test.go) applied to the delivery harness: the
+// cache is warmed, its watcher stopped, and the session registered through a second registry on
+// the same account, so the first read of the entry - the cache's, in durableNeedsDelivery -
+// fails and the second - the bucket's, in liveSessionEntry - answers. With the ledger down for
+// that session the copy is counted skipped under one WARN and the message is acked. An ask that
+// was not best-effort here would NAK it for durableRetryDelay, holding a message this listener
+// hands to nobody.
+func TestASelfSubscribedSessionReadFromTheBucketCostsNoLedgerWaitOrRetry(t *testing.T) {
+	const target = "ses_agent_subject_self"
+	harness := newListenerDeliveryHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the delivering listener's session cache: %v", err)
+	}
+	harness.sessions.StopWatch()
+	registrar, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registering listener's session registry: %v", err)
+	}
+	if err := registrar.Put(target, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s through the other listener: %v", target, err)
+	}
+	// The negative control: a cache holding the entry would have the durable ack the message
+	// unread, and the branch under test would never run.
+	if entry, err := harness.sessions.Get(target); err == nil {
+		t.Fatalf("the delivering listener's cache already holds %s (%+v): the durable would ack its message unread", target, entry)
+	}
+
+	cfg := harness.config
+	cfg.ledger = ledgerDownForSession{Ledger: harness.config.ledger, sessionID: target}
+	item := listenerTestEnvelope(contracts.AgentSubject(target), "agent-subject-self-subscribed")
+	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, item))
+	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+
+	if got := settlement(t); got != "+ACK" {
+		t.Fatalf("settlement = %q, want an ack: a ledger outage for %s must not hold the message back for %s", got, target, durableRetryDelay)
+	}
+	logs := harness.logs.String()
+	if got := strings.Count(logs, `"msg":"`+ledgerUnavailableLine+`"`); got != 1 {
+		t.Fatalf("logged %d %q WARNs, want the one best-effort ask of %s:\n%s", got, ledgerUnavailableLine, target, logs)
+	}
+	if line := mpLineWith(logs, `"msg":"`+ledgerUnavailableLine+`"`); !strings.Contains(line, `"retry":false`) {
+		t.Fatalf("the best-effort ask asked for a retry: %s", line)
+	}
+	if ledgerDelivered(t, harness.config, item.DedupeKey, target) {
+		t.Fatalf("a ledger that could not answer for %s recorded its copy all the same", target)
+	}
+	body := metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("skipped")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - %s read the message on its own subscription:\n%s", deliveredSeries("skipped"), got, target, body)
 	}
 }
 

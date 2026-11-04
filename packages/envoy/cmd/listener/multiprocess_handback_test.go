@@ -342,13 +342,13 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 // never answers -- the relay of that session's consumer holds it -- and messages a session
 // refuses outstanding on the machine's durable (mpRetryOutstanding), with a
 // message published every 100 ms to two healthy sessions. Each stop comes a second into the
-// frame, and the parked messages hold every next pod's settle hold open: each hand-over must end
-// on the stopping pod's clean-hand-back mark, 3 s after the subscribe, and every message to a
-// healthy session must reach it within 10 s of its publish, each session's in order. The pod
-// taking over subscribes beside the stopping pod's own linger and records stale_binding for it,
-// which the mark clears again; were it left standing, the next stop in the chain would mark
-// nothing and the hand-over after it would hold to the 7 s cap of a hard take-over, with the
-// messages queued at the SIGTERM arriving about 11 s after their publish.
+// frame, and the messages outstanding on the durable hold every next pod's settle hold open: each
+// hand-over must end on the stopping pod's clean-hand-back mark, 3 s after the subscribe, and
+// every message to a healthy session must reach it within 10 s of its publish, each session's in
+// order. The pod taking over subscribes beside the stopping pod's own linger and records
+// stale_binding for it, which the mark clears again; were it left standing, the next stop in the
+// chain would mark nothing and the hand-over after it would hold to the 7 s cap of a hard
+// take-over, with the messages queued at the SIGTERM arriving about 11 s after their publish.
 func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")

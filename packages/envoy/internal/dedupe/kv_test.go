@@ -112,9 +112,9 @@ func TestKV_ADeliveredRecordIsSkippedByEveryBootUntilDeliveredAge(t *testing.T) 
 	}
 }
 
-// This process's attempt that nothing has settled is its prompt still running: InFlight until it is
-// TakeoverAfter old, the longest a prompt takes and a margin, and taken over after that, as another
-// boot's would be.
+// This process's attempt that nothing has settled is its delivery still running: InFlight until it
+// is TakeoverAfter old, the longest a delivery takes and a margin, and taken over after that, as
+// another boot's would be.
 func TestKV_ThisProcesssUnsettledAttemptIsInFlightUntilTakeoverAfter(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
@@ -159,8 +159,8 @@ func (f faultyKV) Delete(key string, opts ...nats.DeleteOpt) error {
 }
 
 // A create the bucket stored but whose reply was lost leaves an attempted record of this boot that
-// no prompt of this process is behind: the retry takes it over and proceeds, rather than skipping as
-// in flight a pair nothing prompted.
+// no delivery of this process is behind: the retry takes it over and proceeds, rather than
+// skipping as in flight a pair nothing is delivering.
 func TestKV_ARetryAfterACreateWhoseReplyWasLostProceeds(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
@@ -194,9 +194,8 @@ func TestKV_AnAttemptWhoseClearFailedIsTakenOverByTheNextAttempt(t *testing.T) {
 	mustAttempt(t, ledger, "publish.abc", "ses_target", InFlight)
 }
 
-// A prompt whose answer never came (a slow server can take prompt_async and answer 204 after the
-// client gave up, #389) is kept: the pair is InFlight until the attempt is AttemptedAge old, well
-// past the takeover age, and taken over after that.
+// A delivery whose outcome never came back is kept: the pair is InFlight until the attempt is
+// AttemptedAge old, well past the takeover age, and taken over after that.
 func TestKV_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
@@ -212,7 +211,7 @@ func TestKV_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
 }
 
 // A delivery whose delivered record the bucket refuses was delivered all the same: the attempt is
-// kept, and a repeat within AttemptedAge is not prompted again.
+// kept, and a repeat within AttemptedAge is not delivered again.
 func TestKV_ADeliveryWhoseRecordFailedIsKept(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
@@ -375,7 +374,7 @@ func TestKV_AnotherBootsOldAttemptIsTakenOverAndItsClearLeavesTheNewOne(t *testi
 		t.Fatalf("record after the take-over = %+v, want attempted by boot-b", record)
 	}
 
-	// Boot A's prompt fails late: its clear is at the revision it wrote, which boot B replaced.
+	// Boot A's delivery fails late: its clear is at the revision it wrote, which boot B replaced.
 	if err := a.Clear(stale); err != nil {
 		t.Fatalf("Clear of the replaced attempt: %v", err)
 	}
@@ -415,16 +414,16 @@ func TestKV_ClearLetsTheNextAttemptProceed(t *testing.T) {
 	mustAttempt(t, a, "publish.abc", "ses_target", Delivered)
 }
 
-// A record an older build wrote with the in_doubt field no build writes any more still decodes:
-// encoding/json ignores a field the struct has not got, so the record reads as the attempted
-// record of another boot it is, and is taken over at TakeoverAfter like any other.
+// A record carrying a field this build does not know still decodes: encoding/json ignores a
+// field the struct has not got, so the record reads as the attempted record of another boot it
+// is, and is taken over at TakeoverAfter like any other.
 func TestKV_ARecordCarryingAnUnknownFieldStillDecodes(t *testing.T) {
 	kv := openTestBucket(t)
 	clock := newTestClock()
 	b := newTestKV(kv, "boot-b", clock)
 	key := b.Key("publish.abc", "ses_target")
-	if _, err := kv.Create(key, []byte(`{"state":"attempted","boot":"boot-a","at":1,"in_doubt":true}`)); err != nil {
-		t.Fatalf("write an older build's record: %v", err)
+	if _, err := kv.Create(key, []byte(`{"state":"attempted","boot":"boot-a","at":1,"unknown_field":true}`)); err != nil {
+		t.Fatalf("write a record carrying a field this build does not know: %v", err)
 	}
 	if record := readRecord(t, kv, key); record.State != stateAttempted || record.Boot != "boot-a" {
 		t.Fatalf("record = %+v, want boot-a's attempted record", record)

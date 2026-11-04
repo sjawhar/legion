@@ -2,10 +2,11 @@
 
 // Two listener processes for one machine id, which is what a machine runs once it has an active
 // pod and a standby (INFRA-557). This file is the suite's harness; its rows are in
-// multiprocess_takeover_test.go, multiprocess_state_test.go and multiprocess_handback_test.go,
-// under the same build tag. Every row of the suite starts real cmd/listener binaries against one
-// in-process NATS server, each behind a listenerRelay of its own, and drives them over their real
-// HTTP API and the real bus, because each thing it checks is a property of whole processes: which
+// multiprocess_takeover_test.go, multiprocess_state_test.go, multiprocess_handback_test.go and
+// multiprocess_relay_settle_test.go, under the same build tag. Every row of the suite starts real
+// cmd/listener binaries against one in-process NATS server, each behind a listenerRelay of its
+// own (reconnect_shutdown_test.go, whose cut is below), and drives them over their real HTTP API
+// and the real bus, because each thing it checks is a property of whole processes: which
 // of two processes delivers from the machine's durable, what happens to the messages one process
 // holds when it is stopped, killed or cut off, and what the other answers meanwhile. A row's
 // sessions are one NATS stand-in (mpNATSSession) that counts each frame it answered by event id;
@@ -107,6 +108,15 @@ func mpStartPodBehindLanes(t *testing.T, binary, natsURL, instance string, env .
 	pod := mpStartPodAt(t, binary, natsURL, lanes.relayed, instance, env...)
 	pod.lanes = lanes
 	return pod
+}
+
+// cut drops every link and refuses each new one for d, after which the listener's reconnect, which
+// nats.go retries about once a second, lands on the same server again.
+func (r *listenerRelay) cut(d time.Duration) {
+	r.mu.Lock()
+	r.refuseUntil = time.Now().Add(d)
+	r.mu.Unlock()
+	r.drop()
 }
 
 // mpServerURL is natsURL without the admin user every row's own clients connect as: what a relay
@@ -674,7 +684,7 @@ var mpEventMark = regexp.MustCompile(`mp-event=([A-Za-z0-9_-]+)`)
 // the session never took it. A frame to a failing session (fail) is answered `nak` and counted
 // apart: the session never took it either. Every frame it sees, whichever of those it is, is
 // recorded in the row's delivery journal (mpJournal), which a failing row prints. The frames it
-// answered, and the checks a row reads them through, are mpPromptLog's (kill_allowance_test.go),
+// answered, and the checks a row reads them through, are mpPromptLog's (prompt_log_test.go),
 // which it embeds.
 type mpNATSSession struct {
 	mpPromptLog

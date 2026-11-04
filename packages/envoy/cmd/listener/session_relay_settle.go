@@ -16,12 +16,14 @@ const (
 	// done or nak for be answered before it gives up on them. The term's end cancels the relay,
 	// but a frame the session may already have written must not be left unacked for the pod
 	// taking over to publish again: inside this grace the stopped relay goes on hearing the
-	// session's replies and acks each frame the session answers done, so the successor's restart
-	// at the ack floor passes over it. A frame the grace ends without a done is in doubt
-	// (relayFrameInDoubtLine), whether or not the session answered it received: received says
-	// the client decoded the frame, not that its host wrote the message, so only done says the
-	// session took it and no done is coming. The successor publishes that one again, which is
-	// the one repeat this path allows, under the same event id.
+	// session's replies and acks each frame the session answers done, which lets the consumer's
+	// ack floor move past it once nothing below it is held. A frame the grace ends without a
+	// done is in doubt (relayFrameInDoubtLine), whether or not the session answered it received:
+	// received says the client decoded the frame, not that its host wrote the message, so only
+	// done says the session took it and no done is coming. The successor's restart then sends
+	// again every frame above the ack floor, each under its own event id: the one in doubt, and
+	// any the session answered done above a frame still held (the README's "When a session can
+	// see a message twice").
 	//
 	// The pod taking a released holder's lease over waits relayFormerSettle, this grace and a
 	// margin, before it restarts a session's consumer at its ack floor (sessionRelays.relay),
@@ -59,11 +61,13 @@ func (m *sessionRelays) endFrames(ctx context.Context, run *relayRun) {
 // settleStoppedFrames gives the frames a stopped relay has outstanding - those it has had no
 // done or nak for - relaySettleGrace to be answered: the reply subscription and the
 // session-consumer connection are both still up, so a session that answers done inside it has
-// its message acked here and the pod taking over, which waits relayFormerSettle before it
-// restarts the consumer, never sees that message again. A frame the grace ends without a done
-// is in doubt, a frame the session answered received included: received says the client decoded
-// the frame, not that its host wrote the message, so nothing says the session took it, and one
-// line names it and the successor publishes it once more, under the same event id.
+// its message acked here, and the consumer's ack floor moves past that message once nothing
+// below it is held. A frame the grace ends without a done is in doubt, a frame the session
+// answered received included: received says the client decoded the frame, not that its host
+// wrote the message, so nothing says the session took it, and one line names it. The pod taking
+// over, which waits relayFormerSettle before it restarts the consumer, sends again every frame
+// above the ack floor, each under its own event id (the README's "When a session can see a
+// message twice").
 func (m *sessionRelays) settleStoppedFrames(run *relayRun) {
 	deadline := time.Now().Add(relaySettleGrace)
 	for m.outstanding(run) > 0 && time.Now().Before(deadline) {
@@ -76,8 +80,8 @@ func (m *sessionRelays) settleStoppedFrames(run *relayRun) {
 	}
 }
 
-// relayFrameInDoubtLine is the line settleStoppedFrames logs for the one frame a term's end can
-// leave without a done; the row
+// relayFrameInDoubtLine is the line settleStoppedFrames logs for each frame a term's end leaves
+// without a done; the row
 // TestTwoPodsARelayedFrameHeldPastTheStoppingRelaysSettleBoundIsRepeatedAtMostOnceWithItsId
 // reads it.
 const relayFrameInDoubtLine = "session relay left a frame in doubt: its settle bound ended with the session's reply still out"
