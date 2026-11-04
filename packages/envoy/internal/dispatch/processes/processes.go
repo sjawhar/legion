@@ -122,9 +122,12 @@ type Process struct {
 }
 
 // PredatesFleetColumns reports whether p is a process of a build that predates the columns migration
-// 0138 added, whose row holds their defaults: no build that registers them reads schema version 0.
-// A decision over the fleet leaves such a process out of the numbers it takes from the live rows,
-// as it leaves out a build that does not register at all.
+// 20261101030537_server_processes_schema added, whose row holds their defaults: no build that
+// registers them reads schema version 0. It names such a process where a decision reads it as one
+// that registers nothing: the file store's, which counts it as having no bucket (Bucketless,
+// cmd/dispatch's bucketlessProcesses). The document socket's admission reads its schema numbers
+// as they stand, 0 and 0, so no page creates at or under what it reads and every page is
+// read-only while it lives (docs.readSchemaFleet).
 func (p Process) PredatesFleetColumns() bool { return p.SchemaVersion == 0 }
 
 // Build names the build p serves: "commit " and its commit, "unstamped" for an unstamped build.

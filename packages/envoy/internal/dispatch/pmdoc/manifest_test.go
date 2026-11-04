@@ -269,12 +269,16 @@ func manifestAsOf(t *testing.T, version int) []byte {
 	return encoded
 }
 
-// The typed blocks this manifest's version adds are staged by their numbers: the build of the
-// release before, whose manifest is this one as of the version before, does not declare them. It
-// creates none of them - a write naming one is refused - and a stored document holding one reads
-// as an element it does not know (ErrUnknownElement), which the document service answers
+// The typed blocks this manifest's version adds are staged by their numbers: a build at the
+// manifest version before this one, whose manifest is this one as of that version, does not
+// declare them. That is a build of a release before the first one that shipped them, not the
+// release before this one: the three blocks ship from legion-envoy-v29.1.0 at manifest version
+// 3, so the releases from it on, legion-envoy-v29.2.0 among them, declare all three, and
+// legion-envoy-v29.0.0, at manifest version 2, is the shape this models. Such a build creates
+// none of them - a write naming one is refused - and a stored document holding one reads as an
+// element it does not know (ErrUnknownElement), which the document service answers
 // 409 DOC_NEWER_CONTENT for rather than repairing or rebuilding the document.
-func TestTheTypedBlocksThisVersionAddsAreUnknownToTheBuildBefore(t *testing.T) {
+func TestTheTypedBlocksThisVersionAddsAreUnknownToABuildAtTheVersionBefore(t *testing.T) {
 	added := []string{"requirement", "plan_task", "check"}
 	for _, name := range added {
 		versions, declared := Element{Kind: TypedBlockElement, Name: name}.Versions()
@@ -302,18 +306,18 @@ func TestTheTypedBlocksThisVersionAddsAreUnknownToTheBuildBefore(t *testing.T) {
 	}
 	t.Cleanup(restore)
 	if got := SchemaVersion(); got != before {
-		t.Fatalf("SchemaVersion() of the build before = %d, want %d", got, before)
+		t.Fatalf("SchemaVersion() of a build at the version before = %d, want %d", got, before)
 	}
 	for _, name := range added {
 		if IsTypedBlock(name) {
-			t.Errorf("the build before declares typed block %q, which version %d adds", name, before+1)
+			t.Errorf("a build at version %d declares typed block %q, which version %d adds", before, name, before+1)
 		}
 		_, err := ParseForWrite(markdown(name), nil)
 		if !errors.Is(err, ErrUnknownElement) || !strings.Contains(err.Error(), name) {
-			t.Errorf("the build before writing a %s block = %v, want ErrUnknownElement naming it", name, err)
+			t.Errorf("a build at version %d writing a %s block = %v, want ErrUnknownElement naming it", before, name, err)
 		}
 	}
 	if err := stored.Validate(); !errors.Is(err, ErrUnknownElement) {
-		t.Errorf("the build before reading a stored document holding them = %v, want ErrUnknownElement", err)
+		t.Errorf("a build at version %d reading a stored document holding them = %v, want ErrUnknownElement", before, err)
 	}
 }

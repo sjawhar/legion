@@ -10,7 +10,8 @@ body: |-
     processes, and V is at least every live process's creatable version and the highest `since` the
     document holds. The bound on the highest creatable version makes a page of a newer build
     read-only after a rollback. A page without `schema_creatable` counts its R as 1, and a process
-    before this release is left out. The dashboard uses the manifest it was built with instead of
+    of a build before this release registers no numbers, which count as version 0, so while one is
+    live every page is read-only. The dashboard uses the manifest it was built with instead of
     fetching it and presents both numbers. Each socket's token is answered from that socket's own
     admission, through ygo's `OnTokenAuthContext` (sjawhar/ygo v1.54.1-sami.3, which Dispatch
     already pins), so two sockets of one room that present the same schema version are told apart.

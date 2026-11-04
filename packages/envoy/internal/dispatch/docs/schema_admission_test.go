@@ -212,13 +212,14 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 // creates what the page creates (its schema_creatable is at most the highest creatable version),
 // and the page reads what every live process creates and what the document holds (its
 // schema_version is at least each process's creatable version and the highest since in the
-// document). This process counts as one of them; a process of a build that predates the fleet
-// columns, which registers no schema numbers, and a process whose heartbeat lapsed do not. So
-// after a rollback, when no live process creates what a newer page creates, that page is
-// read-only and an older page stays writable. A page that sends no schema_creatable is a page
-// from before the manifest, every element of which has since 1, so it creates up to 1. The
-// socket's acceptance and its token's answer agree, since the provider takes the second as the
-// socket's scope.
+// document). This process counts as one of them, and so does a process of a build that predates
+// the fleet columns: its row holds no schema numbers, so it counts as reading version 0, which
+// no page's schema_creatable is at or under, and every page is read-only while it lives. A
+// process whose heartbeat lapsed counts for nothing. So after a rollback, when no live process
+// creates what a newer page creates, that page is read-only and an older page stays writable. A
+// page that sends no schema_creatable is a page from before the manifest, every element of which
+// has since 1, so it creates up to 1. The socket's acceptance and its token's answer agree,
+// since the provider takes the second as the socket's scope.
 func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 	v, r := pmdoc.SchemaVersion(), pmdoc.SchemaCreatable()
 	if v != 3 || r != 3 {
@@ -243,7 +244,8 @@ func TestSchemaAdmissionFollowsTheLiveFleet(t *testing.T) {
 		{name: "a page of this version beside the element it represents", future: true, query: page(4, 3), token: "4", writable: true},
 		{name: "a live process creating what an older page cannot represent", fleet: []process{{5, 4, 0}}, query: page(3, 3), token: "3"},
 		{name: "a live process that cannot read what a newer page creates", fleet: []process{{1, 1, 0}}, query: page(5, 4), token: "5"},
-		{name: "a process that predates the fleet columns is left out", fleet: []process{{0, 0, 0}}, query: page(4, 3), token: "4", writable: true},
+		{name: "a process that predates the fleet columns reads version 0, which no page creates at or under", fleet: []process{{0, 0, 0}}, query: page(4, 3), token: "4"},
+		{name: "a page from before the manifest beside a process that predates the fleet columns", fleet: []process{{0, 0, 0}}, query: page(4, -1), token: "4"},
 		{name: "a lapsed process is left out", fleet: []process{{5, 4, time.Hour}}, query: page(3, 3), token: "3", writable: true},
 		{name: "a page that sends no schema_creatable on this version", query: page(4, -1), token: "4", writable: true},
 		{name: "a page that sends no schema_creatable one version newer creates what the first version reads", query: page(5, -1), token: "5", writable: true},

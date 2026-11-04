@@ -38,10 +38,15 @@ func schemaPageOf(query url.Values) schemaPage {
 }
 
 // schemaFleet is what the server processes serving the database read and create: the lowest
-// schema version and the highest creatable version among this process and every live process
-// that registers them. A process of a build that predates the fleet columns registers neither
-// (processes.Process.PredatesFleetColumns) and is left out, as is a build that does not register
-// at all.
+// schema version and the highest creatable version among this process and every live process.
+// A process of a build that predates the fleet columns registers neither number
+// (processes.Process.PredatesFleetColumns), and its row's zeros are what it counts as: a process
+// that reads version 0. Nothing in the registry says what such a build reads, and it may read
+// less than a page creates, so no page is writable while one lives. That build's own server
+// answers the same way from the other side: it knows no fleet and holds read-only every page
+// whose version is not exactly its own (schemaReadOnly, in the builds that carry it). A build
+// that writes no row at all (every release before migration 0135_server_processes) is in no
+// fleet and cannot be counted.
 type schemaFleet struct {
 	minVersion, maxCreatable int
 }
@@ -53,9 +58,6 @@ func readSchemaFleet(ctx context.Context, db processes.Querier) (schemaFleet, er
 		return schemaFleet{}, err
 	}
 	for _, process := range live {
-		if process.PredatesFleetColumns() {
-			continue
-		}
 		fleet.minVersion = min(fleet.minVersion, process.SchemaVersion)
 		fleet.maxCreatable = max(fleet.maxCreatable, process.SchemaCreatable)
 	}

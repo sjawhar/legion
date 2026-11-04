@@ -811,7 +811,7 @@ So for each surface the two builds share, this is what build N+1 may change whil
   Reader-first, by the schema manifest (`internal/dispatch/pmdoc/schema/blocks.json`).
   Every node, mark, typed block, attribute and enum value carries `since`, the schema version from which a build reads it, and `creatable_since`, the version from which a build creates it;
   both are 1 where the manifest names neither.
-  A new element is readable one release before it is creatable, unless the page admission below gates it: `requirement`, `plan_task` and `check` are creatable from version 3, which adds them, since that admission keeps this build's pages read-only until every live process reads version 3.
+  A new element is readable one release before it is creatable, unless the page admission below gates it: `requirement`, `plan_task` and `check` carry `since` 3 and `creatable_since` 3, and ship that way from `legion-envoy-v29.1.0` on (Generations and holds, below).
   A server-side write (an agent's edit, a settlement, an import) is bound by this build's manifest alone, so one can still add such an element during a roll; a build of this manifest at an earlier version then answers `409 DOC_NEWER_CONTENT` for that document (the release before the manifest: Generations and holds, below).
   Every write path refuses an element this build reads but may not create yet (`pmdoc`, `refuseUncreatable`), unless the document already holds it, and the editor offers only the elements it may create.
   An element stays readable while stored documents may hold it: no release removes a readable element from the manifest.
@@ -824,7 +824,7 @@ So for each surface the two builds share, this is what build N+1 may change whil
   each process registers V, the schema version it reads, and R, the highest `since` among the elements it may create, in `server_processes` (migration `20261101030537_server_processes_schema`).
   A page presents its own V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R is at most every live process's V and at most the highest R among the live processes, and its V is at least every live process's R and the highest `since` among the elements the document holds; otherwise it is read-only.
   The bound on the highest R makes a page of a newer build read-only after a rollback: no live process creates what that page creates.
-  A page that sends no `schema_creatable` predates the manifest, so its R is 1, and a process of a build that predates the fleet columns, whose row holds no schema numbers, is left out.
+  A page that sends no `schema_creatable` predates the manifest, so its R is 1, and a process of a build that predates the fleet columns counts as reading version 0, which no page's R is at or under.
   Every 15 seconds (the registry's live window) each process checks its open document sockets again and closes each writable one the fleet no longer admits with `4412` (reason `DOC_ADMISSION_REVOKED`; `DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` and `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON` in `packages/contracts`);
   the close frame goes out once the message the server has in flight on that socket is out, which it waits at most a second for, so a peer too slow to take it in that second gets no close frame at all and reads the end as `1006`;
   the provider reconnects on either, the new socket is admitted again, and the reconnect's sync restores what was in flight, so the second is a bound on the close code a page reads and on nothing else.
@@ -885,9 +885,16 @@ The build before them compares stream and consumer settings with no generation, 
 So each protection binds from the release after the one that introduces it, and that release would ideally change no request member, stream or consumer setting, or loop interval.
 This one changes two such things that main merged beside it.
 The stream carries the kept-message lane `notifications.envoy.kept.>` (stream generation 2); the build before keeps a deployed subject that overlaps none of its own (`reconcileSubjects`), so it leaves that lane in place.
-And it adds document elements: the three typed blocks of version 3.
-The build before reads a document holding one as outside the schema rather than as newer content, so while it serves, a repair or a rebuild asked of it would rewrite that document without them.
-Until every process of that build is gone, leave such a document to a process of this build, which refuses both (`DOC_NEWER_CONTENT`).
+The document elements of version 3 are already out: the three typed blocks `requirement`, `plan_task` and `check` ship from `legion-envoy-v29.1.0`, the first release carrying the commit that added them.
+Every release from that one on, `legion-envoy-v29.2.0` and this one included, reads and creates them at manifest version 3, and reads a document holding them as a document of its own schema.
+A release before it, such as `legion-envoy-v29.0.0` at manifest version 2, declares none of the three and has no newer-content answer at all, so it reads a document holding one as outside the schema, and while it serves, a repair or a rebuild asked of it would rewrite that document without them.
+Until every process of such a build is gone, leave such a document to a process of a build at version 3.
+This release's own document change is the page admission over the fleet (Stored documents, above), and it binds the same way.
+A server of any build before this one knows no fleet: it compares the page's `schema_version` with its own manifest version exactly (`schemaReadOnly` in that build) and holds a page of any other version read-only, which is what `legion-envoy-v29.0.0` at version 2 does with every page of version 3, and what `legion-envoy-v29.2.0` at version 3 does with a page of any other version.
+A process of such a build registers no schema numbers either, so while one is live this build reads the fleet's lowest version as 0 and holds every page it serves read-only, whichever build's page it is.
+So during the first rollout onto this release every page is read-only on this build's processes, and a page is writable on a process of the older build only where its version is that build's own.
+That lasts until every process of the older build is gone: a process stopped as a deploy stops it deletes its row at the end of its HTTP drain and leaves the fleet then, and one killed without deregistering leaves it up to 15 seconds after its last heartbeat, the registry's live window.
+Each page is writable again on the socket it opens after that, which is the socket a reload opens: a socket already admitted read-only stays open and read-only, since the re-check closes writable sockets alone.
 In that first overlap, a take-over (`delivery/held_durable.go`, `heldDurable.takeOver`) deletes a durable and creates it again at its ack floor, all under the durable's consumer lease, and tries a failed create again for up to 10 seconds while it holds its hold.
 The build before holds reconciles the durable under that same lease every 30 seconds and does not read the start the take-over recorded.
 So one case is left: a process of the new build killed between the delete and the create (or one that loses its hold, or fails every try, first) gives up the lease with the durable absent.

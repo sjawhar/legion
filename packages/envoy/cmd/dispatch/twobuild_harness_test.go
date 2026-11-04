@@ -6,8 +6,10 @@
 // tree's schema (the previous build boots on it, which is the SQL half of the rule in
 // cmd/dispatch/README.md) and one NATS server, with one signing key, and drives the surface the
 // other build's clients use: the CLI (twobuild_cli_test.go), the stored documents and the document
-// socket (twobuild_documents_test.go), and the messages and subscription settings on the bus
-// (twobuild_messages_test.go). This file is the harness all three start their builds with.
+// socket (twobuild_documents_test.go), the messages and subscription settings on the bus
+// (twobuild_messages_test.go), and what the page admission does while the previous build's process
+// is live and once it has left the registry (twobuild_transition_test.go). This file is the
+// harness all four start their builds with.
 //
 // The previous build is a directory packages/envoy/scripts/build-dispatch-build.sh writes, named by
 // DISPATCH_PREVIOUS_BUILD. The suite skips only when that variable is unset; a directory it names

@@ -28,6 +28,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 )
 
 // ───── stored documents ─────────────────────────────────────────────────────
@@ -247,12 +248,45 @@ const (
 	readOnlyScope = "readonly"
 )
 
+// fleetNumbers are the numbers the document socket's admission reads off the live registry rows
+// (docs.readSchemaFleet): the lowest schema_version and the highest schema_creatable among the
+// live server processes. A process of a build that predates those columns registers neither, and
+// the zeros its row holds are what it counts as, so one live process of such a build puts the
+// lowest version at 0.
+type fleetNumbers struct {
+	minVersion, maxCreatable int
+}
+
+// fleet reads the live rows' numbers now. It fails when the registry holds no live row: the
+// processes a row of this suite started are in it, and numbers read off an empty registry would
+// say every page is read-only for a reason no build has.
+func (b *twoBuilds) fleet(t *testing.T) fleetNumbers {
+	t.Helper()
+	var live int
+	var numbers fleetNumbers
+	if err := b.database.Pool.QueryRow(context.Background(), `
+		select count(*), coalesce(min(schema_version), 0), coalesce(max(schema_creatable), 0)
+		from server_processes
+		where heartbeat_at > now() - make_interval(secs => $1)`,
+		processes.LiveWindow.Seconds()).Scan(&live, &numbers.minVersion, &numbers.maxCreatable); err != nil {
+		t.Fatalf("read the live fleet's schema numbers: %v", err)
+	}
+	if live == 0 {
+		t.Fatal("the registry holds no live server process, so there is no fleet to admit a page by")
+	}
+	return numbers
+}
+
 // admittedScope is the scope reader admits a socket with writer's page parameters in, by the rule
-// the page admission states (docs.schemaFleet.admits): the page creates no more than the reader
-// reads and no more than the reader creates, and it reads at least what the reader creates and
-// what the document holds. The reader's own numbers are the whole fleet, since a build that
-// predates the fleet columns registers none and is left out. The document is one the writer
-// created, so the highest since it holds is at most the writer's own schema version.
+// the page admission states (docs.schemaFleet.admits): the page creates no more than every live
+// process reads and no more than the highest any of them creates, and it reads at least what they
+// create and what the document holds. fleet is what those live processes register. The document
+// is one the writer created, so the highest since it holds is at most the writer's own schema
+// version.
+//
+// While a process of a build that predates the fleet columns is live, the lowest version in the
+// fleet is 0, which no page's schema_creatable is at or under, so a reader of this build admits
+// every page read-only until that process is gone.
 //
 // A reader that predates the admission - its manifest names no nodes - knows no fleet: it
 // compares the page's token, which is the page's schema version alone, with its own version, and
@@ -260,16 +294,15 @@ const (
 // So a release that raises the manifest version makes every page of the newer build read-only on
 // a process of the older one until the older build is gone, whatever the elements are creatable
 // from.
-func admittedScope(writer, reader documentSide) string {
+func admittedScope(writer, reader documentSide, fleet fleetNumbers) string {
 	if len(reader.manifest.Nodes) == 0 {
 		if writer.page.token == strconv.Itoa(reader.manifest.Version) {
 			return writableScope
 		}
 		return readOnlyScope
 	}
-	version, creatable := reader.manifest.Version, reader.manifest.creatable()
-	if writer.page.creatable <= min(version, creatable) &&
-		writer.page.version >= max(creatable, writer.manifest.Version) {
+	if writer.page.creatable <= min(fleet.minVersion, fleet.maxCreatable) &&
+		writer.page.version >= max(fleet.maxCreatable, writer.manifest.Version) {
 		return writableScope
 	}
 	return readOnlyScope
@@ -407,7 +440,7 @@ func TestTwoBuildsReadAndEditEachOthersDocuments(t *testing.T) {
 			project := uniqueProjectKey(t, "DOC")
 			writer.process.createProject(t, project, "Two builds")
 			t.Run("corpus", func(t *testing.T) {
-				requireCorpusCrossesBuilds(t, writer, reader, project)
+				requireCorpusCrossesBuilds(t, builds, writer, reader, project)
 			})
 			t.Run("approval carry", func(t *testing.T) {
 				requireApprovalCarriedAcrossBuilds(t, writer, reader, project)
@@ -429,7 +462,8 @@ var corpusSkipped = map[string]string{
 	"requirements-tasks-and-checks.md": "its plan tasks and checks point at blocks of a document no project this row creates holds, and a stored block pointer is held to a block the database has (CheckBlockPointers)",
 }
 
-func requireCorpusCrossesBuilds(t *testing.T, writer, reader documentSide, project string) {
+func requireCorpusCrossesBuilds(t *testing.T, builds *twoBuilds, writer, reader documentSide, project string) {
+	fleet := builds.fleet(t)
 	var sockets []*documentSocket
 	files := slices.DeleteFunc(corpusFiles(t, writer.corpus), func(file string) bool {
 		_, skipped := corpusSkipped[file]
@@ -452,7 +486,7 @@ func requireCorpusCrossesBuilds(t *testing.T, writer, reader documentSide, proje
 		}
 
 		socket := openDocumentSocket(t, reader.process, artifactID, writer.page)
-		if want := admittedScope(writer, reader); socket.scope != want {
+		if want := admittedScope(writer, reader, fleet); socket.scope != want {
 			t.Errorf("%s: the %s admits a socket with the %s page's parameters (%s) as %q, want %q",
 				file, reader.name, writer.name, writer.page, socket.scope, want)
 		}
@@ -464,8 +498,8 @@ func requireCorpusCrossesBuilds(t *testing.T, writer, reader documentSide, proje
 			t.Errorf("the %s closed the socket it admitted for document %s: %v", reader.name, socket.artifactID, socket.endErr)
 		}
 	}
-	t.Logf("%d corpus documents of the %s read, took an edit and kept a socket open on the %s, admitted %s",
-		len(files), writer.name, reader.name, admittedScope(writer, reader))
+	t.Logf("%d corpus documents of the %s read, took an edit and kept a socket open on the %s, admitted %s by a fleet reading version %d and creating up to %d",
+		len(files), writer.name, reader.name, admittedScope(writer, reader, fleet), fleet.minVersion, fleet.maxCreatable)
 }
 
 // typedBlockID is the block id the typed-block document gives each typed block: tb-<type name>.

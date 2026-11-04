@@ -104,21 +104,31 @@ function pageCarriesManifest(process: DispatchProcess): boolean {
 /**
  * Whether a page of `pageProcess` may write a document on the server of `server`.
  *
- * A page that carries no manifest of its own takes its `schema_version` from the schema route of
- * the server it talks to and sends no `schema_creatable`, so it presents that server's own
- * version and creates up to 1: every server admits it, its own rule (a version equal to the
- * server's) and this tree's (R 1 at most what the server reads, and a version at least what the
- * server creates and the document holds) alike.
+ * Dispatch B is the previous build when `DISPATCH_E2E_BINARY_B` names one. That build writes no
+ * schema numbers into its `server_processes` row, so this tree's admission counts it as a
+ * process that reads version 0, which no page's `schema_creatable` is at or under: while it is
+ * live, a server of this tree admits every page read-only, its own and B's alike
+ * (`docs.readSchemaFleet`, and `packages/envoy/cmd/dispatch/README.md`, "Two builds at once").
  *
- * A page that carries its manifest presents that manifest's version, so a server reading another
- * version admits it read-only: a build before the fleet columns compares the token with its own
- * version exactly (`schemaReadOnly`), and this tree's rule refuses a page whose version is below
- * the highest `since` the fleet creates (`docs.schemaFleet.admits`).
+ * B's own server knows no fleet: it compares the page's `schema_version` with its own manifest
+ * version exactly (`schemaReadOnly` in that build), so it admits a page of its own version, and
+ * holds a page of any other version read-only. A page that carries no manifest of its own takes
+ * its `schema_version` from the schema route of the server it talks to, so against B's server it
+ * presents B's own version.
+ *
+ * With no previous build - both processes run this tree - the fleet is two processes of one
+ * build, and a page of that build is writable on either.
  */
 function pageWritable(pageProcess: DispatchProcess, server: DispatchProcess): boolean {
-  return (
-    !pageCarriesManifest(pageProcess) || manifestVersion(pageProcess) === manifestVersion(server)
-  );
+  if (binaryB === undefined) {
+    return true;
+  }
+  if (server === "b") {
+    return (
+      !pageCarriesManifest(pageProcess) || manifestVersion(pageProcess) === manifestVersion("b")
+    );
+  }
+  return false;
 }
 
 /** The day `seedDeliveryFixture` writes its timeline on. */
@@ -225,8 +235,9 @@ for (const pageProcess of dispatchProcesses) {
       // The issue's document. Where the other build's server admits this page writable
       // (pageWritable), an edit typed here is saved by that server, then read from the store by
       // this page's own server, and shown below in a context of the other build's page. Where it
-      // admits the page read-only - a page carrying a manifest of another version than the
-      // server reads - the page says so, takes no edit, and the stored document is untouched.
+      // admits the page read-only - a page whose version its own rule does not match, or any
+      // page at all on a server of this tree while a process of the previous build is live -
+      // the page says so, takes no edit, and the stored document is untouched.
       await page.goto(`/issues/${issue.key}/spec`);
       await expect(documentEditor(page)).toContainText("Written before the edit.");
       await expect(connectedDot(page)).toHaveText("connected");

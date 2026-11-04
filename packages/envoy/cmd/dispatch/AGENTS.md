@@ -862,12 +862,14 @@ The `dispatch-multiprocess` job runs only when a file its `dispatch_multiprocess
 `.github/workflows/ci.yaml` names changes; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
-The two-build tests (`twobuild_*_test.go`: a harness file and one file each for the CLI, documents
-and messages tests) start one Dispatch server of an earlier build
+The two-build tests (`twobuild_*_test.go`: a harness file and one file each for the CLI, documents,
+messages and the page admission's transition) start one Dispatch server of an earlier build
 and one of this tree on one Postgres and one NATS, as a rolling release runs them: each build's CLI
 against the other's server, each build's corpus documents read, edited, approved and opened on the
-other's document socket, and outbox events, GitHub messages and the stream and consumer settings
-across a stop and restart of each build. They build only under the `twobuild` tag and run in their
+other's document socket, outbox events, GitHub messages and the stream and consumer settings
+across a stop and restart of each build, and a page of this tree held read-only while the earlier
+build's process is live and admitted writable on its next socket once that process has left the
+registry. They build only under the `twobuild` tag and run in their
 own CI job, `dispatch-two-builds` in `.github/workflows/ci.yaml`, which builds the previous
 release and caches that build by its commit. The earlier build is a directory
 `packages/envoy/scripts/build-dispatch-build.sh`

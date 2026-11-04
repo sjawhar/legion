@@ -1149,7 +1149,11 @@ stays V alone, because a server that predates `schema_creatable` compares the wh
 its own version and its answer replaces the query's. The server admits the tab read-only when a
 live server process cannot read what the tab creates, or the tab cannot represent what the fleet
 creates or what the document holds (`packages/envoy/cmd/dispatch/README.md`, "Two builds at
-once"), and the surface shows `Reload to edit`. A tab admitted writable whose numbers the fleet
+once"), and the surface shows `Reload to edit`. A live server process of a build before the
+`server_processes` schema columns registers no numbers and counts as reading version 0, so during
+a rollout onto the build that carries this rule every tab is read-only on its servers until every
+process of the older build is gone.
+A tab admitted writable whose numbers the fleet
 stops admitting - a build of another version joins or rolls away - has its socket closed by the
 server's 15 s re-check with code `4412` (`DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` in
 `packages/contracts`), or with `1006` when the tab is too slow to take that frame
