@@ -269,13 +269,13 @@ printf 'ARG BUN_VERSION=1.3.14\nFROM oven/bun:${BUN_VERSION}-slim AS cli\n' > "$
 run_check "$root"
 check "a -slim suffix on the ARG tag passes" "$(is "$status" 0)"
 
-# The Bun base of this repository's own Dockerfiles is a copy in ghcr.io/sjawhar/legion/ci, named
+# The Bun base of this repository's own Dockerfiles is a copy in ghcr.io/cybermonklabs/legion/ci, named
 # by digest, so the version it carries is its row's `upstream` in .github/ci-images.yaml. The
 # digests below are made up: nothing pulls them, and what each case reads is the row they match.
 echo "case: rule 6 — a Bun base in the mirror package"
 mirror_row() { # mirror_row <root> <upstream>
   cat > "$1/.github/ci-images.yaml" <<YAML
-registry: ghcr.io/sjawhar/legion/ci
+registry: ghcr.io/cybermonklabs/legion/ci
 images:
   - upstream: $2
     tag: bun
@@ -285,14 +285,14 @@ YAML
 
 root=$(fixture mirror-bun-pinned)
 mirror_row "$root" docker.io/oven/bun:1.3.14-slim
-printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+printf 'FROM ghcr.io/cybermonklabs/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "the row whose upstream is the pinned Bun, suffix and all, passes" "$(is "$status" 0)"
 
 root=$(fixture mirror-bun-drift)
 mirror_row "$root" docker.io/oven/bun:1.4.2-slim
-printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+printf 'FROM ghcr.io/cybermonklabs/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "a row copying another Bun release fails" "$(is "$status" 1)"
@@ -301,7 +301,7 @@ check "and says which file to raise, to what" "$(contains "$out" 'to oven/bun:1.
 
 root=$(fixture mirror-digest-unknown)
 mirror_row "$root" docker.io/oven/bun:1.3.14-slim
-printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021 AS plugin\n' \
+printf 'FROM ghcr.io/cybermonklabs/legion/ci@sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "a digest no row holds fails" "$(is "$status" 1)"
@@ -313,14 +313,14 @@ check "and the line to edit" "$(contains "$out" 'worker.Dockerfile:1:')"
 # .github/ci-images.yaml's nats hub row is written as, and a host carrying a port.
 root=$(fixture mirror-bun-tag-and-digest)
 mirror_row "$root" docker.io/oven/bun:1.3.14@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
-printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+printf 'FROM ghcr.io/cybermonklabs/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "a row whose upstream names the pinned tag beside a digest passes" "$(is "$status" 0)"
 
 root=$(fixture mirror-bun-host-port)
 mirror_row "$root" registry.example.com:5000/oven/bun:1.3.14
-printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+printf 'FROM ghcr.io/cybermonklabs/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "a row whose upstream host carries a port passes" "$(is "$status" 0)"

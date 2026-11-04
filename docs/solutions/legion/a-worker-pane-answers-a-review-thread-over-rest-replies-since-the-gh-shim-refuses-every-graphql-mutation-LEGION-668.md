@@ -31,5 +31,5 @@ related_issues:
 
 LEGION-668's first review round: four `addPullRequestReviewThreadReply` mutations refused in one
 command; the REST replies landed at
-https://github.com/sjawhar/legion/pull/1878#discussion_r4236809837 and the three after it, and
+https://github.com/cybermonklabs/legion/pull/1878#discussion_r4236809837 and the three after it, and
 `legion threads resolve` resolved all four once the reviewer's `Accepted:` was newest.

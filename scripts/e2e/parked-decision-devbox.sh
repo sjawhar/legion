@@ -37,11 +37,11 @@ Inputs (environment):
                                  default https://api.anthropic.com)
   PARKED_DECISION_EVIDENCE_DIR   the evidence directory (default: a fresh /tmp directory, kept)
   PARKED_DECISION_UNTIL          stop after this checkpoint passes (a development run, not the proof)
-  LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID,
-  LEGION_E2E_REVIEW_APP_KEY_NAME, LEGION_E2E_APP_KEY_RUNNER
-                                 Legion's two role Apps (default: this deployment's own, read
-                                 through agent-secrets; lib/github-apps.sh), proved against
-                                 GitHub's GET /app in prerequisites
+  LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_SECRET, LEGION_E2E_REVIEW_APP_ID,
+  LEGION_E2E_REVIEW_APP_SECRET
+                                 Legion's two role Apps (default: this deployment's own, each
+                                 token minted through agent-secrets; lib/github-apps.sh), proved
+                                 from their tokens against GitHub's GET /apps/<slug> in prerequisites
 The devbox gh must act as the proof human.
 
 Checkpoints, in order:

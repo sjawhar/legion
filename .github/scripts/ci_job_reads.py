@@ -337,8 +337,8 @@ def go_notices_runs():
 # simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
-go test -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m"""
+go test -count=1 -timeout 20m ./internal/dispatch/api
+go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -484,7 +484,7 @@ GATES = [
         ("deploy/kubernetes/**", "docs/site/generators/legion-config.sh:28-32 renders every tracked deploy/kubernetes *.example/*.yml/*.yaml"),
         ("scripts/third-party-notices.ts", "docs/site/astro.config.mjs:15; packages/dispatch/web/vite.config.ts:11"),
         (".github/scripts/check-private-names.sh", at_docs("Check the built site has no private name, internal host, or tailnet host")),
-        (f"{ENVOY}/internal/dispatch/api/routes_table.go", "docs/site/generators/dispatch-api.ts:80 sources, checked by generators/lib/markdown.ts:46-49"),
+        (f"{ENVOY}/internal/dispatch/api/routes_table.go", "docs/site/generators/dispatch-api.ts:112 sources, checked by generators/lib/markdown.ts:46-49"),
         (f"{ENVOY}/cmd/dispatch/settings.go", "docs/site/generators/dispatch-config.ts:65 sources, checked by generators/lib/markdown.ts:46-49"),
         (BUILD_BINARIES, f"docs/site/scripts/generate.ts:116 runs it ({at_docs('Build the docs site')})"),
         (RUN_SERVER, f"packages/dispatch/e2e/harness-listeners.ts's dispatchServer runs it ({at_docs('Take the screenshots')})"),
@@ -633,7 +633,7 @@ GATES = [
     gate("envoy_go", "envoy-go", runs=[
         step_run("envoy-go", "Integration test envoy (a real NATS server, in the test process)",
                  "go test ./internal/integration/ -timeout 300s -count=1", ENVOY, ["./internal/integration/"]),
-        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -tags natslive ./internal/testnats/", ENVOY,
+        step_run("envoy-go", "Test the container-backed NATS matrix (natslive)", "go test -count=1 -tags natslive ./internal/testnats/", ENVOY,
                  ["./internal/testnats/"], tags="natslive"),
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
@@ -642,7 +642,7 @@ GATES = [
         # on the service's one checkpointer beside the other package binaries), then ./... but it
         # and internal/integration, which the integration step tests: counted as all of ./....
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -timeout 20m ./internal/dispatch/api", {}),
+            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.

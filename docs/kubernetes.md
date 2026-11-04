@@ -17,7 +17,7 @@ Its runtime's section below is kept for reference until someone removes it (LEGI
 ## Worker image
 
 Every Legion agent process under `runtime: kubernetes` — architect, planner, implementer, tester, reviewer, merger
-— runs from one image, `ghcr.io/sjawhar/legion-worker` (public), on Oh My Pi or, for a phase worker `worker_backends` puts on `claude`, on Claude Code.
+— runs from one image, `ghcr.io/cybermonklabs/legion-worker` (public), on Oh My Pi or, for a phase worker `worker_backends` puts on `claude`, on Claude Code.
 It carries:
 
 - the pinned OMP fork build the daemon's default `omp_invocation` names
@@ -25,7 +25,7 @@ It carries:
   installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
 
 - `legion` (`packages/daemon`), compiled from the same commit at `go.work`'s Go version, static, at `/opt/legion/bin/legion` — the `legion` on `PATH` and the image's `ENTRYPOINT` — with the `agent-secrets` client beside it at `/opt/legion/bin/agent-secrets`.
-  It links the commit it was built from: `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… version` prints `legion (devel) commit <sha>`.
+  It links the commit it was built from: `docker run --rm ghcr.io/cybermonklabs/legion-worker@sha256:… version` prints `legion (devel) commit <sha>`.
   It embeds Legion's role prompts (`packages/daemon/internal/prompts/roles`:
   phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue;
   merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file).
@@ -39,7 +39,7 @@ It carries:
 
 - the pin of Claude Code (`@anthropic-ai/claude-code`) and nothing else of it:
   the committed `package.json` and `package-lock.json` of `packages/daemon/docker/claude-code`, which pin one exact version and carry the npm `sha512` integrity of every tarball, at `/opt/legion/claude-code`.
-  The image carries no Claude Code: its licence reserves every right and grants no redistribution, and `ghcr.io/sjawhar/legion-worker` is public.
+  The image carries no Claude Code: its licence reserves every right and grants no redistribution, and `ghcr.io/cybermonklabs/legion-worker` is public.
   A pod whose role runs on the `claude` backend installs the pinned release at every launch instead, in its generation's start script (`claudeCodeBlock`, `packages/daemon/internal/runtime/sandbox/plugins.go`):
   it copies the pin into `<role state home>/legion-claude-code/g<generation>` on the issue pod's disk, dropping every earlier generation's install there, runs `npm ci --ignore-scripts --omit=dev` from it under a bounded `flock` on the issue's npm cache
   — `npm ci` holds each tarball to the lockfile's integrity — and then holds the installed binary's `--version` to the pin.
@@ -221,7 +221,7 @@ Each item below names an option and its measurement, then the verdict on it.
 
 - the image carries the five clients — 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment.
   In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob
-  — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`):
+  — this branch's head, `ghcr.io/cybermonklabs/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`):
   8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes
 
   **chosen**
@@ -318,7 +318,7 @@ Then:
 ### Image size and pull time
 
 A node that has never run the image pulls it whole before the pod's init containers start, so the image's compressed size is a cold launch's first cost.
-Before the capability tools above, `ghcr.io/sjawhar/legion-worker:1.18.1` was 12 layers and 369 MiB compressed (386,510,448 bytes).
+Before the capability tools above, `ghcr.io/cybermonklabs/legion-worker:1.18.1` was 12 layers and 369 MiB compressed (386,510,448 bytes).
 With them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the pull request that added them):
 the Debian layer grows from about 30 MiB to 307 MiB, almost all of it Chromium and the library closure it depends on;
 the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's tree with the two npm language servers is 66 MiB.
@@ -328,7 +328,7 @@ The warm Go module cache is a layer of its own, 380 MiB over 419 module zips wit
 the zips are compressed already, so the layer should land near that figure, and the image's first build is what measures it.
 The five client tools ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB
 — not a slice of that 22-layer figure, but a difference measured like for like between a later pair of builds, this branch's head and the base it forks from:
-the head `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`) is 24 layers and 1026.9 MiB (1,076,764,060 bytes) where the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`), is 24 layers and 1019.0 MiB (1,068,477,764 bytes)
+the head `ghcr.io/cybermonklabs/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`) is 24 layers and 1026.9 MiB (1,076,764,060 bytes) where the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`), is 24 layers and 1019.0 MiB (1,068,477,764 bytes)
 — 8,286,296 bytes, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703);
 the other 23 layers carry the remaining 1,105 bytes between them, no single one of them differing by more than 3,164 bytes in either direction.
 Each size is read from that image's own manifest in the registry and each revision from its config blob;
@@ -504,7 +504,7 @@ The `FailedMount` forms the kubelet retries itself and heals (`failed to sync co
 condition`) stay under the six-attempt budget, and the providers Secret, which every pod mounts, keeps its own earlier rule and wording (`cannot mount the providers Secret …`);
 the stage 4a harness's `image-probe-missing-volume-negative` check drives the refusal with a volume `operator-missing` from a ConfigMap `<operator ConfigMap>-missing` that does not exist, mounted at `/etc/legion-operator-missing`.
 The runtime keeps the line's `model-fallback` mark for the deployment's capability report ([The deployment's capability report](#the-deployments-capability-report)).
-To run it yourself: `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models` (both roots are required:
+To run it yourself: `docker run --rm ghcr.io/cybermonklabs/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models` (both roots are required:
 the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way;
 `--claude-root` and `--claude-code-pin` default to the image's own `/opt/legion/claude-envoy` and `/opt/legion/claude-code`;
 without `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
@@ -550,7 +550,7 @@ It reruns only when the toolchain or an earlier layer changes, so a commit that 
 To check a published image's toolchain end to end, a project Python install included:
 
 ```sh
-docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c '
+docker run --rm --entrypoint sh ghcr.io/cybermonklabs/legion-worker@sha256:… -c '
   uv --version &&
   node --version &&
   npm --version &&
@@ -577,7 +577,7 @@ docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c '
 
 ### Pin by digest, never by tag
 
-`legion.yaml` `runtime.kubernetes.image` accepts only `ghcr.io/sjawhar/legion-worker@sha256:…`.
+`legion.yaml` `runtime.kubernetes.image` accepts only `ghcr.io/cybermonklabs/legion-worker@sha256:…`.
 A tag is mutable; the daemon must know exactly what it probed, so a tag reference is refused at startup with `runtime.kubernetes.image must be pinned by digest (@sha256:…)` (`packages/daemon/internal/config/kubernetes.go`).
 
 Where the digest is published:
@@ -587,7 +587,7 @@ Where the digest is published:
 
 - the body of the `legion-v<version>` GitHub release, under "Worker image", when `release.yaml` released `legion` in the same run (`gh release view legion-v<version> --json body -q .body`);
 
-- `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or `<legion version>` worker-image tag.
+- `docker buildx imagetools inspect ghcr.io/cybermonklabs/legion-worker:<tag>` for a `sha-` or `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run that builds (on a pull request that is the PR head, never the ephemeral merge commit);
 `<legion version>` only on `main` when the `publish` job released that version in the same run, added after it by `release.yaml`'s `worker_image_release` job on the digest that run's `worker_image` pushed.
@@ -605,8 +605,8 @@ its identity is the workflow file at the ref it was read from, and its source re
 To accept a digest only when a run on `main` built it from commit `<C>`, the commit its `sha-` tag names:
 
 ```bash
-gh attestation verify oci://ghcr.io/sjawhar/legion-worker@sha256:… --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/worker-image.yaml@refs/heads/main \
+gh attestation verify oci://ghcr.io/cybermonklabs/legion-worker@sha256:… --repo cybermonklabs/legion \
+  --cert-identity https://github.com/cybermonklabs/legion/.github/workflows/worker-image.yaml@refs/heads/main \
   --source-ref refs/heads/main --source-digest <C, all 40 hex digits> \
   --deny-self-hosted-runners
 ```
@@ -617,7 +617,7 @@ The Legion release follower adds `--format json` when it parses the verified cer
 - `--cert-identity` matches the identity exactly.
   `--signer-workflow` matches it only as a prefix, so it would also accept a workflow whose path merely starts with `worker-image.yaml`.
 
-- `--source-ref` refuses a run started on another branch that calls `sjawhar/legion/.github/workflows/worker-image.yaml@main`:
+- `--source-ref` refuses a run started on another branch that calls `cybermonklabs/legion/.github/workflows/worker-image.yaml@main`:
   that run's identity names `refs/heads/main`, and its source ref names the other branch.
 
 - `--source-digest` refuses an image a run on `main` built from another commit, such as an older `main` image a pull request run pointed `sha-<C>` at.
@@ -694,7 +694,7 @@ The base image carries Legion's own tools and the generic toolchain listed above
 A deployment whose repositories need more than that (a system library, another language, a different Node or Go line) builds its own image in **its** repo:
 
 ```dockerfile
-FROM ghcr.io/sjawhar/legion-worker@sha256:…
+FROM ghcr.io/cybermonklabs/legion-worker@sha256:…
 # deployment toolchain here
 ```
 
@@ -1960,7 +1960,7 @@ the launcher, the shim and `workspace-init` keep running the generation they wer
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:<64 hex>   # digest only
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:<64 hex>   # digest only
     storage_class: gp2          # required: the issue volumes' class (the cluster has no default)
     issue_volume: 50Gi          # default 50Gi; one volume per issue, and one for the controller's pod
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
@@ -3925,8 +3925,19 @@ Then, still under the pod's lock and before it suspends anything, the daemon run
 The check runs inside the pod, in the shim of one of the round's own processes, as that role and with that role's own GitHub credential: the shim's `rescue-unpushed` frame (`internal/shimwire`) runs git and jj in the role's environment, so the clone's credential helper answers from the role's gh files and the daemon handles no secret for it.
 It asks a process of the implementer or the merger first, the roles that act as the implement App, and asks the next process of the pod when one cannot be asked at all.
 For every workspace on the disk (`/legion/workspaces/<owner>/<repo>/<issue>`, whose repository is the one its own git names, so a directory there that is no git worktree is an error rather than a pass) it reads what the workspace's remote holds now (`git ls-remote origin`, so a commit GitHub keeps only under a pull request's ref after a squash merge counts as held, and a commit only a stale remote-tracking ref names, its branch deleted or force-pushed on GitHub since the pod's last fetch, does not) and finds, against that:
-every commit on a local git branch or a local tag of the clone, every entry of its stash, the git HEAD of the workspace and of every other worktree of the clone (`git worktree list`, the clone's own working tree included), and every commit jj can see that no remote bookmark holds (`heads((::visible_heads() ~ ::remote_bookmarks()) ~ (empty() & description(exact:"")))`, read with `--ignore-working-copy --at-op=@`, so it writes no operation).
-That jj read is repository-wide, whatever the bookmarks say: a merge whose bookmark was never moved onto it, whose push said `Nothing changed`, is found and kept, empty or not, while jj's empty, undescribed working-copy commit is not work.
+the work that is the workspace's own, and never a commit the clone held when it was made, from two sources.
+The first is the workspace's own line: the issue's branch `legion/<KEY>` and every local tag of the clone, every entry of its stash, the git HEAD of the workspace and of every other worktree of the clone (`git worktree list`, the clone's own working tree included), and in jj the ancestors of the workspace's working-copy commit and of its issue's bookmark (`heads(::(@ | bookmarks(exact:"legion/<KEY>")) ~ (empty() & description(exact:"")))`).
+The second is what was made in the pod: every visible jj head (`heads(::visible_heads() ~ (empty() & description(exact:"")))`) and every local git branch that no commit the clone held when it was made contains.
+Provisioning records those commits once, in the one place it creates the shared clone, before it moves the clone into place: every visible head jj sees in the new clone, which is every branch, remote-tracking ref and tag the pod's feed gave it, written to the clone's `.jj/legion-held` (`workspace.RecordHeld`).
+No date decides it: a commit's committer time is what git or jj was told (`git rebase` and `git am` with `--committer-date-is-author-date` keep the author's, `GIT_COMMITTER_DATE` and `JJ_TIMESTAMP` set any), a reflog expires, and the operation log can be abandoned, so a commit a role made in the workspace's own detached git HEAD, or under an old timestamp, is the pod's work wherever jj's working copy has moved since.
+Creating a workspace again in a live pod writes a new `.jj/legion-created`, which the launcher's resume check reads, and leaves the clone's record as it was, so work made before the re-creation, the set-aside of a bookmark moved onto commits nobody described included, is still the pod's.
+A clone with no record, made by a release before it kept one, takes every visible head and local branch the remote lacks: noise, never a loss.
+A candidate that is jj's empty working-copy commit with no description, as the issue's branch is on a workspace provisioning started at the default branch, stands for the commit under it.
+Every jj read is made with `--ignore-working-copy --at-op=@`, so it writes no operation.
+Every git read and the push run with `--no-replace-objects`, so a replacement object (`git replace`, a graft among them) that makes a commit the pod did not make look like the parent of a role's work never makes that work look held.
+A pod's shared clone keeps every commit it ever fetched visible to jj (`git.abandon-unreachable-commits` is false), so its visible heads hold old merges, other trees' handoffs and the pre-rebase copies of branches GitHub rewrote or deleted; what the clone held when it was made is none of the pod's work and is not pushed.
+What a role made in the pod is, wherever its working copy is now: a side line it experimented on and left, and a merge whose bookmark was never moved onto it, whose push said `Nothing changed`, even once the working copy has moved back onto the bookmark; jj's empty, undescribed working-copy commit is not work.
+A commit someone else made, which the pod fetched while it ran and GitHub deleted or rewrote since, is pushed too, however old it is: the check cannot tell it from the pod's own, and that is noise, never a loss.
 `refs/jj/keep` is not read; it holds the obsolete predecessor of every rewritten commit.
 Files in the workspace, or in another worktree of the clone, that no commit holds become one commit on top of that worktree's git HEAD, built in an index of its own, so the files, the index, the refs and jj's operation log are left as they were; a file `.gitignore` ignores is left out, as a role's own push leaves it.
 What it finds is reduced to its heads and pushed, in one atomic push to the workspace's own remote, each head to a branch of its own, `legion/<KEY>-rescue-<first 8 characters of the pod's uid>-<n>`, with `n` the least number from 1 that names no branch the remote has.
@@ -4474,7 +4485,7 @@ Legion holds no model route: everything a pod's Oh My Pi needs to reach a model
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:<64 hex>   # digest only
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:<64 hex>   # digest only
     storage_class: gp3           # optional; the cluster default when omitted
     tree_volume: 20Gi            # default 20Gi; one volume per issue tree
     kubeconfig: ./kind.kubeconfig  # optional; relative paths resolve against legion.yaml's directory.
@@ -4948,7 +4959,7 @@ its [Configuration](#configuration) says where its rules differ, and its [live p
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:<digest>
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:<digest>
     kubeconfig: /home/legion/.kube/config
     storage_class: gp2
     tree_volume: 20Gi
@@ -4958,7 +4969,7 @@ runtime:
       priority_class: legion
 nats_urls: [nats://nats.internal.example.com:4222]
 envoy_url: http://envoy-listener.internal.example.com:9020
-envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
+envoy_token_file: /home/legion/.config/legion/cybermonklabs-legion/envoy-api-token
 dispatch_url: https://dispatch.internal.example.com
 daemon_url: http://<devbox VPC IP>:<daemon port>
 bind: <devbox VPC IP>

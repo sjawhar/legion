@@ -4,7 +4,7 @@ import { screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { renderWithQueries as render } from "../../__tests__/query-provider";
-import type { Event } from "../../api/types";
+import type { AskAnswer, Event } from "../../api/types";
 import { EventBody } from "./EventBody";
 
 const markdownMessage: Event = {
@@ -99,6 +99,61 @@ test("EventBody shows the answer a change replaced, struck through", async () =>
     const { previous_answer: _dropped, ...first } = changed.payload;
     view.rerender(<EventBody event={{ ...changed, payload: first }} />);
     expect(screen.queryByText(/^was:/)).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+// An answer an agent gave for its person is recorded as the person's, so the feed names the
+// agent beside them: a reader must not take the agent's answer for the person's own words.
+test("EventBody names the agent an answer was given through, beside the person", async () => {
+  const alice: AskAnswer = {
+    at: "2026-09-11T00:00:00Z",
+    selected: ["Ship"],
+    text: null,
+    user: "alice",
+  };
+  const answered: Extract<Event, { type: "ask.answered" }> = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-11T00:00:00Z",
+    id: 5,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: { ...alice, act: { session: "0123456789abcdef", scopes: ["person"] } },
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-2",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Publish?",
+      state: "answered",
+      urgency: "med",
+    },
+    seq: 5,
+    type: "ask.answered",
+  };
+  const answeredWith = (answer: AskAnswer): Extract<Event, { type: "ask.answered" }> => ({
+    ...answered,
+    payload: { ...answered.payload, answer },
+  });
+  const view = render(<EventBody event={answered} />);
+
+  try {
+    expect(
+      await screen.findByText("Answered by alice, acting through session 0123456789abcdef")
+    ).toBeDefined();
+    view.rerender(
+      <EventBody event={answeredWith({ ...alice, act: { token_name: "architect" } })} />
+    );
+    expect(screen.getByText("Answered by alice, acting through token architect")).toBeDefined();
+    view.rerender(<EventBody event={answeredWith(alice)} />);
+    expect(screen.getByText("Answered by alice")).toBeDefined();
   } finally {
     view.unmount();
   }

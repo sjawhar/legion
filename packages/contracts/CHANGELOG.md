@@ -1,5 +1,91 @@
 # Changelog
 
+## [main@43a994db0ea1] - 2026-11-04
+
+### Changed
+
+- The `Actor` of a person carries `act`, the agent that made the act for them: the session a broker-issued token proved or the caller named, else the personal token's id and name, with the scopes that credential held, a snapshot taken at the act. `AskAnswer` carries it too, `AgentToken` carries its `scopes`, `WhoamiResponse` carries the caller's, and the mint and the new scope edit have input shapes of their own. A 28th tool spec, `dispatch_inbox`, lists what the person's Dispatch Inbox shows - Needs you, Waiting on agents, Later and Credential requests, each with its count and rows - read with the caller's own credential; it is not the Envoy tool `envoy_inbox`.
+
+## [main@6f23228e01f0] - 2026-11-04
+
+### Added
+
+- The envelope's optional `kept_at`: the time Envoy's listener kept an undeliverable role message,
+  carried on the copy it forwards to the role's next holder.
+
+## [main@7ae56d094176] - 2026-11-04
+
+### Added
+
+- The block schema's own shape is declared once, as a JSON Schema in `schemas/block-schema.schema.json`, and generated into Go (`pmdoc/schema_generated.go`) and TypeScript (`src/block-schema.generated.ts`), which the editor and the dashboard import in place of their own copies.
+  A typed block's attributes keep the order `blocks.json` declares them in.
+  New shapes for the verification work: `DocumentRole`, `CheckBlock`, `CheckResult`, `CheckResultCurrency`, `IssueCheckResults`, `IssueCoverage`, `RequirementCoverage`, `ArtifactReviewKind`, `AskApprovalDocument`, and the `result.recorded` event.
+  Three new `dispatch` specs: `dispatch result`, `dispatch results` and `dispatch plan-approve`, and `dispatch request-approval` takes `include_verification`.
+- `DISPATCH_HREF_REFERENCES` names the Decisions tab's page, `/issues/<key>/decisions`, as the issue's `decisions.md` (`dispatch://<key>/artifact/decisions-md`).
+- The daemon's claim shapes carry the update round a claim is in. The state's claim view and the
+  operator's claim body each gain `updateRound` — `pod:<pod uid>`, the round every claim of one
+  pod shares, or `plugin:<daemon contract>`, one claim's own — and `updateHead`, the commit the
+  worker reported as the head of its issue branch at origin when it answered the round. Both are
+  absent while no round is open, and both are the worker's own report, which nothing verifies.
+  Daemon API contract 46 declares them, so a strict reader before it refuses a state that carries
+  either.
+- Phase handoff records on a Dispatch issue: `HandoffSummary` (`id`, `issue_key`, `phase`,
+  `version`, `author`, `created_at`), what `GET /api/v1/issues/{key}/handoffs` lists and
+  `POST /api/v1/issues/{key}/handoffs/{phase}` answers, and `Handoff`, the same with `body`, the
+  exact text the session wrote, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+  `GET /api/v1/handoffs/{id}` answer it. The `handoff.recorded` event joins `DispatchEvent`, its
+  payload `HandoffRecordedPayload` (`handoff_id`, `phase`, `version`, strict, never the body).
+  `DISPATCH_HANDOFF_BODY_MAX` (262144) is the longest handoff body in UTF-8 bytes, generated into
+  Go as `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED`. Two
+  specs join `dispatch-tools.ts`: `dispatch_handoff_write` (`issue`, `phase`, `body`), which
+  refuses before sending a phase that is not a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`) and a body
+  over the cap or not one JSON object, and `dispatch_handoff_read`, the newest handoff of a phase or
+  the version named.
+- `AskOption.id` and `AskAnswer.id` carry the part an ask's option or answer is stored as, and `Ask.revision` the revision a reference to one pins; the block grammar reads a part of an ask (`dispatch://KEY/ask/<id>#b-<part>[@v<N>]`, and an ask's dashboard page with a `#b-` fragment) wherever it reads a block of a comment, and `dispatch comment --reply-to-ask` takes such a reference to answer one part of an ask. A typed block's `block[]` attribute points only at a block of a document, so `blockPointersProblem` refuses a pointer naming a part of an ask as it refuses one naming a block of a comment or a message, each kind named with the article it takes (`"…" is a block of an ask: a block[] attribute points only at a block of a document`).
+- Decision record types: `IssueDecisions`, `Decision`, `DecisionLink`, `DecisionKeep`, `DocumentRead`, and the `decision.kept` event with its payload.
+
+### Changed
+
+- `dispatch project`'s help now says: when a person asks for a project, make the key from its
+  name and create it, and ask the person only when `dispatch projects` shows that the key is in use.
+- `dispatch_read` takes a project with no artifact, which lists the project's documents on no issue, and its description says an issue read lists the issue's documents under `Documents:`.
+- The `legion-api.ts` mirror and the daemon API fixtures are at contract 45.
+  `LegionHandoffCompleteRequest` takes `handoffId` and `handoffVersion`, the Dispatch handoff
+  record a planning, implementing, testing or reviewing completion names, and `commit` is
+  documented as the implementer's and the merger's alone. `PhaseView` carries `handoffRecord`
+  (`{id, version}`), the record its current phase's completion named, which `state.json` shows
+  in place of `handoffCommit`.
+- The `doc-edit` description says a find or quote anchor stays inside one block, and in a table inside one cell, that several cells change with one operation per cell in the same batch, and that an anchor names one cell's text. It says a find opening with a list marker that matches no text as written selects an item of that kind of list whose text starts with the rest, a task box after the marker selecting only a task item in that state, and that a `with` carrying the same kind of marker replaces the item's text under its own number.
+- The daemon state contract carries one more settings key, `settings.repository_renames`: the repository pairs a deployment tells the daemon to treat as one repository wherever it compares a name, each `{from, to}` in configured order, and `[]` when it configures none. The `daemon-api` fixtures carry it.
+- The shared GitHub push golden (`fixtures/github-envelopes/push.json`) no longer carries `changed_paths`, `changed_paths_truncated` or `forced`, which the Envoy listener has stopped sending.
+- The `turn` argument of `dispatch_comment` now says that `human` does not apply to an approval request a newer version moved. Only `dispatch request-approval` hands such a request back, at the current version.
+- `dispatch_request_approval`'s description says that a later version whose text is exactly the
+  approved version's again, such as an accidental edit undone exactly, with no decision block in
+  it decided since, carries the approval, and that a document that then does not read approved
+  needs a request. `WriteAdvice.superseded_approval`, `ArtifactReview`, `ArtifactApproval` and
+  `ArtifactReviewEventPayload` describe that carry and its reason (`Carried forward from the
+  approval of version <N>: this version's text is that version's, unchanged.`).
+
+### Removed
+
+- The fixtures of the daemon's push classification are removed with its classifier of pushes
+  that change handoffs alone, and no `reduceGithubEvent` fixture marks a push as one.
+
+### Fixed
+
+- The `dispatch_artifact` tool description says that an upload of a document's slug makes its next
+  version, as an upload of its name does.
+- `dispatch artifact` refuses `--content` and `--content-file` under a `--name` whose extension
+  is not `.md` or `.markdown` (`rows.jsonl`, `sizes.tsv`), before it sends anything, and the
+  refusal names `--path`. Inline content is always stored as a Markdown document, so such an
+  upload was accepted and came back altered, a JSONL file's lines joined into one paragraph.
+  A name with no extension, such as a document title, is still taken.
+- A `dispatch_comment` call with `turn` and no `reply_to_ask` is now refused with only the
+  turn rule and what to do: pass `reply_to_ask` with the open ask's id, or drop `turn`. The
+  refusal also named the document-owner rule first, even when the call gave exactly one
+  issue. `dispatch_doc_edit`'s precondition refusal and `dispatch_artifact`'s path-or-content
+  refusal likewise name the owner rule only when the owner is wrong.
+
 ## [main@6b1524cdb8aa] - 2026-11-01
 
 ### Added

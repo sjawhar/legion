@@ -32,7 +32,8 @@ related_issues:
 ## Evidence
 
 - To measure a registry-cache hit, branch run 40453177184 (temporary commit `17fa916a`) wrote
-  `ghcr.io/sjawhar/legion/envoy:buildcache-amd64` and `buildcache-arm64` (package versions
+  `legion/envoy:buildcache-amd64` and `buildcache-arm64` in the ghcr.io package of the account
+  this repository was in before its transfer to cybermonklabs on 2026-11-03 (package versions
   1452720428 and 1452457314). Until review thread PRRT_kwDORFy7ds6wucBM, those were the tags
   `main`'s first attested build would have imported.
 - The implement App's delete of both versions got 403. Both tags stay in the public package; the

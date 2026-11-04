@@ -50,6 +50,7 @@ import {
 import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
 import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import type { DeliveryAnswer } from "@legion/envoy-client/transport";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   envoyPluginInterface,
@@ -3016,6 +3017,54 @@ describe("envoy OMP extension", () => {
       },
       { path: "/v1/sessions", body: undefined },
     ]);
+  });
+
+  test("renders a kept role publish as a success that says no session holds the role yet", async () => {
+    // Nobody holds the role, so the listener kept the message and answered 202 (INFRA-839).
+    // The tool must not read that as a failure: the message reaches whoever claims the role.
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname !== "/v1/messages/publish") {
+        return responseWithRegistration(input, init, {});
+      }
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly topic: string };
+      return new Response(
+        JSON.stringify({
+          event_id: "evt_kept",
+          source: "agent",
+          source_event_id: "evt_kept",
+          source_session: "ses_omp",
+          topic: body.topic,
+          dedupe_key: "dedupe_kept",
+          issued_at: 1,
+          payload_summary: "broadcast",
+          trace_id: "trace_kept",
+          kept: true,
+          kept_reason: "holder_lapsed",
+          holder: "ses_lapsed",
+        }),
+        { status: 202 }
+      );
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?publish-kept");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+
+    const kept = await fixture.tools
+      .find((tool) => tool.name === "envoy_publish")
+      ?.execute("", { topic: "notifications.role.legion-architect", message: "broadcast" });
+
+    expect(kept?.isError).toBeFalsy();
+    expect(kept?.content[0]?.text).toBe(
+      "published evt_kept; kept for the role: no session holds it yet, and the message waits for the session that claims it next"
+    );
+    expect(kept?.details).toMatchObject({
+      event_id: "evt_kept",
+      topic: "notifications.role.legion-architect",
+      kept: true,
+      kept_reason: "holder_lapsed",
+    });
   });
 
   test("builds every tool parameter schema through the injected pi.zod, never the bundled zod", async () => {
@@ -10246,6 +10295,71 @@ console.log(JSON.stringify(args));
     expect(regained).toEqual([{ role, reason: "reclaimed" }]);
   });
 
+  test("the role read's 404 still means no live holder: the kept lane changed only the publish route", async () => {
+    // INFRA-839 gave a role publish a kept lane, so POST /v1/messages/publish answers 202 where
+    // it used to answer 404. GET /v1/roles/<role> is untouched: it still answers 404, with the
+    // role-holder body, when no live session holds the role. The heartbeat's re-assertion reads
+    // that route, so it stays as it is — this pins the body it must keep reading as an absence.
+    const role = "legion-reviewer";
+    const roleClaims: Record<string, unknown>[] = [];
+    const reasserted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        // The listener's own refusal body (writeRoleHolderError), not a bare error string.
+        return Response.json(
+          {
+            error: `role ${role} holder ses_lapsed lapsed; claim released`,
+            reason: "holder_lapsed",
+            holder: "ses_lapsed",
+            claim_released: true,
+          },
+          { status: 404 }
+        );
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+        roleClaims.push(body);
+        if (body.soft === true) reasserted.resolve();
+        return response({
+          session_id: "ses_lapsed_read",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-read-404");
+    const regained: { readonly role: string; readonly reason: string }[] = [];
+    const regainFired = Promise.withResolvers<void>();
+    onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+      regained.push({ role: regainedRole, reason });
+      regainFired.resolve();
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_lapsed_read"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+    await roleTool.execute("", { role });
+
+    intervals[0]?.();
+    await reasserted.promise;
+    await regainFired.promise;
+
+    expect(roleClaims).toEqual([
+      { session_id: "ses_lapsed_read", role },
+      { session_id: "ses_lapsed_read", role, soft: true },
+    ]);
+    expect(regained).toEqual([{ role, reason: "reclaimed" }]);
+  });
+
   test("heartbeat ticks while this session is the live holder issue no claim and append no transcript entry", async () => {
     const role = "legion-controller";
     const roleClaims: unknown[] = [];
@@ -16459,7 +16573,28 @@ describe("messages missed while the subscription was down", () => {
     /** False is a listener without the route, which answers 404. */
     served = true;
     replays = 0;
+    /** How many replay calls, from the next on, the listener answers 503. */
+    failReplays = 0;
+    /** The stream's identity, which an answer names when set. */
+    id: string | undefined;
+    /**
+     * True is a listener that relays: a registration asking for consumer delivery gets the
+     * session's consumer, created where the listener creates it, recorded in `consumerStarts`.
+     */
+    consumer = false;
+    readonly consumerStarts: number[] = [];
     readonly interests = new Map<string, Set<string>>();
+
+    /**
+     * Where the listener starts a session's first consumer: after a resume that names the stream's
+     * identity, zero included, else after the stream's end
+     * (`packages/envoy/cmd/listener/session_delivery.go`).
+     */
+    consumerStart(resume: { readonly stream_id: string; readonly seq?: number } | undefined) {
+      return resume !== undefined && resume.seq !== undefined && resume.stream_id === this.id
+        ? resume.seq + 1
+        : this.lastSeq + 1;
+    }
 
     store(subject: string, data: string, time = new Date().toISOString()): number {
       this.lastSeq += 1;
@@ -16478,7 +16613,12 @@ describe("messages missed while the subscription was down", () => {
       const watermark = this.lastSeq;
       const registered = this.interests.get(request.session_id) ?? new Set<string>();
       return {
-        stream: { created: this.created, first_seq: this.firstSeq, last_seq: watermark },
+        stream: {
+          ...(this.id === undefined ? {} : { id: this.id }),
+          created: this.created,
+          first_seq: this.firstSeq,
+          last_seq: watermark,
+        },
         subjects: request.subjects.map(({ subject, after }) => {
           const refused =
             subject !== `notifications.agent.${request.session_id}` && !registered.has(subject)
@@ -16519,11 +16659,19 @@ describe("messages missed while the subscription was down", () => {
         readonly session_id: string;
         readonly dir?: string;
         readonly topics: readonly string[];
+        readonly delivery?: {
+          readonly consumer: boolean;
+          readonly resume?: { readonly stream_id: string; readonly seq?: number };
+        };
       };
       if (url.pathname === "/v1/replay") {
         model.replays += 1;
         if (!model.served) {
           return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+        }
+        if (model.failReplays > 0) {
+          model.failReplays -= 1;
+          return new Response(JSON.stringify({ error: "stream read failed" }), { status: 503 });
         }
         return response(model.answer(body as unknown as ReplayRequest));
       }
@@ -16531,11 +16679,24 @@ describe("messages missed while the subscription was down", () => {
         const topics = model.interests.get(body.session_id) ?? new Set<string>();
         for (const topic of body.topics) topics.add(topic);
         model.interests.set(body.session_id, topics);
+        let delivery: DeliveryAnswer | undefined;
+        if (model.consumer && body.delivery?.consumer === true && model.id !== undefined) {
+          if (model.consumerStarts.length === 0) {
+            model.consumerStarts.push(model.consumerStart(body.delivery.resume));
+          }
+          delivery = {
+            mode: "consumer",
+            subject: `notifications.envoy.deliver.${body.session_id}`,
+            stream_id: model.id,
+            gap: false,
+          };
+        }
         return response({
           session_id: body.session_id,
           machine_id: "test",
           dir: body.dir,
           topics: [...topics],
+          ...(delivery === undefined ? {} : { delivery }),
         });
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
@@ -16618,6 +16779,8 @@ describe("messages missed while the subscription was down", () => {
       readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
       /** The listener's clock, sent as every reply's `Date`; replies carry none without it. */
       readonly listenerClock?: () => number;
+      /** False for a start that reads no replay before it settles, as one with NATS down. */
+      readonly firstSweep?: boolean;
     } = {}
   ) {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
@@ -16688,7 +16851,9 @@ describe("messages missed while the subscription was down", () => {
     };
     const before = model.replays;
     await fixture.handlers.get("session_start")?.({}, context);
-    await until(() => model.replays > before, "the session's first sweep");
+    if (options.firstSweep !== false) {
+      await until(() => model.replays > before, "the session's first sweep");
+    }
     await settle();
     const tool = (name: string) => {
       const found = fixture.tools.find((candidate) => candidate.name === name);
@@ -16719,6 +16884,25 @@ describe("messages missed while the subscription was down", () => {
         for (const interval of intervals) interval();
         await until(() => model.replays > sweeps, "a heartbeat sweep");
         await settle();
+      },
+      /** Every interval once, run until `condition` holds: a tick in consumer mode reads no replay. */
+      beat: async (condition: () => boolean, what: string) => {
+        for (const interval of intervals) interval();
+        await until(condition, what);
+        await settle();
+      },
+      /** The listener relays stored message `seq` on the agent subject over the session's relay. */
+      relay: (seq: number, data: string) => {
+        const relaySubject = `notifications.envoy.deliver.${sessionID}`;
+        const controls = natsState.controls.get(relaySubject);
+        if (controls === undefined) throw new Error("the relay subject was never subscribed");
+        controls.push(data, `_INBOX.relay.${seq}`, {
+          [RelayHeader.subject]: `notifications.agent.${sessionID}`,
+          [RelayHeader.streamSeq]: String(seq),
+          [RelayHeader.streamID]: model.id ?? "",
+          [RelayHeader.delivered]: "1",
+          [RelayHeader.storedAt]: new Date().toISOString(),
+        });
       },
       /** nats.js reports a reconnect, and the sweep it starts runs to its end. */
       reconnect: async () => {
@@ -16818,6 +17002,146 @@ describe("messages missed while the subscription was down", () => {
     };
     return session;
   }
+
+  describe("registered while its first NATS connection fails", () => {
+    // The listener stores what is sent to a registered session and pushes none of it, since the
+    // session takes its messages over NATS. So the session starts its cursors at the stream's end
+    // before it registers, and what was stored meanwhile reaches it once NATS is back: by a sweep
+    // in core mode, by its first consumer in consumer mode.
+    test("a frame stored during the outage and one sent after it are each shown once", async () => {
+      const model = new StreamModel();
+      natsState.failConnects = 99;
+      const session = await bootReplay("replay-first-outage", model, { firstSweep: false });
+      expect(model.interests.get("ses_replay")).toContain(session.agentSubject);
+      expect(natsState.controls.get(session.agentSubject)).toBeUndefined();
+      const outage = peerMessage("ses_replay", "first-outage");
+      expect(model.store(session.agentSubject, outage)).toBe(1);
+
+      natsState.failConnects = 0;
+      await session.tick();
+      expect(session.live(session.agentSubject).active()).toBe(true);
+      expect(session.cards("evt-first-outage")).toHaveLength(1);
+
+      const later = peerMessage("ses_replay", "after-outage");
+      expect(model.store(session.agentSubject, later)).toBe(2);
+      session.live(session.agentSubject).push(later);
+      await until(() => session.cards("evt-after-outage").length > 0, "the live card");
+      await session.tick();
+      expect(session.cards("evt-first-outage")).toHaveLength(1);
+      expect(session.cards("evt-after-outage")).toHaveLength(1);
+    });
+
+    test("whose position read fails too, a frame stored during the outage and one sent after it are each shown once", async () => {
+      const model = new StreamModel();
+      // Older frames for another session, the first aged out: the stream starts past sequence 1.
+      model.store("notifications.agent.ses_other", peerMessage("ses_other", "oldest"));
+      model.store("notifications.agent.ses_other", peerMessage("ses_other", "older"));
+      model.expireThrough(1);
+      model.failReplays = 1;
+      natsState.failConnects = 99;
+      const session = await bootReplay("replay-first-outage-unread", model, { firstSweep: false });
+      expect(model.replays).toBe(1);
+      expect(model.interests.get("ses_replay")).toContain(session.agentSubject);
+      model.store(session.agentSubject, peerMessage("ses_replay", "unread-outage"));
+
+      natsState.failConnects = 0;
+      await session.tick();
+      expect(session.cards("evt-unread-outage")).toHaveLength(1);
+      const later = peerMessage("ses_replay", "unread-after");
+      model.store(session.agentSubject, later);
+      session.live(session.agentSubject).push(later);
+      await until(() => session.cards("evt-unread-after").length > 0, "the live card");
+      await session.tick();
+      expect(session.cards("evt-unread-outage")).toHaveLength(1);
+      expect(session.cards("evt-unread-after")).toHaveLength(1);
+    });
+
+    test("a session restored with a cursor keeps it, and is shown what was stored past it", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-outage-kept-a", model);
+      await first.stop();
+      model.store(first.agentSubject, peerMessage("ses_replay", "outage-kept"));
+
+      natsState.failConnects = 99;
+      const before = model.replays;
+      const second = await bootReplay("replay-outage-kept-b", model, {
+        entries: first.entries(),
+        firstSweep: false,
+      });
+      // Its cursor is set, so nothing is read to start one, and the registration went out.
+      expect(model.replays).toBe(before);
+      expect(model.interests.get("ses_replay")).toContain(second.agentSubject);
+
+      natsState.failConnects = 0;
+      await second.tick();
+      expect(second.cards("evt-outage-kept")).toHaveLength(1);
+    });
+
+    test("a session whose replay read fails too still registers", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      natsState.failConnects = 99;
+      const session = await bootReplay("replay-outage-unserved", model, { firstSweep: false });
+      expect(model.replays).toBe(1);
+      expect(model.interests.get("ses_replay")).toContain(session.agentSubject);
+    });
+
+    test("in consumer mode, a frame stored during the outage and one sent after it are each shown once", async () => {
+      const model = new StreamModel();
+      model.id = "stream-1";
+      model.consumer = true;
+      natsState.failConnects = 99;
+      const session = await bootReplay("replay-first-outage-consumer", model, {
+        firstSweep: false,
+      });
+      // The stream is empty, so the cursor starts at 0, and a consumer seeded from it starts at 1.
+      model.store(session.agentSubject, peerMessage("ses_replay", "consumer-outage"));
+
+      natsState.failConnects = 0;
+      await session.beat(() => model.consumerStarts.length > 0, "the first consumer");
+      expect(model.consumerStarts).toEqual([1]);
+      session.relay(1, peerMessage("ses_replay", "consumer-outage"));
+      await until(() => session.cards("evt-consumer-outage").length > 0, "the relayed card");
+      const later = peerMessage("ses_replay", "consumer-after");
+      expect(model.store(session.agentSubject, later)).toBe(2);
+      session.relay(2, later);
+      await until(() => session.cards("evt-consumer-after").length > 0, "the relayed card");
+      await session.beat(() => true, "a later beat");
+      expect(session.cards("evt-consumer-outage")).toHaveLength(1);
+      expect(session.cards("evt-consumer-after")).toHaveLength(1);
+    });
+
+    test("in consumer mode, whose position read fails too, a frame stored during the outage and one sent after it are each shown once", async () => {
+      const model = new StreamModel();
+      model.id = "stream-1";
+      model.consumer = true;
+      model.failReplays = 1;
+      natsState.failConnects = 99;
+      const session = await bootReplay("replay-first-outage-consumer-unread", model, {
+        firstSweep: false,
+      });
+      const outage = peerMessage("ses_replay", "consumer-unread-outage");
+      model.store(session.agentSubject, outage);
+
+      // A registration once NATS is back asks for no relay while a sweep still owes the inbox from
+      // the stream's oldest message; that sweep shows the frame. A consumer is asked for only
+      // after it, seeded at or below what the sweep handled: here at 1, so the listener relays the
+      // outage frame again, and the ledger passes over it.
+      natsState.failConnects = 0;
+      await session.tick();
+      expect(session.cards("evt-consumer-unread-outage")).toHaveLength(1);
+      await session.beat(() => model.consumerStarts.length > 0, "the first consumer");
+      expect(model.consumerStarts).toEqual([1]);
+      session.relay(1, outage);
+      const later = peerMessage("ses_replay", "consumer-unread-after");
+      expect(model.store(session.agentSubject, later)).toBe(2);
+      session.relay(2, later);
+      await until(() => session.cards("evt-consumer-unread-after").length > 0, "the relayed card");
+      await session.beat(() => true, "a later beat");
+      expect(session.cards("evt-consumer-unread-outage")).toHaveLength(1);
+      expect(session.cards("evt-consumer-unread-after")).toHaveLength(1);
+    });
+  });
 
   describe("on the session's own topic", () => {
     test("a frame stored while its subscription's iterator was down is shown once it resubscribes", async () => {

@@ -27,21 +27,22 @@ name: CI
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
-# here (`cache: false` on every step). The jobs that cache Go restore one of five families with
+# here (`cache: false` on every step). The jobs that cache Go restore one of six families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-infra
-# (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry, keyed on the
-# Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum
-# change downloads only the changed modules, and Go's build cache is content-addressed, so a stale
-# entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
-# gigabyte, per change for seven days. Only a run off main falls back, when the exact key misses, to
-# the family's newest entry by its prefix; a run on main restores by the exact key only, so the
-# entry it saves after a Go bump holds nothing the older Go built. Each family is saved with
-# actions/cache/save as the last step of a job that runs on main, and only on a push to main whose
-# job succeeded and whose restore missed the exact key. setup-bun reads and writes its cache only on
-# main (.github/actions/setup-bun).
+# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-test (envoy-go
+# alone, which saves it: it builds the test binary of every package of the envoy module, a set no
+# other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each
+# family keeps one entry, keyed on the Go version its job's setup-go installed, so it is refreshed
+# only when Go is bumped. A go.sum change downloads only the changed modules, and Go's build cache
+# is content-addressed, so a stale entry costs a run only what changed; a key on the go.sum files
+# left a whole entry, up to a gigabyte, per change for seven days. Only a run off main falls back,
+# when the exact key misses, to the family's newest entry by its prefix; a run on main restores by
+# the exact key only, so the entry it saves after a Go bump holds nothing the older Go built. Each
+# family is saved with actions/cache/save as the last step before the ci-ok report of a job that
+# runs on main, and only on a push to main whose job succeeded and whose restore missed the exact
+# key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -963,6 +964,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/accesslog/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
+              # docs/statement_timing_test.go measures this package's statements through it.
+              - 'packages/envoy/internal/dispatch/benchtime/*'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
@@ -1047,6 +1050,9 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
+              # cmd/listener/dispatch_kept_role_test.go drives Dispatch's outbox end to end, so the
+              # serverchange soak compiles this package: a change to it must re-run that soak.
+              - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/rank/*'
@@ -1494,8 +1500,8 @@ jobs:
       # evicted, and refreshed only when Go is bumped. Keyed on the go.sum files it would leave a
       # 2.2 GB entry per key change; keyed on the Go version, a go.sum change only downloads the
       # changed modules and rebuilds the changed packages, since Go's build cache is
-      # content-addressed. Restored and saved only when the notices step runs; saved by this job's
-      # last step.
+      # content-addressed. Restored and saved only when the notices step runs; saved by the last step
+      # before this job's ci-ok report.
       - id: go-cache
         if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1571,7 +1577,7 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then reads the
+  # Copies every row .github/ci-images.yaml names into ghcr.io/cybermonklabs/legion/ci, then reads the
   # package to check that it holds every row. The order is the point: the read fails a row the
   # package does not hold, so the copy for this change runs first. The ci_images filter selects
   # this job, and names the files that decide what its two steps do: the rows, the two scripts,
@@ -1689,8 +1695,8 @@ jobs:
     timeout-minutes: 80
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -1919,7 +1925,7 @@ jobs:
       # deterministic under it.
       #
       # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took 306 to
+      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
       # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
       # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
       # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
@@ -1948,7 +1954,7 @@ jobs:
   # Builds the documentation site (docs/site) on every pull request and merge group that could
   # change it. A push to main runs no docs job here: docs-pages.yaml builds and publishes main's
   # site to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the repository
-  # it runs in (https://sjawhar.github.io/legion/ today), one push at a time in push order.
+  # it runs in (https://cybermonklabs.github.io/legion/ today), one push at a time in push order.
   # Both callers run the steps of docs-site.yaml, which holds them once. The site's reference
   # pages are generated from packages/ and skills/ at build time, scripts/third-party-notices.ts
   # writes the THIRD_PARTY_NOTICES.txt it publishes, and the built site is checked with the
@@ -2040,13 +2046,13 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
         # pulls the image here, and does not call .github/actions/pull-test-images: that action
         # reads a Go `const` line, and this image is a TypeScript constant
         # (packages/envoy-client/src/__tests__/nats-server.ts:9-10). The registry is this
         # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
         # it.
-        run: docker pull ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        run: docker pull ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -2103,8 +2109,8 @@ jobs:
     # pinned by digest as this file's other service images are.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2178,8 +2184,8 @@ jobs:
     # needs (LEGION_TEST_NATS_URL on the test step), on the image the envoy-client job pulls.
     services:
       nats:
-        # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        # ghcr.io/cybermonklabs/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
         ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2194,7 +2200,7 @@ jobs:
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
-      # Docker. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
+      # Docker. Every image a CI job fetches is a copy in ghcr.io/cybermonklabs/legion/ci, named by
       # digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - id: setup-go
@@ -2275,8 +2281,8 @@ jobs:
     timeout-minutes: 155
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2347,7 +2353,7 @@ jobs:
           bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
       # The file store the step below starts, pulled first for the reason the action gives. The
-      # image comes from ghcr.io/sjawhar/legion/ci, a registry this repository publishes, so a
+      # image comes from ghcr.io/cybermonklabs/legion/ci, a registry this repository publishes, so a
       # failed pull is a fault of this repository. The action must show it, not retry it.
       - name: Pull the file store image
         uses: ./.github/actions/pull-test-images
@@ -2411,8 +2417,8 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2547,8 +2553,8 @@ jobs:
     timeout-minutes: 60
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2570,10 +2576,21 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # go-envoy-test: this job builds and runs the test binary of every package of the envoy
+      # module, a set no other job builds, so it keeps a family of its own and saves it below.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -2613,15 +2630,15 @@ jobs:
       # delays.
       - name: Unit test envoy Go package
         run: |
-          go test -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
+          go test -count=1 -timeout 20m ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
       # behind the natslive tag, and this step is where it runs (INFRA-250).
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -tags natslive ./internal/testnats/
+        run: go test -count=1 -tags natslive ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -2672,6 +2689,13 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+      - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -2809,8 +2833,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2887,8 +2911,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2899,6 +2923,10 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The broker's store, which the package's contract tests open (brokerstoretest.Open in
+      # internal/dispatch/api/contract_test.go) and skip without; a skip is a pass, so without this
+      # variable they never run under the race detector.
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2938,8 +2966,8 @@ jobs:
     timeout-minutes: 70
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -2998,8 +3026,8 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3045,8 +3073,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3152,8 +3180,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
-        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -3331,7 +3359,7 @@ jobs:
       # build step). That workflow runs on main alone, so this build is what proves the stamp
       # before a merge, and it proves it under the name the transfer gives the repository rather
       # than today's: a provider.go that pinned the address instead of taking the -X would still
-      # serve sjawhar/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
+      # serve cybermonklabs/legion here and fail. ${VERSION} is Pulumi's own placeholder, filled in at
       # install, so the URL is compared literally. The step runs in the module, so the script is
       # reached by its path from the repository root, and the binary goes under $RUNNER_TEMP as
       # the docker provider's tarball above does.

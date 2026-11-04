@@ -73,12 +73,13 @@
 #   document websocket require.
 # - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
 #   listener's API token. The repository carries neither credential.
-# - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
-#   LEGION_E2E_REVIEW_APP_KEY_NAME name another deployment's two role Apps: each App's numeric id
-#   and the secrets broker key the `agent-secrets` client resolves to its private key (lib/github-apps.sh).
-#   Each defaults to this deployment's own, so a run here sets none. prerequisites proves each key
-#   is its id's App against GitHub's GET /app before the run's first write anywhere; the daemon's
-#   github_apps is the block proved.
+# - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_SECRET, LEGION_E2E_REVIEW_APP_ID and
+#   LEGION_E2E_REVIEW_APP_SECRET name another deployment's two role Apps: each App's numeric id
+#   and the secrets broker github-app secret the `agent-secrets` client releases its installation
+#   tokens from (lib/github-apps.sh). Each defaults to this deployment's own, so a run here sets
+#   none. prerequisites proves each App from its token against GitHub (GraphQL's viewer, then
+#   GET /apps/<slug>) before the run's first write anywhere; the daemon's github_apps is the block
+#   proved.
 # - LEGION_E2E_PROJECT (default LEGSMOKE, a Dispatch project key: [A-Z][A-Z0-9]{1,9}, exactly
 #   Dispatch's own projectKeyPattern, checked in prerequisites) names a run's identity;
 #   everything else derives from it, so a second lane sets only this and the two ports below.
@@ -2907,7 +2908,7 @@ production_audit() {
 }
 # note_listener_restarts records every listener-restart episode in $evidence/listener-restarts.json
 # and names, in a note, the release of the production listener whose run spans them, when one does.
-listener_release_repo=sjawhar/legion
+listener_release_repo=cybermonklabs/legion
 note_listener_restarts() {
   local episodes first last releases
   episodes=$(listener_restarts "$evidence/interests-outcomes.txt") || { note "the listener-restart episodes could not be read"; return 0; }

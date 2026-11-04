@@ -564,11 +564,12 @@ func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesI
 	awaitBroadcastDeliveries(t, handler, created.ID)
 }
 
-// Broadcasting is human-only, like the one-session route it is built from, and so is reading
-// one back.
-func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
+// Broadcasting needs the person scope, like the one-session route it is built from, and so does
+// reading one back: the deployment's shared token holds no scope and is turned away from all
+// three rows, and the person's own token reads the list her browser reads.
+func TestBroadcastRoutesRefuseACredentialWithoutThePersonScope(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 
 	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
@@ -591,10 +592,20 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := bearerRequest(t, handler, request.method, request.path, request.body)
-			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"HUMAN_ONLY"`) {
-				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"`+codeScopeRequired+`"`) {
+				t.Fatalf("status=%d body=%s, want 403 %s", response.Code, response.Body.String(), codeScopeRequired)
 			}
 		})
+	}
+	own := agentRequest(t, handler, http.MethodGet, "/api/v1/broadcasts", nil,
+		personalTokenHolding(t, database, model.ScopePerson))
+	if own.Code != http.StatusOK {
+		t.Fatalf("Alice's own token listing her broadcasts: status=%d body=%s", own.Code, own.Body.String())
+	}
+	if listed := decodeBody[[]struct {
+		ID string `json:"id"`
+	}](t, own); len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("Alice's own token listed %#v, want the one send her browser lists", listed)
 	}
 }
 
