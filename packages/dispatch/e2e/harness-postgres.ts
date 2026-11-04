@@ -176,7 +176,7 @@ async function ready(url: string, what: string, signal?: AbortSignal): Promise<v
 }
 
 /** Starts the cluster in `data`, with its log and its unix socket in `dir`, and returns the port
- *  it serves on. */
+ *  it serves on. Returns or throws with no postmaster of `data` left running. */
 async function startCluster(bin: string, data: string, dir: string, what: string): Promise<number> {
   let last = "";
   for (let attempt = 1; attempt <= bindAttempts; attempt++) {
@@ -196,6 +196,15 @@ async function startCluster(bin: string, data: string, dir: string, what: string
       return port;
     } catch (error) {
       last = error instanceof Error ? error.message : String(error);
+      // `pg_ctl -w start` gives up its own wait after `PGCTLTIMEOUT` and exits non-zero, but
+      // the postmaster it started goes on running and holding `postmaster.pid`: the next
+      // attempt's start would fail on that lock rather than on its port, and a throw here would
+      // leave a server serving a loopback port while `e2e/run.ts` removes the data directory
+      // under it. A stop that fails is a server that never bound, which is why the failure the
+      // caller sees stays the start's.
+      await execFileAsync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"]).catch(
+        () => {}
+      );
     }
   }
   throw new Error(
