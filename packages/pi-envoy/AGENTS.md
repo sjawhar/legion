@@ -144,7 +144,7 @@ side turn still running when the handler that subscribed the agent subject (`ses
 session switch, or a Legion handler re-establishing through the claim bridge) reaches the host's
 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
 A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
-blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
+blocks after the text (`@legion/pi-shared/delivery-pictures`, the same bounds as `dispatch read`), and so does
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
 takes text alone, gets them from the extension's own `input` handler when the host asks for that
 input's images (`source: "extension"`), as a picture pasted at the terminal reaches it. A typed
@@ -165,7 +165,7 @@ them, and the turn's admission goes once `sendUserInput` answers that the input 
 every handler having run.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
-steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
+steer) becomes the user's own turn (`@legion/pi-shared/dispatch-user-turn`). A frame is only a candidate
 (`isUserTurnCandidate`: Dispatch's `message.created` on no issue, a person as actor, aside or
 steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; any
 other frame keeps its card with no call to Dispatch. For a candidate the extension asks Dispatch,

@@ -190,7 +190,7 @@ export function inboundKind(message: unknown): "assignment" | "inbound-event" | 
 
 /** The text blocks of an assistant message, joined; empty for anything else. A text block is
  * `{ type: "text", text }` on both hosts' shapes: Oh My Pi's own message model, which `message_end`
- * and `session_stop` hand the plugin (`packages/pi-envoy/src/agent-stream.ts` reads it the same
+ * and `session_stop` hand the plugin (`packages/pi-shared/src/agent-stream.ts` reads it the same
  * way), and Claude Code's, whose `Stop` hook hands its host the last message as a string, so that
  * host never comes here. */
 export function assistantText(message: unknown): string {
@@ -217,7 +217,7 @@ export function assistantText(message: unknown): string {
  *
  * Two block names are accepted because the hosts disagree on it: Oh My Pi's `message_end` hands a
  * `toolCall` block (`{ type: "toolCall", id, name, arguments }`, the shape
- * `packages/pi-envoy/src/agent-stream.ts` reads), and Claude Code names the same thing `tool_use`
+ * `packages/pi-shared/src/agent-stream.ts` reads), and Claude Code names the same thing `tool_use`
  * (its stream-json, which `packages/daemon/internal/claudebridge/bridge.go` reads). Matching only
  * `tool_use` once left a working Oh My Pi worker reported to its architect as stalled. */
 export function assistantRanTool(message: unknown): boolean {

@@ -117,6 +117,21 @@ import {
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
 import {
+  AgentStreamPublisher,
+  type AgentStreamSettingsState,
+  modelReference,
+} from "@legion/pi-shared/agent-stream";
+import { transcriptPictures, withDeliveredPictures } from "@legion/pi-shared/delivery-pictures";
+import {
+  type AcceptedUserTurn,
+  HANDLED_ATTEMPT_ENTRY,
+  handledAttemptKey,
+  handledAttempts,
+  isUserTurnCandidate,
+  turnFromAccept,
+  typedInputReply,
+} from "@legion/pi-shared/dispatch-user-turn";
+import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
   forgetInjectedUserTurns,
@@ -154,25 +169,10 @@ import { connect, Events, type NatsConnection, StringCodec, type Subscription } 
 import { name as packageName, version as packageVersion } from "../package.json" with {
   type: "json",
 };
-import {
-  AgentStreamPublisher,
-  type AgentStreamSettingsState,
-  modelReference,
-} from "../src/agent-stream";
 import { CardAges } from "../src/card-age";
 import { CardWake } from "../src/card-wake";
-import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import { sessionDispatchClient } from "../src/dispatch-session";
-import {
-  type AcceptedUserTurn,
-  HANDLED_ATTEMPT_ENTRY,
-  handledAttemptKey,
-  handledAttempts,
-  isUserTurnCandidate,
-  turnFromAccept,
-  typedInputReply,
-} from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import {
   CONSUMER_STATE_ENTRY,
@@ -1313,7 +1313,8 @@ export default function envoyExtension(pi: PiApi): void {
       });
   };
 
-  // The user turn a person's direct Send or Aside becomes (`src/dispatch-user-turn.ts`): only one
+  // The user turn a person's direct Send or Aside becomes
+  // (`@legion/pi-shared/dispatch-user-turn`): only one
   // whose acceptance by this session Dispatch records, as the body and mode Dispatch answers. The
   // attempt is recorded as handled before Dispatch is asked, so whatever this frame becomes - a
   // turn, or the card every refusal, error and timeout keeps, a broken Dispatch configuration

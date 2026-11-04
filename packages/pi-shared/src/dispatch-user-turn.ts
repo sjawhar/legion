@@ -117,7 +117,7 @@ export function typedInputReply(text: string, outcome: TypedInputOutcome): strin
   if ("error" in outcome) reply = `${command} was not run: ${outcome.error}`;
   else if ("hostVersion" in outcome) {
     if (typed !== undefined) {
-      reply = `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;
+      reply = `${typed} was not run: this session's agent, version ${outcome.hostVersion}, cannot run commands sent from Dispatch; nothing was sent.`;
     }
   } else if (outcome.handled === "terminal-only") {
     reply = `${command} runs only in the session's own terminal; nothing was sent.`;

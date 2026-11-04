@@ -33,6 +33,18 @@
       "types": "./src/tool-result.ts",
       "bun": "./src/tool-result.ts"
     },
+    "./agent-stream": {
+      "types": "./src/agent-stream.ts",
+      "bun": "./src/agent-stream.ts"
+    },
+    "./delivery-pictures": {
+      "types": "./src/delivery-pictures.ts",
+      "bun": "./src/delivery-pictures.ts"
+    },
+    "./dispatch-user-turn": {
+      "types": "./src/dispatch-user-turn.ts",
+      "bun": "./src/dispatch-user-turn.ts"
+    },
     "./shell-command": {
       "types": "./src/shell-command.ts",
       "bun": "./src/shell-command.ts"

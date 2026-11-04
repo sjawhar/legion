@@ -855,10 +855,10 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
   }
 });
 
-// A session's reported model, capped at AGENT_STREAM_LIMITS.modelChars before it ever leaves
-// pi-envoy (packages/pi-envoy/src/agent-stream.ts), is still an unbroken identifier with no
-// spaces: on a 390 px phone it does not fit the header pill or the turn's own label, and without
-// an ellipsis it forced the whole page to scroll sideways rather than wrapping.
+// A session's reported model, capped at AGENT_STREAM_LIMITS.modelChars before it ever leaves the
+// session's own publisher (packages/pi-shared/src/agent-stream.ts), is still an unbroken
+// identifier with no spaces: on a 390 px phone it does not fit the header pill or the turn's own
+// label, and without an ellipsis it forced the whole page to scroll sideways rather than wrapping.
 test("a capped model name ends in an ellipsis on a phone, in the header and on the turn, and never forces the page to scroll sideways @phone", async ({
   browser,
 }, testInfo) => {
