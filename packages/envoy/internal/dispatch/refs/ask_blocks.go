@@ -309,10 +309,18 @@ func planAskIfOwed(ctx context.Context, q Queryer, askID, serverURL string) (Ite
 // where a comment's or a message's row holds every link its blocks hold. A removed part keeps
 // its row with no position, so the links it held drop out until a revision holds the part
 // again. The caller selects its own columns and adds its own conditions with `and`.
-const askPartLinks = `
+//
+// The from and the test of the part are also held apart, for a caller that joins a relation of
+// its own to each link (closureQuery): a join belongs before the where, so such a caller writes
+// the two around its own (askPartLinksFrom, askPartLinksCurrent).
+const (
+	askPartLinksFrom = `
 		from ask_block_refs r
-		join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
+		join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id`
+	askPartLinksCurrent = `
 		where b.position is not null`
+	askPartLinks = askPartLinksFrom + askPartLinksCurrent
+)
 
 // asksCitingTheDocument lists, as the ask itself, every ask holding a current part that cites
 // the document whose ref_key is the numbered parameter param, or one of that document's current

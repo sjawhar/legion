@@ -1,5 +1,19 @@
 # Changelog
 
+## [main@fd9666ee5cc3] - 2026-11-04
+
+### Added
+
+- `ReplayEngine.startCursors()` starts the cursor of every followed subject that has none at the
+  stream's end, reading no message and changing no cursor already set, so a session that registers
+  before it can open its subscriptions is shown, by its first sweep, what was stored meanwhile. It
+  waits at most 2 seconds for the position. A read that fails marks the session's own agent subject
+  `from_start`, with when the mark was set, persisted with the cursors: its first sweep reads it
+  from the oldest message the stream holds, and notices a retention gap only when the mark is older
+  than the stream's 72-hour age limit. `ReplayEngine.startPending()` says whether such a sweep is
+  still owed. `ReplayInput.timeoutMs` sets one replay call's deadline. `startCursors()` drops no
+  cursor of a subject not followed now, runs one at a time with sweeps, and never rejects.
+
 ## [main@6f23228e01f0] - 2026-11-04
 
 ### Added

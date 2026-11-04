@@ -1282,6 +1282,26 @@ func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string)
 	}
 }
 
+// tableAskAnchorsQuery and tableCommentAnchorsQuery read each row of their table that is
+// anchored on the document bound to $1 and records one of the marks bound to $2. Each finds its
+// rows through its table's anchor index (anchorTarget.anchoredOn), so the read goes by the
+// document's anchors rather than by the table; the text of each is built once, as the edit
+// validation's statements are. Neither takes a row lock, which a share lock would: the caller
+// holds the document owner's lock, and every writer of an anchored ask or comment takes that
+// lock first, so what these read holds still until the edit commits.
+var (
+	tableAskAnchorsQuery = `
+		select id::text, anchor->>'mark_id', state
+		from asks
+		where ` + asksAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+	`
+	tableCommentAnchorsQuery = `
+		select id::text, anchor->>'mark_id', resolved
+		from comments
+		where ` + commentsAnchorTarget.anchoredOn() + ` and anchor->>'mark_id' = any($2::text[])
+	`
+)
+
 // checkTableAnchorRows refuses a table edit that would remove a row or column holding an open
 // ask's or an unresolved comment's anchor, reading those rows as they stand. It takes no row
 // lock: the caller holds the document owner's lock (joinLiveWrite), and every writer of an
@@ -1304,11 +1324,7 @@ func checkTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, sna
 	sort.Strings(markIDs)
 	seen := make(map[string]struct{}, len(markIDs))
 	var active []string
-	rows, err := tx.Query(ctx, `
-		select id::text, anchor->>'mark_id', state
-		from asks
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-	`, artifactID, markIDs)
+	rows, err := tx.Query(ctx, tableAskAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("read table ask anchors: %w", err)
 	}
@@ -1329,11 +1345,7 @@ func checkTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, sna
 	}
 	rows.Close()
 
-	rows, err = tx.Query(ctx, `
-		select id::text, anchor->>'mark_id', resolved
-		from comments
-		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
-	`, artifactID, markIDs)
+	rows, err = tx.Query(ctx, tableCommentAnchorsQuery, artifactID, markIDs)
 	if err != nil {
 		return fmt.Errorf("read table comment anchors: %w", err)
 	}
