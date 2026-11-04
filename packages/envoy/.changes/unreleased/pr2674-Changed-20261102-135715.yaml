@@ -1,5 +1,0 @@
-kind: Changed
-body: 'A registration whose `port` is above 0 is answered 400 naming the `port` field: every session receives from its own consumer, or off its own NATS subscription. An accepted registration''s answer still carries `port`, always 0, because every released client parses it. A session''s stored subscription now records the machine and directory of its latest registration, so a session that registers again through another listener is fanned out by that listener and the `sender.machine` and `sender.cwd` of every message it sends name the registration it has now.'
-time: 2026-11-02T13:57:15.953291669Z
-custom:
-    Issue: pr2674

@@ -51,6 +51,11 @@ type Outcome struct {
 	// is logged with that detail and run again after the policy's longest wait, and counts against
 	// no attempt budget: it said nothing about the probed thing, and no number of them is a verdict.
 	Waiting string
+	// Pending is set when the attempt's work is still running past the attempt's bound and goes on
+	// by itself — a token command whose grant waits on a person's approval — and says what it waits
+	// on. Such an attempt is logged with that detail and run again after the policy's first wait,
+	// which joins the work still running, and counts against no attempt budget.
+	Pending string
 	Detail  string
 }
 
@@ -81,6 +86,10 @@ func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attemp
 			delay = retry.Max
 			log.Warn("boot probe is waiting on capacity; running it again",
 				"probe", name, "detail", outcome.Waiting, "retryIn", delay.String())
+		case outcome.Pending != "":
+			delay = retry.Initial
+			log.Warn("boot probe's work is still running; waiting for it",
+				"probe", name, "detail", outcome.Pending, "retryIn", delay.String())
 		case retry.Attempts > 0 && transients+1 >= retry.Attempts:
 			message := fmt.Sprintf("the %s probe never completed within its retry budget (%d attempts)", name, retry.Attempts)
 			if outcome.Detail != "" {

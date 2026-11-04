@@ -25,9 +25,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The statuses a workspace's check ends in, the runtime's own words for them.
@@ -37,19 +39,86 @@ const (
 	Failed  = runtime.RescueFailed
 )
 
-// jjHeads is every commit jj can see that no remote bookmark holds and that holds something, reduced
-// to its heads. It is repository-wide, whatever the bookmarks say: a merge whose bookmark was never
-// moved onto it is as visible here as one it was, and a push of that bookmark says "Nothing changed"
-// while the merge is on this disk alone. An empty commit with no description — jj's working-copy
-// commit before anything is written — holds no work, and dropping it keeps the work under it,
-// since the commit under it becomes a head. An empty commit with a description is kept: an empty
-// merge of two pushed commits is the one record of that merge. refs/jj/keep is not read: it holds
-// the obsolete predecessor of every rewritten commit, which is no lost work.
-const jjHeads = `heads((::visible_heads() ~ ::remote_bookmarks()) ~ (empty() & description(exact:"")))`
+// ownHeads is the jj revset of the work on a workspace's own line, reduced to its heads: the
+// ancestors of its working-copy commit and of the bookmarks its issue owns (ownedBookmarks), less
+// every empty commit with no description. It is the first of the two sources of a workspace's own
+// work; the second is what was made in the pod: every visible head and every local git branch
+// that no commit the clone held when it was made contains (visibleWorkHeads, madeInThePod). That
+// is what holds a role's side line and the merge it left when its working copy moved back. Whether
+// origin holds a head is git's question, asked of what the remote advertises now (unpushed), so
+// nothing here subtracts what jj last saw remote.
+//
+// Neither source is the whole clone. A pod's shared clone keeps every commit it ever fetched
+// visible (workspace-init sets git.abandon-unreachable-commits false), so jj's visible heads hold
+// old merges, other trees' handoffs and the pre-rebase copies of rewritten branches, which origin
+// deleted or rewrote and no role of the pod wrote: rescuing them pushed one branch for each, and
+// the pod's own work was one of sixteen.
+//
+// An empty commit with no description — jj's working-copy commit before anything is written —
+// holds no work, and dropping it makes the commit under it a head. An empty commit with a
+// description is kept: an empty merge of two pushed commits is the one record of that merge, as it
+// is when a worker merges, leaves the issue's bookmark behind and its push says "Nothing changed".
+// refs/jj/keep is not read: it holds the obsolete predecessor of every rewritten commit.
+func ownHeads(bookmarks []string) string {
+	own := "@"
+	for _, b := range bookmarks {
+		own += ` | bookmarks(exact:` + jjString(b) + `)`
+	}
+	return `heads(::(` + own + `) ~ (empty() & description(exact:"")))`
+}
+
+// ownedBookmarks is the bookmarks the issue a workspace's directory names owns: its branch,
+// `legion/<KEY>`, read back from the directory's name (workspace.Location lays it out as the issue
+// key in lowercase). A directory whose name is no issue key owns none.
+func ownedBookmarks(dir string) []string {
+	issue := strings.ToUpper(filepath.Base(dir))
+	if !claim.IsIssueKey(issue) {
+		return nil
+	}
+	return []string{claim.IssueBranch(issue)}
+}
+
+// jjString is name as a jj string literal: quoted, with `\` and `"` escaped, so a bookmark name is
+// the one name it is in a revset.
+func jjString(name string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(name) + `"`
+}
+
+// visibleWorkHeads is every head jj can see that holds something: with the clone's local git
+// branches, what madeInThePod reduces to the work the pod made.
+const visibleWorkHeads = `heads((::visible_heads()) ~ (empty() & description(exact:"")))`
+
+// madeInThePod is the commits of made that the clone at clone did not hold when it was made: none
+// of the commits provisioning recorded then (workspace.RecordHeld, read back with workspace.Held)
+// contains them. That record is the one thing that tells a commit the pod made from one it came
+// with, whatever the commit says of itself: its committer time is what git or jj was told
+// (`git rebase` and `git am` with --committer-date-is-author-date keep the author's,
+// GIT_COMMITTER_DATE and JJ_TIMESTAMP set any), a reflog expires and jj's export writes the same
+// entry for a bookmark it fetched as for one a role moved, and the clone's operation log can be
+// abandoned. Provisioning writes the record once, in the one place it creates the clone, so a
+// re-creation of a workspace in the live pod changes nothing of it.
+//
+// A commit someone else made, which the pod fetched while it ran and origin deleted since, is
+// among what this keeps, and is rescued: noise, and never a loss. A clone with no record, made
+// by an earlier release, or one whose record cannot be read, keeps every one of made, as the check
+// did before it read the record: noise too, and never a loss.
+func (r runner) madeInThePod(clone string, made []string) ([]string, error) {
+	recorded, ok, err := workspace.Held(clone)
+	if err != nil || !ok {
+		return made, nil
+	}
+	held, err := r.objects(clone, recorded, "commit")
+	if err != nil {
+		return nil, err
+	}
+	return r.unpushed(clone, made, held)
+}
 
 // gitPins is configuration every git this package starts reads last: no hook and no file-system
-// monitor runs, whatever the clone's configuration names.
-var gitPins = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
+// monitor runs, whatever the clone's configuration names, and no replacement object (`git replace`,
+// a graft among them) stands in for a commit, so a commit grafted to have a role's work as its
+// parent never makes that work look held, and the push sends the commits as they are.
+var gitPins = []string{"--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}
 
 // Request is one check of every workspace on a pod's disk.
 type Request struct {
@@ -148,13 +217,21 @@ func workspaces(stateDir string) ([]string, error) {
 // rather than a pass: whatever it holds, nothing can push it.
 //
 // What the remote holds is read from the remote alone: a remote-tracking ref is only as fresh as
-// the pod's last fetch, so a commit only a stale one names — its branch since force-pushed or
-// deleted on the remote — is a commit the remote may no longer have, and is rescued.
+// the pod's last fetch, so a commit of the workspace's own that only a stale one names — the
+// issue's branch since force-pushed or deleted on the remote — is a commit the remote may no
+// longer have, and is rescued.
 //
-// The candidates are every commit a role can leave work in: each local branch and tag of the
-// repository, every entry of its stash, the HEAD of the workspace and of every other worktree of
-// the repository (git worktree list, the clone's own included), and jj's own heads. Each of those
-// worktrees' files that no commit holds become one commit on that worktree's HEAD.
+// The candidates are the work that is the workspace's own, and never a commit the clone held when
+// it was made. They come from two sources. The workspace's own line: the ancestors of its
+// working-copy commit and of its issue's bookmark (ownHeads, ownedBookmarks), and in git the
+// issue's branch, every local tag, every entry of the stash, and the HEAD of the workspace and of
+// every other worktree of the repository (git worktree list, the clone's own included), each a
+// worktree on the pod's disk. And what was made in the pod: every visible jj head and every local
+// git branch that no commit the clone held when it was made contains (madeInThePod), a side line a
+// role left, a merge it left behind when its working copy moved back, and a commit git made in the
+// workspace's detached HEAD that jj then moved away from among them. A candidate that is jj's
+// empty working-copy commit stands for the commit under it (holdingWork). Each worktree's files
+// that no commit holds become one commit on that worktree's HEAD.
 //
 // The report also names each rescue branch of this prefix the remote holds already: an earlier
 // check of the same pod pushed it, in a round whose replacement did not happen then, and the issue
@@ -199,12 +276,23 @@ func check(ctx context.Context, req Request, dir string, used, seen map[string]b
 		return fail(err)
 	}
 
+	owned := ownedBookmarks(dir)
+	branches, err := run.git(clone, nil, "for-each-ref", "--format=%(objectname)", "refs/heads")
+	if err != nil {
+		return fail(err)
+	}
+	made := fields(branches)
 	refs, err := run.git(clone, nil, "for-each-ref",
-		"--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)", "refs/heads", "refs/tags")
+		"--format=%(if)%(*objectname)%(then)%(*objectname)%(else)%(objectname)%(end)", "refs/tags")
 	if err != nil {
 		return fail(err)
 	}
 	candidates := fields(refs)
+	for _, b := range owned {
+		if commit, err := run.git(clone, nil, "rev-parse", "--verify", "--quiet", "refs/heads/"+b+"^{commit}"); err == nil {
+			candidates = append(candidates, commit)
+		}
+	}
 	if _, err := run.git(clone, nil, "rev-parse", "--verify", "--quiet", "refs/stash"); err == nil {
 		stash, err := run.git(clone, nil, "log", "--walk-reflogs", "--format=%H", "refs/stash")
 		if err != nil {
@@ -234,13 +322,35 @@ func check(ctx context.Context, req Request, dir string, used, seen map[string]b
 		candidates = append(candidates, head)
 	}
 	if info, err := os.Lstat(filepath.Join(dir, ".jj")); err == nil && info.IsDir() {
-		jjHeadsOut, err := run.jj(dir, "log", "--no-graph", "-r", jjHeads, "-T", `commit_id ++ "\n"`)
+		jjHeadsOut, err := run.jj(dir, "log", "--no-graph", "-r", ownHeads(owned), "-T", `commit_id ++ "\n"`)
 		if err != nil {
 			return fail(err)
 		}
 		candidates = append(candidates, fields(jjHeadsOut)...)
+		visible, err := run.jj(dir, "log", "--no-graph", "-r", visibleWorkHeads, "-T", `commit_id ++ "\n"`)
+		if err != nil {
+			return fail(err)
+		}
+		made = append(made, fields(visible)...)
 	}
+	made, err = run.objects(clone, made, "commit")
+	if err != nil {
+		return fail(err)
+	}
+	made, err = run.holdingWork(clone, made)
+	if err != nil {
+		return fail(err)
+	}
+	made, err = run.madeInThePod(clone, made)
+	if err != nil {
+		return fail(err)
+	}
+	candidates = append(candidates, made...)
 	candidates, err = run.objects(clone, candidates, "commit")
+	if err != nil {
+		return fail(err)
+	}
+	candidates, err = run.holdingWork(clone, candidates)
 	if err != nil {
 		return fail(err)
 	}
@@ -423,6 +533,51 @@ func (r runner) unpushed(clone string, candidates, held []string) ([]string, err
 		}
 	}
 	return tips, nil
+}
+
+// holdingWork is candidates, each once, with every commit that has no message and the tree of its
+// one parent replaced by that parent, as often as it takes. That commit is jj's working-copy commit
+// before anything is written, as ownHeads drops it on jj's side, and a git ref can name it: jj
+// exports a bookmark set on it, as provisioning sets the issue's on the working copy of a workspace
+// it starts at the default branch. A merge is kept whatever it holds.
+func (r runner) holdingWork(clone string, candidates []string) ([]string, error) {
+	for {
+		if len(candidates) == 0 {
+			return nil, nil
+		}
+		listed, err := r.git(clone, nil, append([]string{"log", "--no-walk=unsorted", "--format=%H %T %P%x09%s"}, candidates...)...)
+		if err != nil {
+			return nil, err
+		}
+		replaced := map[string]string{}
+		for line := range strings.Lines(listed) {
+			ids, subject, _ := strings.Cut(strings.TrimRight(line, "\n"), "\t")
+			commit := strings.Fields(ids)
+			if subject != "" || len(commit) != 3 {
+				continue
+			}
+			parentTree, err := r.git(clone, nil, "rev-parse", commit[2]+"^{tree}")
+			if err != nil {
+				return nil, err
+			}
+			if parentTree == commit[1] {
+				replaced[commit[0]] = commit[2]
+			}
+		}
+		var next []string
+		for _, c := range candidates {
+			if p, ok := replaced[c]; ok {
+				c = p
+			}
+			if !slices.Contains(next, c) {
+				next = append(next, c)
+			}
+		}
+		if len(replaced) == 0 {
+			return next, nil
+		}
+		candidates = next
+	}
 }
 
 // edits is one commit holding the workspace's files as they stand, on top of head, when they
