@@ -9,19 +9,22 @@ import type { RulesCheck } from "./rules-check";
 /** A call's arguments, as the dry run printed them or the device validated them. */
 type Input = Record<string, unknown>;
 
-/** The arguments that name the target a write lands on, beside the tool. */
-const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
+/**
+ * The arguments that name the target a write lands on, beside the tool: a Dispatch write's issue,
+ * ask, artifact, project and reply, and the recipients (`to`) of a message to other agents.
+ */
+const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to", "to"] as const;
 
 /** Refusals of one thing on one target after which the next attempt at it goes out unreviewed. */
 export const GATE_BREAKER_REFUSALS = 2;
 
 /**
- * The call's target: its tool and each of the issue, ask, artifact, project and reply its arguments
- * name, as the `key` every count is held under and the `label` the entry records and a reader joins
- * calls on. The key's parts are a JSON array, never joined on a separator: a value is the agent's
- * argument and can hold any character, so a joined key would let one target forge another and give
- * it the refusals counted on the forgery. The label is those same parts joined with spaces, built
- * here beside the key rather than read back out of it.
+ * The call's target: its tool and each of the issue, ask, artifact, project, reply and recipients
+ * its arguments name, as the `key` every count is held under and the `label` the entry records and
+ * a reader joins calls on. The key's parts are a JSON array, never joined on a separator: a value
+ * is the agent's argument and can hold any character, so a joined key would let one target forge
+ * another and give it the refusals counted on the forgery. The label is those same parts joined
+ * with spaces, built here beside the key rather than read back out of it.
  */
 export function breakerKey(toolName: string, input: Input): { key: string; label: string } {
   const parts = [toolName];

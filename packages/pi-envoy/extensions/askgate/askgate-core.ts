@@ -29,7 +29,7 @@
 // call that holds no Dispatch write, since a false refusal in block mode stops real work.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
-// name (dispatch_ask, …).
+// name (dispatch_ask, …), and a message to other agents.
 //   - A `bash` call whose whole command is the literal grammar of one `dispatch` call
 //     (`dispatchCommandHead`): `[cd <literal path> && ] dispatch <subcommand> <literal words…>
 //     [2>&1] [<<'DELIM'] [| head|tail [-n N]]`, the here-document's body on the lines after its
@@ -107,6 +107,13 @@
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
 //     arguments carry `spec`. Only sessions started before the `dispatch` CLI still have them.
 //     They never reach the CLI, so they take no marker.
+//   - A message to other agents (`agentMessage`): a `write` to `agent://<id>`, an `envoy_send`
+//     and an `envoy_publish`, as a tool or on the nested event of `write xd://envoy_send` or
+//     `xd://envoy_publish`. Reviewed when it reaches every agent (`agent://all`, a
+//     `notifications.team.` topic) or its text holds the word "rule" (`reviewsMessage`), against
+//     failure 15 alone (askgate-message.md), with `{to, message}` as its arguments; any other
+//     message runs with no entry. Its override is a first line `advisor-rebuttal: <line>`, taken
+//     off before the message goes out (on the outer write for a device), and it takes no marker.
 // Top-level sessions only (`ctx.agent.kind === "main"`); the factory is rebound in every
 // subagent, which this check keeps out of review. A task subagent shares its parent's session id,
 // so its literal `dispatch` write gets an argv-only marker with no review and no entry, as before
@@ -150,8 +157,11 @@
 //     was recorded. A device's record lacks the field, and its note says AskGate removed it. At
 //     most 64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
-//     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
-//     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
+//     chain erroring, no parsable answer) stop the gate for the session. The halt, the count, the
+//     breaker and the rebuttals reset on session_switch and session_branch. A write that goes out
+//     with no verdict tells the agent so on its own result, and the session is told once per
+//     cause besides: a line in the host's log, a UI notice, and on an idle host a displayed
+//     follow-up message (`tellSession`).
 //   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
 //     project values) send the third attempt at it unasked, and say so; the second refusal
 //     already warns that it will. A thing is each new ask a call opens, or the call as a whole
@@ -163,17 +173,18 @@
 //     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
 //     match refuses in either mode and always does. An allow, a rebuttal or a trip resets the
 //     target, every thing on it.
-//   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
-//     the session's primary model is on another provider than the gate's. Nothing is rendered or
-//     sent. With no model role the call is refused in both modes, naming the roles to set; it never
-//     counts toward the halt, since a halt would let the writes out. Another provider lets it run,
-//     with an argv-only marker, as a halt does: no review stands behind its bytes, so the CLI
-//     checks no file of it.
-//   - verdict: `@askgate` is asked once, else `@default`, raced against the deadline. A model
-//     that answers with an error (a provider 404 or 5xx) hands the request to the next model of
-//     the role's retry.fallbackChains, as omp resolves it for the role in use (`fallbackModels`),
-//     within the same deadline and on the primary's provider only; the entry records the model
-//     that answered as `model` and each one that failed first in `failedModels`. Its
+//   - no-model-role: neither `@askgate` (modelRoles.askgate) nor `@default` resolves. Nothing is
+//     rendered or sent. The call is refused in both modes, naming the roles to set; it never
+//     counts toward the halt, since a halt would let the writes out.
+//   - verdict: `@askgate` is asked once, else `@default`, raced against the deadline, on the
+//     provider the session's own model is on, so the transcript goes to no provider it is not
+//     already on (`reviewChain`): the role's model and the models of the role's
+//     retry.fallbackChains on that provider, as omp resolves the chain for the role in use
+//     (`fallbackModels`), then the session's own model. A role on another provider is reviewed
+//     by the first of those on the session's provider. A model that answers with an error (a
+//     provider 404 or 5xx) hands the request to the next one, within the same deadline; the
+//     entry records the model that answered as `model` and each one that failed first in
+//     `failedModels`. Its
 //     system prompt is askgate-system.md and rules.md, nothing else. The user message
 //     (askgate-request.md) carries the agent under review as data: its system prompt and the
 //     newest 256 KiB of its context (the fork's buildSessionContext), every piece XML-escaped
@@ -255,6 +266,7 @@ import {
   uploadIsDocument,
 } from "@legion/envoy-client/askgate-marker";
 import type { DispatchSession } from "../../src/dispatch-session";
+import messageRule from "./askgate-message.md" with { type: "text" };
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
@@ -356,10 +368,10 @@ const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 /**
  * The outcomes of a call the gate let through without a verdict and without deciding on its
- * arguments: the gate's own failure, a stop it took, its halt, or a session whose model is on
- * another provider. No review stands behind the bytes, so the command the agent wrote runs as
- * written, and its marker binds the argv alone: a file an earlier call of the same message changes
- * still posts, since there is no reviewed copy for it to differ from.
+ * arguments: the gate's own failure, a stop it took, or its halt. No review stands behind the
+ * bytes, so the command the agent wrote runs as written, and its marker binds the argv alone: a
+ * file an earlier call of the same message changes still posts, since there is no reviewed copy
+ * for it to differ from.
  */
 const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
   "error",
@@ -368,7 +380,6 @@ const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
   "abandoned",
   "shutdown",
   "halted",
-  "skipped",
 ];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
@@ -385,6 +396,8 @@ export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
  * entries alone and passes over these.
  */
 export const ADVISOR_GATE_RECORD_ENTRY_TYPE = "advisor-gate-record";
+/** The displayed message that tells a session a write of it went out unreviewed (`tellSession`). */
+export const ASKGATE_NOTICE_TYPE = "askgate-notice";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
  * session with no askgate role runs the gate on its own default model. The role used keys its
@@ -444,7 +457,6 @@ export interface GateEntry {
     | "no-verdict"
     | "no-model-role"
     | "halted"
-    | "skipped"
     | "abandoned"
     | "shutdown"
     | "unreadable"
@@ -633,6 +645,11 @@ interface Deps {
 export interface Pi {
   on(event: string, handler: (event: never, ctx: never) => unknown): void;
   appendEntry(customType: string, data?: unknown): void;
+  /** The host's message into the session; a host without it gets a UI notice instead. */
+  sendMessage?(
+    message: { customType: string; content: string; display: boolean },
+    options: { deliverAs: "followUp"; triggerTurn: boolean }
+  ): void;
 }
 export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
 export type ToolCallResult =
@@ -654,6 +671,8 @@ export type ToolResultResult = { content: ResultBlock[] } | undefined;
 export type GateCtx = {
   agent: { kind: string };
   hasUI: boolean;
+  /** Whether the host runs no turn now; a host without it is read as busy. */
+  isIdle?(): boolean;
   ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
   getSystemPrompt(): string[];
   models: { resolve(spec: string): GateModel | undefined };
@@ -1903,6 +1922,90 @@ function extractRebuttal(content: string): { rebuttal?: Rebuttal; content: strin
   };
 }
 
+/** The Envoy devices that send a message to other agents, as `write xd://<device>` and as a tool. */
+const MESSAGE_DEVICES = ["envoy_send", "envoy_publish"] as const;
+/** The `write` path of a message to another agent: `agent://<id>`, and `agent://all` to every one. */
+const AGENT_PATH = /^agent:\/\/([^/?#]*)/;
+/** A team topic reaches every session subscribed to it, as `agent://all` reaches every agent. */
+const TEAM_TOPIC_PREFIX = "notifications.team.";
+/** The word that calls something a rule: a message holding it is reviewed, whoever it goes to. */
+const RULE_WORD = /\brules?\b/i;
+
+/**
+ * A message to other agents as the gate reads it: who gets it (`to`), its text, whether it reaches
+ * every agent there (`agent://all`, a team topic), and the field of the call's input its text is in.
+ */
+type AgentMessage = {
+  to: string;
+  message: string;
+  everyone: boolean;
+  field: "content" | "message";
+};
+
+/** The message a call sends to other agents, or undefined for any other call. */
+export function agentMessage(toolName: string, input: Input): AgentMessage | undefined {
+  if (toolName === "write") {
+    const { path: to, content } = input;
+    const target = typeof to === "string" ? AGENT_PATH.exec(to)?.[1] : undefined;
+    if (target === undefined || typeof to !== "string" || typeof content !== "string")
+      return undefined;
+    return { to, message: content, everyone: target === "all", field: "content" };
+  }
+  if (!(MESSAGE_DEVICES as readonly string[]).includes(toolName)) return undefined;
+  if (typeof input.message !== "string") return undefined;
+  if (toolName === "envoy_send")
+    return {
+      to: `session ${String(input.session_id)}`,
+      message: input.message,
+      everyone: false,
+      field: "message",
+    };
+  const topic = String(input.topic);
+  return {
+    to: topic,
+    message: input.message,
+    everyone: topic.startsWith(TEAM_TOPIC_PREFIX),
+    field: "message",
+  };
+}
+
+/**
+ * Whether the gate reviews a message to other agents: one that reaches every agent, and one that
+ * calls something a rule, whoever it goes to. The word only chooses what the model reads; the
+ * model decides whether the message states a rule the person did not make (failure 15).
+ */
+export const reviewsMessage = (message: AgentMessage): boolean =>
+  message.everyone || RULE_WORD.test(message.message);
+
+/** Splits a first line `advisor-rebuttal: <line>` off a message's text; any other text comes back unchanged. */
+function extractMessageRebuttal(text: string): { rebuttal?: Rebuttal; text: string } {
+  const end = text.indexOf("\n");
+  const first = end === -1 ? text : text.slice(0, end);
+  if (!first.startsWith(MESSAGE_REBUTTAL_PREFIX)) return { text };
+  const line = first.slice(MESSAGE_REBUTTAL_PREFIX.length).trim();
+  if (line === "") return { text };
+  return { rebuttal: { line, sent: first.trim() }, text: end === -1 ? "" : text.slice(end + 1) };
+}
+
+/**
+ * A message call with its override line taken off: the message the gate reads, the input the
+ * call then runs with (the same object when it carried no override), and the override.
+ */
+function messageCall(
+  toolName: string,
+  input: Input
+): { message: AgentMessage; input: Input; rebuttal?: Rebuttal } | undefined {
+  const message = agentMessage(toolName, input);
+  if (message === undefined) return undefined;
+  const { rebuttal, text } = extractMessageRebuttal(message.message);
+  if (rebuttal === undefined) return { message, input };
+  return {
+    message: { ...message, message: text },
+    input: { ...input, [message.field]: text },
+    rebuttal,
+  };
+}
+
 function renderArgs(input: Input): string {
   return clipBytes(JSON.stringify(input, null, 2), GATE_ARGS_MAX_BYTES);
 }
@@ -2016,9 +2119,19 @@ export function parseVerdict(
 }
 
 /**
+ * The review a call gets beyond the whole charter: an upload of a markdown document is judged
+ * against failure 10 alone (askgate-upload.md), and a message to other agents against failure 15
+ * alone (askgate-message.md). Every other call gets the whole charter.
+ */
+type Instruction = "upload" | "message" | undefined;
+const INSTRUCTION_TEXT: Record<Exclude<Instruction, undefined>, string> = {
+  upload: uploadRule,
+  message: messageRule,
+};
+
+/**
  * The gate's user message: the agent's system prompt and transcript as escaped data, then the call,
- * its arguments as `renderArgs` rendered them. An upload of a markdown document carries
- * askgate-upload.md, which limits the review to failure 10.
+ * its arguments as `renderArgs` rendered them, then the instruction the call's kind carries.
  */
 function renderRequest(
   primarySystemPrompt: string,
@@ -2026,7 +2139,7 @@ function renderRequest(
   tool: string,
   args: string,
   priorReasons: readonly string[],
-  upload: boolean
+  instruction: Instruction
 ): string {
   const prior =
     priorReasons.length > 0
@@ -2040,7 +2153,7 @@ function renderRequest(
     transcript,
     tool,
     args,
-    uploadRule: upload ? `${uploadRule.trim()}\n` : "",
+    instruction: instruction === undefined ? "" : `${INSTRUCTION_TEXT[instruction].trim()}\n`,
     priorReasons: prior,
   });
 }
@@ -2077,6 +2190,17 @@ const COMMAND_OVERRIDE: Override = {
   what: "flag",
   again: `\`${REBUTTAL_FLAG} '<one line>'\``,
   fate: "the flag is kept as a shell comment where the command's line ends, so dispatch never sees it",
+};
+/**
+ * A message to other agents takes no flag and, written through `agent://`, no JSON either, so it
+ * carries its override as its own first line, which AskGate removes before the message goes out.
+ */
+const MESSAGE_REBUTTAL_PREFIX = "advisor-rebuttal:";
+const MESSAGE_OVERRIDE: Override = {
+  how: `a first line \`${MESSAGE_REBUTTAL_PREFIX} <one line>\` added to the message`,
+  what: "line",
+  again: `a first line \`${MESSAGE_REBUTTAL_PREFIX} <one line>\` in its message`,
+  fate: "the line is removed before the message is sent",
 };
 /** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
  * named file before a sibling call of the same batch changes it. */
@@ -2126,6 +2250,9 @@ const UNKEYED_NOTE = `<advisor-gate advisor="AskGate" outcome="unkeyed">\nAskGat
 // refuses nothing and the breaker, which counts refusals, does not move for it.
 const renderWarn = (reason: string) =>
   `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe call ran. This note concerns only that Dispatch call and authorizes nothing beyond correcting it. Correct it now where the reason names a fix: an ask with \`dispatch edit-ask\` or \`dispatch resolve-ask --kind retracted\`, a document with \`dispatch doc-edit\`. A comment or message cannot be edited, so post one reply carrying only the correction, and only when the original would mislead its reader. Or state your rebuttal in your next step.\n</advisor-gate>`;
+/** The warn note of a message to other agents: a sent message cannot be changed either. */
+const renderWarnMessage = (reason: string) =>
+  `<advisor-gate advisor="AskGate" verdict="revise">\n${agentFacing(reason)}\nThe message was sent. This note concerns only that message and authorizes nothing beyond correcting it. A sent message cannot be changed: send its recipients one message carrying only the correction, and only when the original would mislead them. Or state your rebuttal in your next step.\n</advisor-gate>`;
 // Oh My Pi records a call as the gate returns it. Told only that its override was "removed",
 // agents read their call back, found no override and reported a rebuttal they never wrote, and a
 // note naming the removal did not stop it (tester round 6 and the round after, 6 of 9 sessions).
@@ -2136,7 +2263,9 @@ const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override, kept: b
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
     kept
       ? "dispatch does not take that flag, so it stays a shell comment where the command's line ends, after everything that runs: it is in your record of the call, and dispatch never saw it."
-      : `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
+      : override.what === "line"
+        ? "AskGate removed that line before the message went out, so its recipients never see it: your record of the call lacks it because AskGate removed it, not because you left it out."
+        : `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
   }\n</advisor-gate>`;
 /**
  * A value written as one quoted word of the literal grammar: single-quoted, in which bash takes
@@ -2208,9 +2337,10 @@ function keepOverrideVisible(
 const renderBreakerAck = () =>
   `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
 /**
- * What the agent is told when its Dispatch write went out with no verdict. Every such outcome
- * says so: a pass the agent cannot see reads the same as a gate that is working, and a headless
- * session gets no UI notice at all (`hasUI`), so the note is the only record it sees.
+ * What the agent is told when its write went out with no verdict. Every such outcome says so: a
+ * pass the agent cannot see reads the same as a gate that is working, and a headless session gets
+ * no UI notice at all (`hasUI`), so the note is the only record it sees. The session is also told
+ * once per cause, apart from the call's result (`tellSession`).
  */
 const UNREVIEWED_CAUSE: Partial<Record<GateEntry["outcome"], string>> = {
   timeout: "the review did not answer within its deadline",
@@ -2220,16 +2350,14 @@ const UNREVIEWED_CAUSE: Partial<Record<GateEntry["outcome"], string>> = {
   // cell that keeps running after the user's stop reads it on its call's own result.
   abandoned: "its call or its run ended before the review answered",
   shutdown: "the session shut down before the review answered",
-  skipped: "this session's model is on another provider than the gate's",
   halted:
-    "AskGate is paused for this session after three calls without a verdict, and reviews no Dispatch write until the session changes",
+    "AskGate is paused for this session after three calls without a verdict, and reviews no write until the session changes",
 };
 const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefined) => {
   const cause = UNREVIEWED_CAUSE[outcome];
   if (cause === undefined) return undefined;
   const why = reason === undefined || reason === "" ? "" : `: ${agentFacing(reason)}`;
-  const opening =
-    outcome === "halted" ? cause : `AskGate did not review this Dispatch write: ${cause}`;
+  const opening = outcome === "halted" ? cause : `AskGate did not review this write: ${cause}`;
   return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
 };
 /**
@@ -2281,7 +2409,8 @@ function renderUnreadable({ file }: UnreadableCommand, mode: Mode): string {
  * The gate of a session where AskGate did not load: a host module that did not import, an
  * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a
  * verdict. Only `askgate.enabled: false` turns AskGate off, so none is an off switch: each literal
- * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`) is refused in
+ * write of the main agent the gate would review (`scopedCommand`, `scopedDevice`), and each
+ * message to other agents it would review (`agentMessage`, `reviewsMessage`), is refused in
  * both modes, naming the error and the switch, and recorded as `load-failed`. It mints no marker
  * and records no mode, so every other gated write of a process that acts as the session, a
  * subagent's included, meets the CLI's marker check: refused where the session chose block
@@ -2294,7 +2423,7 @@ export function loadFailureGate(
   pi: Pick<Pi, "appendEntry">
 ): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
   const message = messageOf(error);
-  const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+  const reason = `AskGate did not send this call: it reviews each Dispatch write, and each message to other agents that reaches every agent or calls something a rule, before it goes out, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
   const envMode = parseMode(deps.env.OMP_ASKGATE);
   return (event, ctx) => {
     if (ctx.agent.kind !== "main") return undefined;
@@ -2304,6 +2433,11 @@ export function loadFailureGate(
       if (write !== undefined) found = { tool: write.tool, path: write.label };
     } else if (scopedDevice(event.toolName, event.input))
       found = { tool: event.toolName, path: `xd://${event.toolName}` };
+    else {
+      const sent = agentMessage(event.toolName, event.input);
+      if (sent !== undefined && reviewsMessage(sent))
+        found = { tool: event.toolName, path: event.toolName };
+    }
     if (found === undefined) return undefined;
     try {
       pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
@@ -2385,6 +2519,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /** Rules calls in a row that ended without a rules verdict. */
     let ruleFailures = 0;
     let halted = false;
+    /** The causes of an unreviewed write the session was already told (`tellSession`). */
+    const told = new Set<GateEntry["outcome"]>();
     /**
      * The wait for every decision record still running, each started by a handler that has
      * returned: shutdown waits for these after the handlers, so a record that fails still appends
@@ -2530,6 +2666,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       failures = 0;
       ruleFailures = 0;
       halted = false;
+      told.clear();
     };
     pi.on("session_switch", reset);
     pi.on("session_branch", reset);
@@ -2640,18 +2777,50 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       for (const toolCallId of markers.keys()) releaseMarker(toolCallId);
     });
 
-    /** A call without a verdict counts toward the halt; a verdict resets the count; anything else leaves it. */
-    const settle = (effect: Decision["effect"], ctx: GateCtx) => {
+    /**
+     * Tells the session, once per cause until the session changes, that a write of it went out
+     * with no review: the call's own result says so too, but an agent reads a result for what the
+     * call did, and a person watching the session reads no result at all. Called only for a write
+     * that runs. The notice is one line in the host's plain log (`runtimeLogger`), which a
+     * headless session's reader has, and a UI notice where the session has a UI. On an idle host
+     * (a background eval cell's call that ends after its run) it is also a displayed follow-up
+     * message (`sendMessage`), which the host appends with no turn. A busy host gets no message:
+     * an aside it is handed while a run goes on starts a turn when the run ends before the host
+     * delivers it, whatever `triggerTurn` says, and the agent of a running turn reads the call's
+     * own result. Best effort: a notice that fails changes no decision.
+     */
+    const tellSession = (ctx: GateCtx, outcome: GateEntry["outcome"]) => {
+      const cause = UNREVIEWED_CAUSE[outcome];
+      if (cause === undefined || told.has(outcome)) return;
+      told.add(outcome);
+      const notice =
+        outcome === "halted"
+          ? `${cause}. Each write AskGate does not review says so on its own result.`
+          : `AskGate did not review a write of this session: ${cause}, and the write went out unreviewed. AskGate reviews each later write again; one that also goes out unreviewed for this cause says so on its own result.`;
+      try {
+        deps.runtimeLogger.warn(notice);
+        if (ctx.hasUI) ctx.ui.notify(notice, "warning");
+        if (pi.sendMessage !== undefined && ctx.isIdle?.() === true)
+          pi.sendMessage(
+            { customType: ASKGATE_NOTICE_TYPE, content: notice, display: true },
+            { deliverAs: "followUp", triggerTurn: false }
+          );
+      } catch {
+        // The log line or the call's own note is the record.
+      }
+    };
+
+    /**
+     * A call without a verdict counts toward the halt; a verdict resets the count; anything else
+     * leaves it. The halt is told to the session with the first write it lets out unreviewed,
+     * never by the call that reached it, which a refusal may still hold back.
+     */
+    const settle = (effect: Decision["effect"]) => {
       if (effect === "verdict") failures = 0;
       if (effect !== "failure") return;
       failures++;
       if (failures < GATE_HALT_AFTER_FAILURES || halted) return;
       halted = true;
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          `AskGate paused for this session after ${failures} consecutive calls without a verdict; Dispatch writes now go out unchecked.`,
-          "warning"
-        );
     };
 
     /**
@@ -2687,6 +2856,27 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       rebuttals.set(event.toolCallId, rebuttal);
       if (rebuttals.size > REBUTTAL_CAP) rebuttals.delete(rebuttals.keys().next().value as string);
       return { input: { ...input, content } };
+    };
+
+    /**
+     * The outer `write xd://envoy_send` or `xd://envoy_publish` event: take the override line off
+     * the message in its JSON, which the nested device event then reads as the rebuttal it spends.
+     */
+    const stripMessageRebuttal = (event: ToolCallEvent): ToolCallResult => {
+      const { input } = event;
+      if (typeof input.content !== "string") return undefined;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(input.content);
+      } catch {
+        return undefined;
+      }
+      if (!isRecord(parsed) || typeof parsed.message !== "string") return undefined;
+      const { rebuttal, text } = extractMessageRebuttal(parsed.message);
+      if (rebuttal === undefined) return undefined;
+      rebuttals.set(event.toolCallId, rebuttal);
+      if (rebuttals.size > REBUTTAL_CAP) rebuttals.delete(rebuttals.keys().next().value as string);
+      return { input: { ...input, content: JSON.stringify({ ...parsed, message: text }) } };
     };
 
     type Base = Omit<GateEntry, "decision" | "outcome" | "latencyMs">;
@@ -2773,6 +2963,26 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (model) return { role, model };
       }
       return undefined;
+    };
+
+    /**
+     * The models one review walks, every one on the provider the session's own model is on, so the
+     * transcript goes to no provider it is not already on: the gate role's model and the models of
+     * its retry.fallbackChains chain that are on that provider, in chain order, then the session's
+     * own model when the chain does not already hold it, as the last fallback. A role on another
+     * provider (a session that fell back from a gateway to the direct login, or one that runs on
+     * another vendor's model) is reviewed by the first model of its chain on the session's
+     * provider, and by the session's own model when the
+     * chain has none there. A session with no model of its own has no provider to keep the
+     * transcript on, and walks the role's whole chain.
+     */
+    const reviewChain = (ctx: GateCtx, role: GateRole, model: GateModel): GateModel[] => {
+      const roleChain = [model, ...deps.fallbackModels(ctx, model, role)];
+      const own = ctx.model;
+      if (own === undefined) return roleChain;
+      const chain = roleChain.filter((next) => next.provider === own.provider);
+      if (!chain.some((next) => next.id === own.id)) chain.push(own);
+      return chain;
     };
 
     /**
@@ -2867,7 +3077,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
      * rebuttal it carries, the surface an override is written on and whether this call's override
      * stayed on the command the agent reads back (`keepOverrideVisible`; a device's field never
      * does), the one stop everything the call waits on is raced against, the directory its command
-     * runs in, and whether its dry run showed an upload (which the charter request names).
+     * runs in, and the instruction its kind carries: an upload its dry run showed, or a message to
+     * other agents (which the charter request names).
      */
     type GatedCall = {
       event: ToolCallEvent;
@@ -2880,7 +3091,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       kept: boolean;
       stop: Stop;
       directory: () => Promise<string | undefined>;
-      upload: boolean;
+      instruction: Instruction;
     };
 
     /**
@@ -2944,8 +3155,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
 
     const decide = async (call: GatedCall): Promise<Decision> => {
-      const { event, ctx, started, base, key, rebuttal, override, kept, stop, directory, upload } =
-        call;
+      const { event, ctx, started, base, key, rebuttal, override, kept, stop, directory } = call;
+      const { instruction } = call;
       // Before any path that lets the write out: a session with no model role refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
@@ -2980,18 +3191,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
       const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
-      if (ctx.model?.provider !== model.provider)
-        return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
       // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
       const deadlineMs = callDeadlineMs();
       stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
-      // A model that answers with an error hands the request to the next one in the role's chain, inside
-      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
-      const chain = [
-        model,
-        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
-      ];
+      const chain = reviewChain(ctx, role, model);
       // Both calls read one rendering of the agent under review, the newer of them reusing it.
       let rendered: { primarySystemPrompt: string; transcript: string } | undefined;
       const agentContext = () =>
@@ -3019,7 +3222,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               base.path,
               args,
               breaker.charterReasons(key),
-              upload
+              instruction
             );
           },
         },
@@ -3103,7 +3306,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         },
         result: refused
           ? { block: true, reason: renderRevise(charter.reason, tripsNext, override) }
-          : { additionalContext: renderWarn(charter.reason) },
+          : {
+              additionalContext:
+                instruction === "message"
+                  ? renderWarnMessage(charter.reason)
+                  : renderWarn(charter.reason),
+            },
         effect: "verdict",
       };
     };
@@ -3476,7 +3684,13 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           return event.toolName === "bash" && scopedCommand(event.input.command) !== undefined
             ? mintFor(event.toolCallId, event.input.command, null, "subagent")
             : undefined;
-        if (event.toolName === "write") return stripRebuttal(event);
+        if (event.toolName === "write") {
+          const device =
+            typeof event.input.path === "string" ? XD_PATH.exec(event.input.path)?.[1] : undefined;
+          if (device !== undefined && (MESSAGE_DEVICES as readonly string[]).includes(device))
+            return stripMessageRebuttal(event);
+          if (agentMessage(event.toolName, event.input) === undefined) return stripRebuttal(event);
+        }
         if (envMode === undefined) {
           const entries = ctx.sessionManager.getEntries();
           mode = sessionMode(entries);
@@ -3535,10 +3749,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               if ("cause" in run) decision = givenUp(mode, run.cause);
               else if ("unreadable" in run) {
                 if (halted) decision = pass("halted");
-                else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)
-                  decision = pass("skipped", {
-                    reason: `primary on ${ctx.model?.provider ?? "no model"}`,
-                  });
                 else decision = unreadableCall(run.unreadable, checks);
               }
               // The CLI refuses arguments it cannot parse before it sends anything, so the
@@ -3571,12 +3781,49 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   kept,
                   stop,
                   directory: run.directory,
-                  upload: scoped.upload === true,
+                  instruction: scoped.upload === true ? "upload" : undefined,
                 });
               }
             } finally {
               stop.close();
             }
+          }
+        } else if (agentMessage(event.toolName, event.input) !== undefined) {
+          // A message to other agents. Its override is a first line of its own, which goes
+          // whatever the gate decides, or, for a device, the line the outer write took off.
+          const remembered = rebuttals.get(event.toolCallId);
+          rebuttals.delete(event.toolCallId);
+          const read = messageCall(event.toolName, event.input);
+          if (read === undefined) return undefined;
+          if (read.input !== event.input) revised = read.input;
+          if (!reviewsMessage(read.message))
+            return revised === undefined ? undefined : { input: revised };
+          const review = { to: read.message.to, message: read.message.message };
+          const { key, label } = breakerKey(event.toolName, review);
+          base = {
+            ...identity(event, mode),
+            path: event.toolName,
+            revisesForKey: breaker.revises(key),
+            argsDigest: createHash("sha256").update(JSON.stringify(review)).digest("hex"),
+            target: label,
+          };
+          const stop = openStop(event.toolCallId);
+          try {
+            decision = await decide({
+              event: { toolName: event.toolName, toolCallId: event.toolCallId, input: review },
+              ctx,
+              started,
+              base,
+              key,
+              rebuttal: remembered ?? read.rebuttal,
+              override: MESSAGE_OVERRIDE,
+              kept: false,
+              stop,
+              directory: async () => ctx.cwd,
+              instruction: "message",
+            });
+          } finally {
+            stop.close();
           }
         } else {
           // A remembered rebuttal is spent by its device event, whatever happens to the call.
@@ -3605,7 +3852,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               kept: false,
               stop,
               directory: async () => ctx.cwd,
-              upload: false,
+              instruction: undefined,
             });
           } finally {
             stop.close();
@@ -3619,9 +3866,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
       try {
-        settle(decision.effect, ctx);
+        settle(decision.effect);
       } catch {
-        // The halt notice is best effort.
+        // The halt count is best effort.
       }
       let rulesNotice: string | undefined;
       try {
@@ -3675,7 +3922,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       // A review, or a pass the gate took over the dry run's arguments (a rebuttal, a breaker
       // trip), binds those arguments and the files' digests; a call no verdict stands behind (a
-      // halt and another provider among them) is argv-only. The mint reads the command the
+      // halt among them) is argv-only. The mint reads the command the
       // handler finally returns, the override comment put back, whose argv is what bash hands the
       // CLI. A call this entry already refused mints nothing: no command of it runs.
       let minted: ToolCallResult;
@@ -3722,6 +3969,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         (note): note is string => note !== undefined
       );
       if (owed.length > 0) rememberNotice(event.toolCallId, owed.join("\n"));
+      // A write that runs with no review behind it is told to the session once per cause, apart
+      // from this result. A call given up because its own call, run or session ended has no
+      // session step left to read it.
+      const { outcome } = decision.fields;
+      if (
+        decision.fields.decision === "allow" &&
+        outcome !== "abandoned" &&
+        outcome !== "shutdown" &&
+        !decision.result?.block
+      )
+        tellSession(ctx, outcome);
       return revised === undefined ? decision.result : { ...decision.result, input: revised };
     };
 

@@ -25,6 +25,7 @@ import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
   ADVISOR_GATE_RECORD_ENTRY_TYPE,
+  ASKGATE_NOTICE_TYPE,
   type CompleteRequest,
   checkMode,
   createAskGate,
@@ -181,6 +182,10 @@ interface BindOptions {
   dispatch?: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
   /** The clock the gate times itself by; the real one unless a test drives it. */
   now?: () => number;
+  /** Whether the host has `pi.sendMessage`, which the session notice prefers to a UI notice; false unless a test says otherwise. */
+  sendMessage?: boolean;
+  /** What the host's `isIdle` answers; a host without it unless a test says otherwise. */
+  idle?: boolean;
 }
 
 /** One session binding of the gate, driven through a fake `pi` and `ctx`. */
@@ -197,6 +202,11 @@ interface BoundGate {
   /** What the host's plain log was told while the session ran (`runtimeLogger`), which no later session repeats. */
   runtimeWarnings: string[];
   notices: string[];
+  /** What the gate sent into the session with `pi.sendMessage`, when the host has it. */
+  sent: Array<{
+    message: { customType: string; content: string; display: boolean };
+    options: { deliverAs: string; triggerTurn: boolean };
+  }>;
   dumps: Array<[string, string]>;
   calls: CompleteRequest[];
   fallbackRoles: string[];
@@ -224,6 +234,7 @@ function bind(opts: BindOptions = {}): BoundGate {
   const warnings: string[] = [];
   const runtimeWarnings: string[] = [];
   const notices: string[] = [];
+  const sent: BoundGate["sent"] = [];
   const dumps: Array<[string, string]> = [];
   const calls: CompleteRequest[] = [];
   /** The model role each fallback-chain read was made under, in order. */
@@ -273,6 +284,14 @@ function bind(opts: BindOptions = {}): BoundGate {
         recordEntries.push(data as GateRecordEntry);
       else entries.push(data as GateEntry);
     },
+    ...(opts.sendMessage
+      ? {
+          sendMessage: (
+            message: BoundGate["sent"][number]["message"],
+            options: BoundGate["sent"][number]["options"]
+          ) => sent.push({ message, options }),
+        }
+      : {}),
   };
   const complete = opts.complete ?? (async () => ({ text: ALLOW, usage: USAGE }));
   // The session's Dispatch, which a test that drives a document read or a decision record binds;
@@ -340,6 +359,7 @@ function bind(opts: BindOptions = {}): BoundGate {
       getEntries: () => (typeof sessionEntries === "function" ? sessionEntries() : sessionEntries),
     },
     cwd: opts.cwd ?? "/work",
+    ...(opts.idle === undefined ? {} : { isIdle: () => opts.idle === true }),
   };
   const handler = handlers.get("tool_call");
   /** Every call id this binding was handed, ended after the test (`callEnders`). */
@@ -363,6 +383,7 @@ function bind(opts: BindOptions = {}): BoundGate {
     warnings,
     runtimeWarnings,
     notices,
+    sent,
     dumps,
     calls,
     fallbackRoles,
@@ -1120,7 +1141,7 @@ describe("fail-open", () => {
     expect(signals[0].aborted).toBe(true);
     expect(g.entries).toMatchObject([{ decision: "allow", outcome: "timeout", usage: PARTIAL }]);
   });
-  test("three consecutive failures halt the gate for the session with one notice", async () => {
+  test("three consecutive failures halt the gate for the session, with one notice per cause", async () => {
     const g = bind({ env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted });
     for (const id of ["a", "b", "c", "d", "e"]) await g.device(id, "dispatch_comment", COMMENT);
     expect(g.entries.map((e) => e.outcome)).toEqual([
@@ -1131,7 +1152,11 @@ describe("fail-open", () => {
       "halted",
     ]);
     expect(g.calls).toHaveLength(3);
-    expect(g.notices).toHaveLength(1);
+    // The first timeout and the halt are each told once; the later timeouts and halts only on
+    // their own results.
+    expect(g.notices).toHaveLength(2);
+    expect(g.notices[0]).toContain("the review did not answer within its deadline");
+    expect(g.notices[1]).toContain("AskGate is paused for this session");
   });
   test("a verdict between failures resets the count", async () => {
     const texts = ["no json", "no json", ALLOW, "no json", "no json", ALLOW];
@@ -1200,7 +1225,8 @@ describe("fail-open", () => {
         expect(result?.reason).toContain("askgate.enabled");
       }
       expect(g.calls).toHaveLength(3);
-      expect(g.notices).toHaveLength(1);
+      // Every call was refused, so no write went out unreviewed and the session is told nothing.
+      expect(g.notices).toEqual([]);
     }
   });
   test("F9: a write the model allowed still posts when its record fails, since it was reviewed", async () => {
@@ -1245,7 +1271,7 @@ describe("a write that passes unreviewed is recorded and said", () => {
       complete: untilAborted,
     });
     expect(outcome).toBe("timeout");
-    expect(context).toContain("AskGate did not review this Dispatch write");
+    expect(context).toContain("AskGate did not review this write");
     expect(context).toContain("the review did not answer within its deadline");
     expect(context).toContain("The call ran unreviewed.");
   });
@@ -1285,13 +1311,76 @@ describe("a write that passes unreviewed is recorded and said", () => {
     expect(context).toContain("AskGate is paused for this session");
     expect(context).toContain("The call ran unreviewed.");
   });
-  test("a session whose primary model is on another provider", async () => {
-    const { context, outcome } = await unreviewed({
-      primary: { provider: "openai-codex", id: "gpt-5.5" },
+  test("the session is told once per cause besides each result: a log line and a UI notice, and no message to a busy host", async () => {
+    const answers = [untilAborted, untilAborted, async () => ({ text: "", error: "500" })];
+    const g = bind({
+      sendMessage: true,
+      idle: false,
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
+      complete: (req) => (answers.shift() ?? untilAborted)(req),
     });
-    expect(outcome).toBe("skipped");
-    expect(context).toContain("openai-codex");
-    expect(context).toContain("The call ran unreviewed.");
+    for (const id of ["a", "b", "c", "d"]) {
+      const result = await g.device(id, "dispatch_comment", COMMENT);
+      expect(result?.additionalContext).toContain("The call ran unreviewed.");
+    }
+    expect(g.entries.map((e) => e.outcome)).toEqual(["timeout", "timeout", "error", "halted"]);
+    // Three causes: the second timeout says so on its own result alone, and the halt the third
+    // failure reached is told with the first write it lets out. A busy host is sent no message,
+    // since an aside it took as its run ended would start a turn.
+    expect(g.notices).toHaveLength(3);
+    expect(g.notices[0]).toContain("the review did not answer within its deadline");
+    expect(g.notices[1]).toContain("the review failed");
+    expect(g.notices[2]).toContain("AskGate is paused for this session");
+    expect(g.runtimeWarnings).toEqual(g.notices);
+    expect(g.sent).toEqual([]);
+  });
+  test("on an idle host the notice is also a displayed follow-up, which starts no turn", async () => {
+    const g = bind({
+      hasUI: false,
+      sendMessage: true,
+      idle: true,
+      complete: async () => ({ text: "", error: "500" }),
+    });
+    await g.device("a", "dispatch_comment", COMMENT);
+    expect(g.sent.map((s) => [s.message.customType, s.message.display, s.options])).toEqual([
+      [ASKGATE_NOTICE_TYPE, true, { deliverAs: "followUp", triggerTurn: false }],
+    ]);
+    expect(g.sent[0].message.content).toContain("the review failed");
+    expect(g.runtimeWarnings).toEqual([g.sent[0].message.content]);
+  });
+  test("a halt reached by a refused call is told only with the first write it lets out", async () => {
+    const g = bind({
+      sendMessage: true,
+      recordThrows: true,
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
+      complete: untilAborted,
+    });
+    for (const id of ["a", "b", "c"])
+      expect((await g.device(id, "dispatch_comment", COMMENT))?.block).toBe(true);
+    expect(g.notices).toEqual([]);
+  });
+  test("a session switch tells the cause again; a reviewed, refused or rebutted write tells nothing", async () => {
+    const answers = [untilAborted, async () => ({ text: REVISE }), async () => ({ text: ALLOW })];
+    const g = bind({
+      sendMessage: true,
+      idle: true,
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20", OMP_ASKGATE: "block" },
+      complete: (req) => (answers.shift() ?? untilAborted)(req),
+    });
+    await g.device("a", "dispatch_comment", COMMENT);
+    expect((await g.device("b", "dispatch_comment", COMMENT))?.block).toBe(true);
+    expect(await g.device("ok", "dispatch_comment", COMMENT)).toBeUndefined();
+    await g.write(
+      "r",
+      "xd://dispatch_comment",
+      JSON.stringify({ ...COMMENT, advisor_rebuttal: "the note is right" })
+    );
+    await g.device("r", "dispatch_comment", COMMENT);
+    expect(g.sent).toHaveLength(1);
+    await g.event("session_switch");
+    await g.device("c", "dispatch_comment", COMMENT);
+    expect(g.sent).toHaveLength(2);
+    expect(g.sent[1].message.content).toContain("did not answer within its deadline");
   });
   test("a rebuttal and a breaker trip already say the write went unreviewed", async () => {
     const g = bind({
@@ -1540,7 +1629,7 @@ describe("deadline and abandonment", () => {
       const result = await gated;
       expect(result?.block).toBeUndefined();
       expect(result?.additionalContext).toContain(
-        'outcome="abandoned">\nAskGate did not review this Dispatch write: its call or its run ended before the review answered.'
+        'outcome="abandoned">\nAskGate did not review this write: its call or its run ended before the review answered.'
       );
     }
     expect(signals.every((s) => s.aborted)).toBe(true);
@@ -1649,7 +1738,7 @@ describe("deadline and abandonment", () => {
     const result = await gated;
     expect(result?.block).toBeUndefined();
     expect(result?.additionalContext).toContain(
-      'outcome="shutdown">\nAskGate did not review this Dispatch write: the session shut down before the review answered.'
+      'outcome="shutdown">\nAskGate did not review this write: the session shut down before the review answered.'
     );
     expect(g.entries).toMatchObject([
       { decision: "allow", outcome: "shutdown", verdictMode: "warn" },
@@ -3388,13 +3477,17 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       ]);
     });
 
-    test("a session on another provider, and a halt, mint an argv-only marker: no review stands behind either", async () => {
-      const skipped = bind({
+    test("a session on another provider is reviewed there and its marker binds the review; a halt mints an argv-only marker", async () => {
+      const elsewhere = bind({
         env: STUB,
         cwd: work,
         primary: { provider: "openai-codex", id: "gpt-5.5" },
       });
-      await skipped.bash("s", ASK);
+      await elsewhere.bash("s", ASK);
+      expect(elsewhere.calls.map((c) => c.model)).toContainEqual({
+        provider: "openai-codex",
+        id: "gpt-5.5",
+      });
       // The halt is three of the gate's own deadlines in a row, so nothing else of the call may
       // race that deadline. The real dry run is a process, and it races half of these 20 ms: on a
       // busy machine it loses, and the call is an `error` rather than a `timeout`. This dry run
@@ -3426,10 +3519,10 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         "halted",
       ]);
       expect([
-        markersIn(skipped.store),
+        markersIn(elsewhere.store),
         markersIn(halted.store).filter((m) => m.toolCallId === "d"),
       ]).toMatchObject([
-        [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "skipped" }],
+        [{ argv: argvDigest(ASK_ARGV), args: expect.any(String), outcome: "verdict" }],
         [{ argv: argvDigest(ASK_ARGV), args: null, files: [], outcome: "halted" }],
       ]);
       // Three calls wait out the review deadline above, so the row's own bound is the sum of them
@@ -4964,26 +5057,296 @@ describe("sessions", () => {
 });
 
 describe("data routing", () => {
-  test("a session whose primary model is on another provider is not sent to the gate", async () => {
+  const modelOf = (req: CompleteRequest): string => {
+    const model = req.model as GateModel;
+    return `${model.provider}/${model.id}`;
+  };
+  const GATEWAY_FABLE = { provider: "gateway", id: "anthropic/claude-fable-5-1" };
+  test("a session on another provider than the role's model is reviewed by the first model of the role's chain on its own provider", async () => {
+    // A session that fell back from the gateway to the direct login, with the gate's role on the
+    // gateway and the same model on the direct login in the role's chain.
     const g = bind({
-      primary: { provider: "openai-codex", id: "gpt-5.5" },
-      context: () => {
-        throw new Error("the context must not be read");
-      },
+      roles: { askgate: GATEWAY_FABLE },
+      primary: { provider: "anthropic", id: "claude-opus-5" },
+      fallbacks: [MODEL, { provider: "openai", id: "gpt-5.5" }],
     });
     const result = await g.device("t1", "dispatch_comment", COMMENT);
-    expect(result?.block).toBeUndefined();
-    expect(result?.additionalContext).toContain("on another provider than the gate's");
-    expect(g.calls).toHaveLength(0);
+    expect(result?.additionalContext).toBeUndefined();
+    expect(g.calls.map(modelOf)).toEqual(["anthropic/claude-fable-5-1"]);
+    expect(g.fallbackRoles).toEqual(["askgate"]);
     expect(g.entries).toMatchObject([
-      { decision: "allow", outcome: "skipped", reason: "primary on openai-codex" },
+      { decision: "allow", outcome: "verdict", model: "anthropic/claude-fable-5-1" },
     ]);
   });
-  test("a session with no primary model is not sent either", async () => {
-    const g = bind({ primary: undefined });
+  test("a chain with no model on the session's provider is reviewed by the session's own model, and nothing goes to another provider", async () => {
+    const g = bind({
+      primary: { provider: "openai-codex", id: "gpt-5.5" },
+      fallbacks: [{ provider: "anthropic", id: "claude-opus-5-5" }],
+      complete: async (req) =>
+        modelOf(req) === "openai-codex/gpt-5.5"
+          ? { text: ALLOW, usage: USAGE }
+          : { text: "", error: "must not be asked" },
+    });
     await g.device("t1", "dispatch_comment", COMMENT);
-    expect(g.calls).toHaveLength(0);
-    expect(g.entries).toMatchObject([{ outcome: "skipped", reason: "primary on no model" }]);
+    expect(g.calls.map(modelOf)).toEqual(["openai-codex/gpt-5.5"]);
+    expect(g.entries).toMatchObject([{ outcome: "verdict", model: "openai-codex/gpt-5.5" }]);
+  });
+  test("the session's own model is the last of the chain on its provider", async () => {
+    const g = bind({
+      primary: { provider: "anthropic", id: "claude-opus-5-5" },
+      complete: async (req) =>
+        modelOf(req) === "anthropic/claude-fable-5-1"
+          ? { text: "", error: "404 not found", usage: USAGE }
+          : { text: ALLOW, usage: USAGE },
+    });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    expect(g.calls.map(modelOf)).toEqual([
+      "anthropic/claude-fable-5-1",
+      "anthropic/claude-opus-5-5",
+    ]);
+    expect(g.entries).toMatchObject([
+      {
+        outcome: "verdict",
+        model: "anthropic/claude-opus-5-5",
+        failedModels: [{ model: "anthropic/claude-fable-5-1" }],
+      },
+    ]);
+  });
+  test("a session with no model of its own walks the role's whole chain", async () => {
+    const g = bind({
+      primary: undefined,
+      fallbacks: [{ provider: "openai", id: "gpt-5.5" }],
+      complete: async (req) =>
+        modelOf(req) === `${MODEL.provider}/${MODEL.id}`
+          ? { text: "", error: "500", usage: USAGE }
+          : { text: ALLOW, usage: USAGE },
+    });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    expect(g.calls.map(modelOf)).toEqual(["anthropic/claude-fable-5-1", "openai/gpt-5.5"]);
+    expect(g.entries).toMatchObject([{ outcome: "verdict", model: "openai/gpt-5.5" }]);
+  });
+});
+
+// Messages to other agents (failure 15). The texts are the study's real messages of 2026-11-02
+// and 2026-11-03, with private names replaced: a lead's broadcast of a rule nobody asked for, and
+// the plain coordination messages the same sessions sent.
+describe("messages to other agents", () => {
+  const RULE_BROADCAST =
+    "Lead, URGENT memory rule: my process's memory cap holds every agent of this stream. From now on, run ANY git command over a big repository's whole tree as `systemd-run --user --scope -p MemoryMax=8G -- git ...`.";
+  const PLAIN_BROADCAST = "#12 merged at 14:05Z. Rebase your branches onto main before you push.";
+  const PLAIN_DIRECT =
+    "Your test overwrote ~/.ssh/known_hosts at 16:46Z; I restored it. Please fix the test.";
+  const charterCalls = (g: BoundGate) => g.calls.filter(isCharter);
+
+  test("a broadcast to agent://all is reviewed against failure 15 alone, as the message instruction says", async () => {
+    const g = bind({ complete: async () => ({ text: ALLOW, usage: USAGE }) });
+    const result = await g.write("b1", "agent://all", PLAIN_BROADCAST);
+    expect(result).toBeUndefined();
+    const [call] = charterCalls(g);
+    expect(call.user).toContain("Judge this message against content failure 15 alone.");
+    expect(call.user).toContain('"to": "agent://all"');
+    expect(call.user).toContain('"message": "#12 merged at 14:05Z.');
+    expect(call.user).toContain("The agent is about to run `write`");
+    expect(g.entries).toMatchObject([
+      {
+        tool: "write",
+        path: "write",
+        decision: "allow",
+        outcome: "verdict",
+        target: "write to=agent://all",
+      },
+    ]);
+  });
+  test("a message to one agent is reviewed only when it calls something a rule", async () => {
+    const g = bind();
+    expect(await g.write("d1", "agent://Peer", PLAIN_DIRECT)).toBeUndefined();
+    expect(
+      await g.device("s1", "envoy_send", { session_id: "s-2", message: PLAIN_DIRECT })
+    ).toBeUndefined();
+    expect(
+      await g.device("p1", "envoy_publish", {
+        topic: "notifications.role.lead",
+        message: PLAIN_DIRECT,
+      })
+    ).toBeUndefined();
+    expect(g.calls).toEqual([]);
+    expect(g.entries).toEqual([]);
+    await g.write(
+      "d2",
+      "agent://Peer",
+      `${PLAIN_DIRECT} New box rule: no test writes under $HOME.`
+    );
+    await g.device("s2", "envoy_send", {
+      session_id: "s-2",
+      message: "Standing rule: stop idle VMs.",
+    });
+    expect(g.entries.map((e) => [e.tool, e.target])).toEqual([
+      ["write", "write to=agent://Peer"],
+      ["envoy_send", "envoy_send to=session s-2"],
+    ]);
+  });
+  test("a publish to a team topic reaches every agent there, so it is reviewed whatever it says", async () => {
+    const g = bind();
+    await g.device("p1", "envoy_publish", {
+      topic: "notifications.team.stream-leads",
+      message: PLAIN_BROADCAST,
+    });
+    expect(charterCalls(g)).toHaveLength(1);
+    expect(g.entries).toMatchObject([{ tool: "envoy_publish", outcome: "verdict" }]);
+  });
+  test("a revise refuses the broadcast in block mode and names the override line", async () => {
+    const reason =
+      'failure 15 (content gate): "URGENT memory rule" and "From now on" state a rule the person did not make. Send the agent whose process ran out of memory what happened and the fix, with no rule.';
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: async () => ({
+        text: JSON.stringify({ decision: "revise", reason }),
+        usage: USAGE,
+      }),
+    });
+    const result = await g.write("b1", "agent://all", RULE_BROADCAST);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("AskGate did not send this call.");
+    expect(result?.reason).toContain("failure 15");
+    expect(result?.reason).toContain(
+      "a first line `advisor-rebuttal: <one line>` added to the message"
+    );
+    expect(result?.reason).not.toContain("--dry-run");
+    expect(g.entries).toMatchObject([{ decision: "revise", outcome: "verdict", tool: "write" }]);
+  });
+  test("a revise in warn mode sends the message and says a sent message cannot be changed", async () => {
+    const g = bind({ complete: async () => ({ text: REVISE, usage: USAGE }) });
+    const result = await g.write("b1", "agent://all", RULE_BROADCAST);
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain("The message was sent.");
+    expect(result?.additionalContext).not.toContain("dispatch edit-ask");
+  });
+  test("an override line sends the message unreviewed, recorded, with the line taken off", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    const result = await g.write(
+      "b1",
+      "agent://all",
+      `advisor-rebuttal: the person called it a new rule at 18:01Z\n${RULE_BROADCAST}`
+    );
+    expect(g.calls).toEqual([]);
+    expect(result?.block).toBeUndefined();
+    expect(result?.input).toEqual({ path: "agent://all", content: RULE_BROADCAST });
+    expect(result?.additionalContext).toContain('outcome="rebuttal"');
+    expect(result?.additionalContext).toContain("its recipients never see it");
+    expect(g.entries).toMatchObject([
+      { outcome: "rebuttal", rebuttal: "the person called it a new rule at 18:01Z" },
+    ]);
+  });
+  test("an envoy device's override line comes off its JSON on the outer write and is spent by its device event", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    const content = JSON.stringify({
+      topic: "notifications.team.stream-leads",
+      message: `advisor-rebuttal: one case, not a rule\n${RULE_BROADCAST}`,
+    });
+    const outer = await g.write("x1", "xd://envoy_publish", content);
+    expect(JSON.parse(String(outer?.input?.content))).toEqual({
+      topic: "notifications.team.stream-leads",
+      message: RULE_BROADCAST,
+    });
+    const inner = await g.device("x1", "envoy_publish", {
+      topic: "notifications.team.stream-leads",
+      message: RULE_BROADCAST,
+    });
+    expect(inner?.block).toBeUndefined();
+    expect(g.calls).toEqual([]);
+    expect(g.entries).toMatchObject([{ outcome: "rebuttal", rebuttal: "one case, not a rule" }]);
+  });
+  test("two refusals of a broadcast send the third unreviewed", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
+    for (const id of ["a", "b"])
+      expect((await g.write(id, "agent://all", RULE_BROADCAST))?.block).toBe(true);
+    const third = await g.write("c", "agent://all", RULE_BROADCAST);
+    expect(third?.block).toBeUndefined();
+    expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict", "breaker"]);
+  });
+  test("a gate that did not load refuses each message it would review, and lets the others out", () => {
+    const entries: Array<Record<string, unknown>> = [];
+    const refuse = core.loadFailureGate(
+      new Error("OMP_ASKGATE_TIMEOUT_MS must be a positive integer"),
+      { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+      { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
+    );
+    const ctx = { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never;
+    const call = (toolName: string, input: Record<string, unknown>) =>
+      refuse({ toolName, toolCallId: toolName, input }, ctx);
+    expect(call("write", { path: "agent://all", content: PLAIN_BROADCAST })?.block).toBe(true);
+    expect(call("envoy_send", { session_id: "s", message: "New rule: no deploys." })?.block).toBe(
+      true
+    );
+    expect(
+      call("envoy_publish", { topic: "notifications.team.leads", message: PLAIN_BROADCAST })?.block
+    ).toBe(true);
+    expect(call("write", { path: "agent://Peer", content: PLAIN_DIRECT })).toBeUndefined();
+    expect(call("write", { path: "/tmp/notes.md", content: RULE_BROADCAST })).toBeUndefined();
+    expect(entries.map((e) => [e.tool, e.outcome])).toEqual([
+      ["write", "load-failed"],
+      ["envoy_send", "load-failed"],
+      ["envoy_publish", "load-failed"],
+    ]);
+  });
+  test("a subagent's message is not reviewed", async () => {
+    const g = bind({ kind: "sub" });
+    expect(await g.write("b1", "agent://all", RULE_BROADCAST)).toBeUndefined();
+    expect(g.calls).toEqual([]);
+    expect(g.entries).toEqual([]);
+  });
+  test("a write to a file, and a Dispatch device write, are not read as messages", async () => {
+    const g = bind();
+    expect(await g.write("f1", "/tmp/rules.md", RULE_BROADCAST)).toBeUndefined();
+    await g.device("t1", "dispatch_comment", COMMENT);
+    expect(g.entries.map((e) => e.tool)).toEqual(["dispatch_comment"]);
+    expect(charterCalls(g)[0].user).not.toContain("content failure 15 alone");
+  });
+});
+
+// The charter's two failures from the 2026-11-03 study, as the model receives them.
+describe("charter failures 14 and 15", () => {
+  test("every charter call carries both failures, their fixes and their exemptions", async () => {
+    const g = bind();
+    await g.device("t1", "dispatch_comment", COMMENT);
+    const [{ system }] = g.calls.filter(isCharter);
+    expect(system).toContain("14. **A number, date or scope with no source.**");
+    expect(system).toContain("15. **A rule the person did not make.**");
+    expect(system).toContain("rows of an old census");
+    expect(system).toContain('"This is a new rule"');
+    expect(system).toContain("A miscount is\n  content 14 only where the figure names no source.");
+  });
+  test("which calls are messages, and which messages are reviewed", () => {
+    const read = (tool: string, input: Record<string, unknown>) => {
+      const message = core.agentMessage(tool, input);
+      return message === undefined ? undefined : [message.to, core.reviewsMessage(message)];
+    };
+    expect(read("write", { path: "agent://all", content: "hi" })).toEqual(["agent://all", true]);
+    expect(read("write", { path: "agent://Peer?progress", content: "hi" })).toEqual([
+      "agent://Peer?progress",
+      false,
+    ]);
+    expect(read("write", { path: "agent://Peer", content: "a lint rule failed" })).toEqual([
+      "agent://Peer",
+      true,
+    ]);
+    expect(read("write", { path: "local://notes.md", content: "rule" })).toBeUndefined();
+    expect(read("envoy_send", { session_id: "s", message: "Rules for this stream" })).toEqual([
+      "session s",
+      true,
+    ]);
+    expect(read("envoy_send", { session_id: "s", message: "ruled out" })).toEqual([
+      "session s",
+      false,
+    ]);
+    expect(read("envoy_publish", { topic: "notifications.team.x.all", message: "hi" })).toEqual([
+      "notifications.team.x.all",
+      true,
+    ]);
+    expect(read("envoy_publish", { topic: "notifications.role.x", message: "hi" })).toEqual([
+      "notifications.role.x",
+      false,
+    ]);
   });
 });
 
@@ -5809,8 +6172,8 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
       expect(posted.sent).toEqual([]);
     }, 30_000);
 
-  // A session on another provider than the gate's: the gate reviews nothing, so a file that a call
-  // later in the same message changes posts as the CLI reads it, with no refusal naming a review.
+  // A review that fails reviews nothing, so a file that a call later in the same message changes
+  // posts as the CLI reads it, with no refusal naming a review.
   for (const [form, file, command] of [
     ["--body-file", "note.md", "dispatch comment --issue DSP-1 --body-file note.md"],
     ["--path", "brief.md", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"],
@@ -5820,11 +6183,10 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
       const g = bind({
         env: gateEnv,
         cwd: work,
-        primary: { provider: "openai-codex", id: "gpt-5.5" },
+        complete: async () => ({ text: "", error: "500 from the provider" }),
       });
-      expect((await g.bash("skipped", command))?.block).toBeUndefined();
-      expect(g.entries).toMatchObject([{ outcome: "skipped" }]);
-      expect(g.calls).toHaveLength(0);
+      expect((await g.bash("unreviewed", command))?.block).toBeUndefined();
+      expect(g.entries).toMatchObject([{ outcome: "error" }]);
       const edited = `${BRIEF}An edit made in the same message.\n`;
       fs.writeFileSync(path.join(work, file), edited);
       const posted = await post(command, g.store);
@@ -6209,7 +6571,7 @@ describe("rules check", () => {
     ]);
     expect(g.entries[0].raw).toBe("no json");
     expect(g.notices).toHaveLength(1);
-    expect(g.notices[0]).toContain("AskGate paused for this session");
+    expect(g.notices[0]).toContain("AskGate is paused for this session");
   });
   test("a rules call that times out at the deadline changes nothing (rules test 11)", async () => {
     const g = bind({

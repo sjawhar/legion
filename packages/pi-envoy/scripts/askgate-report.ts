@@ -20,7 +20,8 @@
 //     since the rules check refuses in either mode. A warn-mode `unreadable` or `unmarked` is
 //     sent back and no refusal: its write posted.
 //   - unreviewed: a write that posted with no review behind it. Every `allow` whose outcome is
-//     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
+//     not `verdict`: timeout, error, no-verdict, halted, rebuttal, breaker, `skipped` (a session on
+//     another provider, which an earlier release did not review), and in
 //     warn mode `unreadable`, `unmarked`, `abandoned` and `shutdown`. A warn-mode `abandoned` or
 //     `shutdown` is that alone: its decision is `allow`, so it is not sent back.
 //   - decision records not confirmed: the session could not confirm that the gated call's

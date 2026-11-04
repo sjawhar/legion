@@ -331,6 +331,26 @@ reviews these calls:
 Every other Dispatch command is outside the gate, and its text posts unreviewed: among them
 `dispatch issue-update --reason`, `dispatch resolve-ask --reason` and `dispatch suggest`.
 
+Among the charter's failures, two read the figures and the rules a write states. Content 14 refuses
+an ask, message, comment or approval summary that states a count, amount, cost, duration, date or
+scope as fact and names no command, file, record or link it came from; the fix names the source
+beside the figure, or marks the figure as an estimate or as not checked. Content 15 refuses a write
+that states a rule, a standing order or a "from now on" directive for agents when nothing shows
+the person calling it a rule.
+
+**Messages to other agents.** The gate also reviews a main agent's message to other agents when it
+goes to every agent there, a `write` to `agent://all` or an `envoy_publish` to a
+`notifications.team.` topic, or when its text holds the word "rule": a `write` to `agent://<id>`,
+an `envoy_send`, or an `envoy_publish` to any other topic. The word only chooses what the model
+reads. The model judges the message against content 15 alone (`extensions/askgate/askgate-message.md`),
+with the arguments `to` and `message`. Any other message goes out with no entry. A revise refuses
+the message in `block` mode; in `warn` mode the message goes out with the reason. To send a refused
+message anyway, make its first line `advisor-rebuttal: <one line>`: the gate records the line and
+removes it before the message goes out, also from an `xd://envoy_send` or `xd://envoy_publish`
+device's `message`. Two refusals on one recipient with one tool send the third message there
+unreviewed, whatever its text, as two refusals on one Dispatch target do for a write that opens no
+ask. A gate that did not load refuses each message it would review.
+
 The gate reads the arguments from the command's own `--dry-run`. The dry run sends nothing and
 contacts no Dispatch server, so a slow one most likely means a busy machine. The reads, the dry
 run and the `cd`'s `pwd -P` probe, take at most half the call's deadline: the first run of each
@@ -364,8 +384,8 @@ when a review, a rebuttal or a breaker trip stands behind the call (`… AskGate
 message's calls before any of them runs, so it did not see that change. Send the call again in a
 later message than the one that changes the file.`); in `warn` mode it posts with a
 `dispatch: warning:` line. Write or edit a file in one message, and send the write that posts it
-in the next. A call the gate reviewed nothing of (a halt, a session whose model is on another
-provider, a review that failed) checks no file, so its file posts as the CLI reads it.
+in the next. A call the gate reviewed nothing of (a halt, a review that failed) checks no file, so
+its file posts as the CLI reads it.
 
 **The form the gate reads.** One `dispatch` call, alone in the bash call:
 
@@ -431,7 +451,7 @@ gated write only when it consumes one, so a write sent any other way is refused 
   owner-only and exclusively. It binds the exact argument vector the CLI receives and, behind a
   review or a deliberate pass (a rebuttal, a breaker trip), the digest of the arguments the dry
   run printed and the sha256 of each file the argv names, as the gate read it. A call no verdict
-  stands behind (a halt and another provider among them), and a `task` subagent's literal call,
+  stands behind (a halt among them), and a `task` subagent's literal call,
   get a marker of the argument vector alone. Nothing of it is in the command the agent sees. A
   marker goes when its call ends, is refused or the session shuts down; a backgrounded call keeps
   its marker until
@@ -590,15 +610,23 @@ session with a UI, and adds it to that call's own result. It is not one of the n
 shows at its start.
 
 **The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
-role is not set, they ask the `default` role. A model that answers with an error passes the request
-to the next model of that role's `retry.fallbackChains` chain, on the same provider. When neither
-role resolves, the gate refuses the write in both modes and names the two roles. A session whose
-main model is on another provider than the gate's model is not reviewed: its transcript stays on
-that provider.
+role is not set, they ask the `default` role. When neither role resolves, the gate refuses the
+write in both modes and names the two roles. The review runs on the provider the session's own
+model is on, so the transcript goes to no provider it is not already on: the role's model when it
+is on that provider, then the models of the role's `retry.fallbackChains` chain on that provider,
+then the session's own model as the last fallback when the chain does not already name it. A model
+that answers with an error passes the request to the next one. So a session that fell back from a
+gateway to the direct login is reviewed by the role's model
+on the direct login when the chain names it, and a session on another vendor's model is reviewed
+by its own model. An earlier release did not review such a session at all (outcome `skipped`).
 
 **When a write posts unreviewed.** Each of these lets the write out, records an `advisor-gate`
 entry with its outcome, and hands the agent a note that says the write went out unreviewed and
-why. The note reaches a headless session too:
+why. The note reaches a headless session too. For `timeout`, `error`, `no-verdict` and `halted`,
+the session is also told once per cause, until it changes, apart from the call's result: one line
+in the host's plain log, a UI notice in a session with a UI, and, on an idle host (a background
+eval cell's call that ends after its run), a displayed follow-up message that starts no turn. A
+busy host gets no message, since an aside that the host takes as its run ends starts a turn:
 
 | Outcome | What happened |
 | --- | --- |
@@ -606,8 +634,7 @@ why. The note reaches a headless session too:
 | `error` | the review failed: a model error, a handler exception, or a dry run that failed; a dry run that timed out twice, or once with no time left to run it again, gets a note that the machine was busy and that the agent should read back what the write posted |
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
-| `skipped` | the session's main model is on another provider than the gate's |
-| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and kept only as a shell comment, or `"advisor_rebuttal"`, which is recorded and removed |
+| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and kept only as a shell comment, `"advisor_rebuttal"`, which is recorded and removed, or a message whose first line is `advisor-rebuttal: <line>`, which is recorded and removed |
 | `breaker` | the third attempt at one thing on one target, after the gate refused it twice there |
 | `unreadable` (warn mode) | a file the literal call names was missing or not a regular file when the gate ran |
 | `abandoned` (warn mode) | the call or the run ended before the review answered |
@@ -644,8 +671,9 @@ write it would have reviewed.
 
 **The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
 Every entry whose arguments the gate read carries `target`, the call's target in readable form:
-the tool name, then each of `issue`, `ask`, `artifact`, `project` and `in_reply_to` that the input
-carries, as `dispatch_ask issue=ACME-1`. An `unreadable` entry, and the `unmarked` entry pi-envoy
+the tool name, then each of `issue`, `ask`, `artifact`, `project`, `in_reply_to` and, for a
+message to other agents, `to` that the input carries, as `dispatch_ask issue=ACME-1` or
+`write to=agent://all`. An `unreadable` entry, and the `unmarked` entry pi-envoy
 writes from the CLI's own ledger line, carry none: neither has the arguments to name one. The
 third attempt (`outcome: "breaker"`) counts the refusals of
 one thing on one such target, and `revisesForKey` counts every `revise` on it, the `warn` ones

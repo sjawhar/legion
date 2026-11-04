@@ -302,8 +302,8 @@ async function loadAskGate(
   };
 
   // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
-  // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
-  // events as strings, each one in PiEventContract, and types its handlers' events itself.
+  // runs, and passes every other event, appendEntry and sendMessage to the real `pi`. The core
+  // names its events as strings, each one in PiEventContract, and types its handlers' events itself.
   let handler: ToolCallHandler | undefined;
   const wrapped: Pi = {
     on: (event, listener) => {
@@ -311,6 +311,7 @@ async function loadAskGate(
       else pi.on(event as keyof PiEventContract, listener as unknown as () => Promise<void>);
     },
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
+    sendMessage: (message, options) => pi.sendMessage(message, options),
   };
   // This process as the owner of each session's record (`selfOwner`): its marker store, and the
   // owner file setRecordMode rewrites with the current session's mode.

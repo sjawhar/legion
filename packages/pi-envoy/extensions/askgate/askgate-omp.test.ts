@@ -272,7 +272,7 @@ for (const [language, code] of [
       );
       expect(main.length).toBeGreaterThanOrEqual(2);
       const next = JSON.stringify(main.at(-1)?.body.messages);
-      expect(next).toContain("AskGate did not review this Dispatch write");
+      expect(next).toContain("AskGate did not review this write");
       expect(next).toContain("The call ran unreviewed.");
       expect(next).toContain("stand-in dispatch: sent");
 
