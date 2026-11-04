@@ -123,7 +123,7 @@ github_apps:
 runtime:
   kubernetes:
     namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: ghcr.io/cybermonklabs/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
     issue_volume: 50Gi                 # each issue pod's own volume (and the daemon-launched controller's); 50Gi is the default
     session_store: postgres            # required: where every pod's Oh My Pi keeps its sessions, a store that

@@ -29,13 +29,14 @@
 # architecture source; unset, the script reads no component node and says so on one
 # `SKIP: R12 component …` line) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route,
 # /auth/_dev/signin, signs in: the local harness has it, a deployed server does not). Editing a
-# comment is a person's write alone, so the A13 and A15 comment sections sign that person in with a
-# cookie jar and edit the comments the person wrote; with DEV_SIGNIN_LOGIN unset each prints one
-# `SKIP: … PATCH /api/v1/comments/{id} is human-only …` line and every other section runs; the same
-# holds for the answer part of A6's section, whose answer only a person can write. It writes two
-# issues in PROJECT, the second a child of the first, and four asks, three on the child and one on
-# the first; it resolves every ask it can and closes both issues, also when a check fails, and it
-# removes the source `fixture` added the same way.
+# comment needs the `person` scope, which this script's bearer does not hold, so the A13 and A15
+# comment sections sign a person in with a cookie jar and edit the comments that person wrote;
+# with DEV_SIGNIN_LOGIN unset each prints one `SKIP: … PATCH /api/v1/comments/{id} needs the
+# person scope …` line and every other section runs; the same holds for the answer part of A6's
+# section, whose answer needs that scope too. It writes two issues in PROJECT, the second a child
+# of the first, and four asks, three on the child and one on the first; it resolves every ask it
+# can and closes both issues, also when a check fails, and it removes the source `fixture` added
+# the same way.
 # Each passing check prints `PASS: <section> <what>`; the first failing one prints
 # `FAIL: <section> <what>: <observed>` and the script exits 1.
 #
@@ -1057,7 +1058,7 @@ reply_block_is() {
 # names b2 with its current text, or its last text and removed. A body holding block HTML is stored
 # byte for byte, and block HTML added elsewhere leaves b2's changed revision where it was.
 if [[ -z "$dev_login" ]]; then
-  printf 'SKIP: A13 PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to run A13\n'
+  printf 'SKIP: A13 PATCH /api/v1/comments/{id} needs the person scope, which this bearer does not hold, and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to run A13\n'
 else
   person_comment A13 "the person writes a comment of three paragraphs" \
     $'First.\n\nSecond.\n\nThird.'
@@ -1157,7 +1158,7 @@ want_status 400 "A15 comment" "?to=<message block>@v1"
 expect "A15 comment" "a pinned message block on ?to= answers 400 INVALID_REFERENCE" \
   '"INVALID_REFERENCE"' '.code'
 if [[ -z "$dev_login" ]]; then
-  printf 'SKIP: A15 comment PATCH /api/v1/comments/{id} is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to run A15 comment\n'
+  printf 'SKIP: A15 comment PATCH /api/v1/comments/{id} needs the person scope, which this bearer does not hold, and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to run A15 comment\n'
 else
   person_comment "A15 comment" "the person writes comment Y of two paragraphs" $'Alpha.\n\nBeta.'
   y="$posted"
@@ -1214,9 +1215,10 @@ fi
 # the drop (A15); a bare dispatch:// URL in a question, in an option and in an answer starts at that
 # part, and the target counts each written link once (R7); a part no revision of the ask holds is
 # refused by name (R10); and a reply that answers the ask names the part it answers (R11). No part id
-# is guessed: every one of them comes from the ask's own read or from its part_of edges. Answering is
-# a person's write alone (POST /api/v1/asks/{id}/answer is human-only), so the answer part and R7's
-# third link run under DEV_SIGNIN_LOGIN; every other check runs on any server.
+# is guessed: every one of them comes from the ask's own read or from its part_of edges. Answering
+# needs the person scope (POST /api/v1/asks/{id}/answer), which this script's bearer does not
+# hold, so the answer part and R7's third link run under DEV_SIGNIN_LOGIN; every other check runs
+# on any server.
 
 # ask_parts SECTION WHAT ASK: reads the ask; sets $parts_revision to the revision of its parts,
 # $option_parts to its options' part ids in the ask's order, and $answer_part to its answer's part
@@ -1421,7 +1423,7 @@ expect "R7 ask" "the named ask counts the question's link and the option's once 
   '.ask.referenced_by_count'
 
 if [[ -z "$dev_login" ]]; then
-  printf 'SKIP: R7 ask POST /api/v1/asks/{id}/answer is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to read the answer part and the third link\n'
+  printf 'SKIP: R7 ask POST /api/v1/asks/{id}/answer needs the person scope, which this bearer does not hold, and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to read the answer part and the third link\n'
   run "R7 ask" "resolve the unanswered ask naming the target" resolve-ask --ask "$r7_ask" \
     --kind resolved --reason "block-graph.sh read this ask's parts; nothing waits on a person."
 else

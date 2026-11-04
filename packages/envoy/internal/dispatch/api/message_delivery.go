@@ -103,9 +103,15 @@ type acceptedDelivery struct {
 // attempt went to records that it took the message as its user's own turn, and is answered the
 // message's stored body in that attempt's mode. It is one compare-and-set under the message's
 // row lock, and it succeeds only for a person's direct message to that session (acceptDirect)
-// which that person wrote, sent as a Send or an Aside, and only for the latest attempt of one
-// none of whose attempts was accepted before, which the message's own author asked for within
-// the last minute and which did not fail; a refusal names the check.
+// which that person wrote themselves, sent as a Send or an Aside, and only for the latest attempt
+// of one none of whose attempts was accepted before, which the message's own author asked for
+// within the last minute and which did not fail; a refusal names the check.
+//
+// "That person wrote themselves" is two checks, because a person's own credential now reaches the
+// send route through an agent: the author is a person (byPerson), and that author carries no act
+// (byAgent), the agent an answer, message or review records when one was made for its person. A
+// message an agent wrote for the person must never become words the person typed into the
+// session, so it is refused here and reaches the session as a card naming the agent instead.
 //
 // It may land while the attempt is still pending, since pi-envoy answers the frame before
 // Dispatch settles the send, so it writes neither state nor claimed_at, which the settle is
@@ -167,13 +173,14 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sessionID, delivery, state string
-	var direct, byPerson, latest, byAuthor, fresh bool
+	var direct, byPerson, byAgent, latest, byAuthor, fresh bool
 	var taken *int
 	var requester *string
 	err = tx.QueryRow(ctx, messageThreadCTE+`
 		select session_id, delivery, state,
 		       `+acceptDirect+`,
 		       (select author ->> 'kind' = 'user' from messages where id = $1),
+		       (select author ? 'act' from messages where id = $1),
 		       attempt = (select max(attempt) from message_deliveries where message_id = $1),
 		       (select attempt from message_deliveries where message_id = $1 and accepted_at is not null),
 		       requested_by ->> 'kind',
@@ -182,7 +189,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		from message_deliveries
 		where message_id = $1 and attempt = $2
 	`, message.ID, number, actor.ID).Scan(
-		&sessionID, &delivery, &state, &direct, &byPerson, &latest, &taken, &requester, &byAuthor, &fresh,
+		&sessionID, &delivery, &state, &direct, &byPerson, &byAgent, &latest, &taken, &requester, &byAuthor, &fresh,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
@@ -203,6 +210,10 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	case !byPerson:
 		writeError(w, "ACCEPT_NOT_WRITTEN_BY_PERSON", http.StatusConflict,
 			"only a message a person wrote is taken as the session's turn")
+		return
+	case byAgent:
+		writeError(w, "ACCEPT_WRITTEN_BY_AGENT", http.StatusConflict,
+			"this message was written by an agent acting for the person, so it is shown as a card rather than taken as the session's turn")
 		return
 	case delivery != "aside" && delivery != "steer":
 		writeError(w, "ACCEPT_NOT_ASIDE_OR_STEER", http.StatusConflict,

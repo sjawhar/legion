@@ -93,7 +93,8 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 }
 
 // listAgents is readable by any authenticated caller: a session picks a target by the
-// capabilities it advertises. Sending to a session without an issue stays human-only. The list is
+// capabilities it advertises. Sending to a session without an issue needs the person scope
+// (routeScopes), since it writes to someone else's conversation. The list is
 // the stored copy of the listener's live sessions every process shares (readRouteRoster, the
 // route_roster row), at most routeRosterTTL (5 s) old, so one listener call serves agents lists
 // and issue reads alike; a listener that did not answer answers 503 for as long as that copy is a

@@ -69,7 +69,7 @@ commit itself in sjawhar/legion#2354.
 ## Evidence
 
 INFRA-117 merged onto `envoy-infra-integration`.
-`gh api repos/sjawhar/legion/rules/branches/envoy-infra-integration` → `[]`, and the branch
+`gh api repos/cybermonklabs/legion/rules/branches/envoy-infra-integration` → `[]`, and the branch
 carries no classic protection, so the plan named twelve jobs (`lint`, `typecheck`, `test`,
 `pr-title`, `build`, `changes`, `envoy-go`, `envoy-infra-go`, `envoy-go-race`, `envoy-smoke`,
 `envoy-e2e-local`, `dispatch-memory`) as the verdict the roles enforce by hand. All twelve were

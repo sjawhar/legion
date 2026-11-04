@@ -112,7 +112,10 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			if err := tx.QueryRow(ctx, `select now()`).Scan(&answeredAt); err != nil {
 				return model.Ask{}, err
 			}
-			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: answeredAt.UTC()}
+			// Act comes from the actor actingPerson handed the handler: the answer is the
+			// person's, and the agent that made it for them is named beside it. A browser's
+			// actor carries none, and so does a write of docs' own (the carry's answer).
+			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: answeredAt.UTC(), Act: actor.Act}
 			if options.WriteBlock != nil {
 				if err := options.WriteBlock(ctx, tx, ask, answer); err != nil {
 					return model.Ask{}, err
@@ -170,7 +173,7 @@ func parseReplacesAnswer(raw json.RawMessage) (*time.Time, error) {
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	actor, ok := s.actingPerson(w, r)
 	if !ok {
 		return
 	}
@@ -186,6 +189,11 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	// The acting session the body names, where the caller's credential proved none: this route
+	// has always decoded an actor, and a personal token names its session nowhere else.
+	if actor, ok = actSessionFromBody(w, actor, input.Actor); !ok {
 		return
 	}
 	// Before the transition opens its own transaction: an answer's text rides the ask.answered
@@ -241,6 +249,21 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	})
+	// Answering an approval request approves its document, so it needs the approve scope beside
+	// the person scope the table declares for this route. The check cannot sit at the gate: an
+	// ask's kind is known only once its row is read, and reading it before the transaction would
+	// decide on a row another writer could still move. It sits here instead, inside Apply, under
+	// the row lock the answer is written beneath, so the kind checked is the kind answered; the
+	// refusal is the gate's own (missingScopeError), which writeHandlerError gives the challenge
+	// header.
+	recordAnswer := transition.Apply
+	transition.Apply = func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
+		if ask.Kind == "approval" && !actor.Act.Holds(model.ScopeApprove) {
+			return model.Ask{}, missingScopeError(model.ScopeApprove,
+				"this request's credential does not hold the approve scope, which answering an approval request requires")
+		}
+		return recordAnswer(ctx, tx, ask)
+	}
 	// An approval ask's answer is a review of every document it names, each pinned to the version
 	// its question named: that document's latest settled one, which every version write moves the
 	// request to, and the one the human reviewed (revision). A request naming a spec and its

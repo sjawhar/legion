@@ -161,6 +161,7 @@ const validCalls = {
   dispatch_limits: {},
   dispatch_handoff_write: specFor("dispatch_handoff_write").example,
   dispatch_handoff_read: { issue: "DSP-1", phase: "implement", version: 2 },
+  dispatch_inbox: {},
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -233,6 +234,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_limits",
       "dispatch_handoff_write",
       "dispatch_handoff_read",
+      "dispatch_inbox",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -501,6 +503,15 @@ describe("dispatchToolSpecs", () => {
     expect(specFor("dispatch_limits").description).toContain(
       "Dispatch refuses a text over a bound and names the block or the field it passed"
     );
+  });
+
+  test("dispatch_inbox accepts no arguments, names the Envoy tool it is not, and rejects any key", () => {
+    const schema = schemaFor("dispatch_inbox");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ assignee: "me" }).success).toBe(false);
+    // The two tools' names differ by one word, so the description says which Inbox this reads.
+    expect(specFor("dispatch_inbox").description).toContain("envoy_inbox");
   });
 
   test("dispatch_handoff_write takes one JSON object body of any length, and a phase slug", () => {

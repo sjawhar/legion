@@ -17,7 +17,7 @@ import (
 // `-ldflags -X 'github.com/sjawhar/envoy/infra/provider.downloadURL=<that URL>'`; that is why it
 // is a var, since -X writes a variable and never a constant. A build with no such flag - a
 // developer's, and provider_test.go's - serves the address below, this repository's own today.
-var downloadURL = "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"
+var downloadURL = "https://github.com/cybermonklabs/legion/releases/download/envoy-infra-v${VERSION}"
 
 // New returns the envoy-infra provider serving every component the plugin registers, refusing a
 // fractional number in any integer input before a component decodes it (refuseFractionalIntegers).
@@ -25,7 +25,7 @@ func New() (p.Provider, error) {
 	prov, err := infer.NewProviderBuilder().
 		WithNamespace("sjawhar").
 		WithDisplayName("Envoy infrastructure").
-		WithRepository("https://github.com/sjawhar/legion").
+		WithRepository("https://github.com/cybermonklabs/legion").
 		WithLicense("Apache-2.0").
 		WithPluginDownloadURL(downloadURL).
 		// The default, <repository>/sdk/go/<package>, is not a path Go accepts as a module.

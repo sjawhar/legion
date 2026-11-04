@@ -34,7 +34,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-repository=${GITHUB_REPOSITORY:-sjawhar/legion}
+repository=${GITHUB_REPOSITORY:-cybermonklabs/legion}
 # One slash, both halves non-empty, and no whitespace anywhere: everything below pastes this into
 # a URL or an image reference, where a second slash or a space is a different path, not an error.
 if [[ ! $repository =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
