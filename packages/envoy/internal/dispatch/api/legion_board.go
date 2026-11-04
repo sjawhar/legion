@@ -36,9 +36,10 @@ import (
 )
 
 // The board's columns. Queue holds the daemon's waiting line and, after it, the issues a blocker
-// link holds; Design the roots holding a slot whose phase is still `admitted`; Merging `retro`,
-// `merging` and `awaiting_merge`; and Held the phase metric 2 puts on the "no role" bar beside
-// `awaiting_person` (the plan's D11).
+// link holds; Design the issues whose phase is still `admitted` that are on a card at all — the
+// slot holders, and the ones no card stands above, which are on no other issue's count
+// (legionBoardCompute); Merging `retro`, `merging` and `awaiting_merge`; and Held the phase
+// metric 2 puts on the "no role" bar beside `awaiting_person` (the plan's D11).
 const (
 	legionColumnQueue        = "queue"
 	legionColumnDesign       = "design"
@@ -205,6 +206,13 @@ type legionBoardPopulation struct {
 	// issues is every issue the daemon reported, by key, with what Dispatch holds of it beside the
 	// observations.
 	issues map[string]*legionBoardIssue
+	// parents is the parent Dispatch records for every issue of the project, the chain the tree
+	// walk climbs: an issue the daemon reports nothing of can still be the Legion issue above one
+	// it does (treeRoot).
+	parents map[string]string
+	// phaseWork is the server's set of the issues that carry Legion phase work, the other half of
+	// what makes an issue Legion's for the walk (legion_phase_work.go); nil is an empty set.
+	phaseWork *legionPhaseWork
 	// ranked is the project's issue keys in Dispatch's rank order, which is the Queue column's
 	// order when no read has recorded a waiting line.
 	ranked []string
@@ -246,7 +254,15 @@ func (s *server) readLegionBoard(ctx context.Context, project string) (*legionBo
 	if _, err := legion.GetSettings(ctx, pool, project); err != nil {
 		return nil, err
 	}
-	population := &legionBoardPopulation{project: project, issues: map[string]*legionBoardIssue{}}
+	population := &legionBoardPopulation{
+		project: project, issues: map[string]*legionBoardIssue{}, parents: map[string]string{},
+		phaseWork: &s.legionPhaseWork,
+	}
+	// The walk reads the issues that carry Legion phase work beside the daemon's own reports, and
+	// the set is read once rather than per board (legion_phase_work.go).
+	if err := s.legionPhaseWork.ensure(ctx, pool); err != nil {
+		return nil, err
+	}
 	if err := population.readDaemonRead(ctx, pool); err != nil {
 		return nil, err
 	}
@@ -370,10 +386,11 @@ func (issue *legionBoardIssue) observe(field string, value []byte, at time.Time)
 	}
 }
 
-// readIssues reads the project's issues in Dispatch's rank order, and fills the title, priority
-// and parent of every issue the daemon reported. An issue the daemon reports that Dispatch does
-// not hold keeps an empty title: the board shows what the daemon says, and a card with no title is
-// better than a card the reader never sees.
+// readIssues reads the project's issues in Dispatch's rank order, records the parent of every one
+// of them — the chain the tree walk climbs, whatever the daemon reports of each — and fills the
+// title, priority and parent of every issue the daemon reported. An issue the daemon reports that
+// Dispatch does not hold keeps an empty title: the board shows what the daemon says, and a card
+// with no title is better than a card the reader never sees.
 func (p *legionBoardPopulation) readIssues(ctx context.Context, pool *store.Pool) error {
 	rows, err := pool.Query(ctx, `
 		select key, title, priority, coalesce(parent_key, '')
@@ -392,6 +409,7 @@ func (p *legionBoardPopulation) readIssues(ctx context.Context, pool *store.Pool
 			return err
 		}
 		p.ranked = append(p.ranked, key)
+		p.parents[key] = parent
 		if issue := p.issues[key]; issue != nil {
 			issue.title, issue.priority, issue.parent = title, priority, parent
 		}
@@ -411,17 +429,84 @@ func (p *legionBoardPopulation) issueKeys() map[string]struct{} {
 
 // treeRoot is the issue's tree root, by the one rule the metrics place an issue in a tree with
 // (legion.TreeRoot): the `tree` the daemon named where a read carried one (dispatch://INFRA-980),
-// and the topmost Legion issue of its parent chain otherwise. Every issue this population holds
-// is one the daemon reports, so legion.TreeNode's Legion is true for all of them; an issue this
-// population does not hold is one the daemon reports nothing of, and a chain stops below it.
+// and the topmost Legion issue of its parent chain otherwise.
+//
+// The walk knows every issue of the project (parents) and every issue the daemon reports, and an
+// issue is Legion's for it by the one rule both readers state (dispatch://INFRA-1077's spec, "The
+// top issue of a tree", and legion/metrics/population.go's isLegionIssue): the daemon reports it,
+// or it carries Legion phase work. So a chain climbs through an issue that carries a handoff or a
+// role session's event and that the daemon never reported, and stops below an issue that is
+// neither, which is what keeps a tree out of the tracking issues above it. An issue of another
+// project, which only a daemon that reports one brings here, is a root of its own.
 func (p *legionBoardPopulation) treeRoot(key string) string {
-	return legion.TreeRoot(key, func(key string) (legion.TreeNode, bool) {
-		issue, known := p.issues[key]
-		if !known {
-			return legion.TreeNode{}, false
+	return legion.TreeRoot(key, p.treeNode)
+}
+
+// treeNode is what that walk reads of one issue: the daemon's `tree`, Dispatch's parent, and
+// whether the issue is Legion's.
+func (p *legionBoardPopulation) treeNode(key string) (legion.TreeNode, bool) {
+	issue, reported := p.issues[key]
+	parent, held := p.parents[key]
+	if !reported && !held {
+		return legion.TreeNode{}, false
+	}
+	node := legion.TreeNode{Parent: parent, Legion: reported || p.phaseWork.has(key)}
+	if reported {
+		node.Tree, node.Parent = issue.tree, issue.parent
+	}
+	return node, true
+}
+
+// legionBoardCards answers which issues carry a card and, for an issue that carries none, the
+// nearest issue above it in its tree that does. The two answers are worked out together, since
+// the one card that depends on the chain is an `admitted` issue holding no slot: it is an
+// unstarted child where a card stands above it, and a card of its own where none does.
+type legionBoardCards struct {
+	population *legionBoardPopulation
+	// queued is the issues the daemon's own state put in the Queue column, which carry a card
+	// whatever their phase; carded keeps each answer once it is known.
+	queued map[string]bool
+	carded map[string]bool
+}
+
+// has is whether the issue carries a card.
+func (c *legionBoardCards) has(key string) bool {
+	if held, known := c.carded[key]; known {
+		return held
+	}
+	// A chain that loops reads false for the issue being worked out, so the walk ends.
+	c.carded[key] = false
+	issue := c.population.issues[key]
+	if issue == nil {
+		return false
+	}
+	_, named := legionPhaseColumns[issue.phase]
+	held := false
+	switch {
+	case c.queued[key]:
+		held = true
+	case !named:
+		held = false
+	case issue.phase == legion.PhaseAdmitted && issue.slot == nil:
+		held = c.nearestCard(key) == ""
+	default:
+		held = true
+	}
+	c.carded[key] = held
+	return held
+}
+
+// nearestCard is the nearest issue above key in its tree that carries a card, and "" where none
+// does. It climbs the one chain the tree rule names (legion.TreeChain), so a count never leaves
+// the tree the walk puts the issue in.
+func (c *legionBoardCards) nearestCard(key string) string {
+	chain := legion.TreeChain(key, c.population.treeNode)
+	for _, above := range chain[1:] {
+		if c.has(above) {
+			return above
 		}
-		return legion.TreeNode{Tree: issue.tree, Parent: issue.parent, Legion: true}, true
-	})
+	}
+	return ""
 }
 
 // legionBoardCompute is GET /api/v1/legion/board's body for a population read for it. It reads
@@ -433,9 +518,12 @@ func (p *legionBoardPopulation) treeRoot(key string) string {
 // first, then follows Dispatch's rank); the issues a blocker link holds, after them in the Queue
 // column; and otherwise the column its phase falls in. An issue the daemon reports in `admitted`
 // that holds no slot and that neither list names is a child its tree has not started: it is on no
-// card, and its root's card counts it. Where no read has recorded an admission block the waiting
-// line is Dispatch's rank order over the issues in that position, which is the order the daemon's
-// own line follows once a root's wait is answered.
+// card, and the nearest card above it in its tree counts it. Where no issue above it carries a
+// card — its tree climbs through issues the daemon reports nothing of, or through issues whose
+// phase is on no column — it is a card of its own, since a count on an issue the board shows
+// nothing of is a count no reader can see. Where no read has recorded an admission block the
+// waiting line is Dispatch's rank order over the issues in that position, which is the order the
+// daemon's own line follows once a root's wait is answered.
 func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResponse {
 	cards := map[string][]legionBoardCard{}
 	placed := map[string]bool{}
@@ -467,12 +555,16 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 	}
 	p.sortByRank(blocked)
 	queued = append(queued, blocked...)
+	// Which issues carry a card: the queue the daemon's state named, and the rest by phase. The
+	// fallback queue below and the unstarted-child count both read it, so no card is lost to the
+	// tree walk and no count lands on an issue the board shows nothing of.
+	board := &legionBoardCards{population: p, queued: seen, carded: map[string]bool{}}
 	if p.admission == nil {
-		// No read has recorded a waiting line: the roots waiting for a slot, in Dispatch's rank
-		// order.
+		// No read has recorded a waiting line: the issues waiting for a slot that no card above
+		// them holds, in Dispatch's rank order.
 		for _, key := range p.ranked {
 			issue := p.issues[key]
-			if issue != nil && issue.phase == legion.PhaseAdmitted && issue.slot == nil && p.treeRoot(key) == key {
+			if issue != nil && issue.phase == legion.PhaseAdmitted && issue.slot == nil && board.has(key) {
 				queued = append(queued, key)
 			}
 		}
@@ -482,7 +574,8 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 	}
 
 	// Every other issue the daemon reports, by its phase. An `admitted` issue holding no slot that
-	// the queue does not name has not been started: it is counted on its root's card.
+	// the queue does not name has not been started: it is counted on the nearest card above it,
+	// and carries one of its own where there is none.
 	uncarded := map[string]int{}
 	for _, key := range p.sortedKeys() {
 		issue := p.issues[key]
@@ -494,10 +587,10 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 			continue
 		}
 		if issue.phase == legion.PhaseAdmitted && issue.slot == nil {
-			if root := p.treeRoot(key); root != key {
-				uncarded[root]++
+			if above := board.nearestCard(key); above != "" {
+				uncarded[above]++
+				continue
 			}
-			continue
 		}
 		placed[key] = true
 		cards[column] = append(cards[column], p.card(issue, blockers[key], 0))

@@ -21,6 +21,11 @@ package legion
 // is not the rule that picks which finished issues a metric counts, which needs phase work. A
 // chain stops below the first issue that is not a Legion issue, which is what keeps a tree from
 // climbing into the tracking issues above it.
+//
+// Both halves are facts of the project and not of any window, so both readers read them
+// project-wide: the daemon's reports from the whole of what the sampler recorded, and the phase
+// work from one read of every handoff and every Legion role session's event (PhaseWorkKeys).
+// A window narrows which issues a metric measures, never which issues are Legion's.
 type TreeNode struct {
 	Tree   string
 	Parent string
@@ -32,33 +37,49 @@ type TreeNode struct {
 // lookup does not know, one with no parent, and one whose parent is not Legion's are each a root
 // of their own. Nothing here reads a slot: a slot holder is not a root.
 //
-// lookup answers what the population holds for a key, and false for a key it does not hold. The
-// walk keeps the keys it has visited, so a parent chain that loops and a `tree` that points back
-// into the chain both stop rather than running to a depth cap.
+// lookup answers what the population holds for a key, and false for a key it does not hold.
 func TreeRoot(key string, lookup func(key string) (TreeNode, bool)) string {
+	chain := TreeChain(key, lookup)
+	return chain[len(chain)-1]
+}
+
+// TreeChain is the walk TreeRoot makes, kept: the issue itself, then every issue the walk climbs
+// through, ending at the tree root, which is why TreeRoot is its last entry. A reader that must
+// place something on the nearest issue above another — the Legion view counts an unstarted child
+// on the nearest issue of its tree that carries a card — reads the chain rather than stating the
+// climb a second time.
+//
+// The walk keeps the keys it has visited, so a parent chain that loops and a `tree` that points
+// back into the chain both stop rather than running to a depth cap.
+func TreeChain(key string, lookup func(key string) (TreeNode, bool)) []string {
+	chain := []string{key}
 	seen := map[string]bool{}
-	for current := key; ; {
+	for {
+		current := chain[len(chain)-1]
 		if seen[current] {
-			return current
+			return chain
 		}
 		seen[current] = true
 		node, known := lookup(current)
 		if !known {
-			return current
+			return chain
 		}
 		if node.Tree != "" {
-			if node.Tree == current || seen[node.Tree] {
-				return node.Tree
+			if node.Tree == current {
+				return chain
 			}
-			current = node.Tree
+			chain = append(chain, node.Tree)
+			if seen[node.Tree] {
+				return chain
+			}
 			continue
 		}
 		if node.Parent == "" {
-			return current
+			return chain
 		}
 		if above, known := lookup(node.Parent); !known || !above.Legion {
-			return current
+			return chain
 		}
-		current = node.Parent
+		chain = append(chain, node.Parent)
 	}
 }

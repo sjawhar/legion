@@ -55,6 +55,21 @@ func ParseSessionTitle(title string) (SessionTitle, bool) {
 	return SessionTitle{}, false
 }
 
+// Works is whether the session works issue: a phase worker or a root architect of that very
+// issue, never a controller, whose subject is a project.
+func (t SessionTitle) Works(issue string) bool {
+	return !t.Controller && t.Issue == issue
+}
+
+// RoleSessionWorks is whether a session titled title is a Legion role working issue. It is the
+// title half of what makes an issue carry Legion phase work, which the project-wide read asks
+// for every (issue, session) pair it finds (legion.PhaseWorkKeys) and this package's own window
+// read asks for the pairs of its scope (readRoleEvents).
+func RoleSessionWorks(title, issue string) bool {
+	parsed, ok := ParseSessionTitle(title)
+	return ok && parsed.Works(issue)
+}
+
 // OfProject is whether the session belongs to the project: a controller by the project it names
 // (the daemon lowercases the project token into subjects and paths, and the title uppercases it
 // again, so the comparison ignores case), a phase worker by the project its issue's key names.

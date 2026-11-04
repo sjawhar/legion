@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/legion/metrics"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
@@ -104,8 +105,9 @@ type hubEventSeed struct {
 // proven after the call, with its created_at, never the log's raw max(id): event ids are not
 // commit order, so a newest id the hub started on could stand above a lower id still open, which
 // no catch-up (id > cursor) would ever read. It stands on a row the reset check can compare. The
-// open P0 issues are read after that horizon, so they reflect every event at or below the cursor,
-// none of which the hub will act on.
+// open P0 issues and the issues that carry Legion phase work (legion_phase_work.go) are read
+// after that horizon, so they reflect every event at or below the cursor, none of which the hub
+// will act on; the events above it the catch-up this seed starts reads into both.
 //
 // The wait for that horizon, which an open write anywhere on the instance can hold back, ends with
 // the hub's lifetime, or with an error once every observation has failed for a while
@@ -124,6 +126,9 @@ func (h *deliveryHub) seedEvents(await func(context.Context) (safe, id int64, at
 			var p0 map[string]struct{}
 			if err == nil {
 				p0, err = delivery.OpenP0Keys(ctx, h.server.deps.Store.Pool)
+			}
+			if err == nil {
+				err = h.server.legionPhaseWork.reseed(ctx, h.server.deps.Store.Pool)
 			}
 			if err == nil {
 				select {
@@ -367,6 +372,12 @@ func (h *deliveryHub) receive(event model.Event) {
 // a session's write every view that shows the session under another title than the one it wrote
 // under. A view whose read is under way also keeps the issue and the title (deliveryHeard), since
 // the issues and sessions its read names are not known until the read lands.
+//
+// It also grows the set of issues that carry Legion phase work, which a Legion board's tree walk
+// reads (legion_phase_work.go): a handoff recorded, or an event of a session titled
+// `Legion <role> · <that issue's key>`. That set is the hub's one other piece of state kept from
+// the events, beside the P0 issues, and it only grows: phase work is never lost. It is held
+// under the set's own lock, taken here under the hub's, never the other way round.
 func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 	switch event.kind {
 	case "issue.created", "issue.updated", "issue.closed":
@@ -393,6 +404,10 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		h.dirtyIssueLocked(event.issueKey, p0, now)
 	case "architecture.synced":
 		h.dirtyAllLocked(now)
+	case "handoff.recorded":
+		// A handoff is Legion phase work, which the board's tree walk reads
+		// (legion_phase_work.go). It moves no card of its own, so it marks no view.
+		h.server.legionPhaseWork.add(event.issueKey)
 	}
 	if event.actor.Kind == "session" && event.actor.ID != "" {
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
@@ -400,6 +415,11 @@ func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
 		title := event.actor.ID
 		if origin := event.actor.Origin; origin != nil && origin.SessionTitle != "" {
 			title = origin.SessionTitle
+		}
+		// An event of a session titled `Legion <role> · <this issue's key>` is Legion phase work
+		// of that issue, the other half of what the board's tree walk reads.
+		if metrics.RoleSessionWorks(title, event.issueKey) {
+			h.server.legionPhaseWork.add(event.issueKey)
 		}
 		for _, view := range h.views {
 			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {

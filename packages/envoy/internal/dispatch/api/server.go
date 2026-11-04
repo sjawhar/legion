@@ -351,6 +351,10 @@ type server struct {
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
 	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
+	// legionPhaseWork is the issues that carry Legion phase work, which a Legion board's tree
+	// walk reads beside the daemon's own reports (legion_phase_work.go). Its zero value is the
+	// empty set, seeded by the first read that needs it and grown by the hub's event intake.
+	legionPhaseWork legionPhaseWork
 	// liveSockets is every open GET /ws/live socket, which the test hooks close.
 	liveSockets liveSocketSet
 	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by

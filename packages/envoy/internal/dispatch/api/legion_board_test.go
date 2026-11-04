@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"testing"
@@ -500,5 +501,214 @@ func TestTheBoardAndTheMetricsPutAnIssueInTheSameTree(t *testing.T) {
 	}
 	if root := population.TreeRoot("INFRA-940"); root != "INFRA-901" {
 		t.Errorf("the deepest issue's tree root is %s, want INFRA-901 under the tracking issue", root)
+	}
+}
+
+// closeLegionIssue closes one seeded issue, which is what brings its whole parent chain into the
+// metrics' read scope (legion/metrics/population.go's scopeKeys: the issues that could have
+// finished in the window and their ancestors).
+func closeLegionIssue(t *testing.T, database *store.Store, key string, at time.Time) {
+	t.Helper()
+	legionExec(t, database, `update issues set status = 'done', closed_at = $2 where key = $1`, key, at)
+}
+
+// seedLegionRoleEvent writes one event of a session titled `Legion <role> · <issue>` on the
+// issue, the way Dispatch learns a session's title: the actor's origin carries it
+// (delivery/agents.go's ResolveSessionTitles reads the newest). It is Legion phase work with no
+// observation behind it.
+func seedLegionRoleEvent(t *testing.T, database *store.Store, issue, session, role string, at time.Time) {
+	t.Helper()
+	legionExec(t, database, `insert into events (issue_key, seq, type, actor, payload, notify, created_at)
+		select $1, coalesce(max(seq), 0) + 1, 'message.created',
+			jsonb_build_object('kind', 'session', 'id', $2::text,
+				'origin', jsonb_build_object('session_title', $3::text)),
+			'{}', false, $4
+		from events where issue_key = $1`, issue, session, "Legion "+role+" · "+issue, at)
+}
+
+// seedLegionHandoff records one handoff of the issue, the other kind of Legion phase work
+// (legion/metrics/population.go's readHandoffs).
+func seedLegionHandoff(t *testing.T, database *store.Store, issue, phase string, at time.Time) {
+	t.Helper()
+	legionExec(t, database, `insert into handoffs (issue_key, phase, version, body, author, created_at)
+		values ($1, $2, 1, '{}', '{"kind":"session","id":"s-handoff"}'::jsonb, $3)`, issue, phase, at)
+}
+
+// TestTheBoardClimbsThroughAnIssueWithOnlyPhaseWork: the board and the metrics read one rule for
+// what a Legion issue is (dispatch://INFRA-1077's spec, "The top issue of a tree") — the daemon
+// reports it, or it carries Legion phase work — so a chain climbs through an issue the daemon
+// never reported that carries a handoff, and through one that carries an event of a session
+// titled `Legion <role> · <its key>`. Such an issue is an input to the walk and nothing else: it
+// gets no card, and the board names no issue it did not name before.
+func TestTheBoardClimbsThroughAnIssueWithOnlyPhaseWork(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	// Two chains, each a reported ancestor over a middle issue the daemon reports nothing of
+	// over a reported child; under each child a closed issue, so the metrics' window reaches the
+	// whole chain. The first middle carries a handoff, the second a Legion role session's event.
+	for _, chain := range []struct{ ancestor, middle, card, closed int }{{800, 801, 802, 803}, {810, 811, 812, 813}} {
+		for _, issue := range []struct {
+			number int
+			parent string
+		}{
+			{chain.ancestor, ""},
+			{chain.middle, fmt.Sprintf("INFRA-%d", chain.ancestor)},
+			{chain.card, fmt.Sprintf("INFRA-%d", chain.middle)},
+			{chain.closed, fmt.Sprintf("INFRA-%d", chain.card)},
+		} {
+			key := seedLegionIssue(t, database, "INFRA", issue.number, fmt.Sprintf("Issue %d", issue.number),
+				fmt.Sprintf("b%03d", issue.number), nil, issue.parent)
+			if issue.number == chain.ancestor || issue.number == chain.card {
+				seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"implementing"`, hourAgo)
+			}
+		}
+		closeLegionIssue(t, database, fmt.Sprintf("INFRA-%d", chain.closed), hourAgo)
+	}
+	seedLegionHandoff(t, database, "INFRA-801", "implement", hourAgo)
+	seedLegionRoleEvent(t, database, "INFRA-811", "s-811", "tester", hourAgo)
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	population, err := metrics.Read(t.Context(), database.Pool, nil, "INFRA", now.Add(-14*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("read the metrics population: %v", err)
+	}
+	cards := map[string]legionBoardCard{}
+	for _, column := range board.Columns {
+		for _, card := range column.Cards {
+			cards[card.Key] = card
+		}
+	}
+	named := slices.Sorted(maps.Keys(cards))
+	want := []string{"INFRA-800", "INFRA-802", "INFRA-810", "INFRA-812"}
+	if !slices.Equal(named, want) {
+		t.Fatalf("the board's cards are %v, want the four issues the daemon reports, %v", named, want)
+	}
+	for _, chain := range [][2]string{{"INFRA-802", "INFRA-800"}, {"INFRA-812", "INFRA-810"}} {
+		card, root := chain[0], chain[1]
+		if tree := cards[card].Tree; tree != root {
+			t.Errorf("the board puts %s in tree %q, want %q, its ancestor above an issue with only phase work", card, tree, root)
+		}
+		if got := population.TreeRoot(card); got != root {
+			t.Errorf("the metrics put %s in tree %q, want %q", card, got, root)
+		}
+	}
+	for _, middle := range [][2]string{{"INFRA-801", "INFRA-800"}, {"INFRA-811", "INFRA-810"}} {
+		if got := population.TreeRoot(middle[0]); got != middle[1] {
+			t.Errorf("the metrics put the middle issue %s in tree %q, want %q", middle[0], got, middle[1])
+		}
+	}
+	for key, card := range cards {
+		if root := population.TreeRoot(key); root != card.Tree {
+			t.Errorf("%s is in tree %q on the board and %q in the metrics", key, card.Tree, root)
+		}
+	}
+}
+
+// TestAnUnstartedChildIsCountedOnTheNearestCardAndNeverLosesItsOwn: a card an issue would carry
+// is never lost to the widened walk, and the count of an unstarted child lands on a card someone
+// can read. The chain here hangs under an issue that carries only Legion phase work, so the walk
+// climbs through it and no card stands at the tree's root: the admitted issue below it keeps its
+// own card, and the unstarted child below that is counted on it rather than on the root the
+// board shows nothing of.
+func TestAnUnstartedChildIsCountedOnTheNearestCardAndNeverLosesItsOwn(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	// No admission block is recorded, so the Queue is Dispatch's rank order over the issues
+	// waiting for a slot (the board's own fallback).
+	seedLegionIssue(t, database, "INFRA", 820, "The issue with only phase work", "a", nil, "")
+	seedLegionHandoff(t, database, "INFRA-820", "plan", hourAgo)
+	for _, issue := range []struct {
+		number int
+		title  string
+		rank   string
+		parent string
+	}{
+		{821, "The admitted issue", "b", "INFRA-820"},
+		{822, "Its unstarted child", "c", "INFRA-821"},
+	} {
+		key := seedLegionIssue(t, database, "INFRA", issue.number, issue.title, issue.rank, nil, issue.parent)
+		seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"admitted"`, hourAgo)
+	}
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	cards := map[string]legionBoardCard{}
+	columns := map[string]string{}
+	for _, column := range board.Columns {
+		for _, card := range column.Cards {
+			cards[card.Key] = card
+			columns[card.Key] = column.ID
+		}
+	}
+	named := slices.Sorted(maps.Keys(cards))
+	if want := []string{"INFRA-821"}; !slices.Equal(named, want) {
+		t.Fatalf("the board's cards are %v, want %v: the admitted issue keeps the card it carried", named, want)
+	}
+	if column := columns["INFRA-821"]; column != legionColumnQueue {
+		t.Errorf("INFRA-821 is in the %q column, want %q: it is waiting for a slot", column, legionColumnQueue)
+	}
+	if children := cards["INFRA-821"].Children; children != 1 {
+		t.Errorf("INFRA-821 counts %d unstarted children, want the one below it: a count on a root the board shows no card of is a count nobody reads", children)
+	}
+	if tree := cards["INFRA-821"].Tree; tree != "INFRA-820" {
+		t.Errorf("INFRA-821 is in tree %q, want INFRA-820, the issue with phase work above it", tree)
+	}
+}
+
+// TestTheMetricsClimbThroughPhaseWorkOutsideTheirWindow: the phase-work half of what makes an
+// issue Legion's is a fact of the project and not of a window, so the metrics read it for every
+// issue of the project and not only for the issues their window's scope covers
+// (legion/metrics/population.go's scopeKeys). Nothing here closed in the window, so nothing but
+// that project-wide read puts the card issue in its ancestor's tree.
+func TestTheMetricsClimbThroughPhaseWorkOutsideTheirWindow(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	seedLegionProjects(t, handler, "INFRA")
+	nameLegionDaemon(t, handler, "INFRA", "http://legion-infra.internal:13370")
+	now := time.Now().UTC()
+	hourAgo := now.Add(-time.Hour)
+	for _, issue := range []struct {
+		number   int
+		title    string
+		rank     string
+		parent   string
+		reported bool
+	}{
+		{830, "The reported ancestor", "a", "", true},
+		{831, "The issue with only phase work", "b", "INFRA-830", false},
+		{832, "The card issue", "c", "INFRA-831", true},
+	} {
+		key := seedLegionIssue(t, database, "INFRA", issue.number, issue.title, issue.rank, nil, issue.parent)
+		if issue.reported {
+			seedLegionObservation(t, database, "INFRA", key, legion.FieldPhase, `"implementing"`, hourAgo)
+		}
+	}
+	seedLegionHandoff(t, database, "INFRA-831", "implement", hourAgo)
+	seedLegionRoleEvent(t, database, "INFRA-831", "s-831", "reviewer", hourAgo)
+	seedLegionRead(t, database, "INFRA", now.Add(-time.Minute), "")
+
+	board := legionBoardOf(t, handler, "INFRA")
+	population, err := metrics.Read(t.Context(), database.Pool, nil, "INFRA", now.Add(-14*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("read the metrics population: %v", err)
+	}
+	if root := population.TreeRoot("INFRA-832"); root != "INFRA-830" {
+		t.Errorf("the metrics put INFRA-832 in tree %q, want INFRA-830: no issue of this chain finished in the window", root)
+	}
+	if root := population.TreeRoot("INFRA-831"); root != "INFRA-830" {
+		t.Errorf("the metrics put INFRA-831 in tree %q, want INFRA-830", root)
+	}
+	for _, column := range board.Columns {
+		for _, card := range column.Cards {
+			if root := population.TreeRoot(card.Key); root != card.Tree {
+				t.Errorf("%s is in tree %q on the board and %q in the metrics", card.Key, card.Tree, root)
+			}
+		}
 	}
 }
