@@ -581,6 +581,10 @@ port in between. A shared-box deployment leaves the variable unset.
 
 A running daemon applies a settings change without being restarted, from either of two arms, and both reach the one settings holder that resolves the whole file under the change (`packages/daemon/internal/config/live.go`).
 One arm is `PUT /legion/v1/operator/settings`, which takes the operator bearer or a projected Kubernetes ServiceAccount token the deployment named (`settings_route`; `docs/kubernetes.md`, "The settings route").
+The two credentials may change different keys.
+The operator bearer, and the file itself, may change every key but those fixed for the process.
+A change under a projected ServiceAccount token may set only keys whose value is plain data — the keys the daemon reads at each decision, such as `admission_cap`, `review_round_cap`, `max_fix_attempts`, `linger_hours` and the supervision limits and timeouts — and is refused by name for any key naming a command to run, a credential or the file holding one, an address the daemon connects to or listens on, or the rules of who may call the route.
+That is why a person changing the admission cap from Dispatch's Legion view can, while the same path cannot reach `github_apps.<app>.private_key_command`, whose value the daemon would run.
 The other is the file itself changing under the daemon, which a watcher on the directory holding `legion.yaml`, and on each directory holding a file a setting names, notices within a few seconds.
 A change the route made is kept in Postgres and laid back over the file at every boot, so it outlives a restart, until the file's own value for that key changes and takes the key back.
 `GET /legion/v1/state` carries a `settingSources` block beside `settings`, which says for each key whether the file or the route decides it now and when that was written.
