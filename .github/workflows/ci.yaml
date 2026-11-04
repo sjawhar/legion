@@ -267,6 +267,7 @@ jobs:
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/oidc/**'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
@@ -308,6 +309,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/legion/*'
+              - 'packages/envoy/internal/dispatch/legion/metrics/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
@@ -391,6 +393,7 @@ jobs:
               - 'packages/daemon/internal/runtime/tmux/*'
               - 'packages/daemon/internal/runtime/workerbin/*'
               - 'packages/daemon/internal/sessionproxy/*'
+              - 'packages/daemon/internal/settings/*'
               - 'packages/daemon/internal/shim/*'
               - 'packages/daemon/internal/shimwire/*'
               - 'packages/daemon/internal/store/**'
@@ -404,6 +407,10 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # packages/envoy/oidc is the public facade over envoy's internal/oidc, which the
+              # daemon's settings route verifies Dispatch's projected token with
+              # (internal/api/settings_route.go:11).
+              - 'packages/envoy/oidc/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
@@ -771,8 +778,10 @@ jobs:
               # packages/daemon/internal, and scripts/skill-scenarios/daemon-pane.ts:27 runs
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
-              # daemon-pane.go compiles the daemon module, which reaches that envoy package.
+              # daemon-pane.go compiles the daemon module, which reaches those envoy packages.
+              - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/oidc/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
               - 'AGENTS.md'
@@ -1047,6 +1056,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/legion/*'
+              - 'packages/envoy/internal/dispatch/legion/metrics/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/processes/*'
@@ -1251,6 +1262,7 @@ jobs:
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/oidc/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'
