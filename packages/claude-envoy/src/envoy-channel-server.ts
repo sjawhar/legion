@@ -111,6 +111,7 @@ import {
   type LegionToolRuntime,
   legionToolDefinition,
 } from "./legion-tool"
+import { type ModLink, startModLink } from "./mod-link"
 import {
   type ReplayStateFile,
   type ReplayStateWriter,
@@ -1876,12 +1877,16 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stopped = Promise.withResolvers<void>()
   let stopping = false
   let session: ChannelSession | undefined
+  // INFRA-1026: the link to this session's Claude Code mod, bound below once the MCP transport is
+  // up. It is this process's own socket, closed with the server.
+  let modLink: ModLink | undefined
   const stop = (): void => {
     if (stopping) return
     stopping = true
     booting.abort()
     // A reminder waiting on a 15-minute WAITING wait holds no shutting-down server open.
     phaseHook?.stop()
+    void modLink?.close().catch(() => undefined)
     if (session === undefined) {
       stopped.resolve()
       return
@@ -1895,6 +1900,28 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // `tmux kill-session` hangs us up directly; deregister instead of dying.
   process.once("SIGHUP", stop)
   await server.connect(new StdioServerTransport())
+  // The mod (`../hooks/mod.ts`) probes this socket from its own `session.start` and gives up
+  // after about half a minute, so it is bound as early as the transport allows. Started, not
+  // awaited: the transport is already reading stdin, and an await here would let the client's
+  // first tool call arrive before the session below exists. A session whose link cannot bind
+  // runs exactly as it does today, the mod finding nothing and staying silent.
+  void startModLink({
+    // The id Claude Code gave this process, which is what the mod reads as `$.session.id()`;
+    // the ENVOY_SESSION_ID override names an Envoy identity, never a Claude Code session.
+    sessionId: claudeSessionId({ CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"] }),
+    env: process.env,
+  }).then(
+    (link) => {
+      modLink = link
+      // The server was already stopping when the bind finished: nothing will read this link.
+      if (stopping) void link.close().catch(() => undefined)
+    },
+    (error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: no link to this session's Claude Code mod — ${messageFor(error)}; the session runs on without one\n`,
+      )
+    },
+  )
 
   let connection: ChannelForwarderConnection | undefined
   try {
@@ -1953,6 +1980,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (stopping) await session.shutdown()
     await stopped.promise
   } finally {
+    await modLink?.close().catch(() => undefined)
     if (session === undefined && connection !== undefined) {
       await connection.drain().catch(() => undefined)
       await connection.close().catch(() => undefined)
