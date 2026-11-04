@@ -231,14 +231,34 @@ function withoutReadLine(text: string): string {
     : text;
 }
 
-/** The items a rendered list shows, one block each (`renderShown` joins them with a blank line):
- *  without the block holding the marker and the line naming the read, and without the line
- *  counting what the character cap left out, which the read note's own length can move. */
+/** The first line `renderSessionAnswerItem` writes for an item: its time, its author and what the
+ *  person did, joined by ` · `. A line of a person's own text that looks like one only splits
+ *  their item in two, which reads as something new; it never joins two items into one. */
+const ITEM_HEAD = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z · /;
+
+/** The line `leftOutLine` writes last when the character cap dropped older items. */
+const LEFT_OUT =
+  /^\d[\d,]* older items? left out to stay under [\d,]+ characters(: run `dispatch answers` to read every one in full)?\.$/;
+
+/** The items a rendered list shows, one string each: the text without the marker and the line
+ *  naming the read, cut at each item's own first line, and without the line counting what the
+ *  character cap left out, which the read note's own length can move. Two lists that show the
+ *  same items give the same strings, whatever read produced them. */
 function shownItems(text: string): string[] {
-  return withoutReadLine(text)
-    .split("\n\n")
-    .slice(1)
-    .filter((block) => !/^\d+ older items? left out/.test(block));
+  const items: string[] = [];
+  for (const line of withoutReadLine(text).split("\n")) {
+    if (ITEM_HEAD.test(line)) items.push(line);
+    else if (items.length > 0) items[items.length - 1] += `\n${line}`;
+  }
+  const last = items.at(-1);
+  if (last !== undefined) {
+    const paragraphs = last.split("\n\n");
+    const trailing = paragraphs.at(-1)?.trim();
+    if (paragraphs.length > 1 && trailing !== undefined && LEFT_OUT.test(trailing)) {
+      items[items.length - 1] = paragraphs.slice(0, -1).join("\n\n");
+    }
+  }
+  return items.map((item) => item.trimEnd());
 }
 
 /** Whether `next` shows something `shown` did not: an item, or an answer or comment a person

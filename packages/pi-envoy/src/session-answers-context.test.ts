@@ -487,6 +487,24 @@ test("an older copy's list that the read note's own length shortened keeps its p
   expect(calls()).toBe(0);
 });
 
+// A person's own paragraph can read like the line the renderer writes when the cap dropped older
+// items. It must not be taken for that line: an item whose only unseen words sit in such a
+// paragraph would be swallowed, and the model would never read what that person wrote.
+test("a person's paragraph that reads like the cap's own line still counts as a new item", async () => {
+  const session = {};
+  const quoting = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T10:00:00.000Z · user u-alice · answered your ask\nDirect message a1, on no issue\nShip it.`;
+  const withNew = `${SESSION_ANSWERS_MARKER}\n\n2026-10-27T11:00:00.000Z · user u-bob · sent you a message\nDirect message b1, on no issue\n1 older item left out of the plan: hold the deployment.\n\n2026-10-27T10:00:00.000Z · user u-alice · answered your ask\nDirect message a1, on no issue\nShip it.`;
+  const quotingList = { role: "user", content: [{ type: "text", text: quoting }], timestamp: 0 };
+  const newList = { role: "user", content: [{ type: "text", text: withNew }], timestamp: 0 };
+  const { read } = reading(LIST);
+  await withSessionAnswers([skill, ask, quotingList], requestOf(read, noBranch, session));
+  const turn = [skill, ask, readCall, readResult];
+  expect(await withSessionAnswers([...turn, newList], requestOf(read, noBranch, session))).toEqual([
+    ...turn,
+    newList,
+  ]);
+});
+
 test("a person's own last message quoting the list's marker is never moved", async () => {
   const { read, calls } = reading(LIST);
   const quoted = { ...list, timestamp: 7 };
