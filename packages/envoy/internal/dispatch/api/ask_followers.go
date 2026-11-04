@@ -119,10 +119,10 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 		// that call records it. A credential that acts as the addressed session follows it as it
 		// always did, recorded as that session, since that is its own act and no person's;
 		// nothing of what a session reads back changes.
-		acting, actingErr := bearerSessionActor(r, actor, input.Actor)
+		asTheSession, sessionErr := bearerSessionActor(r, actor, input.Actor)
 		switch {
-		case actingErr == nil && acting.ID == sessionID:
-			actor = acting
+		case sessionErr == nil && asTheSession.ID == sessionID:
+			actor = asTheSession
 		case person:
 			// Putting another session on an ask is the person's act, so it is recorded as the
 			// person with the agent beside them. actingPerson cannot refuse the scope here,
@@ -138,8 +138,8 @@ func (s *server) changeAskFollower(w http.ResponseWriter, r *http.Request, follo
 		default:
 			// The body still has to name a session, so a bearer that names none is told that
 			// first, as it always was (400 ACTOR_KIND).
-			if actingErr != nil {
-				s.writeHandlerError(w, actingErr)
+			if sessionErr != nil {
+				s.writeHandlerError(w, sessionErr)
 				return
 			}
 			writeError(w, "FOLLOWER_FORBIDDEN", http.StatusForbidden,

@@ -1,7 +1,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SessionAnswer, SessionAnswerRelation } from "@legion/contracts";
-import { actorActText } from "@legion/contracts";
+import { actorActText, type SessionAnswer, type SessionAnswerRelation } from "@legion/contracts";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import { DispatchClient, isNoRoute } from "./dispatch-http";
 import { ownerTitle } from "./dispatch-owner";

@@ -1,5 +1,6 @@
 import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
+
 import type { SearchAsk } from "../../api/types";
 import {
   badgeLow,

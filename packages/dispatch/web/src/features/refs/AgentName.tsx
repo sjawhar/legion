@@ -7,6 +7,7 @@ import {
 } from "@legion/contracts";
 import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
+
 import type { Actor, AskResolution } from "../../api/types";
 import {
   focusVisibleRing,
@@ -16,7 +17,6 @@ import {
   offlineDotBorder,
   unknownDotBorder,
 } from "../../theme/classes";
-
 import { askResolutionBadge, askResolutionReason } from "./actor";
 import { type AgentRegistry, type AgentState, useAgentRegistry } from "./agent-registry";
 import { AGENT_LIVE_PATH } from "./routes";
