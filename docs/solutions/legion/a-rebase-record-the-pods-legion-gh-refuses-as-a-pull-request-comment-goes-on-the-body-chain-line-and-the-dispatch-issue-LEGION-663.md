@@ -38,7 +38,7 @@ related_issues:
 ## Evidence
 
 LEGION-663 (sjawhar/legion#1874), the retarget to `main` (`cee5c6fc`). `legion gh -- pr comment`
-exited silently with nothing posted; `legion gh -- api repos/sjawhar/legion/issues/1874/comments
+exited silently with nothing posted; `legion gh -- api repos/cybermonklabs/legion/issues/1874/comments
 --method POST` printed "Legion issues live on Dispatch; use `dispatch message` or `dispatch comment`
 on LEGION-663"; `legion gh -- api graphql … addComment` printed "Legion never merges a pull
 request: publish READY (merger role) and let a human merge under the repository's code-owner

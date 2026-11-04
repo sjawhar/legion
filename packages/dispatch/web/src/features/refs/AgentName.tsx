@@ -1,4 +1,10 @@
-import { actorAttribution, actorName, sessionLabel, shortSessionId } from "@legion/contracts";
+import {
+  actorActText,
+  actorAttribution,
+  actorName,
+  sessionLabel,
+  shortSessionId,
+} from "@legion/contracts";
 import { Fragment, type ReactNode, useMemo } from "react";
 import { generatePath, Link } from "react-router-dom";
 
@@ -129,9 +135,9 @@ function AgentStateMark({
 
 /**
  * An agent, as every place in the app shows one. A `user` or `system` actor is its id as plain
- * text (inside the host's control, for `kind="control"`) and reads no registry. A session
- * renders in one `<span data-agent-name data-agent-state>`: its state mark, its name, and its
- * attribution.
+ * text (inside the host's control, for `kind="control"`) and reads no registry; a person an
+ * agent acted for also carries that agent (`actorActText`). A session renders in one
+ * `<span data-agent-name data-agent-state>`: its state mark, its name, and its attribution.
  */
 export function AgentName(props: AgentNameProps): ReactNode {
   if (props.sessionId !== undefined) {
@@ -146,7 +152,10 @@ export function AgentName(props: AgentNameProps): ReactNode {
   }
   const { actor } = props;
   if (actor.kind !== "session") {
-    const named = props.kind === "control" ? props.control(actor.id) : actor.id;
+    // An act an agent made for its person is recorded as the person's, so the person's name
+    // carries the agent beside it, by the one rule every reader of an act follows.
+    const text = actor.kind === "user" ? actorActText(actor.id, actor.act) : actor.id;
+    const named = props.kind === "control" ? props.control(text) : text;
     return props.className === undefined ? named : <span className={props.className}>{named}</span>;
   }
   return (
@@ -251,7 +260,11 @@ export function useAgentText(): AgentText {
   return useMemo(() => {
     const label = (ref: AgentRef) => {
       const { attribution, name } = resolveAgent(ref, registry);
-      return `${name}${attribution}`;
+      // The same name `AgentName` draws, the agent an act was made through included, so a title
+      // or an aria-label never says a person wrote what their agent wrote for them.
+      const acted =
+        "actor" in ref && ref.actor.kind === "user" ? actorActText(name, ref.actor.act) : name;
+      return `${acted}${attribution}`;
     };
     return {
       initials: (actor: Actor) => agentInitials(resolveAgent({ actor }, registry).name),

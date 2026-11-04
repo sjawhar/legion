@@ -215,6 +215,14 @@ type Options struct {
 	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
 	// nil Tokens.
 	GitHubCredential runtime.GitHubCredential
+	// GitHubOwners are the GitHub owners the daemon serves now (appauth.GitHubOwners): lowercased,
+	// with every configured rename alias — the same set the gh bundle of a pod created now would
+	// hold, and so the directories its gh volume would project. A running pod's projection is
+	// fixed at the owners of its creation (manifest's volumes), so an owner this answers that the
+	// pod's volume does not name is a pod whose gh directory lacks it (movedGhOwners). It is read
+	// on every drift evaluation, so it must be cheap and must mint nothing. Required: configure
+	// refuses nil as it refuses a nil GitHubCredential.
+	GitHubOwners func() []string
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns

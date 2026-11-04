@@ -18,7 +18,7 @@ related_issues:
 
 # A READY head waited half an hour for a runner, and main moved under it
 
-On `sjawhar/legion`, the time between READY and the merge is mostly time waiting for a GitHub
+On `cybermonklabs/legion`, the time between READY and the merge is mostly time waiting for a GitHub
 runner, not time running checks. While a READY head waits, `main` keeps moving, and every
 conflict that arrives in that window costs a whole round: a forward merge, a test round, a review
 round, a retro and a second READY.

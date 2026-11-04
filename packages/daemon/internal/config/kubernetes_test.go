@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
-const workerImage = "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const workerImage = "ghcr.io/cybermonklabs/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // kubernetesFile is the smallest file `runtime: kubernetes` loads: every key a pod needs to reach
 // the daemon, Envoy, NATS, and Dispatch, and the required members of the block. The App
@@ -571,12 +571,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "image by tag",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker:latest"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker:latest"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{
 			name: "image with a short digest",
-			body: kubernetesWith(workerImage, "ghcr.io/sjawhar/legion-worker@sha256:0"),
+			body: kubernetesWith(workerImage, "ghcr.io/cybermonklabs/legion-worker@sha256:0"),
 			want: "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
 		},
 		{
