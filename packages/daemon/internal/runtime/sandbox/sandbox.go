@@ -183,6 +183,15 @@ type Runtime struct {
 	// cacheBearers is each cache's bearer token as its Secret last held it (writeCacheSecret), by its
 	// Sandbox's name: what the health read presents, and what an issue pod's Secret is given.
 	cacheBearers map[string]string
+	// sessions are the operator-launched session pods this daemon serves, by pod name
+	// (session.go): the gh Secret the minute sweep keeps fresh and the broker enrollment it
+	// revokes once the pod is gone. It is this daemon's own — a restart serves no session it did
+	// not serve itself — and sessionTurns orders one pod's writes against its own refresh.
+	sessions     map[string]sessionRegistration
+	sessionTurns map[string]chan struct{}
+	// revokeEnrollment is Options.RevokeEnrollment: the daemon's broker login, which the sweep
+	// ends a session pod's enrollment through. Nil revokes none.
+	revokeEnrollment func(ctx context.Context, enrollment string) error
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -356,6 +365,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
+		sessions: map[string]sessionRegistration{}, sessionTurns: map[string]chan struct{}{},
+		revokeEnrollment: opts.RevokeEnrollment,
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}

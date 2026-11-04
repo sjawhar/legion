@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
 // gitHubRefreshInterval is how often refreshGitHubCredentials walks the pod store. The daemon's
@@ -21,9 +22,9 @@ import (
 // (start); a test that must see a tick inside its run shortens it before starting one.
 var gitHubRefreshInterval = time.Minute
 
-// refreshGitHubCredentialsEvery runs refreshGitHubCredentials, then refreshCacheTokens, then
-// readCacheHealth, every interval until ctx ends: the informers' lifetime (start), so the walk never
-// reads a store nothing feeds.
+// refreshGitHubCredentialsEvery runs refreshGitHubCredentials, then refreshSessionCredentials,
+// then refreshCacheTokens, then readCacheHealth, every interval until ctx ends: the informers'
+// lifetime (start), so the walk never reads a store nothing feeds.
 func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval time.Duration) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -33,6 +34,7 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 			return
 		case <-tick.C:
 			r.refreshGitHubCredentials(ctx)
+			r.refreshSessionCredentials(ctx)
 			r.refreshCacheTokens(ctx)
 			r.readCacheHealth(ctx)
 		}
@@ -148,14 +150,10 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 // pod named sandbox, owned by the Sandbox with uid.
 func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, uid types.UID, role claim.Role) {
 	name := roleSecretName(sandbox, role)
-	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	failed := func(err error) {
 		r.log.Warn("sandbox runtime: github credential refresh failed", "sandbox", sandbox, "role", role, "err", err)
 	}
-	read := func() (*corev1.Secret, error) {
-		return secrets.Get(ctx, name, metav1.GetOptions{})
-	}
-	secret, err := read()
+	secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		failed(err)
 		return
@@ -183,15 +181,46 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		failed(fmt.Errorf("the credential's default owner %s is not the Secret's %s", bundle.Default, owner))
 		return
 	}
+	changed := changedGitHubOwners(secret, bundle)
+	if len(changed) == 0 {
+		return
+	}
+	written, err := r.writeGitHubOwners(ctx, name, uid, secret, bundle, changed)
+	if err != nil {
+		failed(err)
+		return
+	}
+	if !written {
+		return
+	}
+	lease := bundle.Owners[owner]
+	r.log.Info("sandbox runtime: github credential refreshed", "sandbox", sandbox, "role", role, "app", lease.App,
+		"expiresAt", lease.ExpiresAt, "owners", changed)
+}
+
+// changedGitHubOwners are bundle's owners whose hosts.yml is not the one secret already holds:
+// the owners a refresh has to rewrite, and none at all when the daemon's leases have not turned
+// over since the last tick, which is most ticks.
+func changedGitHubOwners(secret *corev1.Secret, bundle ghconfig.Bundle) []string {
 	var changed []string
 	for _, o := range bundle.OwnerNames() {
 		if string(secret.Data[GitHubHostsKey(o)]) != bundle.Owners[o].Hosts {
 			changed = append(changed, o)
 		}
 	}
-	if len(changed) == 0 {
-		return
-	}
+	return changed
+}
+
+// writeGitHubOwners sets changed's gh keys from bundle into secret, which was read as the Secret
+// named name owned by uid, and updates it; written is whether that update landed. Nothing else of
+// the Secret changes: a role Secret's launcher token, whose hash binds the launcher
+// (credentialFromSecret), its default and annotations, and the keys of an owner the render no
+// longer holds all stay as they are. A conflict is retried once over a fresh read, and a Secret
+// the fresh read finds another owner's is left exactly as it is, which is no failure and no
+// write, so a caller logs neither. Both the role refresh and a session pod's (session.go) write
+// their Secret through it.
+func (r *Runtime) writeGitHubOwners(ctx context.Context, name string, uid types.UID, secret *corev1.Secret, bundle ghconfig.Bundle, changed []string) (written bool, err error) {
+	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	for retried := false; ; retried = true {
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
@@ -200,26 +229,23 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 			rendered := bundle.Owners[o]
 			secret.Data[GitHubHostsKey(o)], secret.Data[GitHubConfigKey(o)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
-		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
-		if err == nil {
-			break
-		}
-		if !apierrors.IsConflict(err) || retried {
-			failed(err)
-			return
+		if _, err := secrets.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+			if !apierrors.IsConflict(err) || retried {
+				return false, err
+			}
+		} else {
+			return true, nil
 		}
 		// Something else wrote the Secret since it was read — a launch binding it to its new pod
 		// (bindLauncherSecrets) — so its write is kept and the changed owners' keys set over a
 		// fresh read.
-		if secret, err = read(); err != nil {
-			failed(err)
-			return
+		fresh, err := secrets.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
 		}
-		if !ownedBySandbox(secret.OwnerReferences, uid) {
-			return
+		if !ownedBySandbox(fresh.OwnerReferences, uid) {
+			return false, nil
 		}
+		secret = fresh
 	}
-	written := bundle.Owners[owner]
-	r.log.Info("sandbox runtime: github credential refreshed", "sandbox", sandbox, "role", role, "app", written.App,
-		"expiresAt", written.ExpiresAt, "owners", changed)
 }

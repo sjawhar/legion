@@ -1598,6 +1598,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:             tokens,
 		GitHubOwners:       p.repositories.Owners,
 		RepositoryRenames:  cfg.RepositoryRenames,
+		SessionEnroller:    sessionEnrollerOf(p.secretsLogin),
+		SessionPods:        sessionPodsOf(s.runtime),
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
@@ -1896,4 +1898,26 @@ func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
 		return pods.PodAt
 	}
 	return nil
+}
+
+// sessionPodsOf is rt as the session routes read and write it when rt is the Sandbox runtime, the
+// one runtime that runs pods, and nil under any other (api's Options.SessionPods), which refuses
+// both session routes. A typed nil pointer in the interface would not refuse them but panic in
+// the route, so it is compared out here rather than assigned.
+func sessionPodsOf(rt runtime.Runtime) api.SessionPods {
+	if pods, ok := rt.(*sandbox.Runtime); ok && pods != nil {
+		return pods
+	}
+	return nil
+}
+
+// sessionEnrollerOf is the daemon's own secrets-broker login as the session enrollment route
+// makes an enrollment through (api's Options.SessionEnroller), and nil for a deployment that
+// enrolls no pod, whose route refuses every call. A typed nil pointer would not be a nil
+// interface, so it is compared here rather than assigned.
+func sessionEnrollerOf(client *agentsecrets.Client) api.SessionEnroller {
+	if client == nil {
+		return nil
+	}
+	return client
 }

@@ -117,6 +117,13 @@ type Options struct {
 	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
 	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
 	RepositoryRenames ghrepo.Renames
+	// SessionEnroller enrolls a session pod's key with the secrets broker: the daemon's own
+	// agent-secrets login client (internal/agentsecrets). Nil, a deployment that enrolls no pod,
+	// refuses POST /legion/v1/sessions/agent-secrets.
+	SessionEnroller SessionEnroller
+	// SessionPods reads a session pod and writes its gh Secret: the Sandbox runtime. Nil, a
+	// runtime that runs no pods, refuses both session routes.
+	SessionPods SessionPods
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -209,21 +216,25 @@ type server struct {
 	// that says which owner's installation holds a repository recorded under the name a transfer
 	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
 	// serving reads for this server's own GitHub calls. The zero value configures none.
-	renames    ghrepo.Renames
-	githubAPI  string
-	mergeRules func(project string) config.MergeRules
-	grants     *credential.Grants
-	releaser   store.TreeReleaser
-	trees      TreeLifecycles
-	pool       *pgxpool.Pool
-	handlers   []intake.Handler
-	prepare    func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
-	unread     func(resolved string) bool
-	await      func(repo, tree, child, parent string)
-	roleFor    func(phase.Phase) claim.Role
-	records    record.Store
-	dispatch   dispatch.Client
-	claimReady func(c supervise.Claim)
+	renames ghrepo.Renames
+	// sessionEnroller and sessionPods are Options.SessionEnroller and Options.SessionPods, which
+	// the session routes serve an operator-launched pod from (session.go).
+	sessionEnroller SessionEnroller
+	sessionPods     SessionPods
+	githubAPI       string
+	mergeRules      func(project string) config.MergeRules
+	grants          *credential.Grants
+	releaser        store.TreeReleaser
+	trees           TreeLifecycles
+	pool            *pgxpool.Pool
+	handlers        []intake.Handler
+	prepare         func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
+	unread          func(resolved string) bool
+	await           func(repo, tree, child, parent string)
+	roleFor         func(phase.Phase) claim.Role
+	records         record.Store
+	dispatch        dispatch.Client
+	claimReady      func(c supervise.Claim)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -262,6 +273,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
 		renames:            opts.RepositoryRenames,
+		sessionEnroller:    opts.SessionEnroller,
+		sessionPods:        opts.SessionPods,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -315,6 +328,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)
+	mux.HandleFunc("POST /legion/v1/sessions/agent-secrets", s.sessionAgentSecrets)
+	mux.HandleFunc("POST /legion/v1/sessions/github-credential", s.sessionGitHubCredential)
 	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
 	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
 	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)

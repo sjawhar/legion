@@ -223,6 +223,12 @@ type Options struct {
 	// on every drift evaluation, so it must be cheap and must mint nothing. Required: configure
 	// refuses nil as it refuses a nil GitHubCredential.
 	GitHubOwners func() []string
+	// RevokeEnrollment ends one secrets-broker enrollment (the daemon's own login,
+	// agentsecrets.Client.Revoke): the minute sweep revokes an operator-launched session pod's
+	// once that pod is gone, as a claim's machine revokes its process's when it lets the process
+	// go, so a session's enrollment outlives its pod no longer than a worker's does (session.go).
+	// Nil, a deployment that enrolls no pod, revokes none and has none to revoke.
+	RevokeEnrollment func(ctx context.Context, enrollment string) error
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns

@@ -19,3 +19,10 @@ func AppRoleFor(role claim.Role) AppRole {
 	}
 	panic(fmt.Sprintf("AppRoleFor: unsupported claim role %q", role))
 }
+
+// SessionRole is the claim role an operator-launched session pod's gh bundle is minted as
+// (internal/api's session routes, and the Sandbox runtime's refresh of its Secret): a session
+// writes to the owner it names, so it is the implement App's bundle, the one a claim's
+// implementer pod already holds for its issue's owner. The route that mints it and the refresher
+// that mints it again read this one name, so the two can never ask for different Apps.
+const SessionRole = claim.RoleImplementer

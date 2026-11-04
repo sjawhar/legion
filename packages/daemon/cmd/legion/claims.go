@@ -64,12 +64,9 @@ func (c *claimsCall) send(ctx context.Context, op operator, method, path string,
 	return c.operatorCall.send(ctx, op, method, claimsRoute+path, body, c.printer(print))
 }
 
-// printer is print, or under --json the answer as the daemon served it.
+// printer is print, or under --json the answer as the daemon served it (answerPrinter).
 func (c *claimsCall) printer(print func(io.Writer, []byte) error) func(io.Writer, []byte) error {
-	if *c.asJSON {
-		return writeAnswer
-	}
-	return print
+	return answerPrinter(*c.asJSON, print)
 }
 
 // writeAnswer writes a 2xx answer as the daemon served it.

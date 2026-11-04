@@ -4257,6 +4257,42 @@ It needs:
 
 It has no pod create or delete and no PVC verb (LEGION-206 Requirement 8).
 
+### A session pod the operator launches by hand
+
+A session pod is one an operator starts in the deployment's namespace, outside every claim:
+the daemon never spawns, stops or observes it, nothing of the workflow knows it exists, and it carries no `legion.dev/project` label.
+Such a pod can build itself everything a Legion worker pod has except the two things only the daemon holds — a secrets-broker enrollment, which is made under the daemon's own launcher credential, and a gh bundle, which is minted from the GitHub App keys the daemon alone has.
+Two routes serve those two things, and nothing else (`packages/daemon/internal/api/session.go`):
+
+- `POST /legion/v1/sessions/agent-secrets` enrolls the pod's key with the broker, proving the pod with the pod's own projected token, exactly as the daemon enrolls a worker pod's shim.
+  `legion session enroll` is the operator's call.
+
+- `POST /legion/v1/sessions/github-credential` writes the implement App's gh bundle for one owner into a Secret the pod owns, and keeps it fresh.
+  `legion session github-credential` is the operator's call.
+
+Both take the operator bearer (`operator_token_file`), the same authority `legion controller start` buys its capability with:
+a session pod belongs to no claim and holds no capability of its own, so there is nothing weaker to authenticate it by, and the one caller that would hold a minted capability already holds the bearer that would buy it.
+Every refusal carries a code (`INVALID_OPERATOR_TOKEN`, `POD_NOT_FOUND`, `POD_NOT_SESSION`, `POD_UID_MISMATCH`, `AGENT_SECRETS_UNCONFIGURED`, `SESSION_PODS_UNAVAILABLE`, `OWNER_OUTSIDE_PROJECT`, `ENROLLMENT_REFUSED`, `ENROLLMENT_UNAVAILABLE`), so a launcher script branches on the code rather than the sentence.
+
+Neither route widens anything.
+The daemon resolves the pod's name in its own namespace and never takes a uid from the request, so a name no pod holds is refused and a pod carrying `legion.dev/project` — a claim's, the controller's, a cache's, another project's — is refused by name:
+neither route can be aimed at a pod Legion launched.
+The enrollment is the one a worker pod's shim already gets, and the bundle is the one an implementer pod already gets for its issue's owner, with an owner outside the project refused before anything is minted.
+Neither route needs a Kubernetes verb the daemon does not already have ([RBAC the Go daemon needs](#rbac-the-go-daemon-needs)):
+a `get` on the pod, and `create`, `get` and `update` on its Secret.
+
+The order is: create the pod, then call the routes.
+The pod must exist for the daemon to resolve it and for the Secret to be owned by it;
+a pod whose gh volume names a Secret that is not there yet stays Pending until the Secret lands, and the kubelet mounts it then.
+Because the pod owns the Secret, Kubernetes deletes it with the pod, and no credential of a session outlives the session.
+
+The keygen inside the pod and the `agent-secrets renew` loop that keeps its lease alive belong to whatever launches the pod, as they belong to `legion worker-shim` in a claim's pod:
+the daemon runs no `kubectl` and reaches into no pod.
+
+An installation token lasts an hour, so the daemon rewrites a session's gh Secret on the same minute tick that rewrites the role Secrets (`refreshSessionCredentials`, `internal/runtime/sandbox/session.go`).
+It stops the moment the pod is gone, has ended, is being deleted, or has been replaced by another pod of the same name.
+The registration is this daemon's own: a daemon that restarts refreshes no session it did not serve itself, so that pod's tokens then last until their hour is out and a fresh `legion session github-credential` registers it again.
+
 ### The live proof
 
 `scripts/e2e/stage4b-sandbox-tree.sh` drives three real issue trees through the Go daemon on this runtime, in the production cluster's namespace `legion`, against production Dispatch, the Envoy listener and NATS, with real agents.

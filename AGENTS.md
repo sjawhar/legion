@@ -207,6 +207,18 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   every shared clone's git credential helper (`!legion git-credential`, with credential.useHttpPath on), and, as `legion gh auth git-credential`, the helper of the git gh runs itself;
   git runs it, never a person: `get` answers https://github.com with the token of the owner the requested path names from that owner's directory of LEGION_GH_OWNERS_DIR and from nothing else, answering nothing (exit 1, naming why) for any other host, a request with no path, or an owner the bundle holds no directory for; `store` and `erase` write nothing
 
+- `legion session enroll --operator-token-file <file> --pod <name> --thumbprint <tp> --pod-token-file <file> [--pod-uid <uid>] [--session <id>]`
+  and `legion session github-credential --operator-token-file <file> --pod <name> --owner <owner> [--pod-uid <uid>]`
+
+  the operator's two calls for a session pod: one they launch by hand in the deployment's namespace, outside every claim, which the daemon never starts, stops or supervises (`POST /legion/v1/sessions/agent-secrets` and `POST /legion/v1/sessions/github-credential`, `internal/api/session.go`).
+  Each gives that pod a thing only the daemon holds, and nothing more than a claim's pod already gets:
+  enroll enrolls the key `agent-secrets keygen` wrote inside the pod under the daemon's own broker login, proving the pod with the pod's own projected token, as the daemon enrolls a worker pod's shim;
+  github-credential writes the implement App's gh bundle for `--owner` — the write token for that owner, read-only for every other owner of the project — into a Secret the pod owns, which the daemon rewrites on its minute tick until the pod ends.
+  Both take the operator bearer, which is the authority `legion controller start` buys its capability with, and neither trusts a pod uid from its caller:
+  the daemon resolves the name in its own namespace and refuses a name no pod holds and one of Legion's own pods, so neither can be aimed at a claim's pod.
+  The keygen and the `agent-secrets renew` loop belong to whatever launches the pod, as they belong to `legion worker-shim` in a claim's pod, and a daemon restart forgets a session's registration, so the gh Secret then lasts until its tokens expire and a fresh `legion session github-credential` registers it again.
+  It is not `legion sessions`, whose noun is a recorded transcript
+
 - `legion sessions import --dsn-file <url file> --claims <claims.json|-> [--tree <KEY>] [--tree-volume <dir>]`
 
   the one-off copy from legion-v10.0.0 before a runtime.kubernetes.session_store that keeps sessions in a database (postgres or cloudsql-iam;
@@ -266,6 +278,8 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   - model-token
 
   - claims
+
+  - session
 
   - sessions
 

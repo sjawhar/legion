@@ -184,6 +184,12 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
+	// A session pod's broker enrollment is the daemon's to revoke once that pod is gone, as a
+	// claim's is (internal/runtime/sandbox's session sweep). With no broker login there is none
+	// to revoke, and the session enrollment route refuses every call anyway.
+	if p.secretsLogin != nil {
+		reads.opts.RevokeEnrollment = p.secretsLogin.Revoke
+	}
 	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
