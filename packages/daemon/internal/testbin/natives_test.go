@@ -165,7 +165,7 @@ func TestANativesFillThatExtractsNothingCachesNothing(t *testing.T) {
 
 // A binary that lists no embedded natives is refused before it runs: with nothing to check an
 // extraction against, every file it wrote would be refused by name anyway, so refusing first fails
-// with a precise message and never runs omp to extract a native of about 111 MiB.
+// with a precise message and never runs omp to extract a native of about 116 MiB.
 func TestANativesFillRefusesABinaryThatListsNoEmbeddedNatives(t *testing.T) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")

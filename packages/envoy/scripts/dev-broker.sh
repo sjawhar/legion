@@ -372,7 +372,7 @@ dev-broker: ready.
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
   (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose sessions ask
-  for them. A grant lasts until its session ends, or for the --ttl its request names.
+  for them. A grant lasts for the --ttl its request names, else 12 hours.
   Drive it with agent-secrets and agent-secrets-helper in another shell;
   press Ctrl-C here to stop the broker and its issuer.
 
