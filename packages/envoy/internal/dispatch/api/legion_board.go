@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -71,22 +72,30 @@ var legionBoardColumnOrder = []struct{ id, label string }{
 // name (`done`, and any phase a later daemon adds) puts the issue on no card: the board shows the
 // work in flight, and a phase Dispatch has never heard of is not something it can place.
 var legionPhaseColumns = map[string]string{
-	"admitted":        legionColumnDesign,
-	"planning":        legionColumnPlanning,
-	"implementing":    legionColumnImplementing,
-	"testing":         legionColumnTesting,
-	"reviewing":       legionColumnReviewing,
-	"accepting":       legionColumnAccepting,
-	"retro":           legionColumnMerging,
-	"merging":         legionColumnMerging,
-	"awaiting_merge":  legionColumnMerging,
-	"awaiting_person": legionColumnAwaiting,
-	"held":            legionColumnHeld,
+	legion.PhaseAdmitted:       legionColumnDesign,
+	legion.PhasePlanning:       legionColumnPlanning,
+	legion.PhaseImplementing:   legionColumnImplementing,
+	legion.PhaseTesting:        legionColumnTesting,
+	legion.PhaseReviewing:      legionColumnReviewing,
+	legion.PhaseAccepting:      legionColumnAccepting,
+	legion.PhaseRetro:          legionColumnMerging,
+	legion.PhaseMerging:        legionColumnMerging,
+	legion.PhaseAwaitingMerge:  legionColumnMerging,
+	legion.PhaseAwaitingPerson: legionColumnAwaiting,
+	legion.PhaseHeld:           legionColumnHeld,
 }
 
 // legionTreeDepthCap bounds the climb from an issue to its tree root over the parent chain, for a
 // daemon that names no `tree`. A chain longer than this, or one that loops, stops where it stands.
 const legionTreeDepthCap = 32
+
+// legionNotConfiguredCode and legionNotConfiguredMessage are the one refusal a project with no
+// Legion daemon gets, whichever route or live view asked (getLegionBoard,
+// putLegionProjectSettings, the live hub's worker).
+const (
+	legionNotConfiguredCode    = "LEGION_NOT_CONFIGURED"
+	legionNotConfiguredMessage = "this project has no Legion daemon; set one through PUT /api/v1/settings/legion/{project}"
+)
 
 // legionBoardResponse is GET /api/v1/legion/board: the project the board shows, its header, its
 // columns, the settings its daemon reports with where each came from, and when it was computed.
@@ -172,8 +181,7 @@ func (s *server) getLegionBoard(w http.ResponseWriter, r *http.Request) {
 	population, err := s.readLegionBoard(r.Context(), project)
 	if err != nil {
 		if errors.Is(err, legion.ErrNoSettings) {
-			writeError(w, "LEGION_NOT_CONFIGURED", http.StatusNotFound,
-				"this project has no Legion daemon; set one through PUT /api/v1/settings/legion/{project}")
+			writeError(w, legionNotConfiguredCode, http.StatusNotFound, legionNotConfiguredMessage)
 			return
 		}
 		s.writeHandlerError(w, err)
@@ -330,9 +338,9 @@ func (p *legionBoardPopulation) observeProject(field string, value []byte) {
 func (issue *legionBoardIssue) observe(field string, value []byte, at time.Time) {
 	switch {
 	case field == legion.FieldPhase:
-		issue.phase, issue.phaseSince = legionJSONString(value), at
+		issue.phase, issue.phaseSince = legion.JSONString(value), at
 	case field == legion.FieldTree:
-		issue.tree = legionJSONString(value)
+		issue.tree = legion.JSONString(value)
 	case field == legion.FieldSlot:
 		var slot *int
 		if err := json.Unmarshal(value, &slot); err == nil {
@@ -348,10 +356,10 @@ func (issue *legionBoardIssue) observe(field string, value []byte, at time.Time)
 			issue.waitingOn = &legionBoardWait{Kind: wait.Kind, Since: wait.Since, AnsweredAt: wait.AnsweredAt}
 		}
 	case field == legion.FieldPullRequestChecksVerdict:
-		issue.checksVerdict = legionJSONString(value)
+		issue.checksVerdict = legion.JSONString(value)
 	case strings.HasPrefix(field, legion.ClaimFieldPrefix):
 		role := strings.TrimPrefix(field, legion.ClaimFieldPrefix)
-		working := legionJSONString(value) == "working"
+		working := legion.JSONString(value) == "working"
 		held := slices.Contains(issue.roles, role)
 		switch {
 		case working && !held:
@@ -417,18 +425,18 @@ func (p *legionBoardPopulation) treeRoot(key string) string {
 	}
 	root := key
 	for range legionTreeDepthCap {
-		parent := p.issues[root]
-		if parent == nil || parent.parent == "" {
+		current := p.issues[root]
+		if current == nil || current.parent == "" {
 			return root
 		}
-		above, known := p.issues[parent.parent]
+		above, known := p.issues[current.parent]
 		if !known {
 			return root
 		}
 		if above.tree != "" {
 			return above.tree
 		}
-		root = parent.parent
+		root = current.parent
 	}
 	return root
 }
@@ -481,7 +489,7 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 		// order.
 		for _, key := range p.ranked {
 			issue := p.issues[key]
-			if issue != nil && issue.phase == "admitted" && issue.slot == nil && p.treeRoot(key) == key {
+			if issue != nil && issue.phase == legion.PhaseAdmitted && issue.slot == nil && p.treeRoot(key) == key {
 				queued = append(queued, key)
 			}
 		}
@@ -502,7 +510,7 @@ func legionBoardCompute(p *legionBoardPopulation, now time.Time) legionBoardResp
 		if !named {
 			continue
 		}
-		if issue.phase == "admitted" && issue.slot == nil {
+		if issue.phase == legion.PhaseAdmitted && issue.slot == nil {
 			if root := p.treeRoot(key); root != key {
 				uncarded[root]++
 			}
@@ -590,24 +598,9 @@ func (p *legionBoardPopulation) card(issue *legionBoardIssue, blockedBy []string
 // sortedKeys is every issue the daemon reported, in Dispatch's rank order, with the issues
 // Dispatch does not hold after them by key, so one state always makes one board.
 func (p *legionBoardPopulation) sortedKeys() []string {
-	keys := make([]string, 0, len(p.issues))
-	for _, key := range p.ranked {
-		if p.issues[key] != nil {
-			keys = append(keys, key)
-		}
-	}
-	held := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		held[key] = struct{}{}
-	}
-	rest := make([]string, 0, len(p.issues)-len(keys))
-	for key := range p.issues {
-		if _, ranked := held[key]; !ranked {
-			rest = append(rest, key)
-		}
-	}
-	slices.Sort(rest)
-	return append(keys, rest...)
+	keys := slices.Collect(maps.Keys(p.issues))
+	p.sortByRank(keys)
+	return keys
 }
 
 // sortByRank orders keys by Dispatch's rank, the order readIssues read them in, and puts an issue
@@ -631,15 +624,4 @@ func (p *legionBoardPopulation) sortByRank(keys []string) {
 			return strings.Compare(a, b)
 		}
 	})
-}
-
-// legionJSONString is a JSON text's string value, or "" for a null, a number, or anything else: an
-// observation's value is whatever the daemon sent, so a reader of one names what it expects rather
-// than trusting the shape (metrics/population.go's jsonString, which is not exported).
-func legionJSONString(raw []byte) string {
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return ""
-	}
-	return value
 }

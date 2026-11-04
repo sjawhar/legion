@@ -515,14 +515,15 @@ func (d Deps) timeouts() Timeouts {
 }
 
 func (d Deps) check() error {
+	limits, timeouts := d.limits(), d.timeouts()
 	for _, bound := range []struct {
 		name  string
 		value int
 	}{
-		{"Limits.LaunchFailures", d.limits().LaunchFailures},
-		{"Limits.PromptFailures", d.limits().PromptFailures},
-		{"Limits.PromptRetires", d.limits().PromptRetires},
-		{"Timeouts.RegistrationIntervals", d.timeouts().RegistrationIntervals},
+		{"Limits.LaunchFailures", limits.LaunchFailures},
+		{"Limits.PromptFailures", limits.PromptFailures},
+		{"Limits.PromptRetires", limits.PromptRetires},
+		{"Timeouts.RegistrationIntervals", timeouts.RegistrationIntervals},
 		{"PluginContract", d.PluginContract},
 	} {
 		if bound.value < 1 {
@@ -533,11 +534,11 @@ func (d Deps) check() error {
 		name  string
 		value time.Duration
 	}{
-		{"Timeouts.Boot", d.timeouts().Boot},
-		{"Timeouts.RPC", d.timeouts().RPC},
-		{"Timeouts.Probe", d.timeouts().Probe},
-		{"Timeouts.Stop", d.timeouts().Stop},
-		{"Timeouts.LaunchBackoff", d.timeouts().LaunchBackoff},
+		{"Timeouts.Boot", timeouts.Boot},
+		{"Timeouts.RPC", timeouts.RPC},
+		{"Timeouts.Probe", timeouts.Probe},
+		{"Timeouts.Stop", timeouts.Stop},
+		{"Timeouts.LaunchBackoff", timeouts.LaunchBackoff},
 	} {
 		if wait.value <= 0 {
 			return fmt.Errorf("supervise: %s must be positive, got %s", wait.name, wait.value)
@@ -1266,9 +1267,10 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		}
 		err = errors.Join(err, m.stopPrevious(ctx))
 		m.claim.Budgets.LaunchFailures++
+		limit := m.deps.limits().LaunchFailures
 		m.log.Warn("supervise: launch failed", "generation", m.claim.Generation, "error", err,
-			"launchFailures", m.claim.Budgets.LaunchFailures, "limit", m.deps.limits().LaunchFailures)
-		if m.claim.Budgets.LaunchFailures >= m.deps.limits().LaunchFailures {
+			"launchFailures", m.claim.Budgets.LaunchFailures, "limit", limit)
+		if m.claim.Budgets.LaunchFailures >= limit {
 			return errors.Join(err, m.fail(ctx, fmt.Sprintf("launch failures ran out: %v", err)))
 		}
 		charged = true

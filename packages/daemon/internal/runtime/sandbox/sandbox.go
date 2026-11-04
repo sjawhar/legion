@@ -125,6 +125,10 @@ type Runtime struct {
 	// one of them rebuilds the runtime (config.HolderRuntime), so the string is settled here and
 	// only read afterwards, as the shapes are.
 	launchSettings string
+	// launchSettingsNow is that same record decoded, once, beside it: nil when it cannot be read,
+	// which launchSettingsDrift reads as the no-drift answer a record it cannot decode already
+	// gave. A drifted pod is compared against it rather than against a fresh decode per pod.
+	launchSettingsNow map[string]string
 	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
 	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
 	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
@@ -353,7 +357,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		testPostgres: opts.TestPostgres, launchSettings: opts.LaunchSettings,
-		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		launchSettingsNow: launchSettingsRecord(opts.LaunchSettings),
+		tokens:            opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},

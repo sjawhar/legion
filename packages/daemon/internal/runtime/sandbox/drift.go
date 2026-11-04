@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -201,25 +200,11 @@ func templateImageDrift(s *sandbox, image string) []string {
 // podShapeRecord's own comment refuses.
 const launchSettingsAnnotation = "legion.dev/launch-settings"
 
-// launchRows is the class table by the Go field each row is read into, as config's own diff reads
-// it (config.Classes). The launch keys are derived from that one table rather than listed again
-// here, so a row added to it reaches the annotation with it and the two can never disagree.
-var launchRows = func() map[string]config.Row {
-	rows := make(map[string]config.Row, len(config.Classes))
-	for _, row := range config.Classes {
-		rows[row.Field] = row
-	}
-	return rows
-}()
-
 // The two values a launch setting is recorded as in place of the value itself.
 const (
-	// unsetLaunchValue stands for a path the configuration does not carry: a block the file names
-	// under one runtime and not the other, or an optional block it drops. It is only ever a drift
-	// reason's word — a path the configuration does not carry is in no record.
-	unsetLaunchValue = "(unset)"
 	// withheldLaunchValue is what a drift reason says of a secret launch key, whose value is
-	// recorded as a digest and never printed.
+	// recorded as a digest and never printed. It is deliberately not config.UnsetValue's
+	// neighbour `(withheld)`: a drift reason says that the digest moved, not what it now holds.
 	withheldLaunchValue = "changed (withheld)"
 )
 
@@ -243,7 +228,21 @@ func LaunchSettings(cfg *config.Config) string {
 		return ""
 	}
 	settings := map[string]string{}
-	collectLaunchSettings(reflect.ValueOf(cfg).Elem(), settings)
+	// The walk is config's own (config.WalkSettings), so the launch keys are derived from the
+	// one class table rather than listed again here and the two can never disagree: a row added
+	// to the table reaches the annotation with it. Only the leaf is this package's — which rows
+	// a pod's own launch reads, and the digest a secret is recorded as.
+	config.WalkSettings(cfg, func(row config.Row, value reflect.Value) {
+		if row.Class != config.ClassLaunch || !podLaunchPath(row.Path) {
+			return
+		}
+		rendered := config.Render(value)
+		if row.Secret {
+			digest := sha256.Sum256([]byte(rendered))
+			rendered = "sha256:" + hex.EncodeToString(digest[:])
+		}
+		settings[row.Path] = rendered
+	})
 	encoded, err := json.Marshal(settings)
 	if err != nil {
 		return ""
@@ -251,70 +250,10 @@ func LaunchSettings(cfg *config.Config) string {
 	return string(encoded)
 }
 
-// collectLaunchSettings walks one block of the configuration as config's own diff walks it: a row
-// the table calls a block is descended into, and every other row is one value, recorded when its
-// class is the launch of a pod's own. A field with no row is a derived value that is no
-// `legion.yaml` key, which config's census test names.
-func collectLaunchSettings(block reflect.Value, settings map[string]string) {
-	typ := block.Type()
-	for i := range typ.NumField() {
-		field := typ.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		row, known := launchRows[typ.Name()+"."+field.Name]
-		if !known {
-			continue
-		}
-		value := block.Field(i)
-		if row.Block {
-			if value.Kind() == reflect.Pointer {
-				if value.IsNil() {
-					continue
-				}
-				value = value.Elem()
-			}
-			collectLaunchSettings(value, settings)
-			continue
-		}
-		if row.Class != config.ClassLaunch || !podLaunchPath(row.Path) {
-			continue
-		}
-		rendered := launchValue(value)
-		if row.Secret {
-			digest := sha256.Sum256([]byte(rendered))
-			rendered = "sha256:" + hex.EncodeToString(digest[:])
-		}
-		settings[row.Path] = rendered
-	}
-}
-
 // podLaunchPath is whether a launch key is one a pod's own launch reads. The tmux runtime's keys
 // are a pane's launch and reach no pod, and no pod of this runtime is ever built from them.
 func podLaunchPath(path string) bool {
 	return !strings.HasPrefix(path, "runtime.tmux.")
-}
-
-// launchValue is one launch key as the record holds it, which is how config's own log line
-// renders it: a duration as its own string, another scalar as it is, and anything composite as
-// JSON, whose map keys Go sorts and whose pointers it follows. Two equal configurations must
-// encode identically, since a record that differs is drift.
-func launchValue(value reflect.Value) string {
-	if duration, ok := value.Interface().(time.Duration); ok {
-		return duration.String()
-	}
-	switch value.Kind() {
-	case reflect.Bool, reflect.String,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return fmt.Sprintf("%v", value.Interface())
-	}
-	encoded, err := json.Marshal(value.Interface())
-	if err != nil {
-		return fmt.Sprintf("%+v", value.Interface())
-	}
-	return string(encoded)
 }
 
 // launchSettingsDrift names what the pod whose template records held read at its launch that a
@@ -326,7 +265,7 @@ func launchValue(value reflect.Value) string {
 // drift, whatever the configuration now says, since nothing recorded what that pod's launch read
 // and a guess would open an update round over every pod of the fleet at once. A runtime that
 // records none itself compares nothing for the same reason.
-func launchSettingsDrift(held, want string) []string {
+func launchSettingsDrift(held, want string, now map[string]string) []string {
 	if held == want || held == "" || want == "" {
 		return nil
 	}
@@ -334,8 +273,9 @@ func launchSettingsDrift(held, want string) []string {
 	if err != nil {
 		return []string{fmt.Sprintf("its recorded launch settings %q cannot be read: %v", held, err)}
 	}
-	now, err := launchSettingsOf(want)
-	if err != nil {
+	if now == nil {
+		// want could not be decoded (launchSettingsRecord), which is the no-drift answer this
+		// function has always given a record it cannot read as the one a launch now holds.
 		return nil
 	}
 	paths := slices.Collect(maps.Keys(now))
@@ -358,10 +298,10 @@ func launchSettingsDrift(held, want string) []string {
 			continue
 		}
 		if !had {
-			before = unsetLaunchValue
+			before = config.UnsetValue
 		}
 		if !has {
-			after = unsetLaunchValue
+			after = config.UnsetValue
 		}
 		drifted = append(drifted, "launch setting "+path+" "+before+", now "+after)
 	}
@@ -375,6 +315,17 @@ func launchSettingsOf(record string) (map[string]string, error) {
 		return nil, err
 	}
 	return settings, nil
+}
+
+// launchSettingsRecord is one encoded record decoded once, nil when it cannot be read: what the
+// runtime holds beside the record it was built with, so a drifted pod is compared against a map
+// already in hand rather than one decoded again per pod (launchSettingsDrift).
+func launchSettingsRecord(record string) map[string]string {
+	settings, err := launchSettingsOf(record)
+	if err != nil {
+		return nil
+	}
+	return settings
 }
 
 // shapeDrift is why the pod of the Sandbox read as s, a pod of kind, was built from a
@@ -400,7 +351,7 @@ func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
 // only once every worker in it has pushed. A pod no round covers — the project controller's — is
 // replaced by its own next launch, which is the only way such a change reaches it.
 func (r *Runtime) launchDrift(s *sandbox) []string {
-	return launchSettingsDrift(s.Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation], r.launchSettings)
+	return launchSettingsDrift(s.Spec.PodTemplate.Metadata.Annotations[launchSettingsAnnotation], r.launchSettings, r.launchSettingsNow)
 }
 
 // PodDrift satisfies runtime.Runtime: why the pod k's process runs in no longer matches the
@@ -495,7 +446,7 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		// The record is read from the stored template alone, as the shape is: the steady state
 		// costs the one string compare above, and a template that records none — every pod built
 		// before this release — answers nothing.
-		drifted = append(drifted, launchSettingsDrift(held, r.launchSettings)...)
+		drifted = append(drifted, launchSettingsDrift(held, r.launchSettings, r.launchSettingsNow)...)
 	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())

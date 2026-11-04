@@ -317,10 +317,6 @@ type SettingSource struct {
 // daemon's one observer of that question: it is registered with config.Live.OnChange, so every
 // change the daemon applies — the file read again, or the settings route — is recorded here by
 // the same path the change carries.
-//
-// Seam: Restore is where the durable store of route changes, which no daemon keeps yet, hands
-// back what it kept across a restart. Until that store exists, a restarted daemon reads every
-// path as the file's, which is what it is running on.
 type SettingProvenance struct {
 	now func() time.Time
 	mu  sync.Mutex
@@ -339,10 +335,10 @@ func NewSettingProvenance(loadedAt time.Time) *SettingProvenance {
 }
 
 // Restore lays the route changes a store kept over the file's own provenance, path for path. It
-// is the seam the daemon's settings store fills once it exists: the route changes that survived
-// the daemon's restart are the values it is running on, and the state must name them as the
-// route's rather than the file's. A path the class table does not name is recorded as it is
-// given: the store holds what a route applied, and this reports it.
+// is where the daemon's store of route changes hands back what it kept across a restart: those
+// changes are the values the daemon is running on, and the state must name them as the route's
+// rather than the file's. A path the class table does not name is recorded as it is given: the
+// store holds what a route applied, and this reports it.
 func (p *SettingProvenance) Restore(stored map[string]SettingSource) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -206,6 +206,72 @@ func TestARotatedCredentialFileWhosePathDidNotChangeIsReadAgain(t *testing.T) {
 	}
 }
 
+// countingHolder is a holder that counts the rebuilds asked of it, under whichever name the test
+// registers it as.
+type countingHolder struct {
+	name  string
+	built int
+}
+
+func (h *countingHolder) holder() string { return h.name }
+
+func (h *countingHolder) rebuild(*config.Config) error {
+	h.built++
+	return nil
+}
+
+// The file watcher wakes on the state of a whole directory, so a projected token the kubelet
+// refreshed wakes it beside credentials that did not move. A reread rebuilds a credential holder
+// only when the files that holder reads have moved: the wake that follows a kubelet refresh of
+// something else leaves the NATS connection and its durable consumers where they are, and the
+// wake that follows a rotation of the operator bearer rebuilds the API server alone.
+func TestARereadRebuildsOnlyTheHoldersWhoseCredentialFilesMoved(t *testing.T) {
+	dir := t.TempDir()
+	operatorFile := filepath.Join(dir, "operator-token")
+	seedFile := filepath.Join(dir, "nats-seed")
+	for file, contents := range map[string]string{operatorFile: "operator\n", seedFile: "seed\n"} {
+		if err := os.WriteFile(file, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+	cfg := &config.Config{OperatorTokenFile: operatorFile, NatsNkeySeedFile: seedFile}
+	rebuild := newRebuilder(quietLogger())
+	server := &countingHolder{name: config.HolderAPIServer}
+	natsClient := &countingHolder{name: config.HolderNATS}
+	rebuild.register(server, natsClient)
+
+	// The first reread holds no digest of its own, so it reads every holder's files: the daemon
+	// has no record of what they said when it booted on them.
+	rebuild.rereadCredentials(cfg)
+	if server.built != 1 || natsClient.built != 1 {
+		t.Fatalf("the first reread rebuilt the API server %d times and NATS %d, want one each", server.built, natsClient.built)
+	}
+
+	// A wake whose watched files did not move rebuilds nothing.
+	rebuild.rereadCredentials(cfg)
+	if server.built != 1 || natsClient.built != 1 {
+		t.Fatalf("a reread over unmoved files rebuilt the API server %d times and NATS %d, want the one each the first reread did", server.built, natsClient.built)
+	}
+
+	// A rotation of the operator bearer in place rebuilds the API server, and only it.
+	if err := os.WriteFile(operatorFile, []byte("rotated-operator\n"), 0o600); err != nil {
+		t.Fatalf("rotate the operator token: %v", err)
+	}
+	rebuild.rereadCredentials(cfg)
+	if server.built != 2 {
+		t.Fatalf("the API server was rebuilt %d times over a rotated operator_token_file, want 2", server.built)
+	}
+	if natsClient.built != 1 {
+		t.Fatalf("NATS was rebuilt %d times over a rotation of someone else's file, want the one the first reread did", natsClient.built)
+	}
+
+	// And the wake after that rotation, with the file settled again, rebuilds nothing.
+	rebuild.rereadCredentials(cfg)
+	if server.built != 2 || natsClient.built != 1 {
+		t.Fatalf("the reread after the rotation rebuilt the API server %d times and NATS %d, want 2 and 1", server.built, natsClient.built)
+	}
+}
+
 // bearerRequest is one operator route called with the bearer the test names.
 func bearerRequest(t *testing.T, d *daemon, token string) int {
 	t.Helper()
@@ -266,7 +332,7 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	}
 	rebuild := newRebuilder(w.log)
 	live.OnChange(rebuild.observe)
-	w.nats = newNATSHolder(conn, consumers, open, w.log)
+	w.nats = newNATSHolder(conn, consumers, open)
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)
 	before := w.nats.connection()

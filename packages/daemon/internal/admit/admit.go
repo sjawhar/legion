@@ -29,7 +29,7 @@ import (
 type Admission struct {
 	store  record.Store
 	engine *workflow.Engine
-	// readCap answers the admission cap, read at every decision that needs one (capacity) rather
+	// readCap answers the admission cap, read at every decision that needs one rather
 	// than copied here: New sets it to the cap it was given, and the daemon replaces it with a
 	// read of its settings holder (ReadCapFrom), so an operator's `admission_cap` change reaches
 	// the next admission with nothing rebuilt.
@@ -90,10 +90,6 @@ func (a *Admission) ReadCapFrom(read func() int) {
 		a.readCap = read
 	}
 }
-
-// capacity is the admission cap as this decision reads it: the one place admission asks for it,
-// so a change of where it is read from is this accessor's alone.
-func (a *Admission) capacity() int { return a.readCap() }
 
 var _ intake.Handler = (*Admission)(nil)
 
@@ -360,7 +356,7 @@ const todoWakeDelay = 30 * time.Second
 // woken about it and takes nothing for it; only a person hands Legion work
 // (skill://legion-controller, "Free slots").
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
-	cap := a.capacity()
+	cap := a.readCap()
 	if cap <= 0 {
 		return false, nil
 	}
@@ -1099,7 +1095,7 @@ func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, r
 // logSlot logs a slot released or taken once the fact commits: the issue, the slots the project
 // holds after the change, and the cap.
 func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int) {
-	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.capacity()) })
+	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.readCap()) })
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
@@ -1166,7 +1162,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err != nil {
 		return 0, returned, err
 	}
-	cap := a.capacity()
+	cap := a.readCap()
 	if cap <= 0 {
 		return 0, returned, nil
 	}

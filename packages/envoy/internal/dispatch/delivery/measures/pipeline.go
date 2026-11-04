@@ -20,9 +20,9 @@ import (
 // its run's start). Only results that ended in success or failure are timed; a cancelled one is
 // counted beside them, and anything else (skipped, still running) is not counted at all.
 //
-// How many days are shown and how far the failing-jobs table looks back are the caller's
-// (INFRA-1077): GET /api/v1/delivery/pipeline reads a window, and ShownDayCount and FailingWindow
-// are what it answers a caller that names none.
+// How many days are shown is the caller's (INFRA-1077): GET /api/v1/delivery/pipeline reads a
+// window, and ShownDayCount is what it answers a caller that names none. How far the
+// failing-jobs table looks back is not: it is always FailingWindow back from the window's end.
 
 // ShownDayCount is how many UTC days the Pipeline page shows when its caller names no window,
 // ending on the day its clock is on (pipeline.py:19).
@@ -271,15 +271,15 @@ func jobTimings(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 // PRChecks is the PR-checks workflow's Pipeline numbers (pipeline.py:113-167): run, every run's
 // wall time from its start to its completion and its outcome; slowest, the SlowestJobs jobs with
 // SlowestMinResults timed results by their median over the shown days, slowest first, then by
-// name; and failing, every job that failed in a run completed in the failingWindow up to end (a
+// name; and failing, every job that failed in a run completed in the FailingWindow up to end (a
 // run that completed after end, which a window pinned in the past can read, is not counted), most
-// failures first, then by name. end is where the window stops and failingWindow how far back the
-// failing table looks from it: FailingWindow, the window's own last day. The failing tally reads
-// only runs that ended in success or failure (a cancelled run's jobs are not the prototype's to
-// count) and only their jobs that did, and leaves out rollupJob (none when empty) and every
-// summary or guard job (delivery.IsSummaryOrGuardJob). The caller passes the shown days' runs,
-// each with its event and branch already selected.
-func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, days []string, end time.Time, failingWindow time.Duration, rollupJob string) (run Timing, slowest []JobTiming, failing []FailingJob) {
+// failures first, then by name. end is where the window stops, and the failing table always
+// looks FailingWindow back from it. The failing tally reads only runs that ended in success or
+// failure (a cancelled run's jobs are not the prototype's to count) and only their jobs that
+// did, and leaves out rollupJob (none when empty) and every summary or guard job
+// (delivery.IsSummaryOrGuardJob). The caller passes the shown days' runs, each with its event
+// and branch already selected.
+func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, days []string, end time.Time, rollupJob string) (run Timing, slowest []JobTiming, failing []FailingJob) {
 	runSamples := make([]Sample, 0, len(runs))
 	for _, r := range runs {
 		outcome, ok := OutcomeOf(r.Conclusion)
@@ -309,13 +309,13 @@ func PRChecks(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Delive
 	})
 	slowest = slowest[:min(len(slowest), SlowestJobs)]
 
-	return run, slowest, failingJobs(runs, jobsByRun, end, failingWindow, rollupJob)
+	return run, slowest, failingJobs(runs, jobsByRun, end, rollupJob)
 }
 
-// failingJobs is PRChecks' failing tally (pipeline.py:144-157), over the failingWindow ending at
+// failingJobs is PRChecks' failing tally (pipeline.py:144-157), over the FailingWindow ending at
 // end.
-func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, end time.Time, failingWindow time.Duration, rollupJob string) []FailingJob {
-	horizon := end.Add(-failingWindow)
+func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, end time.Time, rollupJob string) []FailingJob {
+	horizon := end.Add(-FailingWindow)
 	var recent []delivery.DeliveryRun
 	for _, run := range runs {
 		outcome, ok := OutcomeOf(run.Conclusion)

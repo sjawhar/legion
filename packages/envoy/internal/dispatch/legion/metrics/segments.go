@@ -100,7 +100,7 @@ func (v *issueView) split(spans []Span) Segments {
 		if len(rest) == 0 {
 			break
 		}
-		taken := intersect(rest, v.claims(index, rule))
+		taken := intersect(rest, v.claims(index))
 		segments.add(rule.Segment, totalOf(taken))
 		rest = subtract(rest, taken)
 	}
@@ -108,14 +108,14 @@ func (v *issueView) split(spans []Span) Segments {
 	return segments
 }
 
-// claims is the spans a rule holds through, computed once per issue: a bar asks for them once per
-// phase stretch, and a rule that reads the whole tree is not worth recomputing.
-func (v *issueView) claims(index int, rule segmentRule) []Span {
+// claims is the spans the rule at index holds through, computed once per issue: a bar asks for
+// them once per phase stretch, and a rule that reads the whole tree is not worth recomputing.
+func (v *issueView) claims(index int) []Span {
 	if v.claimed == nil {
 		v.claimed = make([]([]Span), len(precedence))
 	}
 	if v.claimed[index] == nil {
-		v.claimed[index] = normalize(rule.Spans(v))
+		v.claimed[index] = normalize(precedence[index].Spans(v))
 		if v.claimed[index] == nil {
 			v.claimed[index] = []Span{}
 		}
@@ -128,21 +128,28 @@ func (v *issueView) claims(index int, rule segmentRule) []Span {
 // `ask.answered`, `ask.resolved`, or `waitingOn.answeredAt`)".
 func waitingOnPersonSpans(view *issueView) []Span {
 	spans := markSpans(view.root.Observed[legion.FieldPhase], view.population.issueEnd(view.root), func(value string) bool {
-		return jsonString(value) == phaseAwaitingPerson
+		return legion.JSONString([]byte(value)) == phaseAwaitingPerson
 	})
 	answered := answeredAts(view.root)
 	for _, issue := range view.tree() {
 		for _, turn := range issue.AskTurns {
-			for _, at := range answered {
-				if at.After(turn.From) && at.Before(turn.To) {
-					turn.To = at
-					break
-				}
+			if at, found := answeredWithin(answered, turn); found {
+				turn.To = at
 			}
 			spans = append(spans, turn)
 		}
 	}
 	return spans
+}
+
+// answeredWithin is the first of answered strictly inside turn, which is where that turn ends.
+func answeredWithin(answered []time.Time, turn Span) (time.Time, bool) {
+	for _, at := range answered {
+		if at.After(turn.From) && at.Before(turn.To) {
+			return at, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // inATurnSpans is segment 2: "a role of the issue had claim state `working`".
@@ -153,7 +160,7 @@ func inATurnSpans(view *issueView) []Span {
 			continue
 		}
 		spans = append(spans, markSpans(marks, view.end, func(value string) bool {
-			return jsonString(value) == "working"
+			return legion.JSONString([]byte(value)) == "working"
 		})...)
 	}
 	return spans
@@ -166,11 +173,11 @@ func inATurnSpans(view *issueView) []Span {
 func ciWaitSpans(view *issueView) []Span {
 	issue, end := view.issue, view.end
 	open := markSpans(issue.Observed[legion.FieldPullRequestState], end, func(value string) bool {
-		return jsonString(value) == "open"
+		return legion.JSONString([]byte(value)) == "open"
 	})
 	required := markSpans(issue.Observed[legion.FieldPullRequestRequiresChecks], end, requiresChecks)
 	judged := markSpans(issue.Observed[legion.FieldPullRequestChecksVerdict], end, func(value string) bool {
-		return jsonString(value) != ""
+		return legion.JSONString([]byte(value)) != ""
 	})
 	return subtract(intersect(open, required), judged)
 }
@@ -192,11 +199,8 @@ func waitingOnChildrenSpans(view *issueView) []Span {
 func (v *issueView) tree() []*Issue {
 	tree := make([]*Issue, 0, len(v.children)+1)
 	tree = append(tree, v.root)
-	for _, child := range v.children {
-		if child.Key != v.root.Key {
-			tree = append(tree, child)
-		}
-	}
+	// No child is its own root: linkTrees records a key under its root only where the two differ.
+	tree = append(tree, v.children...)
 	if !slices.ContainsFunc(tree, func(one *Issue) bool { return one.Key == v.issue.Key }) {
 		tree = append(tree, v.issue)
 	}

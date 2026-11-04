@@ -120,7 +120,7 @@ func mappingRigJS(t *testing.T, installs *installations, opts ...func(*workflowR
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.nats = newNATSHolder(nil, consumers, nil, quietLogger())
+	w.nats = newNATSHolder(nil, consumers, nil)
 	running, stop := context.WithCancel(ctx)
 	refreshed := make(chan struct{})
 	go func() { w.refreshOnMappingChange(running); close(refreshed) }()

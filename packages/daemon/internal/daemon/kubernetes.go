@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -192,13 +193,12 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, reads boot
 	// through the same boot read, so a changed kubeconfig is read again too.
 	lookup := environLookup(o.environment())
 	p.runtimeFor = func(c config.Config) (runtimeFactory, error) {
-		next, err := readSandbox(c, p.project, reads.dispatchToken, reads.paneNatsUser, lookup, log)
+		next, err := readSandbox(c, p.project, reads.dispatchToken, reads.nats.paneNatsUser, lookup, log)
 		if err != nil {
 			return nil, err
 		}
 		return sandboxRuntime(next.client, next.opts, p.repositories.Owners, c.RepositoryRenames), nil
 	}
-	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
 		if err != nil {
@@ -239,15 +239,48 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 	if err != nil {
 		return sandboxBoot{}, err
 	}
-	clusterCheck := func(ctx context.Context) error {
+	return sandboxBoot{clusterCheck: clusterCheckOf(cfg, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log), probe: probe}, nil
+}
+
+// clusterCheckOf is the cluster's refusals themselves, each read-only: Agent Sandbox is
+// installed, and no Sandbox of a layout before issue pods remains in the project's namespace.
+// A booting daemon runs them through clusterFence and `legion probe-boot` through sandboxBoot,
+// so both run the one check.
+func clusterCheckOf(cfg config.Config, client *rest.Config, namespace, project string, log *slog.Logger) func(context.Context) error {
+	return func(ctx context.Context) error {
 		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
 		defer cancel()
-		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+		if err := sandbox.CheckInstalled(checking, client, agentSandbox); err != nil {
 			return err
 		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project, reads.opts.Log)
+		return sandbox.CensusLegacyIssueSandboxes(ctx, client, namespace, project, log)
 	}
-	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
+}
+
+// clusterFence is the cluster's refusals of a Kubernetes daemon, built from cfg and nothing
+// else: nil for a tmux daemon, and for a test that handed the daemon its runtime, neither of
+// which has a cluster to refuse.
+//
+// It is built and run before the daemon dials Postgres, so what it reads is the file's own
+// configuration rather than the settled one — the store has to open before the route overlay can
+// be laid back over the file, and an operator whose cluster still holds per-claim Sandboxes must
+// be told that rather than shown a Postgres connection error. Nothing is built from what it
+// reads: the runtime's own client and Options are read again from the settled configuration a
+// few lines later (prepareSandbox's readSandbox), so a route change of a `runtime.kubernetes`
+// key still reaches the runtime the daemon runs on.
+func clusterFence(cfg config.Config, o overrides, log *slog.Logger) (func(context.Context) error, error) {
+	if cfg.Runtime.Name != "kubernetes" || cfg.Runtime.Kubernetes == nil || o.runtime != nil {
+		return nil, nil
+	}
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		return nil, err
+	}
+	client, err := kubeClient(*cfg.Runtime.Kubernetes)
+	if err != nil {
+		return nil, err
+	}
+	return clusterCheckOf(cfg, client, cfg.Runtime.Kubernetes.Namespace, project, log), nil
 }
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts

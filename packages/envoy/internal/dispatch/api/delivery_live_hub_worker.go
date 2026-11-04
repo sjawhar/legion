@@ -166,11 +166,9 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 	case h.views[spec.key] != view:
 		// Every sub left while it read.
 	case errors.Is(err, delivery.ErrNoSettings), errors.Is(err, legion.ErrNoSettings):
-		code, message := "DELIVERY_NOT_CONFIGURED",
-			"delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery"
+		code, message := deliveryNotConfiguredCode, deliveryNotConfiguredMessage
 		if errors.Is(err, legion.ErrNoSettings) {
-			code, message = "LEGION_NOT_CONFIGURED",
-				"this project has no Legion daemon; set one through PUT /api/v1/settings/legion/{project}"
+			code, message = legionNotConfiguredCode, legionNotConfiguredMessage
 		}
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
@@ -260,7 +258,7 @@ func (h *deliveryHub) read(view *deliveryView, spec deliveryLiveSpec, epoch int6
 	case legionBoardView:
 		// The Legion board reads no delivery settings: its own are the project's Legion setting,
 		// and a deployment that configured one and not the other still shows the board.
-		board, boardErr := h.server.readLegionBoard(ctx, spec.project())
+		board, boardErr := h.server.readLegionBoard(ctx, spec.project)
 		if boardErr != nil {
 			return read, boardErr
 		}

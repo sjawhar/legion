@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -100,10 +103,14 @@ type rebuilder struct {
 	// and a change naming it is logged and does nothing.
 	order   []string
 	holders map[string]rebuilt
+	// credentialDigests is what each credential holder's files said the last time
+	// rereadCredentials looked, by holder name: the guard that keeps a wake of the file watcher
+	// from rebuilding a holder whose files have not moved (rereadCredentials).
+	credentialDigests map[string]string
 }
 
 func newRebuilder(log *slog.Logger) *rebuilder {
-	return &rebuilder{log: log, holders: map[string]rebuilt{}}
+	return &rebuilder{log: log, holders: map[string]rebuilt{}, credentialDigests: map[string]string{}}
 }
 
 // register adds one holder. A second registration of the same name replaces the first.
@@ -134,7 +141,7 @@ func (r *rebuilder) observe(cfg *config.Config, applied []config.Change) {
 	}
 	for _, name := range r.order {
 		if _, asked := named[name]; asked {
-			r.rebuild(cfg, name)
+			r.rebuild(cfg, r.holders[name])
 		}
 		delete(named, name)
 	}
@@ -147,13 +154,8 @@ func (r *rebuilder) observe(cfg *config.Config, applied []config.Change) {
 // rebuild builds one holder again and logs what it did. A failure is logged with the holder's
 // name and leaves the old one serving: a daemon that cannot reach NATS with a new seed keeps
 // reading events on the connection it has, and the operator sees why in the log.
-func (r *rebuilder) rebuild(cfg *config.Config, name string) {
-	holder, known := r.holders[name]
-	if !known {
-		r.log.Warn("legion settings: a changed setting names a holder this daemon did not build; nothing was rebuilt",
-			"holder", name)
-		return
-	}
+func (r *rebuilder) rebuild(cfg *config.Config, holder rebuilt) {
+	name := holder.holder()
 	if err := holder.rebuild(cfg); err != nil {
 		r.log.Error("legion settings: rebuilding a holder failed; the daemon keeps the one it has",
 			"holder", name, "error", err)
@@ -173,16 +175,75 @@ var credentialHolders = []string{
 	config.HolderLaunchSpecs,    // instructions, and the launch secrets every spec carries
 }
 
-// rereadCredentials builds every holder that reads a credential file again, whatever the
-// configuration says: the answer to a rotation of a file whose path did not change, which no
-// settings change names, since the path is what the file holds and the path has not moved. The
-// file watcher calls it; it is a function of the rebuilder's and not code inlined in boot, so
-// one caller rotates every credential the daemon holds.
+// credentialFiles are the files one credential holder reads, drawn from the same configuration
+// fields settings.WatchedFiles names. config.HolderGitHubApps reads none of this host's files —
+// an App private key is the key itself, and its command and secret are no file — so it answers
+// nothing and is rebuilt at every reread.
+func credentialFiles(cfg *config.Config, holder string) []string {
+	switch holder {
+	case config.HolderAPIServer:
+		return []string{cfg.OperatorTokenFile}
+	case config.HolderDispatchClient:
+		return []string{cfg.DispatchTokenFile}
+	case config.HolderEnvoyPublisher:
+		return []string{cfg.EnvoyTokenFile}
+	case config.HolderNATS:
+		return []string{cfg.NatsNkeySeedFile, cfg.NatsDaemonNkeySeedFile}
+	case config.HolderLaunchSpecs:
+		// The launch secrets every spec carries (launchSecrets) and the operator's instructions.
+		return []string{cfg.EnvoyTokenFile, cfg.NatsNkeySeedFile, cfg.InstructionsPath}
+	}
+	return nil
+}
+
+// credentialDigest is what files say, as one string: each file's name beside the digest of its
+// bytes, with a read failure folded in as its own text so a file that comes and goes is a change
+// like any other. A file the configuration does not name is its own distinct mark, so a path
+// appearing or being cleared moves the digest.
+func credentialDigest(files []string) string {
+	sum := sha256.New()
+	for _, file := range files {
+		if file == "" {
+			fmt.Fprint(sum, "\x00unnamed")
+			continue
+		}
+		contents, err := os.ReadFile(file)
+		if err != nil {
+			fmt.Fprintf(sum, "\x00error %s: %v", file, err)
+			continue
+		}
+		fmt.Fprintf(sum, "\x00file %s %x", file, sha256.Sum256(contents))
+	}
+	return hex.EncodeToString(sum.Sum(nil))
+}
+
+// rereadCredentials builds every holder whose credential files have moved since the last reread
+// again, whatever the configuration says: the answer to a rotation of a file whose path did not
+// change, which no settings change names, since the path is what the file holds and the path has
+// not moved. The file watcher calls it; it is a function of the rebuilder's and not code inlined
+// in boot, so one caller rotates every credential the daemon holds.
+//
+// The digest guard is what keeps an unrelated wake cheap. The watcher wakes on the state of a
+// whole directory, so a projected token the kubelet refreshed beside a seed that did not move
+// settles the configuration again; without the guard that wake would reconnect NATS and migrate
+// every durable consumer, drop every App lease and rewrite the deployment instructions. A holder
+// whose files read the same holds what they say already, so rebuilding it is work with no answer
+// of its own; a holder that names no file (config.HolderGitHubApps) is rebuilt as before.
 func (r *rebuilder) rereadCredentials(cfg *config.Config) {
 	for _, name := range credentialHolders {
-		if _, known := r.holders[name]; known {
-			r.rebuild(cfg, name)
+		holder, known := r.holders[name]
+		if !known {
+			continue
 		}
+		if files := credentialFiles(cfg, name); len(files) > 0 {
+			digest := credentialDigest(files)
+			moved := r.credentialDigests[name] != digest
+			r.credentialDigests[name] = digest
+			if !moved {
+				continue
+			}
+		}
+		r.rebuild(cfg, holder)
 	}
 }
 
@@ -197,6 +258,12 @@ type dispatchHolder struct {
 
 var _ dispatch.Client = (*dispatchHolder)(nil)
 
+// dispatchClient is the Dispatch client of one configuration and one bearer: boot's and the
+// holder's rebuild both build it here, so the two can never differ in what they build.
+func dispatchClient(cfg config.Config, token string) dispatch.Client {
+	return dispatch.New(cfg.DispatchURL, token)
+}
+
 func newDispatchHolder(client dispatch.Client) *dispatchHolder {
 	h := &dispatchHolder{}
 	h.current.Store(&client)
@@ -210,7 +277,7 @@ func (h *dispatchHolder) rebuild(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	client := dispatch.Client(dispatch.New(cfg.DispatchURL, token))
+	client := dispatchClient(*cfg, token)
 	h.current.Store(&client)
 	return nil
 }
@@ -276,6 +343,12 @@ type publisherHolder struct {
 
 var _ notify.Publisher = (*publisherHolder)(nil)
 
+// envoyPublisher is the Envoy notify publisher of one configuration and one bearer: boot's and
+// the holder's rebuild both build it here.
+func envoyPublisher(cfg config.Config, token string) notify.Publisher {
+	return notify.New(cfg.EnvoyURL, token)
+}
+
 func newPublisherHolder(publisher notify.Publisher) *publisherHolder {
 	h := &publisherHolder{}
 	h.current.Store(&publisher)
@@ -289,7 +362,7 @@ func (h *publisherHolder) rebuild(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	publisher := notify.Publisher(notify.New(cfg.EnvoyURL, token))
+	publisher := envoyPublisher(*cfg, token)
 	h.current.Store(&publisher)
 	return nil
 }
@@ -319,6 +392,12 @@ var (
 	_ appauth.Forgetter     = (*appsHolder)(nil)
 )
 
+// buildApps is the App token manager of one configuration: boot's and the holder's rebuild both
+// build it here.
+func buildApps(cfg config.Config) appauth.Tokens {
+	return appauth.New(cfg.GitHubApps, appauth.Options{})
+}
+
 func newAppsHolder(tokens appauth.Tokens) *appsHolder {
 	h := &appsHolder{}
 	h.current.Store(&tokens)
@@ -328,7 +407,7 @@ func newAppsHolder(tokens appauth.Tokens) *appsHolder {
 func (h *appsHolder) holder() string { return config.HolderGitHubApps }
 
 func (h *appsHolder) rebuild(cfg *config.Config) error {
-	tokens := appauth.Tokens(appauth.New(cfg.GitHubApps, appauth.Options{}))
+	tokens := buildApps(*cfg)
 	h.current.Store(&tokens)
 	return nil
 }
@@ -375,8 +454,6 @@ func (h *appsHolder) Forget(role appauth.AppRole, owner string) {
 // on.
 type apiHolder struct {
 	settings *api.LiveSettings
-	// mergeRules is how a project's merge policy is read from a configuration (projectMergeRules).
-	mergeRules func(cfg config.Config) func(project string) config.MergeRules
 	// route is the settings route's projected-token arm as it now stands, and issuer and
 	// audience what it was built for: a rebuild for some other setting keeps the verifier it has,
 	// with the issuer's keys it has already read.
@@ -385,12 +462,12 @@ type apiHolder struct {
 }
 
 func newAPIHolder(cfg config.Config, operatorToken string) *apiHolder {
-	h := &apiHolder{mergeRules: projectMergeRules}
+	h := &apiHolder{}
 	h.settings = api.NewLiveSettings(api.HeldSettings{
 		OperatorToken:     operatorToken,
 		DesignGate:        cfg.Gates.Design,
 		RepositoryRenames: cfg.RepositoryRenames,
-		MergeRules:        h.mergeRules(cfg),
+		MergeRules:        projectMergeRules(cfg),
 		SettingsRoute:     h.settingsRoute(cfg),
 	})
 	return h
@@ -407,7 +484,7 @@ func (h *apiHolder) rebuild(cfg *config.Config) error {
 		OperatorToken:     token,
 		DesignGate:        cfg.Gates.Design,
 		RepositoryRenames: cfg.RepositoryRenames,
-		MergeRules:        h.mergeRules(*cfg),
+		MergeRules:        projectMergeRules(*cfg),
 		SettingsRoute:     h.settingsRoute(*cfg),
 	})
 	return nil
@@ -509,7 +586,6 @@ func (h *specsHolder) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime
 type runtimeHolder struct {
 	current atomic.Pointer[runtime.Runtime]
 	build   func(cfg config.Config) (runtime.Runtime, error)
-	log     *slog.Logger
 
 	// mu guards the observation feed: out is the channel supervision ranges over, once it has
 	// asked for one, observing the context it asked on, and stopFeed ends the feed from the
@@ -525,8 +601,8 @@ type runtimeHolder struct {
 
 var _ runtime.Runtime = (*runtimeHolder)(nil)
 
-func newRuntimeHolder(rt runtime.Runtime, build func(cfg config.Config) (runtime.Runtime, error), log *slog.Logger) *runtimeHolder {
-	h := &runtimeHolder{build: build, log: log}
+func newRuntimeHolder(rt runtime.Runtime, build func(cfg config.Config) (runtime.Runtime, error)) *runtimeHolder {
+	h := &runtimeHolder{build: build}
 	h.current.Store(&rt)
 	return h
 }
@@ -629,14 +705,14 @@ func (h *runtimeHolder) ended(mine uint64) {
 // so a rebuild moves them with it: the type assertion is made at the call, against the runtime
 // that is current, rather than once against the one boot built.
 func (h *runtimeHolder) repositoryCaches() []sandbox.CacheStatus {
-	if keeper, ok := h.get().(*sandbox.Runtime); ok {
+	if keeper, ok := sandboxOf(h); ok {
 		return keeper.RepositoryCaches()
 	}
 	return nil
 }
 
 func (h *runtimeHolder) podAt(addr netip.Addr) (string, bool) {
-	if pods, ok := h.get().(*sandbox.Runtime); ok {
+	if pods, ok := sandboxOf(h); ok {
 		return pods.PodAt(addr)
 	}
 	return "", false
@@ -703,8 +779,8 @@ type keeperHolder struct {
 	// every turn.
 	wake atomic.Int64
 	// launched is whether the daemon launches the controller itself, and start runs the keeper's
-	// own loop until the context it is given ends; both are nil in a deployment with no keeper to
-	// run (a test's workflow runtime built by hand).
+	// own loop until the context it is given ends; start is nil in a deployment with no keeper
+	// to run (a test's workflow runtime built by hand).
 	mu       sync.Mutex
 	launched bool
 	start    func() context.CancelFunc
@@ -762,19 +838,18 @@ func (h *keeperHolder) rebuild(cfg *config.Config) error {
 type natsHolder struct {
 	// open builds a connection and its consumers from a configuration.
 	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)
-	log  *slog.Logger
 
 	mu         sync.Mutex
 	conn       *nats.Conn
 	consumers  *intake.Consumers
 	generation uint64
-	// cancelRun ends the intake loop's current generation, and swapped is closed and replaced at
-	// every rebuild so a loop whose generation ended can tell a rebuild from a stop.
+	// cancelRun ends the intake loop's current generation; generation above is what a loop whose
+	// run ended compares, to tell a rebuild's cancel from the daemon's stop (rebuilt).
 	cancelRun context.CancelFunc
 }
 
-func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error), log *slog.Logger) *natsHolder {
-	return &natsHolder{open: open, log: log, conn: conn, consumers: consumers}
+func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error)) *natsHolder {
+	return &natsHolder{open: open, conn: conn, consumers: consumers}
 }
 
 func (h *natsHolder) holder() string { return config.HolderNATS }

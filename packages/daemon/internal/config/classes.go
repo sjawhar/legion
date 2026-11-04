@@ -164,8 +164,10 @@ var Classes = []Row{
 	// The capability report is built from the configuration at every read of the state.
 	{Field: "Config.Capabilities", Path: "capabilities", Class: ClassDecision, Block: true},
 	{Field: "Capabilities.Decided", Path: "capabilities.decided", Class: ClassDecision},
-	// The design gate is read per decision; the API server and the launch specs hold copies of it,
-	// which the rebuild refreshes, so the change still takes effect at once where it decides.
+	// The design gate is read per decision; the API server and the launch specs each hold a copy
+	// of it, which their own rebuild refreshes, so the change takes effect at once where it
+	// decides. A row names the one holder an operator is told was rebuilt (Change.Holder), which
+	// is why this one names the API server alone.
 	{Field: "Config.Gates", Path: "gates", Class: ClassDecision, Holder: HolderAPIServer, Block: true},
 	{Field: "Gates.Design", Path: "gates.design", Class: ClassDecision, Holder: HolderAPIServer},
 
@@ -318,12 +320,10 @@ func rowOf(field string) (Row, bool) {
 func Paths() []string {
 	paths := make([]string, 0, len(Classes))
 	for _, row := range Classes {
-		if !slices.Contains(paths, row.Path) {
-			paths = append(paths, row.Path)
-		}
+		paths = append(paths, row.Path)
 	}
 	slices.Sort(paths)
-	return paths
+	return slices.Compact(paths)
 }
 
 // ClassOf is the row a dotted path belongs to: the row whose path it is, or the first row whose

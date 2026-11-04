@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -123,7 +124,7 @@ func (s *server) settingsChange(w http.ResponseWriter, r *http.Request) {
 		// key whose neighbours now contradict it — or the file could not be read. Either way the
 		// daemon changed nothing and keeps running on what it had.
 		s.log.Warn("api: a settings change did not settle; the daemon keeps the settings it has",
-			"by", by, "paths", slices.Sorted(namedPaths(changes)), "error", err)
+			"by", by, "paths", slices.Sorted(maps.Keys(changes)), "error", err)
 		writeJSON(w, http.StatusBadRequest, errorBody("the configuration does not resolve under this change: "+err.Error()))
 		return
 	}
@@ -187,15 +188,4 @@ func (s *server) settingsCaller(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return claims.Subject, true
-}
-
-// namedPaths is the paths one request named, for a log line that says what the caller asked for.
-func namedPaths(m map[string]any) func(func(string) bool) {
-	return func(yield func(string) bool) {
-		for key := range m {
-			if !yield(key) {
-				return
-			}
-		}
-	}
 }

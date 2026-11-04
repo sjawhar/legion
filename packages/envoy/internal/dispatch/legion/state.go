@@ -11,16 +11,17 @@ import (
 // readers in packages/contracts/src/legion-api.ts); this names only the fields Dispatch observes
 // and lets encoding/json ignore every other one, which is what makes the decode loose:
 //
-//   - dispatch://INFRA-980 is about to widen that route — `admission.active` will list every
-//     issue holding a slot, children included, `admission.waiting` will order by tree root,
-//     `admission.blocked` will also list a parent waiting for its children, a new
-//     `admission.trees` will list the live roots, each issue gains a `tree` naming its root, and
-//     DaemonAPIVersion goes from 46 to 47. A reader that refused an unknown field would stop
-//     reading the day a daemon rolls onto it, so nothing here uses a strict decode.
+//   - The route widens (dispatch://INFRA-980 is one such widening: `admission.active` listing
+//     every issue holding a slot, children included, `admission.waiting` ordered by tree root,
+//     `admission.blocked` naming a parent waiting for its children, an `admission.trees` of the
+//     live roots, a `tree` on each issue, and a higher DaemonAPIVersion). A reader that refused
+//     an unknown field would stop reading the day a daemon rolls onto a wider route, so nothing
+//     here uses a strict decode.
 //   - Nothing here takes a slot holder for a root: an issue's slot is read from that issue's own
 //     `slot`, never from `admission.active`, and the admission block below is recorded as the
 //     daemon sent it rather than read as a list of roots.
-//   - Tree is optional and stays optional: a daemon before INFRA-980 sends none.
+//   - Tree is optional and stays optional: a daemon that names no tree is read through its
+//     issues' parent chain instead.
 
 // State is a daemon's state as Dispatch records it: its issues, its admission block, the settings
 // it reports with where each came from, and nothing else of the document.
@@ -47,13 +48,14 @@ type State struct {
 type Admission struct {
 	// Cap is the deployment's admission cap, the slots the header counts against.
 	Cap *int `json:"cap,omitempty"`
-	// Active is every issue holding a slot. Dispatch counts the slots in use from each issue's
-	// own `slot` instead, since INFRA-980 widens this list to children as well as roots.
+	// Active is every issue holding a slot, which a daemon may widen to children as well as
+	// roots (dispatch://INFRA-980). Dispatch counts the slots in use from each issue's own
+	// `slot` instead.
 	Active []string `json:"active,omitempty"`
 	// Waiting is the waiting line in the daemon's own order, which the board's Queue column shows
 	// without re-sorting.
 	Waiting []string `json:"waiting,omitempty"`
-	// Trees is the live tree roots (dispatch://INFRA-980); no daemon released today sends it.
+	// Trees is the live tree roots, where the daemon names them (dispatch://INFRA-980).
 	Trees []string `json:"trees,omitempty"`
 	// Blocked is each issue a blocker link holds, with the issues it waits on.
 	Blocked []BlockedIssue `json:"blocked,omitempty"`
@@ -137,6 +139,35 @@ const (
 	// `claim.implementer`.
 	ClaimFieldPrefix = "claim."
 )
+
+// The phases the daemon reports, which is what a FieldPhase observation holds
+// (packages/daemon/internal/phase). A reader of the board or of the metrics names them from
+// here, so the two never spell one of them differently.
+const (
+	PhaseAdmitted       = "admitted"
+	PhaseAwaitingPerson = "awaiting_person"
+	PhasePlanning       = "planning"
+	PhaseImplementing   = "implementing"
+	PhaseTesting        = "testing"
+	PhaseReviewing      = "reviewing"
+	PhaseAccepting      = "accepting"
+	PhaseRetro          = "retro"
+	PhaseMerging        = "merging"
+	PhaseAwaitingMerge  = "awaiting_merge"
+	PhaseDone           = "done"
+	PhaseHeld           = "held"
+)
+
+// JSONString is a JSON text's string value, or "" for a null, a number, or anything else: an
+// observation's value is whatever the daemon sent, so a reader of one names what it expects
+// rather than trusting the shape.
+func JSONString(raw []byte) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
 
 // AdmissionKey is the issue key every project-level observation is written under — the admission
 // block, the settings and their sources: the empty string, which no issue key can be

@@ -269,7 +269,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	var apps *appsHolder
 	tokens := suppliedTokens
 	if tokens == nil {
-		apps = newAppsHolder(appauth.New(cfg.GitHubApps, appauth.Options{}))
+		apps = newAppsHolder(buildApps(cfg))
 		tokens = apps
 	}
 	installs, ok := tokens.(appauth.Installations)
@@ -284,7 +284,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
 	}
-	client := newDispatchHolder(dispatch.New(cfg.DispatchURL, dispatchToken))
+	client := newDispatchHolder(dispatchClient(cfg, dispatchToken))
 	w := &workflowRuntime{
 		live:   live,
 		tokens: tokens, forget: forget, installs: installs, dispatch: client, repositories: repos, build: build,
@@ -318,14 +318,14 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
-	engineCfg := engineConfig(cfg, reviewAppLogin, build)
+	engineCfg := engineConfig(&cfg, reviewAppLogin, build)
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
 	w.engine = workflow.New(w.records, engineCfg, log)
 	// Every decision-class value the engine and admission read — the review round cap, the fix
 	// attempts, the linger, the production-check bound, the design gate, the admission cap — is
 	// read as the decision is made, from the settings holder, and never copied into either.
 	w.engine.ReadConfigFrom(func() workflow.Config {
-		settings := engineConfig(*live.Snapshot(), reviewAppLogin, build)
+		settings := engineConfig(live.Snapshot(), reviewAppLogin, build)
 		settings.Repositories, settings.NoteUnread = w, w.noteUnread
 		return settings
 	})
@@ -360,7 +360,7 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 // production checks a build is compared against — only for a release build, one with a revision,
 // since nothing else names a commit a merge could be in; a build with none compares nothing,
 // Dispatch's announcement that every server process serves a build (server.started) included.
-func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
+func engineConfig(cfg *config.Config, reviewAppLogin string, build Build) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
@@ -407,7 +407,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	if err != nil {
 		return err
 	}
-	w.nats = newNATSHolder(conn, consumers, open, w.log)
+	w.nats = newNATSHolder(conn, consumers, open)
 	rebuild.register(w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil

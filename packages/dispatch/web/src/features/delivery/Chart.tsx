@@ -1,8 +1,7 @@
 // The one component every chart that draws a measure over a range goes through (INFRA-1077): the
-// measures panel's KPI cards, the Pipeline cards and the Legion charts. It wraps `Sparkbars` and
-// `SpreadBars` rather than replacing them, so `lib/barScale.ts` stays the one scale and
-// `theme/classes.ts`'s `chartBar.*` the one palette, and adds the two controls the spec gives
-// every such chart:
+// measures panel's KPI cards and the Pipeline cards. It wraps `Sparkbars` and `SpreadBars` rather
+// than replacing them, so `lib/barScale.ts` stays the one scale and `theme/classes.ts`'s
+// `chartBar.*` the one palette, and adds the two controls the spec gives every such chart:
 //
 //   - Graph or table. The table holds every number its graph draws: a run of bars is one column,
 //     a median-and-p90 spread is three (the median, the p90 and the results they came from), a
@@ -20,23 +19,23 @@
 // `Timeline.tsx` is not one of these charts: it draws individual pull requests as points, keeps
 // its own `ModeToggle` (Timeline <-> PRList) and its brush, and two overlaid ranges of a scatter
 // is not a comparison a reader can read (the plan's departure S-4).
-import { Fragment, type ReactNode, useId, useState } from "react";
+import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
 
 import {
   borderDefault,
   borderStrong,
   dangerText,
-  secondaryButtonCompact,
   surfaceBg,
   surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
-import { customRange, lastUtcDate, utcDate, type WindowChoice } from "./lib/window";
+import { customRange, DAY_MS, lastUtcDate, utcDate, type WindowChoice } from "./lib/window";
 import { type SegmentedOption, SegmentedToggle } from "./SegmentedToggle";
 import { type SparkbarPoint, Sparkbars } from "./Sparkbars";
 import { type SpreadBarDay, SpreadBars } from "./SpreadBars";
+import { UtcRangeFields } from "./UtcRangeFields";
 
 /** A chart's range: the custom member of the page's own `WindowChoice` (`lib/window.ts`), since
  *  a chart draws the range its answer resolved and a comparison names two exact ends, never a
@@ -44,7 +43,7 @@ import { type SpreadBarDay, SpreadBars } from "./SpreadBars";
 export type ChartRange = Extract<WindowChoice, { kind: "custom" }>;
 
 /** A run of per-day numbers, as `Sparkbars` takes them; `label` heads its table column. */
-export interface ChartSparkSeries {
+interface ChartSparkSeries {
   readonly kind: "spark";
   readonly label: string;
   readonly points: SparkbarPoint[];
@@ -56,7 +55,7 @@ export interface ChartSparkSeries {
 
 /** A run of per-day medians and p90s, as `SpreadBars` takes them; `label` heads its two duration
  *  columns and `noun` the column counting what they came from. */
-export interface ChartSpreadSeries {
+interface ChartSpreadSeries {
   readonly kind: "spread";
   readonly label: string;
   readonly days: readonly SpreadBarDay[];
@@ -79,6 +78,45 @@ export interface ChartCompare {
   readonly series: readonly ChartSeries[] | undefined;
 }
 
+/** Where a host's comparison comes from: the range it reads beside the window, how the reader
+ *  names another, and that range's own answer once its read lands. A section holds one of these
+ *  and `chartCompare` turns it into each chart's `ChartCompare`. */
+export interface ChartCompareSource<T> {
+  /** The range the host is reading beside the window, or null while nothing is compared. */
+  readonly range: ChartRange | null;
+  /** The range the reader picked; null turns the comparison off. */
+  readonly onRange: (next: ChartRange | null) => void;
+  /** The compare range's answer; undefined while its read is out. */
+  readonly data: T | undefined;
+}
+
+/** One chart's comparison: the host's range and callback, with `series` as that chart reads the
+ *  compare range's answer. A host that reads no second range has no source and the chart shows
+ *  its graph-or-table control alone; a chart whose series the answer does not hold (a card the
+ *  compare answer has nothing for) compares nothing. */
+export function chartCompare<T>(
+  source: ChartCompareSource<T> | undefined,
+  series: readonly ChartSeries[] | null | undefined
+): ChartCompare | undefined {
+  if (source === undefined) return undefined;
+  return {
+    onRange: source.onRange,
+    range: source.range,
+    series: source.data === undefined ? undefined : (series ?? undefined),
+  };
+}
+
+/** What the Delivery page gives each of its sections: its one window and its one compare range,
+ *  so every chart on the page follows one window control and one comparison. */
+export interface DeliverySectionProps {
+  /** The range the page reads beside its window, or null while nothing is compared. */
+  readonly compare: ChartRange | null;
+  /** The range a chart's compare control named; null turns the comparison off. */
+  readonly onCompare: (next: ChartRange | null) => void;
+  /** The page's window, which every section follows. */
+  readonly window: WindowChoice;
+}
+
 export interface ChartProps {
   /** What the chart draws, in the reader's words: it names both controls and heads the table. */
   readonly label: string;
@@ -90,13 +128,11 @@ export interface ChartProps {
   readonly compare?: ChartCompare;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 /** What a day with nothing measured reads as: never a zero. */
 const NOTHING = "\u2014";
 
 /** What a number whose read is still out reads as, as the measures panel's numbers do. */
-const PENDING = "\u2026";
+export const PENDING = "\u2026";
 
 type ChartMode = "graph" | "table";
 
@@ -340,22 +376,33 @@ function NumberTable({
   label: string;
   series: readonly ChartSeries[];
 }): ReactNode {
-  const table = tableOf(series);
+  // Every number the series draw, and every number the compare range's draw, built once per run
+  // of series rather than on every render of the host: a live delta or a keystroke elsewhere on
+  // the page re-renders the section around a chart whose numbers have not moved.
+  const table = useMemo(() => tableOf(series), [series]);
   const pending = against !== null && against.series === undefined;
-  const compared = against?.series === undefined ? null : tableOf(against.series);
+  const comparedSeries = against?.series;
+  const compared = useMemo(
+    () => (comparedSeries === undefined ? null : tableOf(comparedSeries)),
+    [comparedSeries]
+  );
+  const comparing = against !== null;
   const notes = [`${label} by UTC day`];
   if (against !== null) notes.push(`compared with ${rangeLabel(against.range)}`);
   for (const one of series) {
     if (one.target !== undefined) notes.push(`${one.label} target ${one.format(one.target)}`);
   }
   notes.push(`${NOTHING} is a day with nothing measured`);
-  const rows =
-    against === null
-      ? table.rows.map((row) => ({ before: undefined, row }))
-      : Array.from(
-          { length: Math.max(table.rows.length, compared?.rows.length ?? table.rows.length) },
-          (_, index) => ({ before: compared?.rows[index], row: table.rows[index] })
-        );
+  const rows = useMemo(
+    () =>
+      !comparing
+        ? table.rows.map((row) => ({ before: undefined, row }))
+        : Array.from(
+            { length: Math.max(table.rows.length, compared?.rows.length ?? 0) },
+            (_, index) => ({ before: compared?.rows[index], row: table.rows[index] })
+          ),
+    [comparing, compared, table]
+  );
   return (
     <div className={`max-h-48 overflow-auto rounded border ${borderDefault}`}>
       <table className="w-full text-xs tabular-nums" data-chart-table={label}>
@@ -479,33 +526,17 @@ function CompareControl({
         <option value="custom">Custom range…</option>
       </select>
       {chosen === "custom" ? (
-        <>
-          <label htmlFor={`${id}-from`}>From</label>
-          <input
-            className={fieldClass}
-            id={`${id}-from`}
-            onChange={(event) => setDraft({ from: event.target.value, to: toDate })}
-            type="date"
-            value={fromDate}
-          />
-          <label htmlFor={`${id}-to`}>To</label>
-          <input
-            className={fieldClass}
-            id={`${id}-to`}
-            onChange={(event) => setDraft({ from: fromDate, to: event.target.value })}
-            type="date"
-            value={toDate}
-          />
-          <span>(UTC)</span>
-          <button className={secondaryButtonCompact} onClick={apply} type="button">
-            Apply
-          </button>
-          {refused === null ? null : (
-            <p className={`basis-full ${dangerText}`} role="alert">
-              {refused}
-            </p>
-          )}
-        </>
+        <UtcRangeFields
+          fieldClass={fieldClass}
+          from={fromDate}
+          idPrefix={id}
+          onApply={apply}
+          onFrom={(next) => setDraft({ from: next, to: toDate })}
+          onTo={(next) => setDraft({ from: fromDate, to: next })}
+          refusalClass={`basis-full ${dangerText}`}
+          refused={refused}
+          to={toDate}
+        />
       ) : null}
     </div>
   );

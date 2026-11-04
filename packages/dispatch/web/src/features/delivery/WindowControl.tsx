@@ -3,7 +3,6 @@ import { type ReactNode, useId, useState } from "react";
 import {
   borderStrong,
   dangerText,
-  secondaryButtonCompact,
   surfaceMutedBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
@@ -16,6 +15,7 @@ import {
   WINDOW_PRESETS,
   type WindowChoice,
 } from "./lib/window";
+import { UtcRangeFields } from "./UtcRangeFields";
 
 const fieldClass = `rounded border px-2 py-1 text-sm ${surfaceMutedBg} ${borderStrong} ${textPrimaryOnCanvas}`;
 
@@ -74,37 +74,19 @@ export function WindowControl({
         <option value="custom">Custom range…</option>
       </select>
       {custom ? (
-        <>
-          <label className="flex items-center gap-1" htmlFor={`${id}-from`}>
-            From
-          </label>
-          <input
-            className={fieldClass}
-            id={`${id}-from`}
-            onChange={(event) => setFromDate(event.target.value)}
-            type="date"
-            value={fromDate}
-          />
-          <label className="flex items-center gap-1" htmlFor={`${id}-to`}>
-            To
-          </label>
-          <input
-            className={fieldClass}
-            id={`${id}-to`}
-            onChange={(event) => setToDate(event.target.value)}
-            type="date"
-            value={toDate}
-          />
-          <span className="text-xs">(UTC)</span>
-          <button className={secondaryButtonCompact} onClick={apply} type="button">
-            Apply
-          </button>
-          {refused === null ? null : (
-            <p className={`basis-full text-xs ${dangerText}`} role="alert">
-              {refused}
-            </p>
-          )}
-        </>
+        <UtcRangeFields
+          fieldClass={fieldClass}
+          from={fromDate}
+          idPrefix={id}
+          labelClass="flex items-center gap-1"
+          noteClass="text-xs"
+          onApply={apply}
+          onFrom={setFromDate}
+          onTo={setToDate}
+          refusalClass={`basis-full text-xs ${dangerText}`}
+          refused={refused}
+          to={toDate}
+        />
       ) : null}
     </div>
   );

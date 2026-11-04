@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/legion"
 )
 
@@ -145,8 +146,8 @@ type ReworkIssue struct {
 type Splitting struct {
 	Weeks []SplittingWeek `json:"weeks"`
 	Filed []FiledIssue    `json:"filed"`
-	// ChildrenPerRoot is the mean number of children of the roots that finished in the window,
-	// and the two medians are their work time with and without children.
+	// FinishedRoots is how many roots finished in the window, ChildrenPerRoot the mean number of
+	// children of those roots, and the two medians are their work time with and without children.
 	FinishedRoots                int     `json:"finished_roots"`
 	ChildrenPerRoot              float64 `json:"children_per_root"`
 	MedianHoursRootsWithChildren float64 `json:"median_hours_roots_with_children"`
@@ -182,6 +183,8 @@ func Compute(population *Population, scope Scope, now time.Time) Report {
 		scope:      scope,
 		phases:     map[string][]PhaseSpan{},
 		views:      map[string]*issueView{},
+		roots:      map[string]string{},
+		workTimes:  map[string]workTimeRow{},
 	}
 	finished := computed.finished()
 	return Report{
@@ -204,6 +207,17 @@ type computation struct {
 	scope      Scope
 	phases     map[string][]PhaseSpan
 	views      map[string]*issueView
+	// roots is each key's tree root and workTimes each issue's work-time row, each computed
+	// once: TreeRoot walks a parent chain allocating a set as it goes, workTimeOf runs the whole
+	// span algebra, and the four metrics ask for each of them three or four times per issue.
+	roots     map[string]string
+	workTimes map[string]workTimeRow
+}
+
+// workTimeRow is one memoised answer of workTimeOf: the row, and whether the issue has one.
+type workTimeRow struct {
+	row WorkTimeIssue
+	ok  bool
 }
 
 // finished is the population every metric counts: "issues of the picked project that finished in
@@ -239,8 +253,20 @@ func (c *computation) finishedInWindow(issue *Issue) bool {
 	return len(issue.FirstRoleEvent) > 0 || len(issue.Handoffs) > 0
 }
 
+// treeRoot is the issue's tree root (Population.TreeRoot), computed once per key: the walk is a
+// pure function of a population Compute never writes to, so one answer stands for the whole
+// computation.
+func (c *computation) treeRoot(key string) string {
+	if root, held := c.roots[key]; held {
+		return root
+	}
+	root := c.population.TreeRoot(key)
+	c.roots[key] = root
+	return root
+}
+
 func (c *computation) isRoot(issue *Issue) bool {
-	return c.population.TreeRoot(issue.Key) == issue.Key
+	return c.treeRoot(issue.Key) == issue.Key
 }
 
 // phasesOf is the issue's phase timeline, computed once.
@@ -258,7 +284,7 @@ func (c *computation) viewOf(issue *Issue) *issueView {
 	if view, held := c.views[issue.Key]; held {
 		return view
 	}
-	root := c.population.Issues[c.population.TreeRoot(issue.Key)]
+	root := c.population.Issues[c.treeRoot(issue.Key)]
 	if root == nil {
 		root = issue
 	}
@@ -300,8 +326,20 @@ func (c *computation) workTime(finished []*Issue) WorkTime {
 	return metric
 }
 
-// workTimeOf is one finished issue's work time.
+// workTimeOf is one finished issue's work time, computed once: the work-time metric asks for
+// every finished issue's row, and the splitting metric asks again for every finished root.
 func (c *computation) workTimeOf(issue *Issue) (WorkTimeIssue, bool) {
+	if held, computed := c.workTimes[issue.Key]; computed {
+		return held.row, held.ok
+	}
+	row, ok := c.computeWorkTime(issue)
+	c.workTimes[issue.Key] = workTimeRow{row: row, ok: ok}
+	return row, ok
+}
+
+// computeWorkTime is the work time itself: the issue's life, less the time it sat parked and the
+// time it sat back in the queue.
+func (c *computation) computeWorkTime(issue *Issue) (WorkTimeIssue, bool) {
 	start, ok := firstWorkerEvent(issue)
 	if !ok {
 		return WorkTimeIssue{}, false
@@ -351,7 +389,7 @@ func (c *computation) phaseTime(finished []*Issue) PhaseTime {
 	var whole, idle float64
 	for _, bar := range bars {
 		row := RoleBar{Role: bar.Role}
-		var perIssue []float64
+		perIssue := make([]float64, 0, len(finished))
 		for _, issue := range finished {
 			view := c.viewOf(issue)
 			spans := phaseSpansOf(view.timeline, bar.Phases...)
@@ -363,9 +401,8 @@ func (c *computation) phaseTime(finished []*Issue) PhaseTime {
 			row.Issues++
 			perIssue = append(perIssue, segments.total())
 		}
-		slices.Sort(perIssue)
 		row.Hours = round(row.Segments.total())
-		row.MedianHoursPerIssue = quantile(perIssue, 0.5)
+		row.MedianHoursPerIssue = median(perIssue)
 		row.Segments = rounded(row.Segments)
 		whole += row.Hours
 		idle += row.Segments.Idle
@@ -381,7 +418,7 @@ func (c *computation) phaseTime(finished []*Issue) PhaseTime {
 // testing hours after the first review.
 func (c *computation) rework(finished []*Issue) Rework {
 	metric := Rework{Issues: make([]ReworkIssue, 0, len(finished))}
-	var rounds, afterReview []float64
+	rounds, afterReview := make([]float64, 0, len(finished)), make([]float64, 0, len(finished))
 	var sentBack int
 	for _, issue := range finished {
 		timeline := c.phasesOf(issue)
@@ -400,10 +437,8 @@ func (c *computation) rework(finished []*Issue) Rework {
 		metric.HoursAfterFirstReview += hoursAfter
 		metric.Issues = append(metric.Issues, row)
 	}
-	slices.Sort(rounds)
-	slices.Sort(afterReview)
-	metric.MedianReviewRounds = quantile(rounds, 0.5)
-	metric.MedianHoursAfterFirstReview = quantile(afterReview, 0.5)
+	metric.MedianReviewRounds = median(rounds)
+	metric.MedianHoursAfterFirstReview = median(afterReview)
 	metric.HoursAfterFirstReview = round(metric.HoursAfterFirstReview)
 	if len(finished) > 0 {
 		metric.SentBackShare = round(float64(sentBack) / float64(len(finished)))
@@ -504,10 +539,8 @@ func (c *computation) splitting(finished []*Issue) Splitting {
 	if metric.FinishedRoots > 0 {
 		metric.ChildrenPerRoot = round(float64(children) / float64(metric.FinishedRoots))
 	}
-	slices.Sort(withChildren)
-	slices.Sort(withoutChildren)
-	metric.MedianHoursRootsWithChildren = quantile(withChildren, 0.5)
-	metric.MedianHoursRootsNoChildren = quantile(withoutChildren, 0.5)
+	metric.MedianHoursRootsWithChildren = median(withChildren)
+	metric.MedianHoursRootsNoChildren = median(withoutChildren)
 	return metric
 }
 
@@ -527,7 +560,7 @@ func (c *computation) classify(filed Filed) FiledIssue {
 	if filer == nil {
 		return row
 	}
-	root := c.population.TreeRoot(filer.Key)
+	root := c.treeRoot(filer.Key)
 	inTree := filed.Parent == filer.Key || filed.Parent == root ||
 		slices.Contains(filed.Ancestors, filer.Key) || slices.Contains(filed.Ancestors, root)
 	if !inTree {
@@ -563,20 +596,20 @@ func weekStart(at time.Time) time.Time {
 }
 
 // quantile is the q-th quantile of a sorted list, "linear interpolation between the closest
-// ranks", and zero for an empty one.
+// ranks", and zero for an empty one: the delivery measures' own rule (measures.Quantile),
+// rounded as every number of a report is.
 func quantile(sorted []float64, q float64) float64 {
 	if len(sorted) == 0 {
 		return 0
 	}
-	if len(sorted) == 1 {
-		return round(sorted[0])
-	}
-	rank := q * float64(len(sorted)-1)
-	lower := int(math.Floor(rank))
-	if lower >= len(sorted)-1 {
-		return round(sorted[len(sorted)-1])
-	}
-	return round(sorted[lower] + (rank-float64(lower))*(sorted[lower+1]-sorted[lower]))
+	return round(measures.Quantile(sorted, q))
+}
+
+// median sorts values and is their middle. Every caller builds the slice for its median alone
+// and reads it no further, so the sort in place is unobservable.
+func median(values []float64) float64 {
+	slices.Sort(values)
+	return quantile(values, 0.5)
 }
 
 // hours is a duration in hours, rounded as every number of a report is.

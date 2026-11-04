@@ -2,11 +2,11 @@ package metrics
 
 import "strings"
 
-// Roles are Legion's six worker types, in the order the workflow runs them. The daemon's
+// roles are Legion's six worker types, in the order the workflow runs them. The daemon's
 // claim.Roles is the same list in the daemon's own module (packages/daemon/internal/claim/
 // token.go), which this module does not import; a deployment changes each role's prompt, model
 // and harness, not the roles.
-var Roles = []string{"architect", "planner", "implementer", "tester", "reviewer", "merger"}
+var roles = []string{"architect", "planner", "implementer", "tester", "reviewer", "merger"}
 
 // The two shapes a Legion session titles itself (packages/pi-legion/src/session-title.ts): a
 // phase worker or a root architect names its role and its issue, a controller names its project.
@@ -47,7 +47,7 @@ func ParseSessionTitle(title string) (SessionTitle, bool) {
 	if role == legionControllerTitle {
 		return SessionTitle{Role: legionControllerTitle, Project: subject, Controller: true}, true
 	}
-	for _, known := range Roles {
+	for _, known := range roles {
 		if role == known {
 			return SessionTitle{Role: role, Issue: subject}, true
 		}

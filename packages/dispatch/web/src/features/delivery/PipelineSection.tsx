@@ -29,7 +29,7 @@
 // The slowest-jobs table's trend keeps its bars alone: its row already holds the last day's and
 // the shown days' median, p90 and count.
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useRef } from "react";
+import { memo, type ReactNode, useMemo, useRef } from "react";
 
 import { isDeliveryNotConfigured } from "../../api/client";
 import { deliveryPipelineQuery } from "../../api/queries";
@@ -53,10 +53,19 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { Chart, type ChartCompare, type ChartRange, type ChartSeries, daysRange } from "./Chart";
+import {
+  Chart,
+  type ChartCompare,
+  type ChartCompareSource,
+  type ChartRange,
+  type ChartSeries,
+  chartCompare,
+  type DeliverySectionProps,
+  daysRange,
+} from "./Chart";
 import { formatDue, formatDuration, formatRate } from "./lib/format";
 import { formatAge } from "./lib/freshness";
-import { liveWindow, type WindowChoice } from "./lib/window";
+import { liveWindow } from "./lib/window";
 import { SourceFreshness } from "./SourceFreshness";
 import { SpreadBars } from "./SpreadBars";
 import { TargetBadge } from "./TargetBadge";
@@ -67,18 +76,11 @@ const CARD = `flex min-w-0 flex-col gap-1.5 rounded border px-3 py-2 ${surfaceBg
  *  the two deploys take, and how often each ends in success, over the page's own window. The
  *  window and the comparison are the page's, so one window control and one compare range serve
  *  this section, the Legion section and the delivery timeline alike. */
-export function PipelineSection({
+export const PipelineSection = memo(function PipelineSection({
   compare,
   onCompare,
   window: chosen,
-}: {
-  /** The range the page reads beside its window, or null while nothing is compared. */
-  readonly compare: ChartRange | null;
-  /** The range a card's compare control named; null turns the comparison off. */
-  readonly onCompare: (next: ChartRange | null) => void;
-  /** The page's window, which every section follows. */
-  readonly window: WindowChoice;
-}): ReactNode {
+}: DeliverySectionProps): ReactNode {
   const query = useQuery(deliveryPipelineQuery({ kind: "pipeline", window: liveWindow(chosen) }));
   // The section's "now": where the window stops, so a failure's age is measured from the moment
   // the failing-jobs table looked back from.
@@ -121,7 +123,7 @@ export function PipelineSection({
       ) : null}
       {query.data === undefined ? null : (
         <PipelineView
-          compare={{ onRange: onCompare, pipeline: compared.data, range: compare }}
+          compare={{ data: compared.data, onRange: onCompare, range: compare }}
           nowMs={nowMs}
           pipeline={query.data}
           readAtMs={answeredAtRef.current}
@@ -129,15 +131,7 @@ export function PipelineSection({
       )}
     </section>
   );
-}
-
-/** What a card's chart compares the shown days with: the range the reader picked, how they pick
- *  another, and the route's answer for it once it lands. */
-export interface PipelineCompare {
-  readonly range: ChartRange | null;
-  readonly onRange: (next: ChartRange | null) => void;
-  readonly pipeline: DeliveryPipelineResponse | undefined;
-}
+});
 
 /** What a stage card's chart draws: each day's run time, median and p90, and the share of the
  *  same day's results that succeeded. */
@@ -172,11 +166,42 @@ export function PipelineView({
   readAtMs,
   nowMs,
 }: {
-  compare?: PipelineCompare;
+  compare?: ChartCompareSource<DeliveryPipelineResponse>;
   pipeline: DeliveryPipelineResponse;
   readAtMs: number;
   nowMs: number;
 }): ReactNode {
+  // What each card's chart compares its own days with: the compare range's answer read as that
+  // card's series, built once per answer rather than on every render of the section, since
+  // `Chart` builds its table of every number from the series it is handed. A card the answer
+  // holds no stage for compares nothing, as it does while the read is out.
+  const comparedData = compare?.data;
+  const comparedSeries = useMemo(
+    () =>
+      comparedData === undefined
+        ? undefined
+        : {
+            mergeToProduction: leadTimeSeries(
+              comparedData.merge_to_production.days,
+              comparedData.targets.merge_to_production_minutes
+            ),
+            openedToMerge: leadTimeSeries(
+              comparedData.opened_to_merge.days,
+              comparedData.targets.opened_to_merge_median_minutes
+            ),
+            prChecks: timingSeries(comparedData.pr_checks.run.days),
+            productionApply: timingSeries(comparedData.production_apply.days),
+            stagingApply:
+              comparedData.staging_apply === null
+                ? null
+                : timingSeries(comparedData.staging_apply.days),
+            stagingE2e:
+              comparedData.staging_e2e === null
+                ? null
+                : timingSeries(comparedData.staging_e2e.days),
+          },
+    [comparedData]
+  );
   const first = pipeline.days[0];
   const last = pipeline.days[pipeline.days.length - 1];
   if (first === undefined || last === undefined) throw new Error("the pipeline has no days");
@@ -187,15 +212,8 @@ export function PipelineView({
   const dayCount = pipeline.days.length;
   // The route answers any window, so a card offers the preceding days and a range of the
   // reader's own alike, and the page reads the one they pick.
-  const cardCompare = (series: (answer: DeliveryPipelineResponse) => ChartSeries[] | null) =>
-    compare === undefined
-      ? undefined
-      : ({
-          onRange: compare.onRange,
-          range: compare.range,
-          series:
-            compare.pipeline === undefined ? undefined : (series(compare.pipeline) ?? undefined),
-        } satisfies ChartCompare);
+  const cardCompare = (series: readonly ChartSeries[] | null | undefined) =>
+    chartCompare(compare, series);
 
   return (
     <>
@@ -213,7 +231,7 @@ export function PipelineView({
           data-section="stage-cards"
         >
           <TimingCard
-            compare={cardCompare((answer) => timingSeries(answer.pr_checks.run.days))}
+            compare={cardCompare(comparedSeries?.prChecks)}
             dayCount={dayCount}
             detail="PR Checks on a pull request, from run start to its last job"
             metric="pr_ci"
@@ -223,9 +241,7 @@ export function PipelineView({
           />
           {pipeline.staging_e2e === null ? null : (
             <TimingCard
-              compare={cardCompare((answer) =>
-                answer.staging_e2e === null ? null : timingSeries(answer.staging_e2e.days)
-              )}
+              compare={cardCompare(comparedSeries?.stagingE2e)}
               dayCount={dayCount}
               detail={pipeline.staging_e2e.job}
               metric="staging_e2e"
@@ -236,9 +252,7 @@ export function PipelineView({
           )}
           {pipeline.staging_apply === null ? null : (
             <TimingCard
-              compare={cardCompare((answer) =>
-                answer.staging_apply === null ? null : timingSeries(answer.staging_apply.days)
-              )}
+              compare={cardCompare(comparedSeries?.stagingApply)}
               dayCount={dayCount}
               detail={pipeline.staging_apply.job}
               metric="staging_apply"
@@ -248,7 +262,7 @@ export function PipelineView({
             />
           )}
           <TimingCard
-            compare={cardCompare((answer) => timingSeries(answer.production_apply.days))}
+            compare={cardCompare(comparedSeries?.productionApply)}
             dayCount={dayCount}
             detail={pipeline.production_apply.job}
             metric="production_apply"
@@ -257,12 +271,7 @@ export function PipelineView({
             title="Deploy to production"
           />
           <LeadTimeCard
-            compare={cardCompare((answer) =>
-              leadTimeSeries(
-                answer.merge_to_production.days,
-                answer.targets.merge_to_production_minutes
-              )
-            )}
+            compare={cardCompare(comparedSeries?.mergeToProduction)}
             dayCount={dayCount}
             detail="DORA lead time, PRs by the day they merged"
             judged="longest"
@@ -273,12 +282,7 @@ export function PipelineView({
             title="Merge to production"
           />
           <LeadTimeCard
-            compare={cardCompare((answer) =>
-              leadTimeSeries(
-                answer.opened_to_merge.days,
-                answer.targets.opened_to_merge_median_minutes
-              )
-            )}
+            compare={cardCompare(comparedSeries?.openedToMerge)}
             dayCount={dayCount}
             detail="Opened to merged, every merged PR, by the day it merged"
             judged="median"
@@ -457,6 +461,9 @@ function TimingCard(props: {
 }): ReactNode {
   const { timing } = props;
   const today: DeliveryTimingDay = lastDay(timing);
+  // Built once per run of days rather than on every render of the section, since `Chart` builds
+  // its table of every number from the series it is handed.
+  const series = useMemo(() => timingSeries(timing.days), [timing.days]);
   return (
     <div className={CARD} data-metric={props.metric}>
       <CardTitle detail={props.detail} title={props.title} />
@@ -476,12 +483,7 @@ function TimingCard(props: {
           p90={timing.total.p90_minutes}
         />
       </div>
-      <Chart
-        compare={props.compare}
-        label={props.title}
-        range={props.range}
-        series={timingSeries(timing.days)}
-      />
+      <Chart compare={props.compare} label={props.title} range={props.range} series={series} />
       <div className={`text-xs ${textSecondaryOnSurface}`} data-health>
         Success today <span className="font-semibold">{formatRate(today.success_rate)}</span>
         <span className={textMutedOnSurface}>
@@ -519,6 +521,9 @@ function LeadTimeCard(props: {
   const { timing, target, judged } = props;
   const today = lastDay(timing);
   const total = timing.total;
+  // Built once per run of days rather than on every render of the section, since `Chart` builds
+  // its table of every number from the series it is handed.
+  const series = useMemo(() => leadTimeSeries(timing.days, target), [timing.days, target]);
   const judgedValue = judged === "longest" ? total.max_minutes : total.median_minutes;
   const met = judgedValue === null ? null : judgedValue < target;
   return (
@@ -543,12 +548,7 @@ function LeadTimeCard(props: {
           p90={total.p90_minutes}
         />
       </div>
-      <Chart
-        compare={props.compare}
-        label={props.title}
-        range={props.range}
-        series={leadTimeSeries(timing.days, target)}
-      />
+      <Chart compare={props.compare} label={props.title} range={props.range} series={series} />
       <div className={`text-xs ${textSecondaryOnSurface}`}>
         {judged === "longest" ? "Longest" : "Median"} today{" "}
         <span className="font-semibold">

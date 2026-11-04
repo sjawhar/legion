@@ -197,7 +197,7 @@ func deliveryPipelineCompute(settings delivery.DeliverySettings, pop pipelinePop
 	if settings.PRChecksRollupJobName != nil {
 		rollup = *settings.PRChecksRollupJobName
 	}
-	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, window.end, measures.FailingWindow, rollup)
+	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, window.end, rollup)
 	cards := []measures.DeployJobCard{{
 		CardID:     pipelineProductionApplyCard,
 		Production: settings.Production(),

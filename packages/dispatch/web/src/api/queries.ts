@@ -316,9 +316,8 @@ export const legionBoardQuery = (view: DeliveryLiveView & { kind: "legion" }) =>
   });
 
 /** Every project's Legion setting, by project key, read once for the whole app: the Issues page's
- *  view selector asks it whether this project has a Legion view, and the Delivery page's Legion
- *  section which projects its picker offers. `[]` is a deployment where no project names a
- *  daemon, not a failure. */
+ *  view selector asks it whether this project has a Legion view. `[]` is a deployment where no
+ *  project names a daemon, not a failure. */
 export const legionSettingsQuery = () =>
   queryOptions({
     queryKey: ["legion-settings"],

@@ -2297,7 +2297,7 @@ func TestALegionViewNamesItsProjectAndNothingElse(t *testing.T) {
 	if refusal != nil {
 		t.Fatalf("a legion view of INFRA: %+v", refusal)
 	}
-	if spec.project() != "INFRA" || spec.key != "legion|INFRA|" {
+	if spec.project != "INFRA" || spec.key != "legion|INFRA|" {
 		t.Fatalf("the spec = %+v, want the project it names and a key of its own", spec)
 	}
 }

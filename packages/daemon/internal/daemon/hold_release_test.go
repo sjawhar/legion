@@ -75,7 +75,7 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 	w := &workflowRuntime{
 		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
 		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
-		holdPollInterval: 20 * time.Millisecond, nats: newNATSHolder(nil, consumers, nil, log),
+		holdPollInterval: 20 * time.Millisecond, nats: newNATSHolder(nil, consumers, nil),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -374,7 +374,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 		dispatch: &filteringDispatch{summaries: []dispatch.IssueSummary{
 			{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
 		}},
-		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, nats: newNATSHolder(nil, consumers, nil, log),
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, nats: newNATSHolder(nil, consumers, nil),
 	}
 	if err := w.reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -436,7 +436,7 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 			{Key: "CAPTURE-1", ResolvedRepo: "sjawhar/legion", Title: "todo root", Status: "todo", Rank: "A", HandedOver: true},
 			{Key: "CAPTURE-2", ResolvedRepo: "sjawhar/legion", Title: "backlog root", Status: "backlog", Rank: "B", HandedOver: true},
 		}},
-		dispatchProject: "CAPTURE", nats: newNATSHolder(nil, consumers, nil, log), bootID: "pilot-boot", log: log,
+		dispatchProject: "CAPTURE", nats: newNATSHolder(nil, consumers, nil), bootID: "pilot-boot", log: log,
 		holdPollInterval: 10 * time.Millisecond,
 	}
 

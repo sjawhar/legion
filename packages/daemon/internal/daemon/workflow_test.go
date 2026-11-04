@@ -32,7 +32,7 @@ func TestLingerHoursReachesTheEngineAsItsDuration(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 
-	engine := engineConfig(cfg, "legion-reviewer[bot]", Build{})
+	engine := engineConfig(&cfg, "legion-reviewer[bot]", Build{})
 	if engine.Linger != 18*time.Minute {
 		t.Errorf("the engine's linger = %s, want 18m0s", engine.Linger)
 	}

@@ -14,7 +14,7 @@
 // and the server refuses the rest — the way `GrantsSection` and the Delivery settings gate. A
 // refusal lands on the row it was made from.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useMemo, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { legionBoardQuery, whoAmIQuery } from "../../api/queries";
@@ -101,18 +101,11 @@ function withSettingAsItWas(
 }
 
 /** The daemon's settings, each with its value and where that value came from, and — for a signed
- *  in person — a control that changes it. `project` is whose daemon these are; `settings` and
- *  `sources` are the board's own two blocks, which an applied change writes back into through the
- *  board's cache entry. */
-export function LegionSettingsPanel({
-  project,
-  settings,
-  sources,
-}: {
-  readonly project: string;
-  readonly settings: Readonly<Record<string, unknown>>;
-  readonly sources: Readonly<Record<string, LegionSettingSource>>;
-}): ReactNode {
+ *  in person — a control that changes it. `board` is the project's own board answer: its
+ *  `project` is whose daemon these are, and its `settings` and `setting_sources` are the two
+ *  blocks an applied change writes back into through the board's cache entry. */
+export function LegionSettingsPanel({ board }: { readonly board: LegionBoardResponse }): ReactNode {
+  const { project, settings, setting_sources: sources } = board;
   const headingId = useId();
   const queryClient = useQueryClient();
   const human = useIsHuman();
@@ -158,10 +151,7 @@ export function LegionSettingsPanel({
           withChangedSetting(previous, variables.key, variables.value, viewer)
         );
       }
-      setResults((current) => {
-        const { [variables.key]: _cleared, ...rest } = current;
-        return rest;
-      });
+      setResults((current) => withEntry(current, variables.key, undefined));
       return { previous };
     },
     // A landing Dispatch could not keep the answer of leaves the optimistic row: the daemon may
@@ -177,10 +167,7 @@ export function LegionSettingsPanel({
         rollBack(variables.key, context?.previous);
       }
       setResults((current) => ({ ...current, [variables.key]: { kind: "verdict", verdict } }));
-      setDrafts((current) => {
-        const { [variables.key]: _applied, ...rest } = current;
-        return rest;
-      });
+      setDrafts((current) => withEntry(current, variables.key, undefined));
     },
     // No read follows: the board is live (`api/live-socket.ts`), so the daemon's next pass
     // replaces `settings` and `setting_sources` whole on this same subscription. Invalidating a
@@ -188,8 +175,12 @@ export function LegionSettingsPanel({
   });
 
   // Every settable path, the ones the daemon withholds a value for included: a credential's
-  // provenance is reported with no value anywhere, which is how a rotation is visible.
-  const keys = [...new Set([...Object.keys(settings), ...Object.keys(sources)])].sort();
+  // provenance is reported with no value anywhere, which is how a rotation is visible. Built
+  // once per board rather than on every keystroke in a row's input.
+  const keys = useMemo(
+    () => [...new Set([...Object.keys(settings), ...Object.keys(sources)])].sort(),
+    [settings, sources]
+  );
 
   const submit = (event: FormEvent<HTMLFormElement>, key: string) => {
     event.preventDefault();

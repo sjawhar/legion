@@ -37,7 +37,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
-	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
@@ -235,13 +234,28 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 	if log == nil {
 		log = slog.Default()
 	}
-	// The store opens first, before anything is built from the configuration: the settings
+	// The cluster's refusals come first, before the daemon dials anything: Agent Sandbox must be
+	// installed, and no per-claim Sandbox of the layout before issue pods may remain. They are
+	// read-only and build nothing, and they run against the file's own configuration, which is
+	// all the daemon holds until its store is open (clusterFence). An operator whose cluster
+	// still carries that layout is told so, rather than shown whatever the daemon met next.
+	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+	defer cancelBoot()
+	fence, err := clusterFence(*live.Snapshot(), o, log)
+	if err != nil {
+		return err
+	}
+	if fence != nil {
+		if err := fence(boot); err != nil {
+			return err
+		}
+	}
+	// The store opens next, and before anything is built from the configuration: the settings
 	// changes this daemon took from its route are laid back over the file here, so the holders
 	// the boot then builds, the credentials it reads and the launch specs it settles are built
 	// from what the daemon is actually running on, and not from a file a change of that key sits
 	// above (internal/settings' Keeper.Restore). Nothing of the schema is written yet — the
-	// cluster's refusals still run before Migrate — and a database this release has not migrated
-	// yet carries no such change.
+	// claims' half of the layout fence and Migrate both still come later.
 	opening, cancelOpening := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelOpening()
 	st, err := store.Open(opening, live.Snapshot().PostgresDSN)
@@ -254,9 +268,9 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 		st.Close()
 		return err
 	}
-	// The boot-time value: every read that happens once — the sockets, the state directory, the
-	// runtime's own options — is this one, and every reader that must see a change goes through
-	// live instead.
+	// The boot-time value, read once the route overlay is back over the file: every read that
+	// happens once — the sockets, the state directory, the runtime's own options — is this one,
+	// and every reader that must see a change goes through live instead.
 	cfg := *live.Snapshot()
 	rebuild := newRebuilder(log)
 	live.OnChange(rebuild.observe)
@@ -288,20 +302,8 @@ func run(ctx context.Context, live *config.Live, build Build, log *slog.Logger, 
 		}
 	}
 
-	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
-	defer cancelBoot()
-	// The cluster's refusals run before any schema write, image probe or reconcile: Agent Sandbox
-	// must be installed, and no per-claim Sandbox of the layout before issue pods may remain. The
-	// claims' half of that layout fence runs next, and the schema is migrated after both — the
-	// store's connection is already open, since the settings this daemon runs on were read
-	// through it before anything was built.
-	if plan.clusterCheck != nil {
-		if err := plan.clusterCheck(boot); err != nil {
-			st.Close()
-			return err
-		}
-	}
-
+	// The claims' half of the layout fence, before the schema is migrated: no stored claim may
+	// still carry a per-claim Sandbox locator.
 	if plan.claimsCheck != nil {
 		if err := plan.claimsCheck(boot, st); err != nil {
 			st.Close()
@@ -665,11 +667,6 @@ type plan struct {
 	// recorded, answering what its OK line reported of the image; nil under tmux, and for a
 	// replaced runtime without one.
 	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
-	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
-	// install check, then the census of Sandboxes of a layout before this one — per-claim pods, or
-	// issue pods on one tree volume (sandbox.CensusLegacyIssueSandboxes). Nil under tmux, and for a
-	// replaced runtime.
-	clusterCheck func(ctx context.Context) error
 	// claimsCheck is the Kubernetes runtime's refusal once the store has opened, before it
 	// migrates: no stored claim may still carry a per-claim Sandbox locator of the layout before
 	// issue pods (store.HasLegacySandboxClaims). Nil under tmux, and for a replaced runtime.
@@ -1173,7 +1170,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			return nil, err
 		}
 		return factory(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
-	}, log)
+	})
 	// The launch specs behind theirs: everything a launch reads that the claim does not carry,
 	// built again from the configuration a `launch` change settled, read by the next launch.
 	buildSpecs := func(c config.Config) (specs, error) {
@@ -1664,8 +1661,17 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	// launch mode and the wake are a holder of their own (keeperHolder): a change of either stops
 	// or starts the keeper's loop and moves the tick, and no running controller is touched.
 	var keeper *controllerKeeper
+	// ensureKeeper builds the keeper the first time one is needed and answers the one there is:
+	// boot builds it under `controller: daemon`, and the holder's start builds it where a change
+	// moved the launch mode to the daemon while the daemon runs.
+	ensureKeeper := func() *controllerKeeper {
+		if keeper == nil {
+			keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
+		}
+		return keeper
+	}
 	if cfg.ControllerLaunch == config.ControllerLaunchDaemon {
-		keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
+		ensureKeeper()
 	}
 	// The settings the API server holds, behind the pointer its routes read through: the operator
 	// bearer, the design gate, the repository equivalence, the projects' merge rules and the
@@ -1753,7 +1759,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	// controller (settingsAnnouncer), and the file under the daemon is watched for the other arm
 	// (settings.Watcher). Both are registered here, after the boot's own restore: what the boot
 	// laid back over the file is what the daemon booted on, not a change to announce.
-	publisher := newPublisherHolder(notify.New(cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"]))
+	publisher := newPublisherHolder(envoyPublisher(cfg, p.secrets["ENVOY_TOKEN"]))
 	p.rebuild.register(publisher)
 	// The controller's topic is the project token's, as every other notice of its is
 	// (notify.ControllerTopic), never the Dispatch project key.
@@ -1818,10 +1824,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	// with serving either way.
 	keeping := newKeeperHolder(cfg.ControllerWakeInterval, keeper != nil, func() context.CancelFunc {
 		kept, stop := context.WithCancel(serving)
-		if keeper == nil {
-			keeper = newControllerKeeper(s.supervisor.ctx, s.supervisor, p.project, p.controllerRetry, s.log)
-		}
-		running := keeper
+		running := ensureKeeper()
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -2076,14 +2079,14 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 // keeps them, and nil under any other. A runtime behind its holder answers through the holder, so
 // a rebuild of the runtime moves the answer with it.
 func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
-	if holder, held := rt.(*runtimeHolder); held {
-		if _, sandboxed := sandboxOf(rt); !sandboxed {
+	switch held := rt.(type) {
+	case *runtimeHolder:
+		if _, sandboxed := sandboxOf(held); !sandboxed {
 			return nil
 		}
-		return holder.repositoryCaches
-	}
-	if keeper, ok := rt.(*sandbox.Runtime); ok {
-		return keeper.RepositoryCaches
+		return held.repositoryCaches
+	case *sandbox.Runtime:
+		return held.RepositoryCaches
 	}
 	return nil
 }
@@ -2091,14 +2094,14 @@ func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
 // callerPodOf is rt's pod at an address when rt is the Sandbox runtime, the one runtime that runs
 // pods, and nil under any other (api's Options.CallerPod).
 func callerPodOf(rt runtime.Runtime) func(netip.Addr) (string, bool) {
-	if holder, held := rt.(*runtimeHolder); held {
-		if _, sandboxed := sandboxOf(rt); !sandboxed {
+	switch held := rt.(type) {
+	case *runtimeHolder:
+		if _, sandboxed := sandboxOf(held); !sandboxed {
 			return nil
 		}
-		return holder.podAt
-	}
-	if pods, ok := rt.(*sandbox.Runtime); ok {
-		return pods.PodAt
+		return held.podAt
+	case *sandbox.Runtime:
+		return held.PodAt
 	}
 	return nil
 }

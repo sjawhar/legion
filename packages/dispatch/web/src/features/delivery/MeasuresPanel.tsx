@@ -26,24 +26,18 @@ import {
   textPrimaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
-import { Chart, type ChartCompare, type ChartRange, type ChartSeries } from "./Chart";
+import {
+  Chart,
+  type ChartCompareSource,
+  type ChartRange,
+  type ChartSeries,
+  chartCompare,
+  PENDING,
+} from "./Chart";
 import { formatMinutes, pct } from "./lib/format";
 import { TargetBadge } from "./TargetBadge";
 
 const UNOWNED_P0_SHOWN = 6;
-
-/** What a pending read shows in each number's place. */
-const PENDING = "\u2026";
-
-/** The comparison the page offers the panel's two charts: the range it reads beside the
- *  window, how the reader names another, and that range's answer once it lands (`Chart`). A
- *  host that reads no second range passes none, and each chart shows its graph-or-table
- *  control alone. */
-export interface MeasuresCompare {
-  readonly range: ChartRange | null;
-  readonly onRange: (next: ChartRange | null) => void;
-  readonly data: DeliveryMeasuresResponse | undefined;
-}
 
 /** The deploys-a-day card's chart: one bar a day against the target. */
 function deploySeries(response: DeliveryMeasuresResponse): ChartSeries[] {
@@ -86,24 +80,10 @@ function runSuccessSeries(response: DeliveryMeasuresResponse): ChartSeries[] {
   ];
 }
 
-/** A card's comparison: the page's, with the compare range's answer read as this card's own
- *  series. */
-function cardCompare(
-  compare: MeasuresCompare | undefined,
-  series: (response: DeliveryMeasuresResponse) => ChartSeries[]
-): ChartCompare | undefined {
-  if (compare === undefined) return undefined;
-  return {
-    onRange: compare.onRange,
-    range: compare.range,
-    series: compare.data === undefined ? undefined : series(compare.data),
-  };
-}
-
 /** The change-failure-rate card's breakdown: deploys with a confirmed break, and how many more
  *  have only unreviewed (pending) flags. `confirmedOrPending` counts each deploy once (the
  *  prototype's web/src/lib/dora.ts:297-305). */
-export function failureRateBreakdown(confirmed: number, confirmedOrPending: number): string {
+function failureRateBreakdown(confirmed: number, confirmedOrPending: number): string {
   const onlyPending = confirmedOrPending - confirmed;
   const breaks = `${confirmed} ${confirmed === 1 ? "deploy" : "deploys"} with a confirmed break`;
   return onlyPending === 0
@@ -167,7 +147,11 @@ export function MeasuresPanel({
   compare,
   data,
 }: {
-  compare?: MeasuresCompare;
+  /** The comparison the page offers the panel's two charts: the range it reads beside the
+   *  window, how the reader names another, and that range's answer once it lands (`Chart`). A
+   *  host that reads no second range passes none, and each chart shows its graph-or-table
+   *  control alone. */
+  compare?: ChartCompareSource<DeliveryMeasuresResponse>;
   data: DeliveryMeasuresResponse | undefined;
 }): ReactNode {
   const [open, setOpen] = useState(false);
@@ -178,6 +162,33 @@ export function MeasuresPanel({
   const targets = data?.targets;
   const status = data?.status;
   const measures = data?.measures;
+  // What the two charts over the window draw, and the range they cover: built once per answer
+  // rather than on every render of the panel, as the fold's own table is, since `Chart` builds
+  // its table of every number from the series it is handed. It is undefined while the read is
+  // out, which is where each chart's own card shows its frame instead.
+  const charts = useMemo(
+    () =>
+      data === undefined
+        ? undefined
+        : {
+            deploys: deploySeries(data),
+            range: {
+              kind: "custom",
+              from: data.window.from,
+              to: data.window.to,
+            } satisfies ChartRange,
+            runSuccess: runSuccessSeries(data),
+          },
+    [data]
+  );
+  const comparedData = compare?.data;
+  const comparedSeries = useMemo(
+    () =>
+      comparedData === undefined
+        ? undefined
+        : { deploys: deploySeries(comparedData), runSuccess: runSuccessSeries(comparedData) },
+    [comparedData]
+  );
 
   const strip = [
     {
@@ -221,12 +232,12 @@ export function MeasuresPanel({
               </span>
             )}
           </div>
-          {data === undefined ? null : (
+          {charts === undefined ? null : (
             <Chart
-              compare={cardCompare(compare, deploySeries)}
+              compare={chartCompare(compare, comparedSeries?.deploys)}
               label="Deploys a day"
-              range={{ kind: "custom", from: data.window.from, to: data.window.to }}
-              series={deploySeries(data)}
+              range={charts.range}
+              series={charts.deploys}
             />
           )}
         </KpiCard>
@@ -346,13 +357,13 @@ export function MeasuresPanel({
               </span>
             )}
           </div>
-          {data === undefined || measures === undefined ? null : (
+          {charts === undefined || measures === undefined ? null : (
             <>
               <Chart
-                compare={cardCompare(compare, runSuccessSeries)}
+                compare={chartCompare(compare, comparedSeries?.runSuccess)}
                 label="Deploy runs reaching production"
-                range={{ kind: "custom", from: data.window.from, to: data.window.to }}
-                series={runSuccessSeries(data)}
+                range={charts.range}
+                series={charts.runSuccess}
               />
               <div className={`text-[11px] ${textMutedOnSurface}`}>
                 {measures.deploy_run_success.cancelled} cancelled runs not counted

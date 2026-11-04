@@ -249,8 +249,8 @@ func TestABlockTheFileDropsReadsAsUnset(t *testing.T) {
 	if index < 0 {
 		t.Fatalf("applied %+v, want the dropped tmux overlay among them", applied)
 	}
-	if applied[index].New != unsetValue {
-		t.Errorf("the dropped path reads %q, want %q", applied[index].New, unsetValue)
+	if applied[index].New != UnsetValue {
+		t.Errorf("the dropped path reads %q, want %q", applied[index].New, UnsetValue)
 	}
 }
 

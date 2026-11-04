@@ -150,7 +150,7 @@ func TestADaemonsTreeFieldNamesTheRootWhereAReadCarriedOne(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `
 		insert into legion_observations (project, issue_key, field, value, observed_at)
 		values ('INFRA', 'INFRA-2', $1, '"INFRA-9"'::jsonb, $2)
-	`, observedTreeField, after(1)); err != nil {
+	`, legion.FieldTree, after(1)); err != nil {
 		t.Fatalf("record a tree observation: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `

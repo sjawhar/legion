@@ -70,13 +70,5 @@ func (s *server) legionMetricsProject(w http.ResponseWriter, r *http.Request) (s
 		}
 		return settings[0].Project, true
 	}
-	if !projectKeyPattern.MatchString(project) {
-		writeError(w, "INVALID_QUERY", http.StatusBadRequest, projectKeyProblem("project", project))
-		return "", false
-	}
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select key from projects where key = $1`, project).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
-		return "", false
-	}
-	return project, true
+	return s.legionProjectNamed(w, r, project, "INVALID_QUERY")
 }

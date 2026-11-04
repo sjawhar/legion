@@ -888,19 +888,20 @@ func TestPodDriftNamesTheLaunchKeyThatMoved(t *testing.T) {
 // compared against nothing.
 func TestLaunchSettingsDriftReadsAnUnreadableAndAnAbsentRecord(t *testing.T) {
 	built := LaunchSettings(launchFixture())
-	if drifted := launchSettingsDrift("{not json", built); len(drifted) != 1 || !strings.Contains(drifted[0], "cannot be read") {
+	now := launchSettingsRecord(built)
+	if drifted := launchSettingsDrift("{not json", built, now); len(drifted) != 1 || !strings.Contains(drifted[0], "cannot be read") {
 		t.Errorf("launchSettingsDrift of an unreadable record = %q, want one reason naming it", drifted)
 	}
-	if drifted := launchSettingsDrift("", built); drifted != nil {
+	if drifted := launchSettingsDrift("", built, now); drifted != nil {
 		t.Errorf("launchSettingsDrift of a pod that records none = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(built, ""); drifted != nil {
+	if drifted := launchSettingsDrift(built, "", launchSettingsRecord("")); drifted != nil {
 		t.Errorf("launchSettingsDrift against a runtime that records none = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(built, built); drifted != nil {
+	if drifted := launchSettingsDrift(built, built, now); drifted != nil {
 		t.Errorf("launchSettingsDrift of one record against itself = %q, want nothing", drifted)
 	}
-	if drifted := launchSettingsDrift(`{"instructions":"/etc/legion/instructions.md"}`, `{}`); !slices.Equal(drifted, []string{"launch setting instructions /etc/legion/instructions.md, now " + unsetLaunchValue}) {
+	if drifted := launchSettingsDrift(`{"instructions":"/etc/legion/instructions.md"}`, `{}`, launchSettingsRecord(`{}`)); !slices.Equal(drifted, []string{"launch setting instructions /etc/legion/instructions.md, now " + config.UnsetValue}) {
 		t.Errorf("launchSettingsDrift of a key the configuration dropped = %q, want it named as unset", drifted)
 	}
 }

@@ -332,15 +332,17 @@ type deliverySub struct {
 }
 
 // deliveryLiveSpec is a subscribed view, resolved: its kind, its window (a preset's length in days,
-// or a custom range), its query without from and to, a pipeline view's pinned at, and the
-// canonical key identical views share.
+// or a custom range), its query without from and to, a pipeline view's pinned at, a legion
+// view's project, and the canonical key identical views share.
 type deliveryLiveSpec struct {
 	kind     string
 	preset   int
 	from, to time.Time
 	query    url.Values
 	at       *time.Time
-	key      string
+	// project is the project a legion view's board shows; every other kind names none.
+	project string
+	key     string
 }
 
 // deliveryFreshnessHeard is the freshness row as the hub last heard it, and the population's
@@ -479,7 +481,7 @@ func (h *deliveryHub) dirtyLegionBoard(project string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, view := range h.views {
-		if view.spec.kind == legionBoardView && view.spec.project() == project {
+		if view.spec.kind == legionBoardView && view.spec.project == project {
 			h.markDirtyLocked(view, now, deliveryCauseChange)
 		}
 	}

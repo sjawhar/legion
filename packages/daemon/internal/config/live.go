@@ -30,9 +30,11 @@ const (
 	// withheldValue stands for a credential, the source of one, the path of a file holding one,
 	// or an address whose userinfo or query may carry one (Row.Secret).
 	withheldValue = "(withheld)"
-	// unsetValue stands for a path the configuration does not carry: a block the file names under
-	// one runtime and not the other, or an optional block it drops.
-	unsetValue = "(unset)"
+	// UnsetValue stands for a path the configuration does not carry: a block the file names under
+	// one runtime and not the other, or an optional block it drops. A drift reason says the same
+	// word of the same situation (runtime/sandbox's launchSettingsDrift), so the settings route's
+	// answer and a pod's drift reason never disagree on it.
+	UnsetValue = "(unset)"
 )
 
 // Change is one setting the daemon applied, as a log line and an answer to the caller read it.
@@ -220,8 +222,8 @@ func (l *Live) Apply(source, by string, overlay map[string]any) (applied []Chang
 	maps.Copy(merged, l.overlay)
 	switch source {
 	case SourceFile:
-		for _, path := range slices.Sorted(maps.Keys(overlay)) {
-			if overlay[path] != nil {
+		for path, value := range overlay {
+			if value != nil {
 				return nil, nil, errors.New(`a "file" apply carries no value of its own: it reads the file again, keeps the stored route overlay, and drops only the paths the file has taken back`)
 			}
 			delete(merged, path)
@@ -240,7 +242,7 @@ func (l *Live) Apply(source, by string, overlay map[string]any) (applied []Chang
 			}
 		}
 	default:
-		return nil, refused, fmt.Errorf("unknown settings source %q: the sources are %q and %q", source, SourceFile, SourceRoute)
+		return nil, nil, fmt.Errorf("unknown settings source %q: the sources are %q and %q", source, SourceFile, SourceRoute)
 	}
 
 	next, err := l.resolve(merged)
@@ -355,11 +357,31 @@ type setting struct{ compared, shown string }
 // members as unset.
 func settingsOf(cfg *Config) map[string]setting {
 	settings := map[string]setting{}
-	collectSettings(reflect.ValueOf(cfg).Elem(), settings)
+	WalkSettings(cfg, func(row Row, value reflect.Value) {
+		rendered := Render(value)
+		if row.Secret {
+			settings[row.Path] = setting{compared: rendered, shown: withheldValue}
+			return
+		}
+		settings[row.Path] = setting{compared: rendered, shown: rendered}
+	})
 	return settings
 }
 
-func collectSettings(block reflect.Value, settings map[string]setting) {
+// WalkSettings visits every value of cfg the class table names, by the row it is read into: one
+// visit per path the table calls a value rather than a block, with a block descended into and a
+// block the configuration does not carry contributing nothing. A field the table has no row for
+// is a derived value that is no legion.yaml key, which config's own census test names.
+//
+// It is the one walk of the configuration the daemon has: config's own diff reads its settings
+// through it (settingsOf), and runtime/sandbox records a pod's launch keys through it
+// (sandbox.LaunchSettings), so a row added to the table reaches both and the two can never
+// disagree on which fields the table names.
+func WalkSettings(cfg *Config, visit func(row Row, value reflect.Value)) {
+	walkSettings(reflect.ValueOf(cfg).Elem(), visit)
+}
+
+func walkSettings(block reflect.Value, visit func(row Row, value reflect.Value)) {
 	typ := block.Type()
 	for i := range typ.NumField() {
 		field := typ.Field(i)
@@ -368,17 +390,11 @@ func collectSettings(block reflect.Value, settings map[string]setting) {
 		}
 		row, known := rowOf(typ.Name() + "." + field.Name)
 		if !known {
-			// A derived value that is no legion.yaml key; config's own census test names each.
 			continue
 		}
 		value := block.Field(i)
 		if !row.Block {
-			rendered := render(value)
-			if row.Secret {
-				settings[row.Path] = setting{compared: rendered, shown: withheldValue}
-				continue
-			}
-			settings[row.Path] = setting{compared: rendered, shown: rendered}
+			visit(row, value)
 			continue
 		}
 		if value.Kind() == reflect.Pointer {
@@ -387,15 +403,18 @@ func collectSettings(block reflect.Value, settings map[string]setting) {
 			}
 			value = value.Elem()
 		}
-		collectSettings(value, settings)
+		walkSettings(value, visit)
 	}
 }
 
-// render is one value as a log line shows it: a duration as its own string, another scalar as it
+// Render is one value as a log line shows it: a duration as its own string, another scalar as it
 // is, and anything composite as JSON, whose map keys are sorted and whose pointers are followed.
 // fmt's %v would print a pointer's address, which differs between two loads of one file and would
 // make every reload report a change.
-func render(value reflect.Value) string {
+//
+// A pod's recorded launch settings are rendered through it too (sandbox.LaunchSettings): two
+// equal configurations must encode identically, since a record that differs is drift.
+func Render(value reflect.Value) string {
 	if duration, ok := value.Interface().(time.Duration); ok {
 		return duration.String()
 	}
@@ -428,10 +447,10 @@ func diff(old, next map[string]setting, source, by string) []Change {
 		before, hadBefore := old[path]
 		after, hasAfter := next[path]
 		if !hadBefore {
-			before = setting{compared: unsetValue, shown: unsetValue}
+			before = setting{compared: UnsetValue, shown: UnsetValue}
 		}
 		if !hasAfter {
-			after = setting{compared: unsetValue, shown: unsetValue}
+			after = setting{compared: UnsetValue, shown: UnsetValue}
 		}
 		if before.compared == after.compared {
 			continue

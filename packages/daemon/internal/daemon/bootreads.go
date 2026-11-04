@@ -18,7 +18,6 @@ import (
 type bootReads struct {
 	project, operatorToken, dispatchToken string
 	secrets                               map[string]string
-	paneNatsUser                          string         // the pane seed's user's public key, "" with no pane seed
 	nats                                  natsConnection // the user the daemon's own NATS connection authenticates as
 	instructions                          []byte         // nil when the configuration names none
 	tmux                                  tmuxReads      // runtime: tmux
@@ -125,7 +124,6 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	if r.nats, err = readNATSConnection(cfg, lookup); err != nil {
 		return bootReads{}, err
 	}
-	r.paneNatsUser = r.nats.paneNatsUser
 	if r.instructions, err = readInstructions(cfg); err != nil {
 		return bootReads{}, err
 	}
@@ -136,7 +134,7 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	case "tmux":
 		r.tmux, err = readTmux(cfg, lookup, getenv, hostOMP)
 	case "kubernetes":
-		r.sandbox, err = readSandbox(cfg, r.project, r.dispatchToken, r.paneNatsUser, lookup, log)
+		r.sandbox, err = readSandbox(cfg, r.project, r.dispatchToken, r.nats.paneNatsUser, lookup, log)
 	default:
 		err = fmt.Errorf("runtime %q is neither tmux nor kubernetes", cfg.Runtime.Name)
 	}
@@ -247,5 +245,5 @@ func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNats
 	if r.nats.source == natsSeedDaemon {
 		daemonNatsUser = r.nats.user
 	}
-	return r.paneNatsUser, daemonNatsUser, nil
+	return r.nats.paneNatsUser, daemonNatsUser, nil
 }

@@ -23,26 +23,28 @@ func (s Span) Duration() time.Duration {
 	return s.To.Sub(s.From)
 }
 
-// The phases a timeline names. Ten are the daemon's own (packages/daemon/internal/phase), and two
-// are this package's reading of `admitted`, which the daemon does not split: an admitted issue
-// holding a slot is its architect's design ("Design: roots that hold a slot while their phase is
-// still `admitted`"), and an admitted issue holding none is the waiting line, whose time is on no
-// bar ("Time in the queue is on no bar").
+// The phases a timeline names. Twelve are the daemon's own, named once in internal/dispatch/legion
+// (packages/daemon/internal/phase), and two are this package's reading of `admitted`, which the
+// daemon does not split: an admitted issue holding a slot is its architect's design ("Design:
+// roots that hold a slot while their phase is still `admitted`"), and an admitted issue holding
+// none is the waiting line, whose time is on no bar ("Time in the queue is on no bar").
 const (
-	phaseAdmitted       = "admitted"
-	phaseQueued         = "queued"
-	phaseDesign         = "design"
-	phaseAwaitingPerson = "awaiting_person"
-	phasePlanning       = "planning"
-	phaseImplementing   = "implementing"
-	phaseTesting        = "testing"
-	phaseReviewing      = "reviewing"
-	phaseAccepting      = "accepting"
-	phaseRetro          = "retro"
-	phaseMerging        = "merging"
-	phaseAwaitingMerge  = "awaiting_merge"
-	phaseDone           = "done"
-	phaseHeld           = "held"
+	phaseAdmitted       = legion.PhaseAdmitted
+	phaseAwaitingPerson = legion.PhaseAwaitingPerson
+	phasePlanning       = legion.PhasePlanning
+	phaseImplementing   = legion.PhaseImplementing
+	phaseTesting        = legion.PhaseTesting
+	phaseReviewing      = legion.PhaseReviewing
+	phaseAccepting      = legion.PhaseAccepting
+	phaseRetro          = legion.PhaseRetro
+	phaseMerging        = legion.PhaseMerging
+	phaseAwaitingMerge  = legion.PhaseAwaitingMerge
+	phaseDone           = legion.PhaseDone
+	phaseHeld           = legion.PhaseHeld
+
+	// queued and design are this package's own split of `admitted`, which no daemon reports.
+	phaseQueued = "queued"
+	phaseDesign = "design"
 )
 
 // childWorkingPhases are the phases "from planning to awaiting merge": a root with a child in one
@@ -94,7 +96,7 @@ func (p *Population) observedPhases(issue *Issue) []PhaseSpan {
 	end := p.issueEnd(issue)
 	var timeline []PhaseSpan
 	for index, mark := range marks {
-		phase := jsonString(mark.Value)
+		phase := legion.JSONString([]byte(mark.Value))
 		if phase == "" {
 			continue
 		}
@@ -134,7 +136,7 @@ func (p *Population) slotSpans(issue *Issue, end time.Time) []Span {
 // mark per role's phase, each phase ending where the next starts, and a handoff ending its own
 // phase where it comes before that next start.
 func (p *Population) fallbackPhases(issue *Issue) []PhaseSpan {
-	root := p.TreeRoot(issue.Key) == issue.Key
+	root := p.isRoot(issue.Key)
 	type mark struct {
 		phase string
 		at    time.Time
@@ -223,10 +225,17 @@ func handoffAfter(issue *Issue, word string, from time.Time) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// enteredStatus is whether the mark at index is where the issue's status became status: the mark
+// holds it and the one before does not.
+func enteredStatus(issue *Issue, index int, status string) bool {
+	return issue.StatusMarks[index].Value == status &&
+		(index == 0 || issue.StatusMarks[index-1].Value != status)
+}
+
 // firstStatusEntry is when the issue's status first became status.
 func firstStatusEntry(issue *Issue, status string) (time.Time, bool) {
 	for index, mark := range issue.StatusMarks {
-		if mark.Value == status && (index == 0 || issue.StatusMarks[index-1].Value != status) {
+		if enteredStatus(issue, index, status) {
 			return mark.At, true
 		}
 	}
@@ -236,8 +245,8 @@ func firstStatusEntry(issue *Issue, status string) (time.Time, bool) {
 // statusEntries counts how many times the issue's status became status.
 func statusEntries(issue *Issue, status string) int {
 	entries := 0
-	for index, mark := range issue.StatusMarks {
-		if mark.Value == status && (index == 0 || issue.StatusMarks[index-1].Value != status) {
+	for index := range issue.StatusMarks {
+		if enteredStatus(issue, index, status) {
 			entries++
 		}
 	}
@@ -263,7 +272,7 @@ func (p *Population) queuedSpans(issue *Issue) []Span {
 	var departed bool
 	var spans []Span
 	for index, mark := range marks {
-		phase := jsonString(mark.Value)
+		phase := legion.JSONString([]byte(mark.Value))
 		if phase == "" {
 			continue
 		}
@@ -320,9 +329,32 @@ func phaseSpansOf(timeline []PhaseSpan, phases ...string) []Span {
 	return normalize(spans)
 }
 
+// isNormalized is whether spans are already what normalize would return: every span positive and
+// each one starting strictly after the one before ends. An empty set is not, so normalize keeps
+// answering nil for it.
+func isNormalized(spans []Span) bool {
+	if len(spans) == 0 {
+		return false
+	}
+	for index, span := range spans {
+		if span.Duration() <= 0 {
+			return false
+		}
+		if index > 0 && !span.From.After(spans[index-1].To) {
+			return false
+		}
+	}
+	return true
+}
+
 // normalize drops the empty spans, orders what is left and merges what overlaps, so the set
-// algebra below needs no special cases.
+// algebra below needs no special cases. A set already in that shape — which is what every
+// caller here hands it, since each one is itself the answer of a normalize — is returned as it
+// is, rather than sorted and copied again.
 func normalize(spans []Span) []Span {
+	if isNormalized(spans) {
+		return spans
+	}
 	kept := make([]Span, 0, len(spans))
 	for _, span := range spans {
 		if span.Duration() > 0 {

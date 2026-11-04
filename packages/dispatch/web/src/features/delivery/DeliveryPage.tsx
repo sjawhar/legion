@@ -87,7 +87,7 @@ const AGENTS_PARAM = ["agents"] as const;
 
 /** A sub-window of the read window a brush drag set (`ws`/`we`): it narrows what the chart, the
  *  list and the count show without a new read, so the facets keep counting the whole window. */
-export interface BrushWindow {
+interface BrushWindow {
   start: string;
   end: string;
 }

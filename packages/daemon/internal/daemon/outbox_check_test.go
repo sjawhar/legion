@@ -659,7 +659,7 @@ func TestTheBootFactCarriesTheBuildsAndAsksDispatchOnlyForAReleaseBuild(t *testi
 			if tc.dispatch != nil && tc.dispatch.buildAsked != tc.asked {
 				t.Fatalf("Dispatch's build commit was asked %d times, want %d", tc.dispatch.buildAsked, tc.asked)
 			}
-			if got := engineConfig(config.Config{Project: "LEGION"}, "legion-reviewer[bot]", tc.build).BuiltFrom; got != tc.builtFrom {
+			if got := engineConfig(&config.Config{Project: "LEGION"}, "legion-reviewer[bot]", tc.build).BuiltFrom; got != tc.builtFrom {
 				t.Fatalf("the engine's BuiltFrom = %q, want %q", got, tc.builtFrom)
 			}
 		})

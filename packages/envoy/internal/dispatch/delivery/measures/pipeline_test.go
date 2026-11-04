@@ -184,7 +184,7 @@ func TestPRChecksTimesWholeRunsFromStartToCompletion(t *testing.T) {
 	c.add(3, 32, 5, "cancelled", 8)
 	c.add(4, 31, 30, "failure", 8)
 	c.add(5, 24, 30, "success", 8)
-	run, _, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
+	run, _, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
 
 	assertCell(t, "run.days[6]", run.Days[6].Cell, 2, new(56.5), new(85.7), 2, 0, 1, new(1.0))
 	assertCell(t, "run.days[5]", run.Days[5].Cell, 1, new(30.0), new(30.0), 0, 1, 0, new(0.0))
@@ -207,7 +207,7 @@ func TestSlowestJobsRankBySevenDayMedianOnceAJobHasEnoughResults(t *testing.T) {
 	for i := range SlowestMinResults - 1 {
 		c.add(int64(1000+i), 30, 130, "success", 8, job("tasks / run (one task)", 120))
 	}
-	_, slowest, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
+	_, slowest, _ := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
 
 	names := make([]string, len(slowest))
 	for i, j := range slowest {
@@ -240,7 +240,7 @@ func failingFixture() ciRuns {
 // no failure, and a failure before the last 24 hours is absent.
 func TestFailingJobsCoverTheLast24HoursWithoutTheRollup(t *testing.T) {
 	c := failingFixture()
-	run, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "checks-complete")
+	run, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "checks-complete")
 
 	lastFailed := time.Date(2026, 10, 2, 10, 30, 0, 0, time.UTC)
 	want := []FailingJob{
@@ -264,7 +264,7 @@ func TestFailingJobsCoverTheLast24HoursWithoutTheRollup(t *testing.T) {
 // the others' result is tallied like any other.
 func TestFailingJobsWithoutARollupLeaveNothingOut(t *testing.T) {
 	c := failingFixture()
-	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
+	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "")
 	names := make([]string, len(failing))
 	for i, j := range failing {
 		names[i] = j.Name
@@ -280,7 +280,7 @@ func TestFailingJobsStopAtNow(t *testing.T) {
 	c := failingFixture()
 	// Completed at 12:30 on Oct 2, half an hour after pipelineNow.
 	c.add(6, 32, 20, "failure", 12, job("build / unit", 19, "failure"), job("lint", 5, "failure"), job("typecheck", 3, "failure"))
-	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "checks-complete")
+	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "checks-complete")
 
 	byName := map[string]FailingJob{}
 	for _, f := range failing {
@@ -310,7 +310,7 @@ func TestAFailingJobsLastRunIsTheSameInEveryRunOrder(t *testing.T) {
 		for i, run := range runs {
 			ids[i] = run.RunID
 		}
-		_, _, failing := PRChecks(runs, c.jobs, pipelineDays, pipelineNow, FailingWindow, "")
+		_, _, failing := PRChecks(runs, c.jobs, pipelineDays, pipelineNow, "")
 		if len(failing) != 1 || failing[0].Failures != 3 || !failing[0].LastFailedAt.Equal(lastFailed) || failing[0].LastRunURL != runURL(9) {
 			t.Fatalf("failing jobs of runs listed %v = %+v, want build / unit failing 3 times, last in run 9 at %s", ids, failing, lastFailed)
 		}

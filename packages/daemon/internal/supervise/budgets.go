@@ -68,10 +68,11 @@ func (m *Machine) chargeDeath() bool {
 	if m.claim.Pending == nil || slices.Contains(unready, m.claim.State) {
 		return false
 	}
+	limit := m.deps.limits().LaunchFailures
 	m.claim.Budgets.Deaths++
 	m.log.Warn("supervise: the agent died with work outstanding", "deaths", m.claim.Budgets.Deaths,
-		"limit", m.deps.limits().LaunchFailures)
-	return m.claim.Budgets.Deaths >= m.deps.limits().LaunchFailures
+		"limit", limit)
+	return m.claim.Budgets.Deaths >= limit
 }
 
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the

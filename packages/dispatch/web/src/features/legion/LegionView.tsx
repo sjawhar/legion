@@ -127,11 +127,7 @@ export function LegionBoardView({
           ))}
         </div>
       </div>
-      <LegionSettingsPanel
-        project={board.project}
-        settings={board.settings}
-        sources={board.setting_sources}
-      />
+      <LegionSettingsPanel board={board} />
     </>
   );
 }

@@ -125,34 +125,21 @@ func (k *Keeper) File(ctx context.Context) ([]config.Change, error) {
 // A row the file has taken back since — its own value for that path has moved — is applied to
 // nothing and deleted: a route change survives a restart until the file changes that key.
 func (k *Keeper) Restore(ctx context.Context) ([]Change, error) {
-	if k.store == nil {
-		return nil, nil
-	}
-	stored, err := k.store.Rows(ctx)
+	kept, taken, err := k.split(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(stored) == 0 {
+	if kept == nil {
+		// No store, or a store holding no rows: there is nothing to lay back over the file.
 		return nil, nil
 	}
-	values, err := k.fileValues(pathsOf(stored))
-	if err != nil {
-		return nil, err
-	}
-	kept := make([]Change, 0, len(stored))
-	var taken []string
 	overlay := map[string]any{}
-	for _, row := range stored {
-		if Digest(values[row.Path]) != row.FileDigest {
-			taken = append(taken, row.Path)
-			continue
-		}
+	for _, row := range kept {
 		var value any
 		if err := json.Unmarshal(row.Value, &value); err != nil {
 			return nil, fmt.Errorf("read the stored settings change of %s: %w", row.Path, err)
 		}
 		overlay[row.Path] = value
-		kept = append(kept, row)
 	}
 	if err := k.store.Forget(ctx, taken); err != nil {
 		return nil, err
@@ -196,30 +183,43 @@ func (k *Keeper) applyRoute(by string, overlay map[string]any) ([]config.Change,
 	return k.live.Apply(config.SourceRoute, by, overlay)
 }
 
-// takenBack is every stored path whose value in the file itself has moved since the route change
-// above it was applied: the keys the file is taking back. A keeper with no store has none.
-func (k *Keeper) takenBack(ctx context.Context) ([]string, error) {
+// split is the four steps both readings of the store share: its rows, what the file itself now
+// says for each of their paths, and the comparison that decides which rows still stand. kept is
+// the rows whose file value has not moved, in the store's own path order, and taken the paths
+// the file is taking back — a path whose file value has moved is the file taking the key back.
+// A keeper with no store, and a store holding no rows, split into nothing at all: kept is nil
+// for both, which is what tells a caller there is nothing to do.
+func (k *Keeper) split(ctx context.Context) (kept []Change, taken []string, err error) {
 	if k.store == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	stored, err := k.store.Rows(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(stored) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	values, err := k.fileValues(pathsOf(stored))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var taken []string
+	kept = make([]Change, 0, len(stored))
 	for _, row := range stored {
 		if Digest(values[row.Path]) != row.FileDigest {
 			taken = append(taken, row.Path)
+			continue
 		}
+		kept = append(kept, row)
 	}
-	return taken, nil
+	return kept, taken, nil
+}
+
+// takenBack is every stored path whose value in the file itself has moved since the route change
+// above it was applied: the keys the file is taking back. A keeper with no store has none.
+func (k *Keeper) takenBack(ctx context.Context) ([]string, error) {
+	_, taken, err := k.split(ctx)
+	return taken, err
 }
 
 // fileValues is what the file itself says for each path, by path, read from the document alone.

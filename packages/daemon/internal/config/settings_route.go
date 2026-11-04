@@ -42,17 +42,6 @@ func (s SettingsRoute) Configured() bool {
 	return s.OIDCIssuer != "" && s.Audience != "" && len(s.ServiceAccounts) > 0
 }
 
-// Admits is whether subject, the `sub` of a verified token, is one of the ServiceAccounts this
-// deployment named.
-func (s SettingsRoute) Admits(subject string) bool {
-	for _, account := range s.ServiceAccounts {
-		if account == subject {
-			return true
-		}
-	}
-	return false
-}
-
 // readSettingsRoute is `settings_route`: a mapping of `oidc_issuer`, `audience` and
 // `service_accounts`. An absent key and a null one configure no caller. A block that carries one
 // of the three carries all of them: an issuer with no ServiceAccounts would admit every account

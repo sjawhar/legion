@@ -26,8 +26,11 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/legion"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -35,17 +38,17 @@ import (
 // ask to a person and the two that take it back (api/events.go names the same family).
 var askTurnEventTypes = []string{"ask.opened", "ask.handed_back", "ask.answered", "ask.resolved"}
 
-// observedTreeField is the legion_observations field an issue's tree root would be recorded
-// under: the per-issue `tree` of `GET /legion/v1/state` that dispatch://INFRA-980 adds. No daemon
-// released today sends it, so this is read where a read carried one and absent otherwise — never
-// assumed, and never replaced by a guess that a slot holder is a root.
-const observedTreeField = "tree"
-
 // fetchedMergeTimesCap bounds how many pull requests one answer fetches from GitHub for a merge
 // time Dispatch has not already stored. Every finished issue whose pull request the delivery
 // intake has reconciled reads from delivery_pull_requests; this is the tail of issues closed since
 // the last reconcile, and a window that names hundreds of them is a backfill, not a dashboard.
 const fetchedMergeTimesCap = 50
+
+// fetchedMergeTimesConcurrency bounds how many of those fetches are in flight at once. Each one
+// mints an installation token and makes two GitHub calls, so a serial pass over the cap is up to
+// 150 round trips inside one request; the bound is the one the broadcast resolver holds its own
+// fan-out to (api/broadcasts.go's broadcastResolveConcurrency).
+const fetchedMergeTimesConcurrency = 8
 
 // Mark is one value of one field as of a moment: an observation the sampler recorded, or a status
 // an event snapshotted. The value of an observation is the JSON text legion_observations holds; a
@@ -149,22 +152,34 @@ func Read(ctx context.Context, pool *store.Pool, github *githubapp.Client, proje
 		return nil, err
 	}
 	keys := population.scopeKeys(from, to)
-	if err := population.readRoleEvents(ctx, pool, keys); err != nil {
-		return nil, err
+	// The six reads below take only those keys and write disjoint fields of each issue, so they
+	// run together rather than one after another, as the delivery population's independent reads
+	// do (api/delivery.go). errgroup answers the first error recorded, so which of two failing
+	// reads names the failure is no longer fixed.
+	independent := []func(ctx context.Context) error{
+		func(ctx context.Context) error { return population.readRoleEvents(ctx, pool, keys) },
+		func(ctx context.Context) error { return population.readStatusMarks(ctx, pool, keys) },
+		func(ctx context.Context) error { return population.readAskTurns(ctx, pool, keys) },
+		func(ctx context.Context) error { return population.readHandoffs(ctx, pool, keys) },
+		func(ctx context.Context) error { return population.readObservations(ctx, pool, project, keys) },
+		func(ctx context.Context) error { return population.readMergeTimes(ctx, pool, github, keys) },
 	}
-	if err := population.readStatusMarks(ctx, pool, keys); err != nil {
-		return nil, err
+	reads, readsCtx := errgroup.WithContext(ctx)
+	read := func(fn func(ctx context.Context) error) error {
+		readCtx, err := store.ForConcurrentRead(readsCtx)
+		if err != nil {
+			return err
+		}
+		reads.Go(func() error { return fn(readCtx) })
+		return nil
 	}
-	if err := population.readAskTurns(ctx, pool, keys); err != nil {
-		return nil, err
+	for _, fn := range independent {
+		if err := read(fn); err != nil {
+			_ = reads.Wait()
+			return nil, err
+		}
 	}
-	if err := population.readHandoffs(ctx, pool, keys); err != nil {
-		return nil, err
-	}
-	if err := population.readObservations(ctx, pool, project, keys); err != nil {
-		return nil, err
-	}
-	if err := population.readMergeTimes(ctx, pool, github, keys); err != nil {
+	if err := reads.Wait(); err != nil {
 		return nil, err
 	}
 	population.linkTrees()
@@ -526,8 +541,8 @@ func (p *Population) readObservations(ctx context.Context, pool *store.Pool, pro
 			continue
 		}
 		issue.Observed[field] = append(issue.Observed[field], Mark{At: at, Value: value})
-		if field == observedTreeField {
-			if tree := jsonString(value); tree != "" {
+		if field == legion.FieldTree {
+			if tree := legion.JSONString([]byte(value)); tree != "" {
 				issue.Tree = tree
 			}
 		}
@@ -581,25 +596,48 @@ func (p *Population) readMergeTimes(ctx context.Context, pool *store.Pool, githu
 	if github == nil {
 		return nil
 	}
-	for index, one := range fetch {
-		if index >= fetchedMergeTimesCap {
-			break
-		}
-		issue := p.Issues[one.issue]
-		if issue == nil || issue.MergedAt != nil {
-			continue
-		}
-		owner, name, found := strings.Cut(one.repo, "/")
-		if !found {
-			continue
-		}
-		fetched, err := delivery.FetchPullRequest(ctx, github, owner, name, one.number)
-		if err != nil {
-			slog.Debug("dispatch: read a Legion issue's merge time", "issue", one.issue, "repo", one.repo, "number", one.number, "error", err)
-			continue
-		}
-		issue.MergedAt = fetched.MergedAt
+	// The cap first, over the flat list, so the same entries are attempted as a serial pass
+	// would attempt; then one group per issue, in the order the rows arrived. Each group runs
+	// its own entries one after another, so the first pull request of an issue that answers a
+	// merge time is still the one assigned and the rest of that issue's are still skipped;
+	// groups write to distinct issues, so no two of them touch the same field.
+	if len(fetch) > fetchedMergeTimesCap {
+		fetch = fetch[:fetchedMergeTimesCap]
 	}
+	grouped := map[string][]unmerged{}
+	var order []string
+	for _, one := range fetch {
+		if _, seen := grouped[one.issue]; !seen {
+			order = append(order, one.issue)
+		}
+		grouped[one.issue] = append(grouped[one.issue], one)
+	}
+	fetches := new(errgroup.Group)
+	fetches.SetLimit(fetchedMergeTimesConcurrency)
+	for _, key := range order {
+		fetches.Go(func() error {
+			for _, one := range grouped[key] {
+				issue := p.Issues[one.issue]
+				if issue == nil || issue.MergedAt != nil {
+					continue
+				}
+				owner, name, found := strings.Cut(one.repo, "/")
+				if !found {
+					continue
+				}
+				fetched, err := delivery.FetchPullRequest(ctx, github, owner, name, one.number)
+				if err != nil {
+					slog.Debug("dispatch: read a Legion issue's merge time", "issue", one.issue, "repo", one.repo, "number", one.number, "error", err)
+					continue
+				}
+				issue.MergedAt = fetched.MergedAt
+			}
+			return nil
+		})
+	}
+	// No group returns an error — a fetch that fails leaves the issue with no merge time, as a
+	// serial pass left it — so this waits and nothing more.
+	_ = fetches.Wait()
 	return nil
 }
 
@@ -644,6 +682,9 @@ func (p *Population) TreeRoot(key string) string {
 	}
 }
 
+// isRoot is whether the issue is its own tree's root.
+func (p *Population) isRoot(key string) bool { return p.TreeRoot(key) == key }
+
 // hasLegionWork is whether the issue carries Legion phase work: an event of a session titled
 // `Legion <role> · <its key>`, a handoff, or an observation the daemon's own state produced.
 func (p *Population) hasLegionWork(issue *Issue) bool {
@@ -671,15 +712,4 @@ func resolveTitles(ctx context.Context, pool *store.Pool, sessions map[string]bo
 		return nil, fmt.Errorf("resolve the session titles: %w", err)
 	}
 	return titles, nil
-}
-
-// jsonString is a JSON text's string value, or "" for a null, a number, or anything else: an
-// observation's value is whatever the daemon sent, so a reader of one names what it expects rather
-// than trusting the shape.
-func jsonString(raw string) string {
-	var value string
-	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		return ""
-	}
-	return value
 }

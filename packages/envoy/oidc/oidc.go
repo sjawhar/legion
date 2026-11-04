@@ -8,39 +8,17 @@
 //
 // This facade changes no behavior — every type is an alias for the internal package's own and
 // every function forwards to it — so internal/oidc remains the one place the verification is
-// described and changed.
+// described and changed. It re-exports exactly what its consumer names, as brokertest does:
+// anything else internal/oidc holds is reached by adding it here when a caller outside this
+// module needs it.
 package oidc
 
-import (
-	"context"
-
-	internal "github.com/sjawhar/envoy/internal/oidc"
-)
-
-// The class of every Verify failure, as internal/oidc declares them: a caller logs the class
-// (Reason) and answers 401 or 403, and no error carries the token.
-var (
-	ErrMalformed         = internal.ErrMalformed
-	ErrIssuer            = internal.ErrIssuer
-	ErrAudience          = internal.ErrAudience
-	ErrExpired           = internal.ErrExpired
-	ErrCancelled         = internal.ErrCancelled
-	ErrIssuerUnavailable = internal.ErrIssuerUnavailable
-	ErrSignature         = internal.ErrSignature
-	ErrNoKey             = internal.ErrNoKey
-)
+import internal "github.com/sjawhar/envoy/internal/oidc"
 
 // Claims is internal/oidc.Claims: the verified claims of a token. For a projected
 // service-account token Subject is the Kubernetes subject,
 // "system:serviceaccount:<namespace>:<name>".
 type Claims = internal.Claims
-
-// Keys is internal/oidc.Keys: an issuer's published signing keys as a key source, so one cache
-// serves a process's whole use of an issuer.
-type Keys = internal.Keys
-
-// Verifier is internal/oidc.Verifier: tokens of one issuer issued to one audience.
-type Verifier = internal.Verifier
 
 // LazyVerifier is internal/oidc.LazyVerifier: a Verifier whose issuer is discovered when first
 // needed, so a daemon boots and serves while its cluster's issuer is unreachable, and so building
@@ -55,19 +33,6 @@ func LooksLikeJWT(s string) bool { return internal.LooksLikeJWT(s) }
 // Reason forwards to internal/oidc.Reason: the class of a Verify failure in one word, which never
 // repeats any part of the token.
 func Reason(err error) string { return internal.Reason(err) }
-
-// NewKeys forwards to internal/oidc.NewKeys.
-func NewKeys(ctx context.Context, issuer string) (*Keys, error) { return internal.NewKeys(ctx, issuer) }
-
-// New forwards to internal/oidc.New: the issuer's discovery document is read now.
-func New(ctx context.Context, issuer, audience string) (*Verifier, error) {
-	return internal.New(ctx, issuer, audience)
-}
-
-// NewWithKeys forwards to internal/oidc.NewWithKeys.
-func NewWithKeys(issuer, audience string, keys *Keys) *Verifier {
-	return internal.NewWithKeys(issuer, audience, keys)
-}
 
 // NewLazyVerifier forwards to internal/oidc.NewLazyVerifier: it reads nothing, and the first
 // Verify (or Discover, or Run) reads the issuer's discovery document.
